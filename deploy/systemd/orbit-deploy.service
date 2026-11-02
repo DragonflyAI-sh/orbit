@@ -1,0 +1,8 @@
+[Unit]
+Description=Deploy the newest green ORBIT commit
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/orbit/pull-deploy.sh

@@ -6,7 +6,8 @@ import { mockPort, PORT_NAMES } from "../src/ports.ts";
 import type { PortStatus } from "../src/ports.ts";
 import { buildServer, STALE_AFTER_MS, withStaleness } from "../src/server.ts";
 
-const server = buildServer(PORT_NAMES.map((name) => mockPort(name)), "abc123");
+const deploy = { lastFailed: { commit: "bad1", at: "2026-11-02T00:00:00Z" } };
+const server = buildServer(PORT_NAMES.map((name) => mockPort(name)), "abc123", () => deploy);
 let base = "";
 
 before(async () => {
@@ -19,6 +20,11 @@ test("status reports the commit and every port", async () => {
   const body = await (await fetch(`${base}/status`)).json();
   assert.equal(body.commit, "abc123");
   assert.deepEqual(body.ports.map((p: PortStatus) => p.port), ["policy", ...PORT_NAMES]);
+});
+
+test("status shows the last failed deploy beside the running commit", async () => {
+  const body = await (await fetch(`${base}/status`)).json();
+  assert.deepEqual(body.deploy, deploy);
 });
 
 test("unbuilt ports say they are mocks", async () => {
