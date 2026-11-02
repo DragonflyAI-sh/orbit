@@ -1,0 +1,20 @@
+[Unit]
+Description=ORBIT gateway
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/opt/orbit/orbit.env
+EnvironmentFile=/opt/orbit/current/release.env
+WorkingDirectory=/opt/orbit/current
+ExecStart=/usr/local/bin/node src/main.ts
+Restart=always
+RestartSec=5
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

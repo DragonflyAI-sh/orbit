@@ -16,7 +16,11 @@ function send(res: ServerResponse, code: number, body: unknown): void {
   res.end(`${JSON.stringify(body, null, 2)}\n`);
 }
 
-export function buildServer(ports: Port[], commit: string): Server {
+export function buildServer(
+  ports: Port[],
+  commit: string,
+  deploy: () => unknown = () => ({ state: "unknown" }),
+): Server {
   const byName = new Map(ports.map((p) => [p.name, p]));
   const policyStatus = (): PortStatus => ({
     port: "policy",
@@ -31,7 +35,7 @@ export function buildServer(ports: Port[], commit: string): Server {
     if (req.method === "GET" && url.pathname === "/status") {
       const now = new Date();
       const statuses = ports.map((p) => withStaleness(p.status(), now));
-      return send(res, 200, { commit, ports: [policyStatus(), ...statuses] });
+      return send(res, 200, { commit, deploy: deploy(), ports: [policyStatus(), ...statuses] });
     }
 
     const match = url.pathname.match(/^\/ports\/([a-z]+)\/([a-z]+)$/);
