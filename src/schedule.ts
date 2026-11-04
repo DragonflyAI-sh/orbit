@@ -12,10 +12,14 @@ export type Job = {
   everyMinutes?: number;
   dailyAt?: string;
   nextRun?: string;
-  runs: { at: string; notification: string }[];
+  // With a run, the job submits work to a worker instead of sending its text as a notification.
+  run?: { worker: string; input: Record<string, unknown> };
+  runs: { at: string; notification?: string; run?: string; error?: string }[];
 };
 
-export type JobInput = { text?: unknown; urgent?: unknown; at?: unknown; everyMinutes?: unknown; dailyAt?: unknown };
+export type Submit = (worker: string, input: Record<string, unknown>) => { run?: { id: string }; error?: string };
+
+export type JobInput = { text?: unknown; urgent?: unknown; at?: unknown; everyMinutes?: unknown; dailyAt?: unknown; run?: unknown };
 
 const MIN_EVERY = 5;
 const KEEP_RUNS = 20;
@@ -31,6 +35,13 @@ export function parseJob(input: JobInput, now: Date): Job | string {
   const kinds = ["at", "everyMinutes", "dailyAt"].filter((k) => input[k as keyof JobInput] !== undefined);
   if (kinds.length !== 1) return "Give exactly one of at (ISO time), everyMinutes, or dailyAt (HH:MM Pacific).";
   const job: Job = { id: randomUUID(), text: input.text.trim().slice(0, 2000), urgent: input.urgent === true, runs: [] };
+  if (input.run !== undefined) {
+    const run = input.run as { worker?: unknown; input?: unknown };
+    if (typeof run?.worker !== "string" || (run.input !== undefined && (typeof run.input !== "object" || run.input === null))) {
+      return "run must be {worker, input}.";
+    }
+    job.run = { worker: run.worker, input: (run.input ?? {}) as Record<string, unknown> };
+  }
   if (input.at !== undefined) {
     const at = new Date(String(input.at));
     if (Number.isNaN(at.getTime()) || at <= now) return "at must be a future ISO time.";
@@ -51,7 +62,7 @@ export function parseJob(input: JobInput, now: Date): Job | string {
 
 export type Scheduler = ReturnType<typeof scheduler>;
 
-export function scheduler(store: Store<Job[]>, notify: Notifier, now: () => Date = () => new Date()) {
+export function scheduler(store: Store<Job[]>, notify: Notifier, now: () => Date = () => new Date(), submit?: Submit) {
   let lastTick: string | undefined;
 
   return {
@@ -73,8 +84,16 @@ export function scheduler(store: Store<Job[]>, notify: Notifier, now: () => Date
       const at = now();
       const jobs = store.read().map((job) => {
         if (!job.nextRun || new Date(job.nextRun) > at) return job;
-        const n = notify.send(job.text, job.urgent);
-        return { ...job, nextRun: next(job, at), runs: [...job.runs, { at: at.toISOString(), notification: n.id }].slice(-KEEP_RUNS) };
+        let record: Job["runs"][number];
+        if (job.run && submit) {
+          const result = submit(job.run.worker, job.run.input);
+          record = result.run ? { at: at.toISOString(), run: result.run.id } : { at: at.toISOString(), error: result.error };
+        } else if (job.run) {
+          record = { at: at.toISOString(), error: "Runs are not available." };
+        } else {
+          record = { at: at.toISOString(), notification: notify.send(job.text, job.urgent).id };
+        }
+        return { ...job, nextRun: next(job, at), runs: [...job.runs, record].slice(-KEEP_RUNS) };
       });
       store.write(jobs.filter((j) => j.nextRun));
       lastTick = at.toISOString();

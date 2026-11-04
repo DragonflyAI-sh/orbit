@@ -21,6 +21,12 @@ Owner only. `POST /notifications {text, urgent}` queues a message; `POST /schedu
 
 Quiet hours, 23:00-08:00 Pacific, hold non-urgent messages. Every notification records receipts only when delivery is proven: `shown` when the web page displayed it, `discord` with the message id when Discord accepted it. Discord is off until a webhook URL is installed at `/etc/credstore/orbit.discord-webhook` (root, 0600).
 
+## Runs
+
+Owner only. `POST /runs {worker, input, key}` queues background work; `GET /runs/:id` shows its timeline; `POST /runs/:id/cancel` stops it. Workers today: `memory-report {query}` and `model-task {prompt}`.
+
+A run moves through `requested`, `accepted`, `running`, `reviewed` and `delivered`, or ends `failed` or `cancelled`. It is `delivered` only when its notification has a receipt. The same `key` returns the existing run instead of starting another. At most 4 run at once. After a restart, runs that were in flight are re-queued only if their worker is safe to repeat; the rest are marked interrupted. A scheduled job can submit a run with `{text, run: {worker, input}, ...}`.
+
 ## Model
 
 Set `ORBIT_MODEL` in `/opt/orbit/orbit.env` and put an OpenAI API key in `/etc/credstore/orbit.openai` (root, 0600), then restart `orbit`. Without both, replies are mock and `/status` says why. The key never goes in the environment file or the repo.

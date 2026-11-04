@@ -7,6 +7,7 @@ import type { Message, ModelPort } from "./model.ts";
 import type { Notifier } from "./notify.ts";
 import { decide } from "./policy.ts";
 import type { Port, PortStatus } from "./ports.ts";
+import type { Runner } from "./runs.ts";
 import type { JobInput, Scheduler } from "./schedule.ts";
 import { parseJob } from "./schedule.ts";
 
@@ -22,6 +23,7 @@ export type Deps = {
   memory: MemoryPort;
   notify: Notifier;
   schedule: Scheduler;
+  runs: Runner;
   commit: string;
   owner?: string;
   identify: Identify;
@@ -65,6 +67,7 @@ export function buildServer({
   memory,
   notify,
   schedule,
+  runs,
   commit,
   owner,
   identify,
@@ -81,9 +84,9 @@ export function buildServer({
   const statuses = (): PortStatus[] => {
     const now = new Date();
     return [
-      fixed("policy", "fail-closed", "Allows reads and chat replies; memory, notify and schedule for the owner only; refuses everything else."),
+      fixed("policy", "fail-closed", "Allows reads and chat replies; memory, notify, schedule and runs for the owner only; refuses everything else."),
       fixed("channel", "web", "Web chat at /. Discord and CLI are not built."),
-      ...[model.status(), memory.status(), notify.status(), schedule.status(), ...ports.map((p) => p.status())].map((s) => withStaleness(s, now)),
+      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), ...ports.map((p) => p.status())].map((s) => withStaleness(s, now)),
     ];
   };
   const limits = (isOwner: boolean): string[] => [
@@ -191,6 +194,34 @@ export function buildServer({
     if (job && req.method === "DELETE") {
       if (!(await owned("schedule", "delete"))) return;
       return schedule.remove(job[1]) ? send(res, 200, { deleted: job[1] }) : send(res, 404, { error: "No job with that id." });
+    }
+
+    if (url.pathname === "/runs" && req.method === "GET") {
+      if (!(await owned("runs", "list"))) return;
+      return send(res, 200, { workers: runs.workers(), runs: runs.list() });
+    }
+    if (url.pathname === "/runs" && req.method === "POST") {
+      if (!(await owned("runs", "submit"))) return;
+      const input = await body();
+      if (!input) return;
+      const worker = typeof input.worker === "string" ? input.worker : "";
+      const args = typeof input.input === "object" && input.input !== null ? (input.input as Record<string, unknown>) : {};
+      const key = typeof input.key === "string" ? input.key : undefined;
+      const result = runs.submit(worker, args, key);
+      if (result.error) return send(res, 400, { error: result.error });
+      runs.pump();
+      return send(res, result.deduped ? 200 : 202, { ...runs.get(result.run!.id), deduped: result.deduped === true });
+    }
+    const runMatch = url.pathname.match(/^\/runs\/([0-9a-f-]+)(\/cancel)?$/);
+    if (runMatch && req.method === "GET" && !runMatch[2]) {
+      if (!(await owned("runs", "get"))) return;
+      const run = runs.get(runMatch[1]);
+      return run ? send(res, 200, run) : send(res, 404, { error: "No run with that id." });
+    }
+    if (runMatch && req.method === "POST" && runMatch[2]) {
+      if (!(await owned("runs", "cancel"))) return;
+      const run = runs.cancel(runMatch[1]);
+      return run ? send(res, 200, run) : send(res, 409, { error: "That run cannot be cancelled now." });
     }
 
     const match = url.pathname.match(/^\/ports\/([a-z]+)\/([a-z]+)$/);

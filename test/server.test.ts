@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { vaultMemory } from "../src/memory.ts";
 import { mockModel } from "../src/model.ts";
 import { notifier } from "../src/notify.ts";
+import { memoryReport, runner } from "../src/runs.ts";
 import { scheduler } from "../src/schedule.ts";
 import { jsonStore } from "../src/store.ts";
 import { decide } from "../src/policy.ts";
@@ -20,12 +21,15 @@ writeFileSync(join(vault, "now.md"), "Top priority: money noodle PR.\n");
 let caller: string | undefined = "rai@example.com";
 const notify = notifier(jsonStore(undefined, "n", []));
 const schedule = scheduler(jsonStore(undefined, "j", []), notify);
+const memoryPort = vaultMemory(vault);
+const runs = runner(jsonStore(undefined, "r", []), [memoryReport(memoryPort)], notify);
 const server = buildServer({
   ports: MOCK_PORT_NAMES.map((name) => mockPort(name)),
   model: mockModel("test"),
-  memory: vaultMemory(vault),
+  memory: memoryPort,
   notify,
   schedule,
+  runs,
   commit: "abc123",
   owner: "rai@example.com",
   identify: async () => caller,
@@ -45,7 +49,7 @@ const chat = (body: unknown) =>
 test("status reports the commit and every port", async () => {
   const body = await (await fetch(`${base}/status`)).json();
   assert.equal(body.commit, "abc123");
-  assert.deepEqual(body.ports.map((p: PortStatus) => p.port), ["policy", "channel", "model", "memory", "notify", "schedule", ...MOCK_PORT_NAMES]);
+  assert.deepEqual(body.ports.map((p: PortStatus) => p.port), ["policy", "channel", "model", "memory", "notify", "schedule", "runs", ...MOCK_PORT_NAMES]);
 });
 
 test("status shows the last failed deploy beside the running commit", async () => {
@@ -71,7 +75,7 @@ test("a chat reply carries provenance and the limits ORBIT has", async () => {
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.reply.provenance, "mock");
-  assert.ok(body.limits.some((l: string) => l.startsWith("runs is mock")));
+  assert.ok(body.limits.some((l: string) => l.startsWith("tools is mock")));
 });
 
 test("the owner's chat brings in matching vault notes", async () => {
@@ -107,7 +111,7 @@ test("chat rejects malformed input", async () => {
 });
 
 test("a mock answer carries mock provenance", async () => {
-  const res = await fetch(`${base}/ports/runs/describe`, { method: "POST" });
+  const res = await fetch(`${base}/ports/tools/describe`, { method: "POST" });
   assert.equal(res.status, 200);
   assert.equal((await res.json()).provenance, "mock");
 });
@@ -149,4 +153,23 @@ test("a live port that has not been verified recently is degraded", () => {
     verifiedAt: new Date(now.getTime() - STALE_AFTER_MS - 1).toISOString(),
   };
   assert.equal(withStaleness(status, now).state, "degraded");
+});
+
+test("the owner can submit a run and read it back; a repeated key returns the same run", async () => {
+  caller = "rai@example.com";
+  const submit = (key?: string) =>
+    fetch(`${base}/runs`, { method: "POST", body: JSON.stringify({ worker: "memory-report", input: { query: "money" }, key }) });
+  const first = await submit("k1");
+  assert.equal(first.status, 202);
+  const run = await first.json();
+  const again = await (await submit("k1")).json();
+  assert.equal(again.id, run.id);
+  assert.equal(again.deduped, true);
+  assert.equal((await fetch(`${base}/runs`, { method: "POST", body: JSON.stringify({ worker: "nope" }) })).status, 400);
+  assert.equal((await (await fetch(`${base}/runs/${run.id}`)).json()).worker, "memory-report");
+
+  caller = undefined;
+  assert.equal((await submit()).status, 403);
+  assert.equal((await fetch(`${base}/runs`)).status, 403);
+  caller = "rai@example.com";
 });
