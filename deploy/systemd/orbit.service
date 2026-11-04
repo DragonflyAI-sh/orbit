@@ -7,6 +7,8 @@ Wants=network-online.target
 EnvironmentFile=/opt/orbit/orbit.env
 EnvironmentFile=/opt/orbit/current/release.env
 WorkingDirectory=/opt/orbit/current
+# Optional model key: /etc/credstore/orbit.openai (root, 0600). Absent means replies are mock.
+ImportCredential=orbit.*
 ExecStart=/usr/local/bin/node src/main.ts
 Restart=always
 RestartSec=5
