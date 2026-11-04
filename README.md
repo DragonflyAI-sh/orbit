@@ -33,12 +33,6 @@ Owner only, read-only. `GET /tools` lists them; `POST /tools/<name>` calls one. 
 
 ## Model
 
-Set `ORBIT_MODEL` in `/opt/orbit/orbit.env` and put an OpenAI API key in `/etc/credstore/orbit.openai` (root, 0600), then restart `orbit`. Without both, replies are mock and `/status` says why. The key never goes in the environment file or the repo.
+Set `ORBIT_MODEL` in `/opt/orbit/orbit.env`. ORBIT then signs in with ChatGPT, the same device-code flow OpenClaw uses: press "Sign in with ChatGPT" on the web page and enter the code at `auth.openai.com/codex/device`. Replies go through your ChatGPT subscription. ORBIT keeps its own login in its private state directory and renews it itself; it never shares OpenClaw's, because each renewal replaces the token.
 
-## Deploy
-
-The host pulls. Every 2 minutes `orbit-deploy.timer` fetches main and deploys the newest commit whose `checks` passed. It then smoke tests `/status` and restores the previous release if that fails. `/status` shows the running commit and the last failed one. CI holds no deploy credentials.
-
-One-time host setup, as root: `deploy/install.sh <bind-address> <owner-tailscale-login>`. The deployer also refreshes a read-only, markdown-only copy of the vault at `/opt/orbit/vault` from the host's own vault clone. Re-run it after changing anything in `deploy/`.
-
-This repo holds no personal data or secrets.
+An OpenAI API key at `/etc/credstore/orbit.openai` (root, 0600) takes precedence if present. Without either, replies are mock and `/status` says why.

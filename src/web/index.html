@@ -42,6 +42,10 @@
   .live { color: var(--live); } .mock { color: var(--mock); } .degraded, .down { color: var(--down); }
   #inbox { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
   .note { border-left: 3px solid var(--gold); padding: 4px 8px; background: var(--card); border-radius: 4px; white-space: pre-wrap; }
+  #signin:not(:empty) { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  #signin button { padding: 4px 12px; margin-top: 4px; }
+  #signin code { font-size: 16px; letter-spacing: .12em; color: var(--gold); }
+  #signin a { color: var(--accent-2); }
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   .msg { max-width: 720px; padding: 8px 12px; border-radius: 12px; background: var(--card);
          border: 1px solid var(--line); white-space: pre-wrap; }
@@ -56,7 +60,7 @@
 </style>
 </head>
 <body>
-<header><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><div id="ports"></div><div id="inbox"></div></header>
+<header><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><div id="ports"></div><div id="signin"></div><div id="inbox"></div></header>
 <main id="log"></main>
 <form id="form"><textarea id="input" rows="2" placeholder="Message ORBIT" required></textarea><button>Send</button></form>
 <script>
@@ -130,8 +134,36 @@
     } catch { /* the next refresh tries again */ }
   }
 
+  // ChatGPT sign-in, owner only: the same device-code flow OpenClaw uses.
+  async function refreshSignin() {
+    const box = document.getElementById("signin");
+    try {
+      const res = await fetch("/model/login");
+      if (!res.ok) { box.replaceChildren(); return; }
+      const login = await res.json();
+      if (login.state === "signed-in") { box.replaceChildren(); return; }
+      if (login.state === "pending") {
+        box.innerHTML = "";
+        const p = document.createElement("div");
+        p.append("Enter ", Object.assign(document.createElement("code"), { textContent: login.userCode }), " at ");
+        p.append(Object.assign(document.createElement("a"), { href: login.verificationUrl, target: "_blank", rel: "noopener", textContent: login.verificationUrl }));
+        p.append(" while signed in to ChatGPT.");
+        box.append(p);
+        setTimeout(() => { refreshSignin(); refreshStatus(); }, 5000);
+        return;
+      }
+      box.innerHTML = "";
+      const why = login.state === "failed" ? `Sign-in failed: ${login.detail}. ` : "";
+      box.append(why + "Replies are not real until ORBIT is signed in to ChatGPT.");
+      const button = Object.assign(document.createElement("button"), { textContent: "Sign in with ChatGPT" });
+      button.addEventListener("click", async () => { await fetch("/model/login", { method: "POST" }); refreshSignin(); });
+      box.append(document.createElement("br"), button);
+    } catch { /* the next refresh tries again */ }
+  }
+
   refreshStatus();
   refreshInbox();
+  refreshSignin();
   setInterval(refreshStatus, 30000);
   setInterval(refreshInbox, 30000);
 </script>

@@ -76,16 +76,17 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch):
   };
 }
 
-// The key comes from a systemd credential (ImportCredential=orbit.*), never from the environment file.
-export function selectModel(env: NodeJS.ProcessEnv): ModelPort {
+// An OpenAI API key (systemd credential orbit.openai) wins; otherwise ORBIT signs in with ChatGPT like OpenClaw does.
+export function selectModel(env: NodeJS.ProcessEnv, chatgpt?: (model: string) => ModelPort): ModelPort {
   const model = env.ORBIT_MODEL;
   const dir = env.CREDENTIALS_DIRECTORY;
   if (!model) return mockModel("No model is configured (ORBIT_MODEL unset), so replies are mock.");
   try {
     const key = readFileSync(join(dir ?? "", "orbit.openai"), "utf8").trim();
-    if (!dir || !key) throw new Error("empty");
-    return openaiModel(model, key);
+    if (dir && key) return openaiModel(model, key);
   } catch {
-    return mockModel(`ORBIT_MODEL is ${model} but no orbit.openai credential is installed, so replies are mock.`);
+    // No API key installed; fall through to ChatGPT sign-in.
   }
+  if (chatgpt) return chatgpt(model);
+  return mockModel(`ORBIT_MODEL is ${model} but no orbit.openai credential is installed, so replies are mock.`);
 }

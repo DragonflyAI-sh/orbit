@@ -196,3 +196,11 @@ test("the owner can call a read-only tool; write tools and other callers are ref
   assert.equal((await fetch(`${base}/tools/echo`, { method: "POST", body: "{}" })).status, 403);
   caller = "rai@example.com";
 });
+
+test("model sign-in endpoints are owner only and say when a model has no sign-in", async () => {
+  caller = "rai@example.com";
+  assert.equal((await fetch(`${base}/model/login`)).status, 404);
+  caller = "someone@example.com";
+  assert.equal((await fetch(`${base}/model/login`, { method: "POST" })).status, 403);
+  caller = "rai@example.com";
+});
