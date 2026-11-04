@@ -88,6 +88,8 @@ export function notifier(store: Store<Notification[]>, discord?: Sink, now: () =
 
     recent: (): Notification[] => list().slice(-50).reverse(),
 
+    get: (id: string): Notification | undefined => list().find((n) => n.id === id),
+
     ack(id: string): Notification | undefined {
       let found: Notification | undefined;
       save(
