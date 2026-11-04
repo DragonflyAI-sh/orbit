@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { vaultMemory } from "../src/memory.ts";
 import { mockModel } from "../src/model.ts";
+import { nodes as devicePresence } from "../src/nodes.ts";
 import { notifier } from "../src/notify.ts";
 import { memoryReport, runner } from "../src/runs.ts";
 import { scheduler } from "../src/schedule.ts";
@@ -28,6 +29,15 @@ const runs = runner(jsonStore(undefined, "r", []), [memoryReport(memoryPort)], n
 const echo: Tool = { name: "echo", description: "", readOnly: true, validate: () => undefined, run: async (i) => ({ value: i, provenance: "live", source: "tools/echo" }) };
 const writer: Tool = { ...echo, name: "writer", readOnly: false };
 const tools = toolbox([echo, writer]);
+const nodes = devicePresence(
+  async () => ({
+    Self: { HostName: "orbit-host", OS: "linux" },
+    User: { "1": { LoginName: "rai@example.com" } },
+    Peer: { a: { HostName: "air", OS: "macOS", Online: true, UserID: 1 } },
+  }),
+  "rai@example.com",
+);
+await nodes.refresh();
 const server = buildServer({
   ports: MOCK_PORT_NAMES.map((name) => mockPort(name)),
   model: mockModel("test"),
@@ -36,6 +46,7 @@ const server = buildServer({
   schedule,
   runs,
   tools,
+  nodes,
   commit: "abc123",
   owner: "rai@example.com",
   identify: async () => caller,
@@ -55,7 +66,7 @@ const chat = (body: unknown) =>
 test("status reports the commit and every port", async () => {
   const body = await (await fetch(`${base}/status`)).json();
   assert.equal(body.commit, "abc123");
-  assert.deepEqual(body.ports.map((p: PortStatus) => p.port), ["policy", "channel", "model", "memory", "notify", "schedule", "runs", "tools", ...MOCK_PORT_NAMES]);
+  assert.deepEqual(body.ports.map((p: PortStatus) => p.port), ["policy", "channel", "model", "memory", "notify", "schedule", "runs", "tools", "nodes", ...MOCK_PORT_NAMES]);
 });
 
 test("status shows the last failed deploy beside the running commit", async () => {
@@ -63,11 +74,9 @@ test("status shows the last failed deploy beside the running commit", async () =
   assert.deepEqual(body.deploy, deploy);
 });
 
-test("unbuilt ports say they are mocks", async () => {
+test("no port is still a mock", async () => {
   const body = await (await fetch(`${base}/status`)).json();
-  for (const p of body.ports.filter((x: PortStatus) => MOCK_PORT_NAMES.includes(x.port as never))) {
-    assert.equal(p.state, "mock");
-  }
+  assert.deepEqual(body.ports.filter((p: PortStatus) => p.state === "mock" && p.port !== "model").map((p: PortStatus) => p.port), []);
 });
 
 test("the avatar is served for the page and its icons", async () => {
@@ -87,7 +96,7 @@ test("a chat reply carries provenance and the limits ORBIT has", async () => {
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.reply.provenance, "mock");
-  assert.ok(body.limits.some((l: string) => l.startsWith("nodes is mock")));
+  assert.ok(body.limits.some((l: string) => l.startsWith("runs is degraded")));
 });
 
 test("the owner's chat brings in matching vault notes", async () => {
@@ -122,15 +131,9 @@ test("chat rejects malformed input", async () => {
   assert.equal((await chat({ messages: [{ role: "assistant", content: "x" }] })).status, 400);
 });
 
-test("a mock answer carries mock provenance", async () => {
-  const res = await fetch(`${base}/ports/nodes/describe`, { method: "POST" });
-  assert.equal(res.status, 200);
-  assert.equal((await res.json()).provenance, "mock");
-});
-
 test("policy refuses actions that are not built", async () => {
-  assert.equal(decide("nodes", "run", true).allow, false);
-  const res = await fetch(`${base}/ports/nodes/run`, { method: "POST" });
+  assert.equal(decide("devices", "wipe", true).allow, false);
+  const res = await fetch(`${base}/ports/devices/wipe`, { method: "POST" });
   assert.equal(res.status, 403);
 });
 
@@ -202,5 +205,18 @@ test("model sign-in endpoints are owner only and say when a model has no sign-in
   assert.equal((await fetch(`${base}/model/login`)).status, 404);
   caller = "someone@example.com";
   assert.equal((await fetch(`${base}/model/login`, { method: "POST" })).status, 403);
+  caller = "rai@example.com";
+});
+
+test("the owner sees devices and chat knows them; others do not", async () => {
+  caller = "rai@example.com";
+  const list = await (await fetch(`${base}/nodes`)).json();
+  assert.deepEqual(list.devices.map((d: { name: string }) => d.name), ["orbit-host", "air"]);
+  const reply = await (await chat({ messages: [{ role: "user", content: "is my laptop on?" }] })).json();
+  assert.match(reply.reply.value, /Devices right now/);
+  caller = "someone@example.com";
+  assert.equal((await fetch(`${base}/nodes`)).status, 403);
+  const other = await (await chat({ messages: [{ role: "user", content: "is my laptop on?" }] })).json();
+  assert.doesNotMatch(other.reply.value, /Devices right now/);
   caller = "rai@example.com";
 });

@@ -3,6 +3,7 @@ import { tailscaleIdentify } from "./identity.ts";
 import { selectMemory } from "./memory.ts";
 import { chatgptModel, tokenFile } from "./chatgpt.ts";
 import { selectModel } from "./model.ts";
+import { nodes as devicePresence, tailscaleStatus } from "./nodes.ts";
 import { notifier, selectDiscord } from "./notify.ts";
 import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
 import { memoryReport, modelTask, runner, toolCall } from "./runs.ts";
@@ -31,6 +32,8 @@ const model = selectModel(process.env, (name) => chatgptModel(name, tokenFile(st
 const memory = selectMemory(process.env);
 const notify = notifier(jsonStore(stateDir, "notifications", []), selectDiscord(process.env));
 const tools = toolbox([githubRepoStatus()]);
+const owner = process.env.ORBIT_OWNER || undefined;
+const nodes = devicePresence(tailscaleStatus(), owner);
 const runs = runner(jsonStore(stateDir, "runs", []), [memoryReport(memory), modelTask(model), toolCall(tools)], notify);
 runs.recover();
 const schedule = scheduler(jsonStore(stateDir, "jobs", []), notify, () => new Date(), (worker, input) => runs.submit(worker, input));
@@ -38,6 +41,7 @@ const tick = () =>
   schedule
     .tick()
     .then(() => runs.pump())
+    .then(() => nodes.refresh())
     .catch((err) => console.error(JSON.stringify({ at: new Date().toISOString(), tick: String(err) })));
 tick();
 setInterval(tick, 30_000);
@@ -50,8 +54,9 @@ buildServer({
   schedule,
   runs,
   tools,
+  nodes,
   commit,
-  owner: process.env.ORBIT_OWNER || undefined,
+  owner,
   identify: tailscaleIdentify(),
   deploy: readDeploy,
 }).listen(port, host, () => {
