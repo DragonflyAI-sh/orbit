@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { mockPort, PORT_NAMES } from "./ports.ts";
+import { selectModel } from "./model.ts";
+import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
 import { buildServer } from "./server.ts";
 
 const port = Number(process.env.PORT ?? 8790);
@@ -16,6 +17,6 @@ function readDeploy(): unknown {
   }
 }
 
-buildServer(PORT_NAMES.map((name) => mockPort(name)), commit, readDeploy).listen(port, host, () => {
+buildServer(MOCK_PORT_NAMES.map((name) => mockPort(name)), selectModel(process.env), commit, readDeploy).listen(port, host, () => {
   console.log(`orbit ${commit} listening on ${host}:${port}`);
 });

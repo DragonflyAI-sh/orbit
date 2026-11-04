@@ -20,9 +20,7 @@ export type Port = {
   call(action: string, input: unknown): Result<unknown>;
 };
 
-export const PORT_NAMES = [
-  "channel",
-  "model",
+export const MOCK_PORT_NAMES = [
   "memory",
   "runs",
   "schedule",
