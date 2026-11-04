@@ -20,7 +20,8 @@ export type Port = {
   call(action: string, input: unknown): Result<unknown>;
 };
 
-export const MOCK_PORT_NAMES = ["nodes"] as const;
+// Every port is real now; mockPort stays for the next capability that starts as a mock.
+export const MOCK_PORT_NAMES: readonly string[] = [];
 
 export function mockPort(name: string, now: () => Date = () => new Date()): Port {
   const impl = "mock-static";

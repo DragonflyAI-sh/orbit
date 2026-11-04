@@ -5,6 +5,7 @@ import type { Identify } from "./identity.ts";
 import type { MemoryPort } from "./memory.ts";
 import type { Login } from "./chatgpt.ts";
 import type { Message, ModelPort } from "./model.ts";
+import type { Nodes } from "./nodes.ts";
 import type { Notifier } from "./notify.ts";
 import { decide } from "./policy.ts";
 import type { Port, PortStatus } from "./ports.ts";
@@ -28,6 +29,7 @@ export type Deps = {
   schedule: Scheduler;
   runs: Runner;
   tools: Toolbox;
+  nodes: Nodes;
   commit: string;
   owner?: string;
   identify: Identify;
@@ -73,6 +75,7 @@ export function buildServer({
   schedule,
   runs,
   tools,
+  nodes,
   commit,
   owner,
   identify,
@@ -89,9 +92,9 @@ export function buildServer({
   const statuses = (): PortStatus[] => {
     const now = new Date();
     return [
-      fixed("policy", "fail-closed", "Allows reads and chat replies; memory, notify, schedule, runs and tools for the owner only; refuses everything else."),
+      fixed("policy", "fail-closed", "Allows reads and chat replies; memory, notify, schedule, runs, tools and devices for the owner only; refuses everything else."),
       fixed("channel", "web", "Web chat at /. Discord and CLI are not built."),
-      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), ...ports.map((p) => p.status())].map((s) => withStaleness(s, now)),
+      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...ports.map((p) => p.status())].map((s) => withStaleness(s, now)),
     ];
   };
   const limits = (isOwner: boolean): string[] => [
@@ -146,6 +149,10 @@ export function buildServer({
         } catch {
           // memory.status() reports the failure; the reply goes ahead without notes.
         }
+      }
+      if (isOwner) {
+        const devices = `### Devices right now (from Tailscale)\n${nodes.summary()}`;
+        notes = notes ? `${devices}\n\n${notes}` : devices;
       }
       const current = limits(isOwner);
       try {
@@ -225,6 +232,11 @@ export function buildServer({
       if (typeof input.url !== "string") return send(res, 400, { error: "Send {url}: the address the browser landed on." });
       const login = await model.finishLogin(input.url);
       return send(res, login.state === "signed-in" ? 200 : 400, login);
+    }
+
+    if (url.pathname === "/nodes" && req.method === "GET") {
+      if (!(await owned("nodes", "list"))) return;
+      return send(res, 200, nodes.list());
     }
 
     if (url.pathname === "/tools" && req.method === "GET") {

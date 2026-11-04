@@ -31,6 +31,10 @@ A run moves through `requested`, `accepted`, `running`, `reviewed` and `delivere
 
 Owner only, read-only. `GET /tools` lists them; `POST /tools/<name>` calls one. Write tools are refused until approvals exist. Today: `github-repo-status {repo: "owner/name"}` returns open PRs and the latest main CI run for a public repo, with no credential. The `tool` worker runs a tool as a background run, so a schedule can deliver it, for example a daily repo digest.
 
+## Nodes
+
+Owner only. `GET /nodes` lists the owner's devices on the tailnet, online or offline with last-seen, read from this host's tailscaled every 30 seconds. Devices of other tailnet users are never listed. The owner's chat gets the same summary, so ORBIT can answer "is my laptop on?". Presence only for now: desktop notifications will need a helper on each laptop.
+
 ## Model
 
 Set `ORBIT_MODEL` in `/opt/orbit/orbit.env`. ORBIT then uses "Sign in with ChatGPT" token sharing, the method OpenClaw's OpenAI plugin uses: ChatGPT authorizes eligible Responses API calls (`api.openai.com/v1/responses`) on your subscription.
