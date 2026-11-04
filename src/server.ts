@@ -4,8 +4,11 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Identify } from "./identity.ts";
 import type { MemoryPort } from "./memory.ts";
 import type { Message, ModelPort } from "./model.ts";
+import type { Notifier } from "./notify.ts";
 import { decide } from "./policy.ts";
 import type { Port, PortStatus } from "./ports.ts";
+import type { JobInput, Scheduler } from "./schedule.ts";
+import { parseJob } from "./schedule.ts";
 
 export const STALE_AFTER_MS = 5 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -17,6 +20,8 @@ export type Deps = {
   ports: Port[];
   model: ModelPort;
   memory: MemoryPort;
+  notify: Notifier;
+  schedule: Scheduler;
   commit: string;
   owner?: string;
   identify: Identify;
@@ -54,7 +59,17 @@ function parseMessages(body: unknown): Message[] | undefined {
   return ok && messages.at(-1).role === "user" ? (messages as Message[]) : undefined;
 }
 
-export function buildServer({ ports, model, memory, commit, owner, identify, deploy = () => ({ state: "unknown" }) }: Deps): Server {
+export function buildServer({
+  ports,
+  model,
+  memory,
+  notify,
+  schedule,
+  commit,
+  owner,
+  identify,
+  deploy = () => ({ state: "unknown" }),
+}: Deps): Server {
   const byName = new Map(ports.map((p) => [p.name, p]));
   const fixed = (port: string, impl: string, detail: string): PortStatus => ({
     port,
@@ -66,9 +81,9 @@ export function buildServer({ ports, model, memory, commit, owner, identify, dep
   const statuses = (): PortStatus[] => {
     const now = new Date();
     return [
-      fixed("policy", "fail-closed", "Allows reads and chat replies; memory for the owner only; refuses everything else."),
+      fixed("policy", "fail-closed", "Allows reads and chat replies; memory, notify and schedule for the owner only; refuses everything else."),
       fixed("channel", "web", "Web chat at /. Discord and CLI are not built."),
-      ...[model.status(), memory.status(), ...ports.map((p) => p.status())].map((s) => withStaleness(s, now)),
+      ...[model.status(), memory.status(), notify.status(), schedule.status(), ...ports.map((p) => p.status())].map((s) => withStaleness(s, now)),
     ];
   };
   const limits = (isOwner: boolean): string[] => [
@@ -125,6 +140,57 @@ export function buildServer({ ports, model, memory, commit, owner, identify, dep
       } catch {
         return send(res, 502, { error: "The model call failed. /status has the detail.", limits: current });
       }
+    }
+
+    // Owner-only routes for notify and schedule. Each decision is audited.
+    const owned = async (port: string, action: string): Promise<boolean> => {
+      const decision = decide(port, action, await isOwnerOf(req));
+      audit(port, action, decision);
+      if (!decision.allow) send(res, 403, { error: decision.reason });
+      return decision.allow;
+    };
+    const body = async (): Promise<Record<string, unknown> | undefined> => {
+      try {
+        return (await readJson(req)) as Record<string, unknown>;
+      } catch {
+        send(res, 400, { error: "Body must be JSON under 64 KB." });
+        return undefined;
+      }
+    };
+
+    if (url.pathname === "/notifications" && req.method === "GET") {
+      if (!(await owned("notify", "inbox"))) return;
+      return send(res, 200, { inbox: notify.inbox(), recent: notify.recent() });
+    }
+    if (url.pathname === "/notifications" && req.method === "POST") {
+      if (!(await owned("notify", "send"))) return;
+      const input = await body();
+      if (!input) return;
+      if (typeof input.text !== "string" || !input.text.trim()) return send(res, 400, { error: "A notification needs text." });
+      return send(res, 201, notify.send(input.text.trim().slice(0, 2000), input.urgent === true));
+    }
+    const ack = url.pathname.match(/^\/notifications\/([0-9a-f-]+)\/ack$/);
+    if (ack && req.method === "POST") {
+      if (!(await owned("notify", "ack"))) return;
+      const n = notify.ack(ack[1]);
+      return n ? send(res, 200, n) : send(res, 404, { error: "No unshown notification with that id." });
+    }
+
+    if (url.pathname === "/schedule" && req.method === "GET") {
+      if (!(await owned("schedule", "list"))) return;
+      return send(res, 200, { jobs: schedule.list() });
+    }
+    if (url.pathname === "/schedule" && req.method === "POST") {
+      if (!(await owned("schedule", "create"))) return;
+      const input = await body();
+      if (!input) return;
+      const job = parseJob(input as JobInput, new Date());
+      return typeof job === "string" ? send(res, 400, { error: job }) : send(res, 201, schedule.add(job));
+    }
+    const job = url.pathname.match(/^\/schedule\/([0-9a-f-]+)$/);
+    if (job && req.method === "DELETE") {
+      if (!(await owned("schedule", "delete"))) return;
+      return schedule.remove(job[1]) ? send(res, 200, { deleted: job[1] }) : send(res, 404, { error: "No job with that id." });
     }
 
     const match = url.pathname.match(/^\/ports\/([a-z]+)\/([a-z]+)$/);

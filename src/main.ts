@@ -2,8 +2,11 @@ import { readFileSync } from "node:fs";
 import { tailscaleIdentify } from "./identity.ts";
 import { selectMemory } from "./memory.ts";
 import { selectModel } from "./model.ts";
+import { notifier, selectDiscord } from "./notify.ts";
 import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
+import { scheduler } from "./schedule.ts";
 import { buildServer } from "./server.ts";
+import { jsonStore } from "./store.ts";
 
 const port = Number(process.env.PORT ?? 8790);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -19,10 +22,20 @@ function readDeploy(): unknown {
   }
 }
 
+// systemd sets STATE_DIRECTORY from StateDirectory=orbit. Without it, state is in memory and /status says so.
+const stateDir = process.env.STATE_DIRECTORY;
+const notify = notifier(jsonStore(stateDir, "notifications", []), selectDiscord(process.env));
+const schedule = scheduler(jsonStore(stateDir, "jobs", []), notify);
+const tick = () => schedule.tick().catch((err) => console.error(JSON.stringify({ at: new Date().toISOString(), tick: String(err) })));
+tick();
+setInterval(tick, 30_000);
+
 buildServer({
   ports: MOCK_PORT_NAMES.map((name) => mockPort(name)),
   model: selectModel(process.env),
   memory: selectMemory(process.env),
+  notify,
+  schedule,
   commit,
   owner: process.env.ORBIT_OWNER || undefined,
   identify: tailscaleIdentify(),

@@ -1,14 +1,14 @@
 export type Decision = { allow: boolean; reason: string };
 
-// Fails closed. Reads and chat replies pass; memory needs the owner; everything else waits for real approvals.
+// Fails closed. Reads and chat replies pass; memory, notify and schedule need the owner; everything else waits for real approvals.
 const OPEN_ACTIONS = new Set(["describe", "chat"]);
-const OWNER_PORTS = new Set(["memory"]);
+const OWNER_PORTS = new Set(["memory", "notify", "schedule"]);
 
 export function decide(port: string, action: string, isOwner: boolean): Decision {
   if (OWNER_PORTS.has(port) && action !== "describe") {
     return isOwner
-      ? { allow: true, reason: `${port}.${action} is read-only and you are the owner` }
-      : { allow: false, reason: `${port}.${action} is refused: only the owner can read memory` };
+      ? { allow: true, reason: `${port}.${action} is allowed for the owner` }
+      : { allow: false, reason: `${port}.${action} is refused: only the owner can use ${port}` };
   }
   return OPEN_ACTIONS.has(action) || OWNER_PORTS.has(port)
     ? { allow: true, reason: `${action} has no effect outside ORBIT` }

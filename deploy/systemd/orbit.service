@@ -20,6 +20,8 @@ NoNewPrivileges=yes
 # Reads the vault copy (group orbit-vault) and asks tailscaled who sent each request.
 SupplementaryGroups=orbit-vault
 ReadWritePaths=/run/tailscale
+# Notifications and jobs persist here (STATE_DIRECTORY).
+StateDirectory=orbit
 
 [Install]
 WantedBy=multi-user.target
