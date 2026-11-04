@@ -33,6 +33,8 @@ Owner only, read-only. `GET /tools` lists them; `POST /tools/<name>` calls one. 
 
 ## Model
 
-Set `ORBIT_MODEL` in `/opt/orbit/orbit.env`. ORBIT then signs in with ChatGPT, the same device-code flow OpenClaw uses: press "Sign in with ChatGPT" on the web page and enter the code at `auth.openai.com/codex/device`. Replies go through your ChatGPT subscription. ORBIT keeps its own login in its private state directory and renews it itself; it never shares OpenClaw's, because each renewal replaces the token.
+Set `ORBIT_MODEL` in `/opt/orbit/orbit.env`. ORBIT then uses "Sign in with ChatGPT" token sharing, the method OpenClaw's OpenAI plugin uses: ChatGPT authorizes eligible Responses API calls (`api.openai.com/v1/responses`) on your subscription.
+
+To sign in, press "Sign in with ChatGPT" on the web page, open the link and approve ORBIT. The browser then lands on a `localhost:8080` address that will not load, because ORBIT runs on the server; paste that address into the page. ORBIT verifies the identity token against OpenAI's published keys, checks that token sharing was granted, and keeps its own login in its private state directory. It renews the login itself and never shares OpenClaw's, because every renewal replaces the token.
 
 An OpenAI API key at `/etc/credstore/orbit.openai` (root, 0600) takes precedence if present. Without either, replies are mock and `/status` says why.
