@@ -27,6 +27,10 @@ Owner only. `POST /runs {worker, input, key}` queues background work; `GET /runs
 
 A run moves through `requested`, `accepted`, `running`, `reviewed` and `delivered`, or ends `failed` or `cancelled`. It is `delivered` only when its notification has a receipt. The same `key` returns the existing run instead of starting another. At most 4 run at once. After a restart, runs that were in flight are re-queued only if their worker is safe to repeat; the rest are marked interrupted. A scheduled job can submit a run with `{text, run: {worker, input}, ...}`.
 
+## Tools
+
+Owner only, read-only. `GET /tools` lists them; `POST /tools/<name>` calls one. Write tools are refused until approvals exist. Today: `github-repo-status {repo: "owner/name"}` returns open PRs and the latest main CI run for a public repo, with no credential. The `tool` worker runs a tool as a background run, so a schedule can deliver it, for example a daily repo digest.
+
 ## Model
 
 Set `ORBIT_MODEL` in `/opt/orbit/orbit.env` and put an OpenAI API key in `/etc/credstore/orbit.openai` (root, 0600), then restart `orbit`. Without both, replies are mock and `/status` says why. The key never goes in the environment file or the repo.

@@ -8,6 +8,7 @@ import type { Notifier } from "./notify.ts";
 import { decide } from "./policy.ts";
 import type { Port, PortStatus } from "./ports.ts";
 import type { Runner } from "./runs.ts";
+import type { Toolbox } from "./tools.ts";
 import type { JobInput, Scheduler } from "./schedule.ts";
 import { parseJob } from "./schedule.ts";
 
@@ -24,6 +25,7 @@ export type Deps = {
   notify: Notifier;
   schedule: Scheduler;
   runs: Runner;
+  tools: Toolbox;
   commit: string;
   owner?: string;
   identify: Identify;
@@ -68,6 +70,7 @@ export function buildServer({
   notify,
   schedule,
   runs,
+  tools,
   commit,
   owner,
   identify,
@@ -84,9 +87,9 @@ export function buildServer({
   const statuses = (): PortStatus[] => {
     const now = new Date();
     return [
-      fixed("policy", "fail-closed", "Allows reads and chat replies; memory, notify, schedule and runs for the owner only; refuses everything else."),
+      fixed("policy", "fail-closed", "Allows reads and chat replies; memory, notify, schedule, runs and tools for the owner only; refuses everything else."),
       fixed("channel", "web", "Web chat at /. Discord and CLI are not built."),
-      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), ...ports.map((p) => p.status())].map((s) => withStaleness(s, now)),
+      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), ...ports.map((p) => p.status())].map((s) => withStaleness(s, now)),
     ];
   };
   const limits = (isOwner: boolean): string[] => [
@@ -194,6 +197,27 @@ export function buildServer({
     if (job && req.method === "DELETE") {
       if (!(await owned("schedule", "delete"))) return;
       return schedule.remove(job[1]) ? send(res, 200, { deleted: job[1] }) : send(res, 404, { error: "No job with that id." });
+    }
+
+    if (url.pathname === "/tools" && req.method === "GET") {
+      if (!(await owned("tools", "list"))) return;
+      return send(res, 200, { tools: tools.list() });
+    }
+    const toolMatch = url.pathname.match(/^\/tools\/([a-z0-9-]+)$/);
+    if (toolMatch && req.method === "POST") {
+      if (!(await owned("tools", "call"))) return;
+      const tool = tools.get(toolMatch[1]);
+      if (!tool) return send(res, 404, { error: `No tool named ${toolMatch[1]}.` });
+      if (!tool.readOnly) return send(res, 403, { error: `${tool.name} is not read-only, so it is refused until approvals exist.` });
+      const input = await body();
+      if (!input) return;
+      const invalid = tool.validate(input);
+      if (invalid) return send(res, 400, { error: invalid });
+      try {
+        return send(res, 200, await tools.call(tool.name, input));
+      } catch (err) {
+        return send(res, 502, { error: err instanceof Error ? err.message : "tool failed" });
+      }
     }
 
     if (url.pathname === "/runs" && req.method === "GET") {
