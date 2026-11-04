@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { tailscaleIdentify } from "./identity.ts";
+import { selectMemory } from "./memory.ts";
 import { selectModel } from "./model.ts";
 import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
 import { buildServer } from "./server.ts";
@@ -17,6 +19,14 @@ function readDeploy(): unknown {
   }
 }
 
-buildServer(MOCK_PORT_NAMES.map((name) => mockPort(name)), selectModel(process.env), commit, readDeploy).listen(port, host, () => {
+buildServer({
+  ports: MOCK_PORT_NAMES.map((name) => mockPort(name)),
+  model: selectModel(process.env),
+  memory: selectMemory(process.env),
+  commit,
+  owner: process.env.ORBIT_OWNER || undefined,
+  identify: tailscaleIdentify(),
+  deploy: readDeploy,
+}).listen(port, host, () => {
   console.log(`orbit ${commit} listening on ${host}:${port}`);
 });

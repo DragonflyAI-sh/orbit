@@ -17,6 +17,9 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
+# Reads the vault copy (group orbit-vault) and asks tailscaled who sent each request.
+SupplementaryGroups=orbit-vault
+ReadWritePaths=/run/tailscale
 
 [Install]
 WantedBy=multi-user.target

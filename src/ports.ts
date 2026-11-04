@@ -21,7 +21,6 @@ export type Port = {
 };
 
 export const MOCK_PORT_NAMES = [
-  "memory",
   "runs",
   "schedule",
   "tools",
