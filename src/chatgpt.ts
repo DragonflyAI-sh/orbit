@@ -1,24 +1,41 @@
+import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { instructions } from "./model.ts";
 import type { Message, ModelPort } from "./model.ts";
 import type { PortStatus } from "./ports.ts";
 
-// Same sign-in OpenClaw uses: the Codex CLI's ChatGPT device-code flow. ORBIT keeps its own login,
-// because each refresh replaces the token and a shared one would break whichever client refreshed second.
-const AUTH = "https://auth.openai.com";
-const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const DEVICE_CALLBACK = `${AUTH}/deviceauth/callback`;
-const VERIFY_URL = `${AUTH}/codex/device`;
-const RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
-const DEVICE_TIMEOUT_MS = 15 * 60 * 1000;
+// "Sign in with ChatGPT" token sharing, the method OpenClaw's OpenAI plugin uses: ChatGPT authorizes eligible
+// Responses API calls on the subscription. ORBIT registers and keeps its own login, because every refresh
+// replaces the token and a shared one would break whichever client refreshed second.
+const ISSUER = "https://auth.openai.com";
+const AUTHORIZE_URL = `${ISSUER}/api/accounts/authorize`;
+const TOKEN_URL = `${ISSUER}/api/accounts/oauth/token`;
+const JWKS_URL = `${ISSUER}/.well-known/jwks.json`;
+const RESOURCE = "https://api.openai.com/v1";
+const RESPONSES_URL = `${RESOURCE}/responses`;
+const REDIRECT_URI = "http://localhost:8080/auth/callback";
+const REGISTER_CLIENT = "dynamic_agent_client";
+const SCOPE = "openid email profile resource.invoke chatgpt.tokens.use.direct offline_access";
+const SHARING_SCOPES = ["chatgpt.tokens.use.direct", "chatpass.enable.request.direct"];
+const LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
 const REFRESH_EARLY_MS = 5 * 60 * 1000;
 
-export type Tokens = { access: string; refresh: string; expires: number; accountId?: string };
+export type Tokens = {
+  access: string;
+  refresh: string;
+  expires: number;
+  idToken: string;
+  clientId: string;
+  subject: string;
+  email?: string;
+  scope?: string;
+};
+
 export type Login =
   | { state: "signed-out" }
-  | { state: "pending"; userCode: string; verificationUrl: string; expiresAt: string }
-  | { state: "signed-in"; accountId?: string; since: string }
+  | { state: "pending"; authorizeUrl: string; expiresAt: string }
+  | { state: "signed-in"; email?: string; since: string }
   | { state: "failed"; detail: string; at: string };
 
 type Fetch = typeof fetch;
@@ -49,39 +66,50 @@ export function tokenFile(dir: string | undefined): TokenFile {
   };
 }
 
-export function accountIdOf(access: string): string | undefined {
-  try {
-    const payload = JSON.parse(Buffer.from(access.split(".")[1], "base64url").toString("utf8"));
-    return payload?.["https://api.openai.com/auth"]?.chatgpt_account_id;
-  } catch {
-    return undefined;
-  }
-}
+const b64url = (bytes: Buffer) => bytes.toString("base64url");
+const decodePart = (part: string) => JSON.parse(Buffer.from(part, "base64url").toString("utf8"));
 
-const json = { "content-type": "application/json", accept: "application/json", originator: "codex_cli_rs" };
+type TokenResponse = { access_token?: string; refresh_token?: string; expires_in?: number; id_token?: string; token_type?: string; scope?: string; error?: unknown };
 
-async function tokenRequest(fetcher: Fetch, form: Record<string, string>): Promise<Tokens> {
-  const res = await fetcher(`${AUTH}/oauth/token`, {
+async function tokenRequest(fetcher: Fetch, form: Record<string, string>): Promise<TokenResponse> {
+  const res = await fetcher(TOKEN_URL, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(form),
   });
-  const body = (await res.json().catch(() => ({}))) as { access_token?: string; refresh_token?: string; expires_in?: number; error?: unknown };
-  if (!res.ok || !body.access_token) {
-    const code = typeof body.error === "string" ? body.error : (body.error as { code?: string })?.code;
-    throw new Error(`token ${form.grant_type} failed: HTTP ${res.status}${code ? ` ${code}` : ""}`);
+  const body = (await res.json().catch(() => ({}))) as TokenResponse;
+  if (!res.ok) {
+    throw new Error(body.error === "invalid_grant" ? "ChatGPT connection expired or was revoked; sign in again" : `ChatGPT token ${form.grant_type} failed: HTTP ${res.status}`);
   }
-  return {
-    access: body.access_token,
-    refresh: body.refresh_token ?? form.refresh_token,
-    expires: Date.now() + (body.expires_in ?? 3600) * 1000,
-    accountId: accountIdOf(body.access_token),
-  };
+  return body;
+}
+
+type Jwk = { kid?: string; kty: string; n?: string; e?: string };
+
+// Verifies the ID token's RS256 signature against OpenAI's published keys, then its claims.
+export async function verifyIdToken(fetcher: Fetch, idToken: string, clientId: string, nonce: string | undefined, now: number) {
+  const [h, p, s] = idToken.split(".");
+  if (!h || !p || !s) throw new Error("ChatGPT returned a malformed identity token");
+  const header = decodePart(h) as { alg?: string; kid?: string };
+  if (header.alg !== "RS256") throw new Error("ChatGPT identity token uses an unexpected algorithm");
+  const keys = ((await (await fetcher(JWKS_URL)).json()) as { keys?: Jwk[] }).keys ?? [];
+  const jwk = keys.find((k) => k.kid === header.kid) ?? (keys.length === 1 ? keys[0] : undefined);
+  if (!jwk) throw new Error("No OpenAI signing key matches the identity token");
+  const ok = verify("RSA-SHA256", Buffer.from(`${h}.${p}`), createPublicKey({ key: jwk, format: "jwk" }), Buffer.from(s, "base64url"));
+  if (!ok) throw new Error("ChatGPT identity token signature is invalid");
+  const claims = decodePart(p) as { iss?: string; aud?: string | string[]; azp?: string; sub?: string; exp?: number; nonce?: string; email?: string };
+  const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  if (claims.iss !== ISSUER || !audiences.includes(clientId) || (claims.azp && claims.azp !== clientId)) {
+    throw new Error("ChatGPT identity token was not issued to ORBIT");
+  }
+  if (!claims.sub || !claims.exp || claims.exp * 1000 < now) throw new Error("ChatGPT identity token is expired or has no subject");
+  if (nonce !== undefined && claims.nonce !== nonce) throw new Error("ChatGPT identity token nonce does not match this sign-in");
+  return claims;
 }
 
 type ResponsesEvent = { type?: string; delta?: string; response?: { output?: { type: string; content?: { type: string; text: string }[] }[] } };
 
-// The Codex endpoint streams server-sent events; collect the text.
+// The Responses API streams server-sent events; collect the text.
 export function textFromStream(raw: string): string {
   let deltas = "";
   let final = "";
@@ -109,25 +137,55 @@ export function textFromStream(raw: string): string {
 export type ChatGPTModel = ModelPort & {
   login(): Login;
   startLogin(): Promise<Login>;
+  finishLogin(callbackUrl: string): Promise<Login>;
 };
 
-export type ChatGPTOptions = { fetcher?: Fetch; now?: () => number; pollMs?: number };
+export type ChatGPTOptions = { fetcher?: Fetch; now?: () => number };
 
 export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOptions = {}): ChatGPTModel {
   const fetcher = options.fetcher ?? fetch;
   const now = options.now ?? Date.now;
-  let login: Login = file.read() ? { state: "signed-in", accountId: file.read()?.accountId, since: new Date(now()).toISOString() } : { state: "signed-out" };
+  const saved = file.read();
+  let login: Login = saved ? { state: "signed-in", email: saved.email, since: new Date(now()).toISOString() } : { state: "signed-out" };
+  let pending: { state: string; nonce: string; verifier: string; deadline: number } | undefined;
   let lastOk: string | undefined;
   let lastError: { at: string; detail: string } | undefined;
   let refreshing: Promise<Tokens> | undefined;
-  const impl = `chatgpt/${model}`;
+  const impl = `chatgpt-token-sharing/${model}`;
+  const at = () => new Date(now()).toISOString();
+
+  const credential = async (body: TokenResponse, clientId: string, nonce: string | undefined, previous?: Tokens): Promise<Tokens> => {
+    const idToken = body.id_token ?? previous?.idToken;
+    const refresh = body.refresh_token ?? previous?.refresh;
+    if (!body.access_token || !refresh || !idToken || body.token_type?.toLowerCase() !== "bearer") {
+      throw new Error("ChatGPT did not return a complete renewable login");
+    }
+    const claims = body.id_token ? await verifyIdToken(fetcher, idToken, clientId, nonce, now()) : decodePart(idToken.split(".")[1]);
+    if (previous && claims.sub !== previous.subject) throw new Error("ChatGPT account changed during refresh; sign in again");
+    const scope = body.scope ?? previous?.scope;
+    const granted = new Set(scope?.split(/\s+/) ?? []);
+    if (!granted.has("resource.invoke") || !SHARING_SCOPES.some((s) => granted.has(s))) {
+      throw new Error("ChatGPT sign-in worked but token sharing was not granted; sign in again and allow it");
+    }
+    return {
+      access: body.access_token,
+      refresh,
+      expires: now() + (body.expires_in ?? 3600) * 1000,
+      idToken,
+      clientId,
+      subject: claims.sub,
+      email: claims.email ?? previous?.email,
+      scope,
+    };
+  };
 
   // One refresh at a time: a second concurrent refresh would reuse a token the first just replaced.
   const fresh = async (force = false): Promise<Tokens> => {
     const tokens = file.read();
     if (!tokens) throw new Error("not signed in to ChatGPT");
     if (!force && tokens.expires - REFRESH_EARLY_MS > now()) return tokens;
-    refreshing ??= tokenRequest(fetcher, { grant_type: "refresh_token", refresh_token: tokens.refresh, client_id: CLIENT_ID })
+    refreshing ??= tokenRequest(fetcher, { grant_type: "refresh_token", client_id: tokens.clientId, refresh_token: tokens.refresh, resource: RESOURCE })
+      .then((body) => credential(body, tokens.clientId, undefined, tokens))
       .then((t) => {
         file.write(t);
         return t;
@@ -136,16 +194,15 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
     return refreshing;
   };
 
-  const call = async (tokens: Tokens, body: string) =>
+  const call = (tokens: Tokens, body: string) =>
     fetcher(RESPONSES_URL, {
       method: "POST",
       headers: {
         authorization: `Bearer ${tokens.access}`,
-        ...(tokens.accountId ? { "chatgpt-account-id": tokens.accountId } : {}),
         "content-type": "application/json",
         accept: "text/event-stream",
-        "openai-beta": "responses=experimental",
-        originator: "codex_cli_rs",
+        // OpenClaw sends this on token-sharing requests.
+        "x-openai-chatpass-test": "codex-direct",
       },
       body,
     });
@@ -153,63 +210,75 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
   return {
     login: () => login,
 
+    // Starts a sign-in: a PKCE authorization link that also registers ORBIT as its own ChatGPT client.
     async startLogin(): Promise<Login> {
-      if (login.state === "pending" && new Date(login.expiresAt).getTime() > now()) return login;
-      const res = await fetcher(`${AUTH}/api/accounts/deviceauth/usercode`, {
-        method: "POST",
-        headers: json,
-        body: JSON.stringify({ client_id: CLIENT_ID }),
-      });
-      if (!res.ok) throw new Error(`device code request failed: HTTP ${res.status}`);
-      const body = (await res.json()) as { device_auth_id?: string; user_code?: string; usercode?: string; interval?: number };
-      const userCode = body.user_code ?? body.usercode;
-      if (!body.device_auth_id || !userCode) throw new Error("device code response was incomplete");
-      const deadline = now() + DEVICE_TIMEOUT_MS;
-      login = { state: "pending", userCode, verificationUrl: VERIFY_URL, expiresAt: new Date(deadline).toISOString() };
-      const interval = options.pollMs ?? Math.max(3, body.interval ?? 5) * 1000;
-      const deviceAuthId = body.device_auth_id;
+      if (login.state === "pending" && pending && pending.deadline > now()) return login;
+      const verifier = b64url(randomBytes(32));
+      pending = {
+        verifier,
+        state: b64url(randomBytes(24)),
+        nonce: b64url(randomBytes(24)),
+        deadline: now() + LOGIN_TIMEOUT_MS,
+      };
+      const url = new URL(AUTHORIZE_URL);
+      url.search = new URLSearchParams({
+        response_type: "code",
+        client_id: REGISTER_CLIENT,
+        redirect_uri: REDIRECT_URI,
+        resource: RESOURCE,
+        scope: SCOPE,
+        code_challenge: b64url(createHash("sha256").update(verifier).digest()),
+        code_challenge_method: "S256",
+        state: pending.state,
+        nonce: pending.nonce,
+        agent_name_hint: "ORBIT",
+      }).toString();
+      login = { state: "pending", authorizeUrl: url.toString(), expiresAt: new Date(pending.deadline).toISOString() };
+      return login;
+    },
 
-      // Waits for Rai to enter the code, in the background.
-      void (async () => {
+    // Takes the localhost:8080 address the browser landed on after approving.
+    async finishLogin(callbackUrl: string): Promise<Login> {
+      try {
+        if (!pending || pending.deadline < now()) throw new Error("No sign-in is in progress, or it expired. Start again.");
+        let url: URL;
         try {
-          while (now() < deadline) {
-            await new Promise((r) => setTimeout(r, interval));
-            const poll = await fetcher(`${AUTH}/api/accounts/deviceauth/token`, {
-              method: "POST",
-              headers: json,
-              body: JSON.stringify({ device_auth_id: deviceAuthId, user_code: userCode }),
-            });
-            if (poll.status === 403 || poll.status === 404) continue;
-            if (!poll.ok) throw new Error(`device authorization failed: HTTP ${poll.status}`);
-            const grant = (await poll.json()) as { authorization_code?: string; code_verifier?: string };
-            if (!grant.authorization_code || !grant.code_verifier) throw new Error("device authorization was incomplete");
-            const tokens = await tokenRequest(fetcher, {
-              grant_type: "authorization_code",
-              code: grant.authorization_code,
-              redirect_uri: DEVICE_CALLBACK,
-              client_id: CLIENT_ID,
-              code_verifier: grant.code_verifier,
-            });
-            file.write(tokens);
-            login = { state: "signed-in", accountId: tokens.accountId, since: new Date(now()).toISOString() };
-            return;
-          }
-          login = { state: "failed", detail: "The code expired before it was entered.", at: new Date(now()).toISOString() };
-        } catch (err) {
-          login = { state: "failed", detail: err instanceof Error ? err.message : String(err), at: new Date(now()).toISOString() };
+          url = new URL(callbackUrl.trim());
+        } catch {
+          throw new Error("That is not a URL. Paste the full address from the browser's address bar.");
         }
-      })();
+        const q = url.searchParams;
+        if (q.get("state") !== pending.state) throw new Error("That address is from a different sign-in. Start again.");
+        if (q.get("error")) throw new Error(q.get("error") === "access_denied" ? "ChatGPT authorization was declined." : `ChatGPT authorization failed: ${q.get("error")}`);
+        const code = q.get("code");
+        const ids = q.getAll("client_id");
+        if (!code) throw new Error("The address has no authorization code.");
+        if (ids.length !== 1 || !/^oaiapp_[A-Za-z0-9_-]+$/.test(ids[0])) throw new Error("ChatGPT returned an invalid client registration.");
+        const body = await tokenRequest(fetcher, {
+          grant_type: "authorization_code",
+          client_id: ids[0],
+          code,
+          code_verifier: pending.verifier,
+          redirect_uri: REDIRECT_URI,
+          resource: RESOURCE,
+        });
+        const tokens = await credential(body, ids[0], pending.nonce);
+        file.write(tokens);
+        pending = undefined;
+        login = { state: "signed-in", email: tokens.email, since: at() };
+      } catch (err) {
+        login = { state: "failed", detail: err instanceof Error ? err.message : String(err), at: at() };
+      }
       return login;
     },
 
     status(): PortStatus {
-      const at = new Date(now()).toISOString();
       if (login.state === "pending") {
-        return { port: "model", state: "down", impl, detail: `Waiting for sign-in: enter ${login.userCode} at ${login.verificationUrl}.`, verifiedAt: at };
+        return { port: "model", state: "down", impl, detail: "Waiting for sign-in: approve on ChatGPT, then paste the localhost address into ORBIT.", verifiedAt: at() };
       }
       if (!file.read()) {
         const why = login.state === "failed" ? ` Last sign-in failed: ${login.detail}` : "";
-        return { port: "model", state: "down", impl, detail: `Not signed in to ChatGPT. Sign in from the web page.${why}`, verifiedAt: at };
+        return { port: "model", state: "down", impl, detail: `Not signed in to ChatGPT. Sign in from the web page.${why}`, verifiedAt: at() };
       }
       if (lastError && (!lastOk || lastError.at > lastOk)) {
         return { port: "model", state: "down", impl, detail: `Last call failed: ${lastError.detail}`, verifiedAt: lastError.at };
@@ -219,28 +288,27 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
     },
 
     async reply(messages: Message[], limits: string[], notes?: string) {
-      const at = new Date(now()).toISOString();
+      const started = at();
       const body = JSON.stringify({
         model,
         instructions: instructions(limits, notes),
-        input: messages.map((m) => ({
-          type: "message",
-          role: m.role,
-          content: [{ type: m.role === "user" ? "input_text" : "output_text", text: m.content }],
-        })),
+        input: messages.map((m) => ({ role: m.role, content: m.content })),
         stream: true,
         store: false,
       });
       try {
         let res = await call(await fresh(), body);
         if (res.status === 401) res = await call(await fresh(true), body);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          const detail = await res.text().catch(() => "");
+          throw new Error(`HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+        }
         const text = textFromStream(await res.text());
         if (!text) throw new Error("response had no text");
-        lastOk = at;
+        lastOk = started;
         return { value: text, provenance: "live" as const, source: `model/${impl}` };
       } catch (err) {
-        lastError = { at, detail: err instanceof Error ? err.message : String(err) };
+        lastError = { at: started, detail: err instanceof Error ? err.message : String(err) };
         throw err;
       }
     },

@@ -144,12 +144,19 @@
       if (login.state === "signed-in") { box.replaceChildren(); return; }
       if (login.state === "pending") {
         box.innerHTML = "";
-        const p = document.createElement("div");
-        p.append("Enter ", Object.assign(document.createElement("code"), { textContent: login.userCode }), " at ");
-        p.append(Object.assign(document.createElement("a"), { href: login.verificationUrl, target: "_blank", rel: "noopener", textContent: login.verificationUrl }));
-        p.append(" while signed in to ChatGPT.");
-        box.append(p);
-        setTimeout(() => { refreshSignin(); refreshStatus(); }, 5000);
+        const steps = document.createElement("div");
+        steps.append("1. ", Object.assign(document.createElement("a"), { href: login.authorizeUrl, target: "_blank", rel: "noopener", textContent: "Open ChatGPT sign-in" }), " and approve ORBIT.");
+        steps.append(document.createElement("br"), "2. The browser then lands on a localhost:8080 page that will not load. Copy that address and paste it here:");
+        const field = Object.assign(document.createElement("input"), { placeholder: "http://localhost:8080/auth/callback?...", type: "url" });
+        field.style.cssText = "width:100%;margin-top:6px;padding:6px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit";
+        const finish = Object.assign(document.createElement("button"), { textContent: "Finish sign-in" });
+        finish.addEventListener("click", async () => {
+          const res = await fetch("/model/login/callback", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: field.value }) });
+          await res.json();
+          refreshSignin();
+          refreshStatus();
+        });
+        box.append(steps, field, document.createElement("br"), finish);
         return;
       }
       box.innerHTML = "";

@@ -22,7 +22,7 @@ const avatar = readFileSync(new URL("./web/avatar.png", import.meta.url));
 
 export type Deps = {
   ports: Port[];
-  model: ModelPort & { login?(): Login; startLogin?(): Promise<Login> };
+  model: ModelPort & { login?(): Login; startLogin?(): Promise<Login>; finishLogin?(callbackUrl: string): Promise<Login> };
   memory: MemoryPort;
   notify: Notifier;
   schedule: Scheduler;
@@ -215,6 +215,16 @@ export function buildServer({
       } catch (err) {
         return send(res, 502, { error: err instanceof Error ? err.message : "sign-in failed to start" });
       }
+    }
+
+    if (url.pathname === "/model/login/callback" && req.method === "POST") {
+      if (!(await owned("model", "login"))) return;
+      if (!model.finishLogin) return send(res, 404, { error: "This model does not use sign-in." });
+      const input = await body();
+      if (!input) return;
+      if (typeof input.url !== "string") return send(res, 400, { error: "Send {url}: the address the browser landed on." });
+      const login = await model.finishLogin(input.url);
+      return send(res, login.state === "signed-in" ? 200 : 400, login);
     }
 
     if (url.pathname === "/tools" && req.method === "GET") {
