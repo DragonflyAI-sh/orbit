@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { selectMemory, vaultMemory } from "../src/memory.ts";
+import { selectMemory, terms, vaultMemory } from "../src/memory.ts";
 
 const root = mkdtempSync(join(tmpdir(), "orbit-vault-"));
 mkdirSync(join(root, "Projects"));
@@ -11,6 +11,10 @@ mkdirSync(join(root, ".obsidian"));
 writeFileSync(join(root, "Projects", "money-noodle.md"), "# Money Noodle\nPR 275 is a draft.\n");
 writeFileSync(join(root, "Projects", "star-lake.md"), "Cabin trip.\n");
 writeFileSync(join(root, ".obsidian", "hidden.md"), "money noodle settings\n");
+writeFileSync(
+  join(root, "Projects", "ubuntu-guide.md"),
+  "What is the status of the install? The status is what the status was. ".repeat(40) + "money noodle once.\n",
+);
 const sync = join(root, "sync.json");
 
 test("search ranks notes by the words in the query", () => {
@@ -37,4 +41,14 @@ test("memory is live only while the vault copy was synced recently", () => {
 test("a missing vault is down, not mock", () => {
   assert.equal(selectMemory({}).status().state, "down");
   assert.equal(selectMemory({ ORBIT_VAULT: join(root, "nope") }).status().state, "down");
+});
+
+test("common words do not count as matches", () => {
+  assert.deepEqual(terms("what is the status of money noodle?"), ["money", "noodle"]);
+});
+
+test("a note named for the query beats a long note that mentions it in passing", () => {
+  const hits = vaultMemory(root).search("what is the status of money noodle?").value;
+  assert.equal(hits[0].path, join("Projects", "money-noodle.md"));
+  assert.equal(hits[1].path, join("Projects", "ubuntu-guide.md"));
 });
