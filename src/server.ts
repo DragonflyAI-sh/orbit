@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Identify } from "./identity.ts";
 import type { MemoryPort } from "./memory.ts";
+import type { Login } from "./chatgpt.ts";
 import type { Message, ModelPort } from "./model.ts";
 import type { Notifier } from "./notify.ts";
 import { decide } from "./policy.ts";
@@ -21,7 +22,7 @@ const avatar = readFileSync(new URL("./web/avatar.png", import.meta.url));
 
 export type Deps = {
   ports: Port[];
-  model: ModelPort;
+  model: ModelPort & { login?(): Login; startLogin?(): Promise<Login> };
   memory: MemoryPort;
   notify: Notifier;
   schedule: Scheduler;
@@ -150,7 +151,7 @@ export function buildServer({
       try {
         return send(res, 200, { reply: await model.reply(messages, current, notes), memory: used, limits: current });
       } catch {
-        return send(res, 502, { error: "The model call failed. /status has the detail.", limits: current });
+        return send(res, 502, { error: `The model call failed: ${model.status().detail}`, limits: current });
       }
     }
 
@@ -203,6 +204,17 @@ export function buildServer({
     if (job && req.method === "DELETE") {
       if (!(await owned("schedule", "delete"))) return;
       return schedule.remove(job[1]) ? send(res, 200, { deleted: job[1] }) : send(res, 404, { error: "No job with that id." });
+    }
+
+    if (url.pathname === "/model/login" && (req.method === "GET" || req.method === "POST")) {
+      if (!(await owned("model", req.method === "GET" ? "login-status" : "login"))) return;
+      if (!model.login || !model.startLogin) return send(res, 404, { error: "This model does not use sign-in." });
+      if (req.method === "GET") return send(res, 200, model.login());
+      try {
+        return send(res, 202, await model.startLogin());
+      } catch (err) {
+        return send(res, 502, { error: err instanceof Error ? err.message : "sign-in failed to start" });
+      }
     }
 
     if (url.pathname === "/tools" && req.method === "GET") {

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { tailscaleIdentify } from "./identity.ts";
 import { selectMemory } from "./memory.ts";
+import { chatgptModel, tokenFile } from "./chatgpt.ts";
 import { selectModel } from "./model.ts";
 import { notifier, selectDiscord } from "./notify.ts";
 import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
@@ -26,7 +27,7 @@ function readDeploy(): unknown {
 
 // systemd sets STATE_DIRECTORY from StateDirectory=orbit. Without it, state is in memory and /status says so.
 const stateDir = process.env.STATE_DIRECTORY;
-const model = selectModel(process.env);
+const model = selectModel(process.env, (name) => chatgptModel(name, tokenFile(stateDir)));
 const memory = selectMemory(process.env);
 const notify = notifier(jsonStore(stateDir, "notifications", []), selectDiscord(process.env));
 const tools = toolbox([githubRepoStatus()]);
