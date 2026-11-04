@@ -20,13 +20,7 @@ export type Port = {
   call(action: string, input: unknown): Result<unknown>;
 };
 
-export const MOCK_PORT_NAMES = [
-  "runs",
-  "schedule",
-  "tools",
-  "nodes",
-  "notify",
-] as const;
+export const MOCK_PORT_NAMES = ["runs", "tools", "nodes"] as const;
 
 export function mockPort(name: string, now: () => Date = () => new Date()): Port {
   const impl = "mock-static";

@@ -6,6 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { vaultMemory } from "../src/memory.ts";
 import { mockModel } from "../src/model.ts";
+import { notifier } from "../src/notify.ts";
+import { scheduler } from "../src/schedule.ts";
+import { jsonStore } from "../src/store.ts";
 import { decide } from "../src/policy.ts";
 import { MOCK_PORT_NAMES, mockPort } from "../src/ports.ts";
 import type { PortStatus } from "../src/ports.ts";
@@ -15,10 +18,14 @@ const deploy = { lastFailed: { commit: "bad1", at: "2026-11-02T00:00:00Z" } };
 const vault = mkdtempSync(join(tmpdir(), "orbit-vault-"));
 writeFileSync(join(vault, "now.md"), "Top priority: money noodle PR.\n");
 let caller: string | undefined = "rai@example.com";
+const notify = notifier(jsonStore(undefined, "n", []));
+const schedule = scheduler(jsonStore(undefined, "j", []), notify);
 const server = buildServer({
   ports: MOCK_PORT_NAMES.map((name) => mockPort(name)),
   model: mockModel("test"),
   memory: vaultMemory(vault),
+  notify,
+  schedule,
   commit: "abc123",
   owner: "rai@example.com",
   identify: async () => caller,
@@ -38,7 +45,7 @@ const chat = (body: unknown) =>
 test("status reports the commit and every port", async () => {
   const body = await (await fetch(`${base}/status`)).json();
   assert.equal(body.commit, "abc123");
-  assert.deepEqual(body.ports.map((p: PortStatus) => p.port), ["policy", "channel", "model", "memory", ...MOCK_PORT_NAMES]);
+  assert.deepEqual(body.ports.map((p: PortStatus) => p.port), ["policy", "channel", "model", "memory", "notify", "schedule", ...MOCK_PORT_NAMES]);
 });
 
 test("status shows the last failed deploy beside the running commit", async () => {
@@ -105,10 +112,31 @@ test("a mock answer carries mock provenance", async () => {
   assert.equal((await res.json()).provenance, "mock");
 });
 
-test("policy refuses anything but reads and chat", async () => {
-  assert.equal(decide("notify", "send", true).allow, false);
-  const res = await fetch(`${base}/ports/notify/send`, { method: "POST" });
+test("policy refuses actions that are not built", async () => {
+  assert.equal(decide("tools", "run", true).allow, false);
+  const res = await fetch(`${base}/ports/tools/run`, { method: "POST" });
   assert.equal(res.status, 403);
+});
+
+test("the owner can schedule a job and see notifications; nobody else can", async () => {
+  caller = "rai@example.com";
+  const created = await fetch(`${base}/schedule`, { method: "POST", body: JSON.stringify({ text: "stretch", everyMinutes: 30 }) });
+  assert.equal(created.status, 201);
+  assert.equal((await (await fetch(`${base}/schedule`)).json()).jobs.length, 1);
+  const bad = await fetch(`${base}/schedule`, { method: "POST", body: JSON.stringify({ text: "x", everyMinutes: 1 }) });
+  assert.equal(bad.status, 400);
+
+  const sent = await (await fetch(`${base}/notifications`, { method: "POST", body: JSON.stringify({ text: "hi", urgent: true }) })).json();
+  const inbox = await (await fetch(`${base}/notifications`)).json();
+  assert.ok(inbox.inbox.some((n: { id: string }) => n.id === sent.id));
+  const acked = await (await fetch(`${base}/notifications/${sent.id}/ack`, { method: "POST" })).json();
+  assert.equal(acked.shown.detail, "Shown in the ORBIT web page");
+
+  caller = "someone@example.com";
+  assert.equal((await fetch(`${base}/schedule`)).status, 403);
+  assert.equal((await fetch(`${base}/notifications`)).status, 403);
+  assert.equal((await fetch(`${base}/notifications`, { method: "POST", body: JSON.stringify({ text: "x" }) })).status, 403);
+  caller = "rai@example.com";
 });
 
 test("a live port that has not been verified recently is degraded", () => {

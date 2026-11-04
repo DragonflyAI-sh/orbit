@@ -19,6 +19,8 @@
   #ports { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
   .pill { border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
   .live { color: var(--live); } .mock { color: var(--mock); } .degraded, .down { color: var(--down); }
+  #inbox { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .note { border-left: 3px solid var(--mock); padding: 4px 8px; background: var(--card); border-radius: 4px; }
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   .msg { max-width: 720px; padding: 8px 12px; border-radius: 10px; background: var(--card);
          border: 1px solid var(--line); white-space: pre-wrap; }
@@ -31,7 +33,7 @@
 </style>
 </head>
 <body>
-<header><h1>ORBIT</h1><div id="ports"></div></header>
+<header><h1>ORBIT</h1><div id="ports"></div><div id="inbox"></div></header>
 <main id="log"></main>
 <form id="form"><textarea id="input" rows="2" placeholder="Message ORBIT" required></textarea><button>Send</button></form>
 <script>
@@ -89,8 +91,26 @@
   document.getElementById("input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.target.form.requestSubmit(); }
   });
+  // Shows due notifications, then acknowledges each so ORBIT records a shown receipt.
+  async function refreshInbox() {
+    try {
+      const res = await fetch("/notifications");
+      if (!res.ok) return;
+      const { inbox } = await res.json();
+      for (const n of inbox) {
+        const el = document.createElement("div");
+        el.className = "note";
+        el.textContent = n.text;
+        document.getElementById("inbox").append(el);
+        await fetch(`/notifications/${n.id}/ack`, { method: "POST" });
+      }
+    } catch { /* the next refresh tries again */ }
+  }
+
   refreshStatus();
+  refreshInbox();
   setInterval(refreshStatus, 30000);
+  setInterval(refreshInbox, 30000);
 </script>
 </body>
 </html>
