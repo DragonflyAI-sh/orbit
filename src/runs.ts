@@ -4,6 +4,7 @@ import type { ModelPort } from "./model.ts";
 import type { Notifier } from "./notify.ts";
 import type { PortStatus } from "./ports.ts";
 import type { Store } from "./store.ts";
+import type { Toolbox } from "./tools.ts";
 
 export type RunState = "requested" | "accepted" | "running" | "reviewed" | "delivered" | "failed" | "cancelled";
 export type Output = { text: string; provenance: "live" | "mock" };
@@ -69,6 +70,25 @@ export function modelTask(model: ModelPort): Worker {
         : output.provenance === "mock"
           ? { ok: true, detail: "Output is mock: no model is connected." }
           : { ok: true, detail: "Model answered." },
+  };
+}
+
+export function toolCall(tools: Toolbox): Worker {
+  return {
+    name: "tool",
+    idempotent: true,
+    timeoutMs: 60_000,
+    validate: (input) => {
+      const tool = typeof input.name === "string" ? tools.get(input.name) : undefined;
+      if (!tool) return "tool needs {name, input} naming a known tool.";
+      if (!tool.readOnly) return `${tool.name} is not read-only, so it is refused until approvals exist.`;
+      return tool.validate((input.input ?? {}) as Record<string, unknown>);
+    },
+    run: async (input) => {
+      const result = await tools.call(String(input.name), (input.input ?? {}) as Record<string, unknown>);
+      return { text: JSON.stringify(result.value, null, 2), provenance: result.provenance };
+    },
+    review: (output) => ({ ok: output.text.length > 2, detail: "Tool answered." }),
   };
 }
 

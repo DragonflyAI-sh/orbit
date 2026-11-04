@@ -10,6 +10,8 @@ import { notifier } from "../src/notify.ts";
 import { memoryReport, runner } from "../src/runs.ts";
 import { scheduler } from "../src/schedule.ts";
 import { jsonStore } from "../src/store.ts";
+import { toolbox } from "../src/tools.ts";
+import type { Tool } from "../src/tools.ts";
 import { decide } from "../src/policy.ts";
 import { MOCK_PORT_NAMES, mockPort } from "../src/ports.ts";
 import type { PortStatus } from "../src/ports.ts";
@@ -23,6 +25,9 @@ const notify = notifier(jsonStore(undefined, "n", []));
 const schedule = scheduler(jsonStore(undefined, "j", []), notify);
 const memoryPort = vaultMemory(vault);
 const runs = runner(jsonStore(undefined, "r", []), [memoryReport(memoryPort)], notify);
+const echo: Tool = { name: "echo", description: "", readOnly: true, validate: () => undefined, run: async (i) => ({ value: i, provenance: "live", source: "tools/echo" }) };
+const writer: Tool = { ...echo, name: "writer", readOnly: false };
+const tools = toolbox([echo, writer]);
 const server = buildServer({
   ports: MOCK_PORT_NAMES.map((name) => mockPort(name)),
   model: mockModel("test"),
@@ -30,6 +35,7 @@ const server = buildServer({
   notify,
   schedule,
   runs,
+  tools,
   commit: "abc123",
   owner: "rai@example.com",
   identify: async () => caller,
@@ -49,7 +55,7 @@ const chat = (body: unknown) =>
 test("status reports the commit and every port", async () => {
   const body = await (await fetch(`${base}/status`)).json();
   assert.equal(body.commit, "abc123");
-  assert.deepEqual(body.ports.map((p: PortStatus) => p.port), ["policy", "channel", "model", "memory", "notify", "schedule", "runs", ...MOCK_PORT_NAMES]);
+  assert.deepEqual(body.ports.map((p: PortStatus) => p.port), ["policy", "channel", "model", "memory", "notify", "schedule", "runs", "tools", ...MOCK_PORT_NAMES]);
 });
 
 test("status shows the last failed deploy beside the running commit", async () => {
@@ -75,7 +81,7 @@ test("a chat reply carries provenance and the limits ORBIT has", async () => {
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.reply.provenance, "mock");
-  assert.ok(body.limits.some((l: string) => l.startsWith("tools is mock")));
+  assert.ok(body.limits.some((l: string) => l.startsWith("nodes is mock")));
 });
 
 test("the owner's chat brings in matching vault notes", async () => {
@@ -111,14 +117,14 @@ test("chat rejects malformed input", async () => {
 });
 
 test("a mock answer carries mock provenance", async () => {
-  const res = await fetch(`${base}/ports/tools/describe`, { method: "POST" });
+  const res = await fetch(`${base}/ports/nodes/describe`, { method: "POST" });
   assert.equal(res.status, 200);
   assert.equal((await res.json()).provenance, "mock");
 });
 
 test("policy refuses actions that are not built", async () => {
-  assert.equal(decide("tools", "run", true).allow, false);
-  const res = await fetch(`${base}/ports/tools/run`, { method: "POST" });
+  assert.equal(decide("nodes", "run", true).allow, false);
+  const res = await fetch(`${base}/ports/nodes/run`, { method: "POST" });
   assert.equal(res.status, 403);
 });
 
@@ -171,5 +177,16 @@ test("the owner can submit a run and read it back; a repeated key returns the sa
   caller = undefined;
   assert.equal((await submit()).status, 403);
   assert.equal((await fetch(`${base}/runs`)).status, 403);
+  caller = "rai@example.com";
+});
+
+test("the owner can call a read-only tool; write tools and other callers are refused", async () => {
+  caller = "rai@example.com";
+  const ok = await fetch(`${base}/tools/echo`, { method: "POST", body: JSON.stringify({ x: 1 }) });
+  assert.deepEqual((await ok.json()).value, { x: 1 });
+  assert.equal((await fetch(`${base}/tools/writer`, { method: "POST", body: "{}" })).status, 403);
+  assert.equal((await fetch(`${base}/tools/nope`, { method: "POST", body: "{}" })).status, 404);
+  caller = "someone@example.com";
+  assert.equal((await fetch(`${base}/tools/echo`, { method: "POST", body: "{}" })).status, 403);
   caller = "rai@example.com";
 });
