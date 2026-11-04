@@ -9,6 +9,16 @@ mkdir -p "$STATE" "$ROOT/releases"
 # shellcheck source=/dev/null
 . "$ROOT/orbit.env"
 
+# Refresh the read-only vault copy. A failure here never blocks a deploy; /status shows the sync age.
+if [ -d "$ROOT/vault/.git" ]; then
+  if git -C "$ROOT/vault" pull -q --ff-only; then
+    jq -n --arg c "$(git -C "$ROOT/vault" rev-parse HEAD)" --arg at "$(date -u +%FT%TZ)" '{commit: $c, at: $at}' > "$STATE/vault.json.new" \
+      && mv "$STATE/vault.json.new" "$STATE/vault.json"
+  else
+    echo "deploy: vault refresh failed"
+  fi
+fi
+
 git -C "$ROOT/repo" fetch -q origin main
 sha="$(git -C "$ROOT/repo" rev-parse origin/main)"
 current="$(cat "$ROOT/current/COMMIT" 2>/dev/null || true)"

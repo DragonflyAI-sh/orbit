@@ -6,23 +6,28 @@ export type Message = { role: "user" | "assistant"; content: string };
 
 export type ModelPort = {
   status(): PortStatus;
-  reply(messages: Message[], limits: string[]): Promise<Result<string>>;
+  reply(messages: Message[], limits: string[], notes?: string): Promise<Result<string>>;
 };
 
-export function instructions(limits: string[]): string {
+export function instructions(limits: string[], notes?: string): string {
   return [
     "You are ORBIT (Operational Reasoning Bot for Intelligent Tasks), Rai's personal assistant.",
     "Be concise and technical. Never present a guess as fact.",
     "These parts of you are not connected yet, so you know nothing from them. Say so plainly when it matters:",
     ...limits.map((l) => `- ${l}`),
+    ...(notes
+      ? ["", "Excerpts from Rai's vault, the source of truth for his projects and commitments. Cite the note path. They may be partial:", notes]
+      : []),
   ].join("\n");
 }
 
 export function mockModel(detail: string, now: () => Date = () => new Date()): ModelPort {
   return {
     status: () => ({ port: "model", state: "mock", impl: "mock-echo", detail, verifiedAt: now().toISOString() }),
-    reply: async (messages) => ({
-      value: `Mock reply: no model is connected, so this is not a real answer. You said: "${messages.at(-1)?.content ?? ""}"`,
+    reply: async (messages, _limits, notes) => ({
+      value: `Mock reply: no model is connected, so this is not a real answer. You said: "${messages.at(-1)?.content ?? ""}"${
+        notes ? "\n\nMemory found these notes, which a real model would read:\n" + [...notes.matchAll(/^### (.+)$/gm)].map((m) => `- ${m[1]}`).join("\n") : ""
+      }`,
       provenance: "mock",
       source: "model/mock-echo",
     }),
@@ -44,13 +49,13 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch):
       if (lastOk) return { port: "model", state: "live", impl, detail: "Answering.", verifiedAt: lastOk };
       return { port: "model", state: "degraded", impl, detail: "Configured but not exercised yet.", verifiedAt: new Date(0).toISOString() };
     },
-    reply: async (messages, limits) => {
+    reply: async (messages, limits, notes) => {
       const at = new Date().toISOString();
       try {
         const res = await fetcher("https://api.openai.com/v1/responses", {
           method: "POST",
           headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-          body: JSON.stringify({ model, instructions: instructions(limits), input: messages }),
+          body: JSON.stringify({ model, instructions: instructions(limits, notes), input: messages }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const body = (await res.json()) as { output?: { type: string; content?: { type: string; text: string }[] }[] };

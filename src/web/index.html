@@ -80,7 +80,8 @@
       const body = await res.json();
       if (!res.ok) { add("orbit", body.error, "error", "down"); history.pop(); return; }
       history.push({ role: "assistant", content: body.reply.value });
-      add("orbit", body.reply.value, `${body.reply.provenance} · ${body.reply.source}`, body.reply.provenance);
+      const mem = body.memory?.length ? ` · memory: ${body.memory.join(", ")}` : "";
+      add("orbit", body.reply.value, `${body.reply.provenance} · ${body.reply.source}${mem}`, body.reply.provenance);
     } catch { add("orbit", "ORBIT did not answer.", "error", "down"); history.pop(); }
     refreshStatus();
   });
