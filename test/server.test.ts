@@ -70,6 +70,12 @@ test("unbuilt ports say they are mocks", async () => {
   }
 });
 
+test("the avatar is served for the page and its icons", async () => {
+  const res = await fetch(`${base}/avatar.png`);
+  assert.equal(res.headers.get("content-type"), "image/png");
+  assert.deepEqual([...new Uint8Array(await res.arrayBuffer()).slice(1, 4)], [80, 78, 71]);
+});
+
 test("the web page is served at /", async () => {
   const res = await fetch(base);
   assert.equal(res.status, 200);

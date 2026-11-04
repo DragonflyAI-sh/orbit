@@ -17,6 +17,7 @@ const MAX_BODY_BYTES = 64 * 1024;
 const MAX_MESSAGES = 40;
 const MAX_NOTE_CHARS = 2000;
 const page = readFileSync(new URL("./web/index.html", import.meta.url), "utf8");
+const avatar = readFileSync(new URL("./web/avatar.png", import.meta.url));
 
 export type Deps = {
   ports: Port[];
@@ -108,6 +109,11 @@ export function buildServer({
     if (req.method === "GET" && url.pathname === "/") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       return res.end(page);
+    }
+
+    if (req.method === "GET" && url.pathname === "/avatar.png") {
+      res.writeHead(200, { "content-type": "image/png", "cache-control": "public, max-age=86400" });
+      return res.end(avatar);
     }
 
     if (req.method === "GET" && url.pathname === "/status") {
