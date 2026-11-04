@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# orbit-job: the ORBIT job protocol for Claude cloud runners.
+# Control files live in DragonflyAI-sh/orbit-work on branch orbit/<job-id>:
+#   ORBIT writes  .orbit/brief.md, .orbit/steer/<n>.md
+#   the runner    .orbit/started.json, .orbit/checkins.jsonl, .orbit/replies/<n>.md, .orbit/summary.md
+# This version uses git only; API callbacks come later and are reported as api=not-configured.
+set -uo pipefail
+
+TOOL_VERSION=1
+STATE_DIR="${ORBIT_JOB_STATE:-$HOME/.orbit-job}"
+
+say() { echo "orbit-job: $*"; }
+die() { echo "orbit-job: error: $*" >&2; exit 2; }
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Escapes a string for a JSON value.
+json() {
+  local s=$1
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\r'/}; s=${s//$'\t'/\\t}
+  printf '"%s"' "$s"
+}
+
+valid_id() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; }
+
+load() {
+  [ -f "$STATE_DIR/current" ] || die "no job started here; run: orbit-job start --job <id>"
+  # shellcheck source=/dev/null
+  . "$STATE_DIR/current"
+}
+
+# The orbit-work checkout: --control, else a checkout here or under $HOME whose origin is orbit-work.
+find_control() {
+  local d url
+  for d in "$PWD" "$HOME"/* /home/user/*; do
+    [ -d "$d/.git" ] || continue
+    url=$(git -C "$d" remote get-url origin 2>/dev/null) || continue
+    case "$url" in */orbit-work | */orbit-work.git) echo "$d"; return 0 ;; esac
+  done
+  return 1
+}
+
+git_c() {
+  if git -C "$CONTROL" config user.email >/dev/null; then
+    git -C "$CONTROL" "$@"
+  else
+    git -C "$CONTROL" -c user.name="ORBIT job runner" -c user.email="orbit-job@users.noreply.github.com" "$@"
+  fi
+}
+
+# Pushes the job branch, rebasing on what ORBIT pushed meanwhile. Prints the short commit id.
+push() {
+  local tries=0
+  : >"$STATE_DIR/push.err"
+  until git -C "$CONTROL" push -q origin "HEAD:refs/heads/$BRANCH" 2>>"$STATE_DIR/push.err"; do
+    tries=$((tries + 1))
+    [ "$tries" -ge 3 ] && return 1
+    git_c pull -q --rebase origin "$BRANCH" 2>>"$STATE_DIR/push.err" || return 1
+  done
+  git -C "$CONTROL" rev-parse --short HEAD
+}
+
+# Commits the given control files and pushes. Reports what actually happened.
+record() {
+  local message=$1 sha
+  shift
+  git -C "$CONTROL" add -- "$@" || return 1
+  git_c commit -q -m "$message" -- "$@" || { say "FAILED git=commit-failed api=not-configured"; return 1; }
+  if sha=$(push); then
+    say "ok git=pushed $sha api=not-configured"
+  else
+    say "FAILED git=push-failed api=not-configured"
+    sed 's/^/  /' "$STATE_DIR/push.err" >&2
+    return 1
+  fi
+}
+
+cmd_start() {
+  local job="" control=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --job) job=${2:-}; shift 2 ;;
+      --control) control=${2:-}; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  valid_id "$job" || die "--job <id> is required (letters, digits, dot, underscore, dash)"
+  if [ -z "$control" ]; then control=$(find_control) || die "cannot find the orbit-work checkout; pass --control <path>"; fi
+  CONTROL=$(cd "$control" && pwd) || die "no such directory: $control"
+  BRANCH="orbit/$job"
+  mkdir -p "$STATE_DIR"
+  git -C "$CONTROL" fetch -q origin "$BRANCH" 2>/dev/null || die "branch $BRANCH is not on origin; ORBIT pushes it, with the brief, before the job starts"
+  git -C "$CONTROL" checkout -q -B "$BRANCH" FETCH_HEAD || die "could not check out $BRANCH"
+  [ -f "$CONTROL/.orbit/brief.md" ] || die "$BRANCH has no .orbit/brief.md"
+  printf 'JOB=%q\nCONTROL=%q\nBRANCH=%q\n' "$job" "$CONTROL" "$BRANCH" >"$STATE_DIR/current"
+  printf '{"job":%s,"at":%s,"host":%s,"tool":%d}\n' "$(json "$job")" "$(json "$(now)")" "$(json "$(hostname)")" "$TOOL_VERSION" >"$CONTROL/.orbit/started.json"
+  record "orbit-job $job: started" .orbit/started.json || exit 1
+  say "brief: $CONTROL/.orbit/brief.md"
+}
+
+cmd_checkin() {
+  [ $# -ge 1 ] && [ -n "$1" ] || die 'usage: orbit-job checkin "<what you are doing>"'
+  load
+  printf '{"at":%s,"status":%s}\n' "$(json "$(now)")" "$(json "$1")" >>"$CONTROL/.orbit/checkins.jsonl"
+  record "orbit-job $JOB: checkin" .orbit/checkins.jsonl || exit 1
+  cmd_steers
+}
+
+# Prints steers that have no reply yet. Always pulls first so new steers from ORBIT show up.
+cmd_steers() {
+  load
+  git_c pull -q --rebase origin "$BRANCH" 2>/dev/null || say "could not pull $BRANCH; showing steers already here"
+  local f n found=0
+  for f in "$CONTROL"/.orbit/steer/*.md; do
+    [ -e "$f" ] || continue
+    n=$(basename "$f" .md)
+    [ -e "$CONTROL/.orbit/replies/$n.md" ] && continue
+    found=1
+    echo "--- steer $n (reply with: orbit-job reply $n <file>)"
+    cat "$f"
+    echo
+  done
+  [ "$found" = 1 ] || say "no unanswered steers"
+}
+
+cmd_reply() {
+  [ $# -eq 2 ] || die "usage: orbit-job reply <steer-number> <file>"
+  local n=$1 file=$2
+  [[ $n =~ ^[0-9]+$ ]] || die "steer number must be a whole number"
+  [ -f "$file" ] || die "no such file: $file"
+  load
+  [ -f "$CONTROL/.orbit/steer/$n.md" ] || die "there is no steer $n"
+  mkdir -p "$CONTROL/.orbit/replies"
+  cp "$file" "$CONTROL/.orbit/replies/$n.md"
+  record "orbit-job $JOB: reply $n" ".orbit/replies/$n.md" || exit 1
+}
+
+cmd_summary() {
+  local status="" file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --status) status=${2:-}; shift 2 ;;
+      *) file=$1; shift ;;
+    esac
+  done
+  case "$status" in done | blocked | failed) ;; *) die "usage: orbit-job summary --status done|blocked|failed <file>" ;; esac
+  [ -f "$file" ] || die "no such file: $file"
+  load
+  { printf -- '---\nstatus: %s\nat: %s\n---\n\n' "$status" "$(now)"; cat "$file"; } >"$CONTROL/.orbit/summary.md"
+  record "orbit-job $JOB: summary ($status)" .orbit/summary.md || exit 1
+}
+
+usage() {
+  cat <<'U'
+orbit-job: the ORBIT job protocol (git only for now)
+  orbit-job start --job <id> [--control <orbit-work checkout>]   check out orbit/<id>, record the start
+  orbit-job checkin "<status>"                                    record progress, then show new steers
+  orbit-job steers                                                show steers that have no reply yet
+  orbit-job reply <n> <file>                                      answer steer n
+  orbit-job summary --status done|blocked|failed <file>           final summary; write one on every exit
+U
+}
+
+case "${1:-}" in
+  start) shift; cmd_start "$@" ;;
+  checkin) shift; cmd_checkin "$@" ;;
+  steers) shift; cmd_steers ;;
+  reply) shift; cmd_reply "$@" ;;
+  summary) shift; cmd_summary "$@" ;;
+  -h | --help | help | "") usage ;;
+  --version) echo "orbit-job $TOOL_VERSION" ;;
+  *) usage >&2; exit 2 ;;
+esac
