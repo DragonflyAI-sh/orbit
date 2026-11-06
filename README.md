@@ -35,6 +35,19 @@ Owner only, read-only. `GET /tools` lists them; `POST /tools/<name>` calls one. 
 
 Owner only. `GET /nodes` lists the owner's devices on the tailnet, online or offline with last-seen, read from this host's tailscaled every 30 seconds. Devices of other tailnet users are never listed. The owner's chat gets the same summary, so ORBIT can answer "is my laptop on?". Presence only for now: desktop notifications will need a helper on each laptop.
 
+## Cloud runners: `orbit-job`
+
+`tools/orbit-job` is the job protocol for Claude cloud runners. A job's control files live in the private `DragonflyAI-sh/orbit-work` repo on branch `orbit/<job-id>`: ORBIT writes `.orbit/brief.md` and `.orbit/steer/<n>.md`; the runner writes `started.json`, `checkins.jsonl`, `replies/<n>.md` and `summary.md`. Code always goes to the project repo, never `orbit-work`.
+
+```bash
+orbit-job start --job <id>        # check out orbit/<id>, record the start, print the brief path
+orbit-job checkin "<status>"      # record progress, then show new steers
+orbit-job reply <n> <file>        # answer steer n
+orbit-job summary --status done|blocked|failed <file>
+```
+
+Each command reports what really happened (`ok git=pushed <sha>` or `FAILED ...`). This version is git only; API callbacks come next. `tools/orbit-job/install.sh` installs the tool and its skill (`SKILL.md`) in a cloud session.
+
 ## Model
 
 Set `ORBIT_MODEL` in `/opt/orbit/orbit.env`. ORBIT then uses "Sign in with ChatGPT" token sharing, the method OpenClaw's OpenAI plugin uses: ChatGPT authorizes eligible Responses API calls (`api.openai.com/v1/responses`) on your subscription.
