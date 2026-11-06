@@ -1,0 +1,19 @@
+[Unit]
+Description=Tailscale identity for the ORBIT job listener (orbit-jobs), userspace networking
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# A second tailscaled with its own node identity, so the public job listener never shares the host's.
+ExecStart=/usr/sbin/tailscaled --tun=userspace-networking --statedir=/var/lib/orbit-tailscale-jobs --socket=/run/orbit-tailscale-jobs/tailscaled.sock --port=0
+StateDirectory=orbit-tailscale-jobs
+StateDirectoryMode=0700
+RuntimeDirectory=orbit-tailscale-jobs
+Restart=on-failure
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
