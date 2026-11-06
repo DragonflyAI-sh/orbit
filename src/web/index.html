@@ -265,7 +265,7 @@
     document.getElementById("log").hidden = next !== "chat";
     chatForm.hidden = next !== "chat";
     jobsBox.hidden = next !== "jobs";
-    if (next === "jobs") refreshJobs();
+    if (next === "jobs") jobsPoller.poll();
   }
   tabs.addEventListener("click", (e) => { const t = e.target.closest("button")?.dataset.tab; if (t) setTab(t); });
 
@@ -347,27 +347,39 @@
       ...(rows.length ? rows.map(jobCard) : [el("div", { className: "empty", textContent: "No jobs yet." })]));
   }
 
+  // <poller>
+  // Runs `refresh` when `shouldRun()` says so, never two at once. Tests load this block on its own.
+  function makePoller(refresh, shouldRun, schedule, ms) {
+    let busy = false;
+    const poll = async () => {
+      if (busy || !shouldRun()) return;
+      busy = true;
+      try { await refresh(); } finally { busy = false; }
+    };
+    return { poll, start: () => schedule(poll, ms) };
+  }
+  // </poller>
+
+  // Fetches and draws the Jobs tab. Called by the poller and by the user's own clicks on that tab.
   async function refreshJobs() {
     try {
-      if (tab !== "jobs") {
-        // Keep the tab badge fresh and discover whether this visitor is the owner.
-        const jr = await fetch("/jobs?view=rows");
-        tabs.hidden = !jr.ok;
-        if (jr.ok) {
-          const rows = (await jr.json()).jobs;
-          const pr = await fetch("/chat/proposals");
-          const n = rows.filter((r) => ["not-started", "quiet", "launch-failed"].includes(r.health)).length + (pr.ok ? (await pr.json()).proposals.length : 0);
-          document.getElementById("jobsbadge").textContent = n ? `(${n})` : "";
-        }
-        return;
-      }
       if (openJob) await renderDetail(openJob); else await renderList();
     } catch { /* the next refresh tries again */ }
   }
-  // Every 15 seconds, only while the page is visible.
-  setInterval(() => { if (document.visibilityState === "visible") refreshJobs(); }, 15000);
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refreshJobs(); });
-  refreshJobs();
+  // The Jobs tab refreshes once when it opens and every 15 seconds while it is showing and the page is visible.
+  // The Chat tab and a hidden page make no jobs requests.
+  const jobsPoller = makePoller(refreshJobs, () => tab === "jobs" && document.visibilityState === "visible", setInterval, 15000);
+  jobsPoller.start();
+
+  // The tabs show only for the owner. /chat/proposals is owner-only and cheap, so it answers that once on load
+  // without touching the jobs list; the badge fills in when the Jobs tab opens.
+  (async () => {
+    try {
+      const pr = await fetch("/chat/proposals");
+      tabs.hidden = !pr.ok;
+      if (pr.ok) { const n = (await pr.json()).proposals.length; document.getElementById("jobsbadge").textContent = n ? `(${n})` : ""; }
+    } catch { /* stay on Chat */ }
+  })();
 
   refreshStatus();
   refreshInbox();
