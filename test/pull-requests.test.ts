@@ -140,8 +140,8 @@ test("githubPulls: opens from orbit/<job> to main with the title and body, using
 });
 
 test("githubPulls: an existing PR for the branch is returned, not duplicated", async () => {
-  const g = fakeGithub({ [REF]: { status: 200 }, "GET /repos/o/r/pulls": { status: 200, json: [{ html_url: "https://github.com/o/r/pull/2" }] } });
-  assert.deepEqual(await githubPulls("TOK", g.fetcher).open("o/r", "j", "T", "B"), { status: "exists", url: "https://github.com/o/r/pull/2" });
+  const g = fakeGithub({ [REF]: { status: 200 }, "GET /repos/o/r/pulls": { status: 200, json: [{ html_url: "https://github.com/o/r/pull/2", head: { ref: "orbit/j", repo: { full_name: "o/r" } } }] } });
+  assert.deepEqual(await githubPulls("TOK", g.fetcher).open("o/r", "j", "T", "B"), { status: "exists", url: "https://github.com/o/r/pull/2", head: { ref: "orbit/j", repo: "o/r" } });
   assert.ok(!g.seen.some((s) => s.method === "POST"));
 });
 

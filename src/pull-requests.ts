@@ -52,7 +52,7 @@ export function prText(job: Job, summary: string): { title: string; body: string
 
 export type PullPort = {
   // "no-branch" when orbit/<job> does not exist in the repo; otherwise the PR, new or already there.
-  open(repo: string, job: string, title: string, body: string): Promise<{ status: "no-branch" } | { status: "opened" | "exists"; url: string }>;
+  open(repo: string, job: string, title: string, body: string): Promise<{ status: "no-branch" } | { status: "opened" | "exists"; url: string; head?: { ref: string; repo: string } }>;
 };
 
 export async function httpFailure(what: string, res: Response): Promise<never> {
@@ -95,8 +95,11 @@ export function githubPulls(token: string, fetcher: Fetch = fetch): PullPort {
       const owner = repo.split("/")[0];
       const existing = await call("GET", `/repos/${repo}/pulls?state=all&head=${encodeURIComponent(`${owner}:${branch}`)}`);
       if (!existing.ok) return fail("Looking for an existing pull request", existing);
-      const found = (await existing.json()) as { html_url?: string }[];
-      if (found[0]?.html_url) return { status: "exists", url: found[0].html_url };
+      const found = (await existing.json()) as { html_url?: string; head?: { ref?: string; repo?: { full_name?: string } | null } }[];
+      if (found[0]?.html_url) {
+        const head = found[0].head;
+        return { status: "exists", url: found[0].html_url, head: head?.ref && head.repo?.full_name ? { ref: head.ref, repo: head.repo.full_name } : undefined };
+      }
       const made = await call("POST", `/repos/${repo}/pulls`, { title, head: branch, base: "main", body });
       if (!made.ok) return fail("Opening the pull request", made);
       const pr = (await made.json()) as { html_url?: string };
@@ -133,8 +136,11 @@ export function pullRequestOpener(jobs: Jobs, repos: Map<string, string>, pulls:
       }
       jobs.setPr(job.id, { at, url: result.url });
       notify.send(`PR ready: ${result.url}`, false);
-      // Only a PR ORBIT just opened gets a review; one that already existed does not.
-      if (result.status === "opened") {
+      // A PR ORBIT just opened gets a review. So does one that already existed, but only if its head is this job's own
+      // branch in the mapped repo (the runner opened it); the reviewer starts at most one review per job.
+      const runnerOpened = result.status === "exists" && result.head?.ref === `orbit/${job.id}` && result.head.repo.toLowerCase() === repo.toLowerCase() && result.url.toLowerCase().startsWith(`https://github.com/${repo.toLowerCase()}/pull/`);
+      if (runnerOpened) notify.send(`PR ${result.url} for job ${job.id} was opened by the runner, not by ORBIT. ORBIT is reviewing it anyway.`, false);
+      if (result.status === "opened" || runnerOpened) {
         try {
           onOpened?.(jobs.get(job.id) ?? job, result.url);
         } catch (err) {

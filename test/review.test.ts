@@ -16,7 +16,7 @@ import { jsonStore } from "../src/store.ts";
 const tick = () => new Promise((r) => setTimeout(r, 10));
 const PR = "https://github.com/DragonflyAI-sh/orbit/pull/7";
 
-function setup(opts: { pull?: "opened" | "exists"; comments?: CommentPort | undefined; fire?: () => Promise<{ sessionId: string; sessionUrl: string }> } = {}) {
+function setup(opts: { head?: { ref: string; repo: string } | null; pull?: "opened" | "exists"; comments?: CommentPort | undefined; fire?: () => Promise<{ sessionId: string; sessionUrl: string }> } = {}) {
   const notify = notifier(jsonStore<Notification[]>(undefined, "n", []));
   const jobs = jobRegistry(jsonStore<Job[]>(undefined, "j", []), Buffer.alloc(32, 1), notify);
   const briefs: { id: string; text: string }[] = [];
@@ -28,7 +28,7 @@ function setup(opts: { pull?: "opened" | "exists"; comments?: CommentPort | unde
   const comments: CommentPort | undefined = "comments" in opts ? opts.comments : { post: async (repo, pull, body) => (posted.push({ repo, pull, body }), `${PR}#issuecomment-1`) };
   const review = reviewer(jobs, launch, comments, notify);
   let opens = 0;
-  const pulls: PullPort = { open: async () => (opens++, { status: opts.pull ?? "opened", url: PR }) };
+  const pulls: PullPort = { open: async () => (opens++, { status: opts.pull ?? "opened", url: PR, ...(opts.pull === "exists" ? { head: opts.head === null ? undefined : (opts.head ?? { ref: "orbit/w1", repo: "DragonflyAI-sh/orbit" }) } : {}) }) };
   pullRequestOpener(jobs, parseRoutineRepos("orbit=DragonflyAI-sh/orbit"), pulls, notify, () => new Date(), (job, url) => void review.start(job, url));
   const texts = () => notify.recent().map((n) => n.text);
   const reviewId = (work: string) => jobs.get(work)!.reviewJob!.id!;
@@ -78,11 +78,27 @@ test("an opened PR starts exactly one review job on the same routine, marked as 
   assert.equal(s.opens(), 1);
 });
 
-test("a PR that already existed gets no review", async () => {
+test("a PR the runner opened (it already existed) on the job's own branch gets one review, and Rai is told who opened it", async () => {
   const s = setup({ pull: "exists" });
   await finishWork(s);
-  assert.equal(s.briefs.length, 0);
-  assert.equal(s.jobs.get("w1")!.reviewJob, undefined);
+  assert.equal(s.briefs.length, 1);
+  assert.ok(s.jobs.get("w1")!.reviewJob?.id);
+  assert.equal(s.texts().filter((t) => t.includes("opened by the runner, not by ORBIT")).length, 1);
+  s.jobs.record("w1", { type: "summary", status: "done", text: "again", via: "git" });
+  await tick();
+  await tick();
+  assert.equal(s.briefs.length, 1, "still one review");
+  assert.equal(s.opens(), 1);
+});
+
+test("an existing PR that is not from the job's own branch in the mapped repo gets no review", async () => {
+  for (const head of [{ ref: "orbit/other", repo: "DragonflyAI-sh/orbit" }, { ref: "orbit/w1", repo: "someone/orbit" }, { ref: "main", repo: "DragonflyAI-sh/orbit" }, null]) {
+    const s = setup({ pull: "exists", head });
+    await finishWork(s);
+    assert.equal(s.briefs.length, 0, JSON.stringify(head));
+    assert.equal(s.jobs.get("w1")!.reviewJob, undefined);
+    assert.ok(!s.texts().some((t) => t.includes("opened by the runner")));
+  }
 });
 
 test("a review job never opens a PR and never starts a review, even when it finishes done", async () => {
