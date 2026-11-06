@@ -33,6 +33,21 @@ mv "$ROOT/orbit.env.new" "$ROOT/orbit.env"
 
 install -m 755 "$src/pull-deploy.sh" /usr/local/lib/orbit/pull-deploy.sh
 install -m 644 "$src"/systemd/orbit.service "$src"/systemd/orbit-deploy.service "$src"/systemd/orbit-deploy.timer /etc/systemd/system/
+# Public job listener: its own Tailscale node, orbit-jobs, publishing only 127.0.0.1:8791 on port 443.
+# Set up only when the one-time auth key exists; the cloud proxy only reaches port 443.
+jobs_key=/etc/credstore/orbit.tailscale-jobs
+if [ -s "$jobs_key" ]; then
+  install -m 644 "$src"/systemd/orbit-tailscale-jobs.service /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl enable --now orbit-tailscale-jobs.service
+  ts="tailscale --socket=/run/orbit-tailscale-jobs/tailscaled.sock"
+  for _ in 1 2 3 4 5; do $ts status >/dev/null 2>&1 && break; $ts up --auth-key="file:$jobs_key" --hostname=orbit-jobs --accept-dns=false --accept-routes=false && break; sleep 2; done
+  $ts funnel --bg --https=443 http://127.0.0.1:8791
+  sed -i "/^ORBIT_INGRESS_PORT=/d;/^ORBIT_PUBLIC_JOB_URL=/d" "$ROOT/orbit.env"
+  name="$($ts status --self --json | jq -r '.Self.DNSName' | sed 's/\.$//')"
+  printf 'ORBIT_INGRESS_PORT=8791\nORBIT_PUBLIC_JOB_URL=https://%s\n' "$name" >> "$ROOT/orbit.env"
+fi
+
 systemctl daemon-reload
 systemctl enable orbit.service
 systemctl enable --now orbit-deploy.timer
