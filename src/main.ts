@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { tailscaleIdentify } from "./identity.ts";
 import { buildIngress } from "./ingress.ts";
+import { jobLauncher } from "./job-launch.ts";
 import { jobSecret, jobs as jobRegistry } from "./jobs.ts";
 import { gitReconciler, selectControl, selectRoutines } from "./launcher.ts";
 import { selectMemory } from "./memory.ts";
@@ -10,6 +11,7 @@ import { nodes as devicePresence, tailscaleStatus } from "./nodes.ts";
 import { notifier, selectDiscord } from "./notify.ts";
 import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
 import { parseRoutineRepos, pullRequestOpener, selectPulls } from "./pull-requests.ts";
+import { reviewer, selectComments } from "./review.ts";
 import { memoryReport, modelTask, runner, toolCall } from "./runs.ts";
 import { scheduler } from "./schedule.ts";
 import { buildServer } from "./server.ts";
@@ -42,7 +44,11 @@ const nodes = devicePresence(tailscaleStatus(), owner);
 const jobs = jobRegistry(jsonStore(stateDir, "jobs-cloud", []), jobSecret(stateDir), notify);
 const watch = watcher(jsonStore(stateDir, "watch", { ports: {} }), notify, () => new Date(), jobs);
 const control = selectControl(process.env);
-pullRequestOpener(jobs, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), selectPulls(process.env), notify);
+const routines = selectRoutines(process.env);
+const publicJobUrl = process.env.ORBIT_PUBLIC_JOB_URL || undefined;
+// ORBIT starts reviews itself, from a PR it just opened: not a chat tool call, so no confirmation is needed.
+const review = reviewer(jobs, jobLauncher({ jobs, control, routines, notify, publicJobUrl }), selectComments(process.env), notify);
+pullRequestOpener(jobs, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), selectPulls(process.env), notify, () => new Date(), (job, url) => void review.start(job, url));
 const reconcile = control ? gitReconciler(jobs, control) : async () => {};
 
 // The job listener binds to localhost only; Tailscale Funnel is what publishes it.
@@ -82,9 +88,9 @@ buildServer({
   nodes,
   jobs,
   watch,
-  publicJobUrl: process.env.ORBIT_PUBLIC_JOB_URL || undefined,
+  publicJobUrl,
   control,
-  routines: selectRoutines(process.env),
+  routines,
   commit,
   owner,
   identify: tailscaleIdentify(),
