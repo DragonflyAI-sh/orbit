@@ -231,6 +231,26 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
       body,
     });
 
+  // Before any call has been made: what can be checked on this machine alone, with no request to OpenAI. It says
+  // the saved login looks complete and usable, never that the model answered. verifiedAt is when this local check
+  // ran, not an inference time, so it never stands in for lastOk.
+  const readiness = (): PortStatus => {
+    const t = file.read();
+    const checked = at();
+    const down = (detail: string): PortStatus => ({ port: "model", state: "down", impl, detail, verifiedAt: checked });
+    if (!t || typeof t.access !== "string" || !t.access || typeof t.refresh !== "string" || !t.refresh || !t.clientId || !t.idToken || !Number.isFinite(t.expires)) {
+      return down("Saved ChatGPT login is incomplete; sign in again from the web page.");
+    }
+    const granted = new Set(t.scope?.split(/\s+/) ?? []);
+    if (!granted.has("resource.invoke") || !SHARING_SCOPES.some((s) => granted.has(s))) {
+      return down("Saved ChatGPT login lacks token sharing; sign in again from the web page.");
+    }
+    if (t.expires - REFRESH_EARLY_MS <= now()) {
+      return { port: "model", state: "degraded", impl, detail: "Signed in; the access token has expired or is about to. It will be renewed on the next call, which has not been tried, so ChatGPT is unconfirmed.", verifiedAt: checked };
+    }
+    return { port: "model", state: "live", impl, detail: "Signed in: saved ChatGPT login is complete and unexpired (checked locally). No model call has been made yet, so ChatGPT has not been contacted.", verifiedAt: checked };
+  };
+
   return {
     login: () => login,
 
@@ -308,7 +328,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         return { port: "model", state: "down", impl, detail: `Last call failed: ${lastError.detail}`, verifiedAt: lastError.at };
       }
       if (lastOk) return { port: "model", state: "live", impl, detail: "Answering through your ChatGPT subscription.", verifiedAt: lastOk };
-      return { port: "model", state: "degraded", impl, detail: "Signed in, not exercised yet.", verifiedAt: new Date(0).toISOString() };
+      return readiness();
     },
 
     async step(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<Step> {
