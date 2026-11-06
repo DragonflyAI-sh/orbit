@@ -51,6 +51,12 @@
          border: 1px solid var(--line); white-space: pre-wrap; }
   .user { align-self: flex-end; background: var(--accent); color: var(--on-accent); border-color: transparent; }
   .tag { display: block; font-size: 11px; margin-top: 4px; }
+  .calls { display: block; margin-top: 6px; font-size: 12px; color: var(--muted); }
+  .calls div { margin-top: 2px; }
+  .proposal { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--gold); border-radius: 8px; background: var(--bg); }
+  .proposal pre { margin: 4px 0; white-space: pre-wrap; max-height: 240px; overflow-y: auto; font: 12px/1.4 ui-monospace, monospace; }
+  .proposal button { padding: 4px 12px; margin-right: 6px; }
+  .proposal button.cancel { background: var(--card); color: var(--fg); border: 1px solid var(--line); }
   form { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
   textarea { flex: 1; resize: none; font: inherit; padding: 8px; border-radius: 10px; border: 1px solid var(--line);
              background: var(--card); color: var(--fg); }
@@ -81,7 +87,48 @@
     } catch { /* the next refresh tries again */ }
   }
 
-  function add(role, text, tag, tagClass) {
+  function showCalls(el, calls) {
+    if (!calls?.length) return;
+    const box = document.createElement("span");
+    box.className = "calls";
+    box.append(`Tool calls (${calls.length}):`);
+    for (const c of calls) {
+      const row = document.createElement("div");
+      const src = c.ok ? `${c.provenance} · ${c.source}` : "failed";
+      row.textContent = `${c.ok ? "✓" : "✗"} ${c.name}(${JSON.stringify(c.args).slice(0, 120)}) [${src}] ${c.summary.slice(0, 160)}`;
+      box.append(row);
+    }
+    el.append(box);
+  }
+
+  function showProposal(el, p) {
+    const box = document.createElement("div");
+    box.className = "proposal";
+    const head = document.createElement("div");
+    const steer = p.kind === "job_steer";
+    head.textContent = steer ? `Proposed steer for job ${p.job}. Nothing has been sent yet.` : `Proposed job on routine "${p.routine}". Nothing has launched yet.`;
+    const brief = document.createElement("pre");
+    brief.textContent = steer ? p.text : p.brief;
+    const status = document.createElement("div");
+    const done = (text) => { box.replaceChildren(head, brief, Object.assign(document.createElement("div"), { textContent: text })); };
+    const act = async (verb) => {
+      confirm.disabled = cancel.disabled = true;
+      try {
+        const res = await fetch(`/chat/proposals/${p.id}/${verb}`, { method: "POST" });
+        const body = await res.json();
+        if (!res.ok) return done(`${verb === "confirm" ? (steer ? "Steer failed" : "Launch failed") : "Not cancelled"}: ${body.error}`);
+        done(verb === "cancel" ? "Cancelled." : steer ? `Steer ${body.steer.n} queued for ${body.steered}; the job picks it up at its next check-in.` : `Launched job ${body.id}${body.launch?.sessionUrl ? " · " + body.launch.sessionUrl : ""}. Ask ORBIT for its status.`);
+      } catch { done("ORBIT did not answer."); }
+    };
+    const confirm = Object.assign(document.createElement("button"), { type: "button", textContent: "Confirm" });
+    const cancel = Object.assign(document.createElement("button"), { type: "button", textContent: "Cancel", className: "cancel" });
+    confirm.addEventListener("click", () => act("confirm"));
+    cancel.addEventListener("click", () => act("cancel"));
+    box.append(head, brief, confirm, cancel, status);
+    el.append(box);
+  }
+
+  function add(role, text, tag, tagClass, extra) {
     const el = document.createElement("div");
     el.className = `msg ${role}`;
     el.textContent = text;
@@ -91,6 +138,7 @@
       t.textContent = tag;
       el.append(t);
     }
+    if (extra) { showCalls(el, extra.calls); for (const p of extra.proposals ?? []) showProposal(el, p); }
     log.append(el);
     log.scrollTop = log.scrollHeight;
   }
@@ -110,7 +158,7 @@
       if (!res.ok) { add("orbit", body.error, "error", "down"); history.pop(); return; }
       history.push({ role: "assistant", content: body.reply.value });
       const mem = body.memory?.length ? ` · memory: ${body.memory.join(", ")}` : "";
-      add("orbit", body.reply.value, `${body.reply.provenance} · ${body.reply.source}${mem}`, body.reply.provenance);
+      add("orbit", body.reply.value, `${body.reply.provenance} · ${body.reply.source}${mem}`, body.reply.provenance, body);
     } catch { add("orbit", "ORBIT did not answer.", "error", "down"); history.pop(); }
     refreshStatus();
   });

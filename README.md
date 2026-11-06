@@ -11,6 +11,10 @@ curl localhost:8790/status
 
 Open `/` for web chat. Every reply is tagged `live` or `mock`, and the model is told which parts of ORBIT are not connected.
 
+## Chat tools
+
+For the owner, the model can call ORBIT's own actions during a reply (up to 5 rounds): `memory_search`, `memory_read`, `github_repo_status`, `jobs_list`, `job_status`, `job_steer`, `notify` and `job_launch`. Each call is checked by `decide("agent", tool)`, and the reply lists every call with its provenance. `job_launch` only creates a proposal; the page shows it with Confirm and Cancel, and only a click calls the launcher (`POST /chat/proposals/:id/confirm`). Anyone else, or a model that cannot call tools (the mock), gets none and is told so.
+
 ## Memory
 
 Keyword search over the vault copy, read-only. Only the owner can use it: ORBIT asks tailscaled who sent each request and compares that login with `ORBIT_OWNER`. Anyone else, or a request it cannot identify, gets no memory.

@@ -1,8 +1,8 @@
 import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { instructions } from "./model.ts";
-import type { Message, ModelPort } from "./model.ts";
+import { instructions, parseOutput, responsesTools } from "./model.ts";
+import type { Item, Message, ModelPort, Step, ToolDef } from "./model.ts";
 import type { PortStatus } from "./ports.ts";
 
 // "Sign in with ChatGPT" token sharing, the method OpenClaw's OpenAI plugin uses: ChatGPT authorizes eligible
@@ -107,7 +107,31 @@ export async function verifyIdToken(fetcher: Fetch, idToken: string, clientId: s
   return claims;
 }
 
-type ResponsesEvent = { type?: string; delta?: string; response?: { output?: { type: string; content?: { type: string; text: string }[] }[] } };
+type StreamItem = { type: string; content?: { type: string; text: string }[]; call_id?: string; name?: string; arguments?: string };
+type ResponsesEvent = { type?: string; delta?: string; item?: StreamItem; response?: { output?: StreamItem[] } };
+
+// Text and function calls from a streamed response. Calls come from the completed response, or from per-item
+// events when the stream ends without one.
+export function stepFromStream(raw: string): Step {
+  let deltas = "";
+  let completed: StreamItem[] | undefined;
+  const items: StreamItem[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    let event: ResponsesEvent;
+    try {
+      event = JSON.parse(line.slice(5).trim());
+    } catch {
+      continue;
+    }
+    if (event.type === "response.output_text.delta" && event.delta) deltas += event.delta;
+    if (event.type === "response.output_item.done" && event.item) items.push(event.item);
+    if (event.type === "response.completed") completed = event.response?.output;
+  }
+  const calls = parseOutput(completed?.length ? completed : items).calls;
+  return { text: textFromStream(raw) || deltas, calls };
+}
+
 
 // The Responses API streams server-sent events; collect the text.
 export function textFromStream(raw: string): string {
@@ -285,6 +309,33 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
       }
       if (lastOk) return { port: "model", state: "live", impl, detail: "Answering through your ChatGPT subscription.", verifiedAt: lastOk };
       return { port: "model", state: "degraded", impl, detail: "Signed in, not exercised yet.", verifiedAt: new Date(0).toISOString() };
+    },
+
+    async step(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<Step> {
+      const started = at();
+      const body = JSON.stringify({
+        model,
+        instructions: instructions(limits, notes, tools.map((t) => `${t.name}: ${t.description}`)),
+        input,
+        ...(tools.length ? { tools: responsesTools(tools) } : {}),
+        stream: true,
+        store: false,
+      });
+      try {
+        let res = await call(await fresh(), body);
+        if (res.status === 401) res = await call(await fresh(true), body);
+        if (!res.ok) {
+          const detail = await res.text().catch(() => "");
+          throw new Error(`HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+        }
+        const step = stepFromStream(await res.text());
+        if (!step.text && !step.calls.length) throw new Error("response had no text");
+        lastOk = started;
+        return step;
+      } catch (err) {
+        lastError = { at: started, detail: err instanceof Error ? err.message : String(err) };
+        throw err;
+      }
     },
 
     async reply(messages: Message[], limits: string[], notes?: string) {

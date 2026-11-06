@@ -4,17 +4,37 @@ import type { PortStatus, Result } from "./ports.ts";
 
 export type Message = { role: "user" | "assistant"; content: string };
 
+export type ToolDef = { name: string; description: string; parameters: Record<string, unknown> };
+export type ToolCall = { call_id: string; name: string; arguments: string };
+// Conversation items for the Responses API: chat turns plus function calls and their outputs.
+export type Item =
+  | Message
+  | { type: "function_call"; call_id: string; name: string; arguments: string }
+  | { type: "function_call_output"; call_id: string; output: string };
+export type Step = { text: string; calls: ToolCall[] };
+
 export type ModelPort = {
   status(): PortStatus;
   reply(messages: Message[], limits: string[], notes?: string): Promise<Result<string>>;
+  // One model turn with tools offered. Absent when the model cannot call tools (the mock).
+  step?(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<Step>;
 };
 
-export function instructions(limits: string[], notes?: string): string {
+export function instructions(limits: string[], notes?: string, tooling?: string[]): string {
   return [
     "You are ORBIT (Operational Reasoning Bot for Intelligent Tasks), Rai's personal assistant.",
     "Be concise and technical. Never present a guess as fact.",
     "These parts of you are not connected yet, so you know nothing from them. Say so plainly when it matters:",
     ...limits.map((l) => `- ${l}`),
+    ...(tooling?.length
+      ? [
+          "",
+          "You can call these tools. Every call goes through ORBIT's owner and policy checks, and each result says where it came from:",
+          ...tooling.map((t) => `- ${t}`),
+          "Only say an action happened if its tool result says so. job_launch only proposes: Rai must click Confirm on the proposal before anything launches, so say it is waiting for his confirmation, never that it started.",
+          "If a tool returns an error or is refused, report that plainly.",
+        ]
+      : []),
     ...(notes
       ? ["", "Excerpts from Rai's vault, the source of truth for his projects and commitments. Cite the note path. They may be partial:", notes]
       : []),
@@ -36,12 +56,56 @@ export function mockModel(detail: string, now: () => Date = () => new Date()): M
 
 type Fetch = typeof fetch;
 
+type OutputItem = { type: string; content?: { type: string; text: string }[]; call_id?: string; name?: string; arguments?: string };
+
+export function parseOutput(output: OutputItem[]): Step {
+  return {
+    text: output
+      .filter((o) => o.type === "message")
+      .flatMap((o) => o.content ?? [])
+      .filter((c) => c.type === "output_text")
+      .map((c) => c.text)
+      .join(""),
+    calls: output
+      .filter((o) => o.type === "function_call" && o.call_id && o.name)
+      .map((o) => ({ call_id: o.call_id!, name: o.name!, arguments: o.arguments ?? "{}" })),
+  };
+}
+
+// The Responses API wants {type:"function", name, description, parameters}.
+export const responsesTools = (tools: ToolDef[]) => tools.map((t) => ({ type: "function", ...t }));
+
 export function openaiModel(model: string, key: string, fetcher: Fetch = fetch): ModelPort {
   let lastOk: string | undefined;
   let lastError: { at: string; detail: string } | undefined;
   const impl = `openai/${model}`;
 
+  const request = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<Step> => {
+    const at = new Date().toISOString();
+    try {
+      const res = await fetcher("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model,
+          instructions: instructions(limits, notes, tools.map((t) => `${t.name}: ${t.description}`)),
+          input,
+          ...(tools.length ? { tools: responsesTools(tools) } : {}),
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const step = parseOutput(((await res.json()) as { output?: OutputItem[] }).output ?? []);
+      if (!step.text && !step.calls.length) throw new Error("response had no text");
+      lastOk = at;
+      return step;
+    } catch (err) {
+      lastError = { at, detail: err instanceof Error ? err.message : String(err) };
+      throw err;
+    }
+  };
+
   return {
+    step: request,
     status: () => {
       if (lastError && (!lastOk || lastError.at > lastOk)) {
         return { port: "model", state: "down", impl, detail: `Last call failed: ${lastError.detail}`, verifiedAt: lastError.at };
@@ -50,28 +114,9 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch):
       return { port: "model", state: "degraded", impl, detail: "Configured but not exercised yet.", verifiedAt: new Date(0).toISOString() };
     },
     reply: async (messages, limits, notes) => {
-      const at = new Date().toISOString();
-      try {
-        const res = await fetcher("https://api.openai.com/v1/responses", {
-          method: "POST",
-          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-          body: JSON.stringify({ model, instructions: instructions(limits, notes), input: messages }),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const body = (await res.json()) as { output?: { type: string; content?: { type: string; text: string }[] }[] };
-        const text = (body.output ?? [])
-          .filter((o) => o.type === "message")
-          .flatMap((o) => o.content ?? [])
-          .filter((c) => c.type === "output_text")
-          .map((c) => c.text)
-          .join("");
-        if (!text) throw new Error("response had no text");
-        lastOk = at;
-        return { value: text, provenance: "live", source: `model/${impl}` };
-      } catch (err) {
-        lastError = { at, detail: err instanceof Error ? err.message : String(err) };
-        throw err;
-      }
+      const step = await request(messages, limits, notes, []);
+      if (!step.text) throw new Error("response had no text");
+      return { value: step.text, provenance: "live", source: `model/${impl}` };
     },
   };
 }
