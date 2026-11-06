@@ -3,6 +3,8 @@ import { test } from "node:test";
 import { notifier } from "../src/notify.ts";
 import type { Notification } from "../src/notify.ts";
 import type { PortState, PortStatus } from "../src/ports.ts";
+import { jobs as jobRegistry } from "../src/jobs.ts";
+import type { Job } from "../src/jobs.ts";
 import { jsonStore } from "../src/store.ts";
 import { watcher } from "../src/watch.ts";
 import type { WatchState } from "../src/watch.ts";
@@ -138,4 +140,86 @@ test("the watch port never watches itself", () => {
   r.advance(10);
   r.watch.tick();
   assert.deepEqual(r.texts(), []);
+});
+
+function jobRig() {
+  let t = new Date("2026-11-05T20:00:00Z").getTime();
+  const now = () => new Date(t);
+  const notify = notifier(jsonStore<Notification[]>(undefined, "n", []), undefined, now);
+  const registry = jobRegistry(jsonStore<Job[]>(undefined, "j", []), Buffer.alloc(32, 1), notify, now);
+  const store = jsonStore<WatchState>(undefined, "w", { ports: {} });
+  const watch = watcher(store, notify, now, registry);
+  const advance = (min: number) => void (t += min * MIN);
+  const alerts = () => notify.recent().filter((n) => n.text.startsWith("Job ") && /is (quiet|not started)/.test(n.text));
+  const launch = (id: string) => {
+    registry.register(id);
+    registry.setLaunch(id, { routine: "r", at: now().toISOString(), sessionUrl: `https://claude.ai/code/session_${id}` });
+  };
+  return { registry, watch, advance, alerts, launch, notify, store, now };
+}
+
+test("a job that never starts alerts once with its id and session link", () => {
+  const r = jobRig();
+  r.launch("j1");
+  r.advance(9);
+  r.watch.tick();
+  assert.equal(r.alerts().length, 0);
+  r.advance(2);
+  r.watch.tick();
+  r.advance(30);
+  r.watch.tick();
+  r.watch.tick();
+  assert.equal(r.alerts().length, 1);
+  assert.match(r.alerts()[0].text, /Job j1 is not started.*https:\/\/claude\.ai\/code\/session_j1.*no check-in yet/);
+  assert.match(r.watch.status().detail, /Jobs alerting: j1 not-started/);
+});
+
+test("a quiet job alerts once with its last check-in; reporting again and going quiet again alerts anew; finishing never does", () => {
+  const r = jobRig();
+  r.launch("j2");
+  r.registry.record("j2", { type: "started" });
+  r.registry.record("j2", { type: "checkin", text: "reading the code" });
+  r.advance(16);
+  r.watch.tick();
+  r.advance(60);
+  r.watch.tick();
+  assert.equal(r.alerts().length, 1);
+  assert.match(r.alerts()[0].text, /Job j2 is quiet.*session_j2.*reading the code/);
+
+  r.registry.record("j2", { type: "checkin", text: "back" });
+  r.watch.tick();
+  assert.equal(r.alerts().length, 1, "no extra message when it reports again");
+  r.advance(16);
+  r.watch.tick();
+  assert.equal(r.alerts().length, 2, "a new stall is a new alert");
+
+  r.registry.record("j2", { type: "summary", status: "done", text: "ok" });
+  r.advance(120);
+  r.watch.tick();
+  assert.equal(r.alerts().length, 2);
+  assert.doesNotMatch(r.watch.status().detail, /Jobs alerting/);
+});
+
+test("a job that finishes while quiet, or a failed launch, does not alert", () => {
+  const r = jobRig();
+  r.launch("j3");
+  r.registry.record("j3", { type: "summary", status: "failed", text: "x" });
+  r.registry.setLaunch("j4", { routine: "r", at: r.now().toISOString() });
+  r.registry.register("j4");
+  r.registry.setLaunch("j4", { routine: "r", at: r.now().toISOString(), failedAt: r.now().toISOString(), error: "no" });
+  r.advance(60);
+  r.watch.tick();
+  assert.equal(r.alerts().length, 0);
+});
+
+test("job alerts survive a restart without repeating", () => {
+  const r = jobRig();
+  r.launch("j5");
+  r.advance(11);
+  r.watch.tick();
+  assert.equal(r.alerts().length, 1);
+  const again = watcher(r.store, r.notify, r.now, r.registry);
+  again.tick();
+  again.tick();
+  assert.equal(r.alerts().length, 1);
 });
