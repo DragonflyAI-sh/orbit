@@ -10,7 +10,7 @@ export const CONTROL_REPO = "DragonflyAI-sh/orbit-work";
 const GITHUB = "https://api.github.com";
 const ROUTINES = "https://api.anthropic.com/v1/claude_code/routines";
 
-function credential(env: NodeJS.ProcessEnv, name: string): string | undefined {
+export function credential(env: NodeJS.ProcessEnv, name: string): string | undefined {
   const dir = env.CREDENTIALS_DIRECTORY;
   if (!dir) return undefined;
   try {

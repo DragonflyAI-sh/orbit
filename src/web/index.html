@@ -276,7 +276,10 @@
       el("span", { className: `health-${r.health}`, textContent: r.health }));
     const link = safeLink(r.sessionUrl, "session on claude.ai");
     if (link) row.append(link);
+    const pr = safeLink(r.prUrl, "pull request");
+    if (pr) row.append(pr); else if (r.prOpening) row.append(el("span", { className: "meta", textContent: "opening pull request…" }));
     card.append(row);
+    if (r.prError) card.append(el("div", { className: "latest health-launch-failed", textContent: `Pull request not opened: ${r.prError}` }));
     if (r.launchError) card.append(el("div", { className: "latest health-launch-failed", textContent: r.launchError }));
     card.append(el("div", { className: "latest", textContent: r.latest?.text || (r.latest ? `${r.latest.type}${r.latest.status ? ": " + r.latest.status : ""}` : "No report yet") }));
     const reported = r.latest ? `reported ${ago(r.latest.at)} through ${r.latest.via === "git" ? "git" : "the API"}` : `launched ${ago(r.launchedAt)}; nothing reported`;
@@ -323,7 +326,8 @@
     });
     const head = el("div", { className: "card" + (j.health === "launch-failed" ? " bad" : "") },
       el("div", { className: "row" }, el("span", { className: "id", textContent: j.id }), el("span", { textContent: j.state }), el("span", { className: `health-${j.health}`, textContent: j.health }),
-        ...[safeLink(j.launch?.sessionUrl, "session on claude.ai")].filter(Boolean)));
+        ...[safeLink(j.launch?.sessionUrl, "session on claude.ai"), safeLink(j.pr?.url, "pull request")].filter(Boolean)),
+      ...(j.pr?.error ? [el("div", { className: "latest health-launch-failed", textContent: `Pull request not opened: ${j.pr.error}` })] : []));
     jobsBox.replaceChildren(
       el("button", { type: "button", className: "back", textContent: "← All jobs", onclick: () => { openJob = null; refreshJobs(); } }),
       head, el("h2", { textContent: "Steer" }), el("div", { className: "card steerbox" }, area, send, status),

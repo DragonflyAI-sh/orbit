@@ -45,6 +45,9 @@ export function jobRow(job: Job, health: Health) {
     sessionUrl: job.launch?.sessionUrl,
     latest: last ? { at: last.at, type: last.type, status: last.status, text: last.text?.slice(0, 300), via: last.via ?? "api" } : null,
     lastEventAt: job.lastEventAt,
+    prUrl: job.pr?.url,
+    prError: job.pr?.error,
+    prOpening: Boolean(job.pr && !job.pr.url && !job.pr.error),
     pendingSteers: job.steers.filter((s) => !s.deliveredAt).length,
   };
 }

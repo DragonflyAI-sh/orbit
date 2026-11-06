@@ -11,9 +11,12 @@ import type { Store } from "./store.ts";
 export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "summary"; sha?: string; n?: number; status?: string; text?: string; via?: "api" | "git" };
 export type Steer = { n: number; text: string; at: string; deliveredAt?: string };
 export type Launch = { routine: string; at: string; branch?: string; briefCommit?: string; sessionId?: string; sessionUrl?: string; failedAt?: string; error?: string };
+export type PullRequest = { at: string; url?: string; error?: string };
 export type Job = {
   id: string;
   launch?: Launch;
+  // Set when ORBIT starts opening the project PR; once set, ORBIT never opens another.
+  pr?: PullRequest;
   createdAt: string;
   expiresAt: string;
   state: "registered" | "running" | "done" | "blocked" | "failed";
@@ -45,6 +48,8 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
   const find = (id: string) => list().find((j) => j.id === id);
   const update = (id: string, change: (j: Job) => Job) => save(list().map((j) => (j.id === id ? change(j) : j)));
   let lastEventAt: string | undefined;
+  type SummaryListener = (job: Job, fullText: string | undefined) => void;
+  const listeners: SummaryListener[] = [];
 
   return {
     // Registers a job and returns its token. Registering an existing id again returns a fresh token for it.
@@ -81,6 +86,14 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
       if (event.type === "summary") {
         const via = clean.via === "git" ? " (found in git; the API did not report it)" : "";
         notify.send(`Job ${id} finished: ${event.status}${via}.\n\n${clean.text ?? "(see git)"}`, event.status !== "done");
+        // Listeners get the summary before the stored copy is clipped, and must not throw into the caller.
+        for (const l of listeners) {
+          try {
+            l(find(id)!, event.text);
+          } catch {
+            /* a listener's failure is its own to report */
+          }
+        }
       }
       return find(id);
     },
@@ -101,6 +114,15 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
     acknowledge(id: string, numbers: number[]): void {
       const at = now().toISOString();
       update(id, (j) => ({ ...j, steers: j.steers.map((s) => (numbers.includes(s.n) && !s.deliveredAt ? { ...s, deliveredAt: at } : s)) }));
+    },
+
+    // Called after a summary is recorded, whether it came over the API or from git.
+    onSummary(listener: SummaryListener): void {
+      listeners.push(listener);
+    },
+
+    setPr(id: string, pr: PullRequest | undefined): void {
+      update(id, (j) => ({ ...j, pr }));
     },
 
     setLaunch(id: string, launch: Launch): void {
