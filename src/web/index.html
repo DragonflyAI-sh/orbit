@@ -40,8 +40,15 @@
   .pill { border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; background: var(--card); }
   .pill::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; background: currentColor; vertical-align: middle; }
   .live { color: var(--live); } .mock { color: var(--mock); } .degraded, .down { color: var(--down); }
-  #inbox { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
-  .note { border-left: 3px solid var(--gold); padding: 4px 8px; background: var(--card); border-radius: 4px; white-space: pre-wrap; }
+  #inbox { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; max-height: 30dvh; overflow-y: auto; overscroll-behavior: contain; }
+  .note { border-left: 3px solid var(--gold); padding: 4px 8px; background: var(--card); border-radius: 4px; overflow-wrap: anywhere; }
+  .note .top { display: flex; gap: 6px; align-items: flex-start; }
+  .note .first { flex: 1; min-width: 0; }
+  .note .rest { margin-top: 4px; white-space: pre-wrap; font-size: 14px; }
+  .note button { flex: none; background: none; border: 0; padding: 2px 6px; min-height: 24px; color: var(--accent-2); font: inherit; font-size: 13px; cursor: pointer; }
+  .note button.x { color: var(--muted); font-size: 16px; line-height: 1; }
+  .note a, .ev a, .latest a { color: var(--accent-2); }
+  #inbox .showall { align-self: flex-start; background: none; border: 0; padding: 2px 0; color: var(--accent-2); font: inherit; font-size: 13px; cursor: pointer; }
   #signin:not(:empty) { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
   #signin button { padding: 4px 12px; margin-top: 4px; }
   #signin code { font-size: 16px; letter-spacing: .12em; color: var(--gold); }
@@ -193,17 +200,37 @@
   document.getElementById("input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.target.form.requestSubmit(); }
   });
-  // Shows due notifications, then acknowledges each so ORBIT records a shown receipt.
+  // Shows due notifications, then acknowledges each so ORBIT records a shown receipt. Each note shows its first line
+  // with "more" and "×"; at most 3 show unless "show all". Dismissing only hides the note in this browser.
+  const noteList = [];
+  let showAllNotes = false;
+  const expandedNotes = new Set();
+  const dismissedKey = "orbit.dismissed-notes";
+  const loadDismissed = () => { try { return new Set(JSON.parse(localStorage.getItem(dismissedKey) || "[]")); } catch { return new Set(); } };
+  const saveDismissed = (set) => { try { localStorage.setItem(dismissedKey, JSON.stringify([...set].slice(-200))); } catch { /* private mode: dismissed for this page only */ } };
+  const dismissedNotes = loadDismissed();
+  function renderInbox() {
+    const box = document.getElementById("inbox");
+    const { shown, total } = pickNotes(noteList, dismissedNotes, showAllNotes);
+    const nodes = shown.map((n) => {
+      const { first, rest } = firstLine(n.text);
+      const open = expandedNotes.has(n.id);
+      const top = el("div", { className: "top" }, el("div", { className: "first" }, ...linkify(first, el)));
+      if (rest) top.append(el("button", { type: "button", textContent: open ? "less" : "more", onclick: () => { open ? expandedNotes.delete(n.id) : expandedNotes.add(n.id); renderInbox(); } }));
+      top.append(el("button", { type: "button", className: "x", title: "Dismiss", textContent: "×", onclick: () => { dismissedNotes.add(n.id); saveDismissed(dismissedNotes); renderInbox(); } }));
+      return el("div", { className: "note" }, top, ...(rest && open ? [el("div", { className: "rest" }, ...linkify(rest, el))] : []));
+    });
+    if (total > NOTES_SHOWN) nodes.push(el("button", { type: "button", className: "showall", textContent: showAllNotes ? "show fewer" : `show all (${total})`, onclick: () => { showAllNotes = !showAllNotes; renderInbox(); } }));
+    box.replaceChildren(...nodes);
+  }
   async function refreshInbox() {
     try {
       const res = await fetch("/notifications");
       if (!res.ok) return;
       const { inbox } = await res.json();
       for (const n of inbox) {
-        const el = document.createElement("div");
-        el.className = "note";
-        el.textContent = n.text;
-        document.getElementById("inbox").append(el);
+        noteList.push({ id: n.id, text: String(n.text ?? "") });
+        renderInbox();
         await fetch(`/notifications/${n.id}/ack`, { method: "POST" });
       }
     } catch { /* the next refresh tries again */ }
@@ -288,7 +315,7 @@
     if (r.reviewError) card.append(el("div", { className: "latest health-launch-failed", textContent: `Review: ${r.reviewError}` }));
     if (r.prError) card.append(el("div", { className: "latest health-launch-failed", textContent: `Pull request not opened: ${r.prError}` }));
     if (r.launchError) card.append(el("div", { className: "latest health-launch-failed", textContent: r.launchError }));
-    card.append(el("div", { className: "latest", textContent: r.latest?.text || (r.latest ? `${r.latest.type}${r.latest.status ? ": " + r.latest.status : ""}` : "No report yet") }));
+    card.append(el("div", { className: "latest" }, ...linkify(r.latest?.text || (r.latest ? `${r.latest.type}${r.latest.status ? ": " + r.latest.status : ""}` : "No report yet"), el)));
     const reported = r.latest ? `reported ${ago(r.latest.at)} through ${r.latest.via === "git" ? "git" : "the API"}` : `launched ${ago(r.launchedAt)}; nothing reported`;
     card.append(el("div", { className: "meta", textContent: reported + (r.pendingSteers ? ` · ${r.pendingSteers} steer(s) waiting` : "") }));
     card.append(el("button", { type: "button", className: "open", textContent: "Open", onclick: () => { openJob = r.id; steerNote = ""; refreshJobs(); } }));
@@ -312,9 +339,9 @@
     const existing = jobsBox.querySelector("textarea.steer");
     if (existing) steerDraft = existing.value;
     const events = el("div", { className: "card" }, ...(j.events.length ? [...j.events].reverse().slice(0, 100).map((ev) =>
-      el("div", { className: "ev", textContent: `${ago(ev.at)} · ${ev.type}${ev.status ? " " + ev.status : ""} · ${ev.via === "git" ? "git" : "API"}${ev.text ? "\n" + ev.text : ""}` })) : [el("div", { className: "empty", textContent: "No events yet." })]));
+      el("div", { className: "ev" }, ...linkify(`${ago(ev.at)} · ${ev.type}${ev.status ? " " + ev.status : ""} · ${ev.via === "git" ? "git" : "API"}${ev.text ? "\n" + ev.text : ""}`, el))) : [el("div", { className: "empty", textContent: "No events yet." })]));
     const steers = el("div", { className: "card" }, ...(j.steers.length ? [...j.steers].reverse().map((s) =>
-      el("div", { className: "ev", textContent: `#${s.n} · ${ago(s.at)} · ${s.deliveredAt ? "picked up " + ago(s.deliveredAt) : "waiting for the runner"}\n${s.text}` })) : [el("div", { className: "empty", textContent: "No steers yet." })]));
+      el("div", { className: "ev" }, ...linkify(`#${s.n} · ${ago(s.at)} · ${s.deliveredAt ? "picked up " + ago(s.deliveredAt) : "waiting for the runner"}\n${s.text}`, el))) : [el("div", { className: "empty", textContent: "No steers yet." })]));
     const area = el("textarea", { className: "steer", rows: 3, placeholder: "Steer this job. It picks the message up at its next check-in." });
     area.value = steerDraft;
     const status = el("div", { className: "meta", textContent: steerNote });
@@ -353,6 +380,44 @@
       el("h2", { textContent: `Jobs (${rows.length})` }),
       ...(rows.length ? rows.map(jobCard) : [el("div", { className: "empty", textContent: "No jobs yet." })]));
   }
+
+  // <notes>
+  // Pure helpers for the inbox and for runner text. Runner text is only ever inserted as text nodes and real <a>
+  // elements built with textContent; no HTML parsing is involved.
+  const NOTES_SHOWN = 3;
+  function firstLine(text) {
+    const lines = String(text ?? "").split("\n");
+    const i = lines.findIndex((l) => l.trim());
+    if (i < 0) return { first: "", rest: "" };
+    return { first: lines[i].trim(), rest: lines.slice(i + 1).join("\n").trim() };
+  }
+  // Splits text into strings and https:// links. Only https links become <a>; anything else stays plain text.
+  function linkify(text, mk) {
+    const out = [];
+    const src = String(text ?? "");
+    const re = /https:\/\/[^\s<>"'`]+/g;
+    let last = 0, m;
+    while ((m = re.exec(src))) {
+      let url = m[0];
+      let tail = "";
+      while (/[.,;:!?)\]}]$/.test(url)) { tail = url.slice(-1) + tail; url = url.slice(0, -1); }
+      let ok = false;
+      try { const u = new URL(url); ok = u.protocol === "https:" && !!u.hostname; } catch { /* plain text */ }
+      if (!ok) continue;
+      if (m.index > last) out.push(src.slice(last, m.index));
+      out.push(mk("a", { href: url, target: "_blank", rel: "noopener noreferrer", textContent: url }));
+      last = m.index + url.length;
+      re.lastIndex = last;
+    }
+    if (last < src.length) out.push(src.slice(last));
+    return out;
+  }
+  // The notes to show: undismissed ones, newest first, at most NOTES_SHOWN unless all are asked for.
+  function pickNotes(notes, dismissed, all) {
+    const live = notes.filter((n) => !dismissed.has(n.id)).slice().reverse();
+    return { shown: all ? live : live.slice(0, NOTES_SHOWN), total: live.length };
+  }
+  // </notes>
 
   // <poller>
   // Runs `refresh` when `shouldRun()` says so, never two at once. Tests load this block on its own.

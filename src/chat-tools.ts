@@ -91,7 +91,7 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
       {
         name: "job_launch",
         description:
-          "Propose launching a new job on a cloud runner. This does NOT launch it: it creates a proposal that Rai must confirm with a button on the page. Write a complete brief: goal, where things are, constraints, what done means.",
+          "Propose launching a new job on a cloud runner. This does NOT launch it: it creates a proposal that Rai must confirm with a button on the page. Write a complete brief: goal, where things are, constraints, what done means. Every brief must also say: push only to the branch orbit/<job-id>; never open, edit or comment on a pull request (ORBIT opens it); end the job summary with `## PR title` and `## PR body` sections; run the typecheck and the tests before finishing; and put no secrets in code, commits or the summary.",
         parameters: obj({ routine: str("Routine name"), brief: str("The full brief for the runner") }, ["routine", "brief"]),
         run: async (a) => {
           const { routines, problem } = d.launchable();
