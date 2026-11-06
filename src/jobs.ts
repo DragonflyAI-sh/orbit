@@ -10,8 +10,10 @@ import type { Store } from "./store.ts";
 
 export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "summary"; sha?: string; n?: number; status?: string; text?: string };
 export type Steer = { n: number; text: string; at: string; deliveredAt?: string };
+export type Launch = { routine: string; at: string; branch?: string; briefCommit?: string; sessionId?: string; sessionUrl?: string; failedAt?: string; error?: string };
 export type Job = {
   id: string;
+  launch?: Launch;
   createdAt: string;
   expiresAt: string;
   state: "registered" | "running" | "done" | "blocked" | "failed";
@@ -95,6 +97,19 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
     acknowledge(id: string, numbers: number[]): void {
       const at = now().toISOString();
       update(id, (j) => ({ ...j, steers: j.steers.map((s) => (numbers.includes(s.n) && !s.deliveredAt ? { ...s, deliveredAt: at } : s)) }));
+    },
+
+    setLaunch(id: string, launch: Launch): void {
+      update(id, (j) => ({ ...j, launch }));
+    },
+
+    // Flags a job that has not started within 10 minutes of launch, or has gone quiet for 15 minutes.
+    health(job: Job): "ok" | "not-started" | "quiet" | "finished" | "launch-failed" {
+      if (job.launch?.failedAt) return "launch-failed";
+      if (job.state === "done" || job.state === "blocked" || job.state === "failed") return "finished";
+      const t = now().getTime();
+      if (!job.events.length) return job.launch && t - new Date(job.launch.at).getTime() > 10 * 60_000 ? "not-started" : "ok";
+      return job.lastEventAt && t - new Date(job.lastEventAt).getTime() > 15 * 60_000 ? "quiet" : "ok";
     },
 
     get: find,

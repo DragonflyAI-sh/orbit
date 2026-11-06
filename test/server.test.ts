@@ -13,6 +13,7 @@ import { memoryReport, runner } from "../src/runs.ts";
 import { scheduler } from "../src/schedule.ts";
 import { jsonStore } from "../src/store.ts";
 import { toolbox } from "../src/tools.ts";
+import type { ControlRepo, Routine } from "../src/launcher.ts";
 import type { Tool } from "../src/tools.ts";
 import { decide } from "../src/policy.ts";
 import { MOCK_PORT_NAMES, mockPort } from "../src/ports.ts";
@@ -40,6 +41,17 @@ const nodes = devicePresence(
 );
 await nodes.refresh();
 const jobs = jobRegistry(jsonStore(undefined, "jc", []), Buffer.alloc(32, 1), notify);
+let fireText = "";
+let failFire = false;
+const control: ControlRepo = { pushBrief: async (job) => ({ branch: `orbit/${job}`, commit: "c0ffee" }) };
+const routine: Routine = {
+  name: "orbit",
+  fire: async (text) => {
+    if (failFire) throw new Error("HTTP 401");
+    fireText = text;
+    return { sessionId: "cse_9", sessionUrl: "https://claude.ai/code/cse_9" };
+  },
+};
 const server = buildServer({
   ports: MOCK_PORT_NAMES.map((name) => mockPort(name)),
   model: mockModel("test"),
@@ -51,6 +63,8 @@ const server = buildServer({
   nodes,
   jobs,
   publicJobUrl: "https://orbit.example:8443",
+  control,
+  routines: new Map([["orbit", routine]]),
   commit: "abc123",
   owner: "rai@example.com",
   identify: async () => caller,
@@ -238,5 +252,42 @@ test("the owner registers a job and steers it; nobody else can", async () => {
   assert.equal((await fetch(`${base}/jobs`)).status, 403);
   assert.equal((await fetch(`${base}/jobs`, { method: "POST", body: JSON.stringify({ id: "x" }) })).status, 403);
   assert.equal((await fetch(`${base}/jobs/job-1/steer`, { method: "POST", body: JSON.stringify({ text: "x" }) })).status, 403);
+  caller = "rai@example.com";
+});
+
+test("the owner launches a job: brief written, Routine fired with the job token, session recorded", async () => {
+  caller = "rai@example.com";
+  const res = await fetch(`${base}/jobs/launch`, { method: "POST", body: JSON.stringify({ routine: "orbit", brief: "Fix the bug." }) });
+  assert.equal(res.status, 202);
+  const job = await res.json();
+  assert.match(job.id, /^orbit-\d{12}-[a-z0-9]+$/);
+  assert.deepEqual([job.launch.branch, job.launch.briefCommit, job.launch.sessionUrl], [`orbit/${job.id}`, "c0ffee", "https://claude.ai/code/cse_9"]);
+  assert.equal(job.health, "ok");
+  const token = fireText.match(/^Token: (.+)$/m)![1];
+  assert.equal(JSON.stringify(job).includes(token), false, "the token is never returned");
+  assert.equal(JSON.stringify(await (await fetch(`${base}/jobs/${job.id}`)).json()).includes(token), false);
+  assert.ok(jobs.verify(job.id, token), "the fire text carries a token that works for this job");
+  assert.match(fireText, /^Job id: orbit-/);
+  assert.match(fireText, /^API: https:\/\/orbit\.example:8443$/m);
+});
+
+test("a launch that fails is recorded, notified, and flagged", async () => {
+  caller = "rai@example.com";
+  failFire = true;
+  const res = await fetch(`${base}/jobs/launch`, { method: "POST", body: JSON.stringify({ routine: "orbit", brief: "x" }) });
+  failFire = false;
+  assert.equal(res.status, 502);
+  const body = await res.json();
+  assert.match(body.error, /routine not fired: HTTP 401/);
+  assert.equal(body.job.health, "launch-failed");
+  assert.ok(notify.recent().some((n) => n.text.includes("could not launch")));
+});
+
+test("launch refuses an unknown routine, a missing brief, and anyone but the owner", async () => {
+  caller = "rai@example.com";
+  assert.equal((await fetch(`${base}/jobs/launch`, { method: "POST", body: JSON.stringify({ routine: "nope", brief: "x" }) })).status, 400);
+  assert.equal((await fetch(`${base}/jobs/launch`, { method: "POST", body: JSON.stringify({ routine: "orbit" }) })).status, 400);
+  caller = "someone@example.com";
+  assert.equal((await fetch(`${base}/jobs/launch`, { method: "POST", body: JSON.stringify({ routine: "orbit", brief: "x" }) })).status, 403);
   caller = "rai@example.com";
 });
