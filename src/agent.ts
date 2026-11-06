@@ -100,8 +100,10 @@ async function execute(
   }
 }
 
-// Actions with effects outside the conversation wait here for a click on Confirm.
-export type Proposal = { id: string; kind: "job_launch"; routine: string; brief: string; createdAt: string; expiresAt: string };
+// Actions with effects outside the conversation wait here for a click on Confirm: launching a job, and
+// steering one (a steered runner has push access, and tool results can carry text written by others).
+export type ProposalAction = { kind: "job_launch"; routine: string; brief: string } | { kind: "job_steer"; job: string; text: string };
+export type Proposal = ProposalAction & { id: string; createdAt: string; expiresAt: string };
 
 export const PROPOSAL_TTL_MS = 30 * 60 * 1000;
 const MAX_PROPOSALS = 20;
@@ -112,11 +114,11 @@ export function proposals(now: () => Date = () => new Date()) {
     for (const [id, p] of open) if (new Date(p.expiresAt) <= now()) open.delete(id);
   };
   return {
-    propose(routine: string, brief: string): Proposal {
+    propose(action: ProposalAction): Proposal {
       sweep();
       while (open.size >= MAX_PROPOSALS) open.delete(open.keys().next().value!);
       const at = now();
-      const p: Proposal = { id: randomUUID(), kind: "job_launch", routine, brief, createdAt: at.toISOString(), expiresAt: new Date(at.getTime() + PROPOSAL_TTL_MS).toISOString() };
+      const p: Proposal = { ...action, id: randomUUID(), createdAt: at.toISOString(), expiresAt: new Date(at.getTime() + PROPOSAL_TTL_MS).toISOString() };
       open.set(p.id, p);
       return p;
     },

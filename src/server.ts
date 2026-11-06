@@ -173,6 +173,25 @@ export function buildServer({
   return createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://orbit");
 
+    // Owner identity comes from the Tailscale device, so a page on another site that Rai visits could make his
+    // browser send requests that look like his. Browsers mark those; refuse any state-changing one.
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      const site = req.headers["sec-fetch-site"];
+      const origin = req.headers.origin;
+      let crossOrigin = false;
+      if (origin) {
+        try {
+          crossOrigin = new URL(origin).host !== req.headers.host;
+        } catch {
+          crossOrigin = true;
+        }
+      }
+      if ((site && site !== "same-origin" && site !== "none") || crossOrigin) {
+        audit("policy", "cross-site", { allow: false, reason: `refused a ${req.method} from ${origin ?? site}` });
+        return send(res, 403, { error: "Cross-site requests are refused." });
+      }
+    }
+
     if (req.method === "GET" && url.pathname === "/") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       return res.end(page);
@@ -337,10 +356,14 @@ export function buildServer({
     // A chat proposal does nothing until Rai confirms it here; each proposal can be confirmed or cancelled once.
     const proposalMatch = url.pathname.match(/^\/chat\/proposals\/([0-9a-f-]+)\/(confirm|cancel)$/);
     if (jobs && proposalMatch && req.method === "POST") {
-      if (!(await owned("jobs", proposalMatch[2] === "confirm" ? "launch" : "cancel"))) return;
+      if (!(await owned("jobs", proposalMatch[2] === "confirm" ? "confirm" : "cancel"))) return;
       const proposal = proposals.take(proposalMatch[1]);
       if (!proposal) return send(res, 404, { error: "No open proposal with that id. It was already confirmed, cancelled or expired." });
       if (proposalMatch[2] === "cancel") return send(res, 200, { cancelled: proposal.id });
+      if (proposal.kind === "job_steer") {
+        const steer = jobs.steer(proposal.job, proposal.text);
+        return steer ? send(res, 201, { steered: proposal.job, steer }) : send(res, 404, { error: "That job no longer exists." });
+      }
       const result = await launchJob(proposal.routine, proposal.brief);
       return send(res, result.code, result.body);
     }

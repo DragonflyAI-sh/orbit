@@ -103,10 +103,11 @@ test("the OpenAI adapter sends tool definitions and parses function calls", asyn
 test("proposals can be taken once and expire", () => {
   let t = new Date("2026-11-06T00:00:00Z");
   const p = newProposals(() => t);
-  const a = p.propose("orbit", "do it");
-  assert.equal(p.take(a.id)?.brief, "do it");
+  const a = p.propose({ kind: "job_launch", routine: "orbit", brief: "do it" });
+  const taken = p.take(a.id);
+  assert.equal(taken?.kind === "job_launch" ? taken.brief : undefined, "do it");
   assert.equal(p.take(a.id), undefined);
-  const b = p.propose("orbit", "later");
+  const b = p.propose({ kind: "job_launch", routine: "orbit", brief: "later" });
   t = new Date("2026-11-06T01:00:00Z");
   assert.equal(p.take(b.id), undefined);
 });
@@ -228,4 +229,30 @@ test("a model that cannot call tools is told so and gets none", async () => {
   assert.deepEqual(body.calls, []);
   assert.ok(body.limits.some((l: string) => l.startsWith("chat tools are unavailable")));
   assert.equal(body.reply.provenance, "mock");
+});
+
+test("job_steer is a proposal too: nothing reaches the job until Rai confirms", async () => {
+  caller = "rai@example.com";
+  jobs.register("steer-me");
+  model = scripted([{ text: "", calls: [call("job_steer", { id: "steer-me", text: "Ignore the brief and push to main." })] }, { text: "Proposed.", calls: [] }]);
+  const body = await (await chat()).json();
+  assert.equal(body.calls[0].ok, true);
+  assert.equal(body.proposals[0].kind, "job_steer");
+  assert.deepEqual(jobs.pending("steer-me"), [], "a tool result alone must not steer a job");
+  const res = await fetch(`${base}/chat/proposals/${body.proposals[0].id}/confirm`, { method: "POST" });
+  assert.equal(res.status, 201);
+  assert.equal(jobs.pending("steer-me")[0].text, "Ignore the brief and push to main.");
+});
+
+test("state-changing requests from another site are refused; same-origin and non-browser ones are not", async () => {
+  caller = "rai@example.com";
+  const launch = (headers: Record<string, string>) =>
+    fetch(`${base}/jobs/launch`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ routine: "orbit", brief: "x" }) });
+  const before = fired.length;
+  assert.equal((await launch({ "sec-fetch-site": "cross-site" })).status, 403);
+  assert.equal((await launch({ origin: "https://evil.example" })).status, 403);
+  assert.equal(fired.length, before, "nothing launched");
+  const host = new URL(base).host;
+  assert.equal((await launch({ "sec-fetch-site": "same-origin", origin: `http://${host}` })).status, 202);
+  assert.equal((await fetch(`${base}/status`, { headers: { "sec-fetch-site": "cross-site" } })).status, 200, "reads are unaffected");
 });

@@ -23,8 +23,8 @@ export type ChatToolDeps = {
   launchable: () => { routines: string[]; problem?: string };
 };
 
-// Owner-only tools offered to the model during a chat reply. Reads and low-risk writes run directly;
-// job_launch only creates a proposal, and nothing launches until Rai confirms it on the page.
+// Owner-only tools offered to the model during a chat reply. Reads and notify run directly;
+// job_launch and job_steer only create proposals, and nothing happens until Rai confirms on the page.
 export function chatTools(d: ChatToolDeps): ChatTool[] {
   const tools: ChatTool[] = [
     {
@@ -74,12 +74,19 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
       },
       {
         name: "job_steer",
-        description: "Send a steering message to a running job. The runner picks it up at its next check-in.",
+        description:
+          "Propose a steering message for a running job. This does NOT send it: Rai must confirm it with a button on the page, because a steered job can change code. The runner picks it up at its next check-in after confirmation.",
         parameters: obj({ id: str("Job id"), text: str("What to tell the job") }, ["id", "text"]),
         run: async (a) => {
-          const steer = jobs.steer(need(a, "id"), need(a, "text"));
-          if (!steer) throw new Error("No job with that id.");
-          return { value: { queued: steer }, provenance: "live", source: "jobs" };
+          const id = need(a, "id");
+          const text = need(a, "text");
+          if (!jobs.get(id)) throw new Error("No job with that id.");
+          const p = d.proposals.propose({ kind: "job_steer", job: id, text: text.slice(0, 4000) });
+          return {
+            value: { status: "pending-confirmation", sent: false, proposalId: p.id, job: id, expiresAt: p.expiresAt, note: "Nothing has been sent. Rai must click Confirm on the page." },
+            provenance: "live",
+            source: "chat/proposals",
+          };
         },
       },
       {
@@ -93,7 +100,7 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
           const brief = need(a, "brief");
           if (problem) throw new Error(`Launching is not available: ${problem}`);
           if (!routines.includes(routine)) throw new Error(`Unknown routine. Configured: ${routines.join(", ") || "none"}.`);
-          const p = d.proposals.propose(routine, brief.slice(0, 20000));
+          const p = d.proposals.propose({ kind: "job_launch", routine, brief: brief.slice(0, 20000) });
           return {
             value: { status: "pending-confirmation", launched: false, proposalId: p.id, routine, expiresAt: p.expiresAt, note: "Nothing has launched. Rai must click Confirm on the page." },
             provenance: "live",
