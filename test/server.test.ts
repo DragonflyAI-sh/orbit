@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { vaultMemory } from "../src/memory.ts";
 import { mockModel } from "../src/model.ts";
+import { jobs as jobRegistry } from "../src/jobs.ts";
 import { nodes as devicePresence } from "../src/nodes.ts";
 import { notifier } from "../src/notify.ts";
 import { memoryReport, runner } from "../src/runs.ts";
@@ -38,6 +39,7 @@ const nodes = devicePresence(
   "rai@example.com",
 );
 await nodes.refresh();
+const jobs = jobRegistry(jsonStore(undefined, "jc", []), Buffer.alloc(32, 1), notify);
 const server = buildServer({
   ports: MOCK_PORT_NAMES.map((name) => mockPort(name)),
   model: mockModel("test"),
@@ -47,6 +49,8 @@ const server = buildServer({
   runs,
   tools,
   nodes,
+  jobs,
+  publicJobUrl: "https://orbit.example:8443",
   commit: "abc123",
   owner: "rai@example.com",
   identify: async () => caller,
@@ -66,7 +70,7 @@ const chat = (body: unknown) =>
 test("status reports the commit and every port", async () => {
   const body = await (await fetch(`${base}/status`)).json();
   assert.equal(body.commit, "abc123");
-  assert.deepEqual(body.ports.map((p: PortStatus) => p.port), ["policy", "channel", "model", "memory", "notify", "schedule", "runs", "tools", "nodes", ...MOCK_PORT_NAMES]);
+  assert.deepEqual(body.ports.map((p: PortStatus) => p.port), ["policy", "channel", "model", "memory", "notify", "schedule", "runs", "tools", "nodes", "jobs", ...MOCK_PORT_NAMES]);
 });
 
 test("status shows the last failed deploy beside the running commit", async () => {
@@ -218,5 +222,21 @@ test("the owner sees devices and chat knows them; others do not", async () => {
   assert.equal((await fetch(`${base}/nodes`)).status, 403);
   const other = await (await chat({ messages: [{ role: "user", content: "is my laptop on?" }] })).json();
   assert.doesNotMatch(other.reply.value, /Devices right now/);
+  caller = "rai@example.com";
+});
+
+test("the owner registers a job and steers it; nobody else can", async () => {
+  caller = "rai@example.com";
+  const created = await (await fetch(`${base}/jobs`, { method: "POST", body: JSON.stringify({ id: "job-1" }) })).json();
+  assert.equal(created.job.id, "job-1");
+  assert.match(created.token, /^job-1\./);
+  assert.equal(created.api, "https://orbit.example:8443");
+  const steer = await (await fetch(`${base}/jobs/job-1/steer`, { method: "POST", body: JSON.stringify({ text: "go" }) })).json();
+  assert.equal(steer.n, 1);
+  assert.equal((await (await fetch(`${base}/jobs/job-1`)).json()).steers.length, 1);
+  caller = "someone@example.com";
+  assert.equal((await fetch(`${base}/jobs`)).status, 403);
+  assert.equal((await fetch(`${base}/jobs`, { method: "POST", body: JSON.stringify({ id: "x" }) })).status, 403);
+  assert.equal((await fetch(`${base}/jobs/job-1/steer`, { method: "POST", body: JSON.stringify({ text: "x" }) })).status, 403);
   caller = "rai@example.com";
 });

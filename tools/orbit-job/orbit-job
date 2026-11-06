@@ -3,10 +3,12 @@
 # Control files live in DragonflyAI-sh/orbit-work on branch orbit/<job-id>:
 #   ORBIT writes  .orbit/brief.md, .orbit/steer/<n>.md
 #   the runner    .orbit/started.json, .orbit/checkins.jsonl, .orbit/replies/<n>.md, .orbit/summary.md
-# This version uses git only; API callbacks come later and are reported as api=not-configured.
+# With --api and --token, every step also calls ORBIT back, and a check-in fetches steers queued through the API
+# (the tool writes them into .orbit/steer/ so the git record stays complete). Git stays the record: if the API is
+# unreachable the step still lands in git and reports api=failed.
 set -uo pipefail
 
-TOOL_VERSION=1
+TOOL_VERSION=2
 STATE_DIR="${ORBIT_JOB_STATE:-$HOME/.orbit-job}"
 
 say() { echo "orbit-job: $*"; }
@@ -39,6 +41,42 @@ find_control() {
   return 1
 }
 
+api_on() { [ -n "${API:-}" ] && [ -n "${TOKEN:-}" ]; }
+
+# POSTs one event to ORBIT. Prints the response body; fails quietly so git remains the fallback.
+api_event() {
+  api_on || return 2
+  curl -fsS -m 15 -X POST -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" \
+    --data-binary @- "$API/v1/jobs/$JOB/events" 2>>"$STATE_DIR/api.err"
+}
+
+# Writes steers from an API response (JSON on stdin) into .orbit/steer/<n>.md if missing. Prints the numbers written.
+write_steers() {
+  command -v python3 >/dev/null || return 0
+  python3 -c '
+import json, os, sys
+d = sys.argv[1]
+try:
+    steers = json.load(sys.stdin).get("steers", [])
+except Exception:
+    sys.exit(0)
+os.makedirs(d, exist_ok=True)
+for s in steers:
+    n, text = s.get("n"), s.get("text")
+    if not isinstance(n, int) or not isinstance(text, str):
+        continue
+    path = os.path.join(d, f"{n}.md")
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            f.write(text.rstrip("\n") + "\n")
+        print(n)
+' "$CONTROL/.orbit/steer"
+}
+
+api_note() { # api_note <status-of-api-call>
+  case "$1" in 0) echo "api=sent" ;; 2) echo "api=not-configured" ;; *) echo "api=failed" ;; esac
+}
+
 git_c() {
   if git -C "$CONTROL" config user.email >/dev/null; then
     git -C "$CONTROL" "$@"
@@ -59,27 +97,40 @@ push() {
   git -C "$CONTROL" rev-parse --short HEAD
 }
 
-# Commits the given control files and pushes. Reports what actually happened.
+# Commits the given control files, pushes, then sends the event to ORBIT if the API is configured.
+# $1 message, $2 event JSON without sha (or "" for none), rest: files. Reports what actually happened.
 record() {
-  local message=$1 sha
-  shift
+  local message=$1 event=$2 sha git_ok=1 api_rc=2 body
+  shift 2
   git -C "$CONTROL" add -- "$@" || return 1
-  git_c commit -q -m "$message" -- "$@" || { say "FAILED git=commit-failed api=not-configured"; return 1; }
-  if sha=$(push); then
-    say "ok git=pushed $sha api=not-configured"
-  else
-    say "FAILED git=push-failed api=not-configured"
-    sed 's/^/  /' "$STATE_DIR/push.err" >&2
-    return 1
+  if ! git_c commit -q -m "$message" -- "$@"; then
+    git_ok=0
+  elif ! sha=$(push); then
+    git_ok=0
   fi
+  if [ -n "$event" ]; then
+    body=${event%\}}
+    [ "$git_ok" = 1 ] && body="$body,\"sha\":$(json "$sha")"
+    body="$body}"
+    printf '%s' "$body" | api_event >"$STATE_DIR/api.out"; api_rc=$?
+  fi
+  if [ "$git_ok" = 1 ]; then
+    say "ok git=pushed $sha $(api_note "$api_rc")"
+  else
+    say "FAILED git=push-failed $(api_note "$api_rc")"
+    sed 's/^/  /' "$STATE_DIR/push.err" >&2
+  fi
+  [ "$git_ok" = 1 ] || [ "$api_rc" = 0 ]
 }
 
 cmd_start() {
-  local job="" control=""
+  local job="" control="" api="${ORBIT_JOB_API:-}" token="${ORBIT_JOB_TOKEN:-}"
   while [ $# -gt 0 ]; do
     case "$1" in
       --job) job=${2:-}; shift 2 ;;
       --control) control=${2:-}; shift 2 ;;
+      --api) api=${2:-}; shift 2 ;;
+      --token) token=${2:-}; shift 2 ;;
       *) die "unknown option: $1" ;;
     esac
   done
@@ -91,17 +142,26 @@ cmd_start() {
   git -C "$CONTROL" fetch -q origin "$BRANCH" 2>/dev/null || die "branch $BRANCH is not on origin; ORBIT pushes it, with the brief, before the job starts"
   git -C "$CONTROL" checkout -q -B "$BRANCH" FETCH_HEAD || die "could not check out $BRANCH"
   [ -f "$CONTROL/.orbit/brief.md" ] || die "$BRANCH has no .orbit/brief.md"
-  printf 'JOB=%q\nCONTROL=%q\nBRANCH=%q\n' "$job" "$CONTROL" "$BRANCH" >"$STATE_DIR/current"
+  case "$api" in "" | https://* | http://127.0.0.1:* | http://localhost:*) ;; *) die "--api must be an https:// URL" ;; esac
+  API=${api%/}; TOKEN=$token; JOB=$job
+  printf 'JOB=%q\nCONTROL=%q\nBRANCH=%q\nAPI=%q\nTOKEN=%q\n' "$job" "$CONTROL" "$BRANCH" "$API" "$TOKEN" >"$STATE_DIR/current"
+  chmod 600 "$STATE_DIR/current"
   printf '{"job":%s,"at":%s,"host":%s,"tool":%d}\n' "$(json "$job")" "$(json "$(now)")" "$(json "$(hostname)")" "$TOOL_VERSION" >"$CONTROL/.orbit/started.json"
-  record "orbit-job $job: started" .orbit/started.json || exit 1
+  record "orbit-job $job: started" '{"type":"started"}' .orbit/started.json || exit 1
   say "brief: $CONTROL/.orbit/brief.md"
 }
 
 cmd_checkin() {
   [ $# -ge 1 ] && [ -n "$1" ] || die 'usage: orbit-job checkin "<what you are doing>"'
   load
+  local got="" files=(.orbit/checkins.jsonl) n ack=""
+  # Steers queued through the API become files first, so this check-in's commit records them.
+  if api_on && curl -fsS -m 15 -H "Authorization: Bearer $TOKEN" "$API/v1/jobs/$JOB/steers" >"$STATE_DIR/steers.json" 2>>"$STATE_DIR/api.err"; then
+    got=$(write_steers <"$STATE_DIR/steers.json")
+  fi
+  for n in $got; do files+=(".orbit/steer/$n.md"); ack="$ack${ack:+,}$n"; done
   printf '{"at":%s,"status":%s}\n' "$(json "$(now)")" "$(json "$1")" >>"$CONTROL/.orbit/checkins.jsonl"
-  record "orbit-job $JOB: checkin" .orbit/checkins.jsonl || exit 1
+  record "orbit-job $JOB: checkin${got:+ (received steers $(echo $got))}" "{\"type\":\"checkin\",\"status\":$(json "$1"),\"ack\":[$ack]}" "${files[@]}" || exit 1
   cmd_steers
 }
 
@@ -131,7 +191,7 @@ cmd_reply() {
   [ -f "$CONTROL/.orbit/steer/$n.md" ] || die "there is no steer $n"
   mkdir -p "$CONTROL/.orbit/replies"
   cp "$file" "$CONTROL/.orbit/replies/$n.md"
-  record "orbit-job $JOB: reply $n" ".orbit/replies/$n.md" || exit 1
+  record "orbit-job $JOB: reply $n" "{\"type\":\"reply\",\"n\":$n,\"text\":$(json "$(head -c 4000 "$file")")}" ".orbit/replies/$n.md" || exit 1
 }
 
 cmd_summary() {
@@ -146,13 +206,13 @@ cmd_summary() {
   [ -f "$file" ] || die "no such file: $file"
   load
   { printf -- '---\nstatus: %s\nat: %s\n---\n\n' "$status" "$(now)"; cat "$file"; } >"$CONTROL/.orbit/summary.md"
-  record "orbit-job $JOB: summary ($status)" .orbit/summary.md || exit 1
+  record "orbit-job $JOB: summary ($status)" "{\"type\":\"summary\",\"status\":\"$status\",\"text\":$(json "$(head -c 4000 "$file")")}" .orbit/summary.md || exit 1
 }
 
 usage() {
   cat <<'U'
-orbit-job: the ORBIT job protocol (git only for now)
-  orbit-job start --job <id> [--control <orbit-work checkout>]   check out orbit/<id>, record the start
+orbit-job: the ORBIT job protocol (git record, optional API callbacks)
+  orbit-job start --job <id> [--api <url> --token <t>] [--control <dir>]   check out orbit/<id>, record the start
   orbit-job checkin "<status>"                                    record progress, then show new steers
   orbit-job steers                                                show steers that have no reply yet
   orbit-job reply <n> <file>                                      answer steer n

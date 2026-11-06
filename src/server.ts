@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Identify } from "./identity.ts";
+import type { Jobs } from "./jobs.ts";
 import type { MemoryPort } from "./memory.ts";
 import type { Login } from "./chatgpt.ts";
 import type { Message, ModelPort } from "./model.ts";
@@ -30,6 +31,8 @@ export type Deps = {
   runs: Runner;
   tools: Toolbox;
   nodes: Nodes;
+  jobs?: Jobs;
+  publicJobUrl?: string;
   commit: string;
   owner?: string;
   identify: Identify;
@@ -76,6 +79,8 @@ export function buildServer({
   runs,
   tools,
   nodes,
+  jobs,
+  publicJobUrl,
   commit,
   owner,
   identify,
@@ -92,9 +97,9 @@ export function buildServer({
   const statuses = (): PortStatus[] => {
     const now = new Date();
     return [
-      fixed("policy", "fail-closed", "Allows reads and chat replies; memory, notify, schedule, runs, tools and devices for the owner only; refuses everything else."),
+      fixed("policy", "fail-closed", "Allows reads and chat replies; memory, notify, schedule, runs, tools, devices and jobs for the owner only; refuses everything else."),
       fixed("channel", "web", "Web chat at /. Discord and CLI are not built."),
-      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...ports.map((p) => p.status())].map((s) => withStaleness(s, now)),
+      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...(jobs ? [jobs.status()] : []), ...ports.map((p) => p.status())].map((s) => withStaleness(s, now)),
     ];
   };
   const limits = (isOwner: boolean): string[] => [
@@ -232,6 +237,33 @@ export function buildServer({
       if (typeof input.url !== "string") return send(res, 400, { error: "Send {url}: the address the browser landed on." });
       const login = await model.finishLogin(input.url);
       return send(res, login.state === "signed-in" ? 200 : 400, login);
+    }
+
+    if (jobs && url.pathname === "/jobs" && req.method === "GET") {
+      if (!(await owned("jobs", "list"))) return;
+      return send(res, 200, { jobs: jobs.list() });
+    }
+    if (jobs && url.pathname === "/jobs" && req.method === "POST") {
+      if (!(await owned("jobs", "register"))) return;
+      const input = await body();
+      if (!input) return;
+      const result = jobs.register(String(input.id ?? ""));
+      if ("error" in result) return send(res, 400, { error: result.error });
+      return send(res, 201, { ...result, api: publicJobUrl ?? null });
+    }
+    const jobMatch = url.pathname.match(/^\/jobs\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})(\/steer)?$/);
+    if (jobs && jobMatch && req.method === "GET" && !jobMatch[2]) {
+      if (!(await owned("jobs", "get"))) return;
+      const job = jobs.get(jobMatch[1]);
+      return job ? send(res, 200, job) : send(res, 404, { error: "No job with that id." });
+    }
+    if (jobs && jobMatch && req.method === "POST" && jobMatch[2]) {
+      if (!(await owned("jobs", "steer"))) return;
+      const input = await body();
+      if (!input) return;
+      if (typeof input.text !== "string" || !input.text.trim()) return send(res, 400, { error: "A steer needs text." });
+      const steer = jobs.steer(jobMatch[1], input.text.trim());
+      return steer ? send(res, 201, steer) : send(res, 404, { error: "No job with that id." });
     }
 
     if (url.pathname === "/nodes" && req.method === "GET") {

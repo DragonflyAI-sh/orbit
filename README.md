@@ -46,7 +46,9 @@ orbit-job reply <n> <file>        # answer steer n
 orbit-job summary --status done|blocked|failed <file>
 ```
 
-Each command reports what really happened (`ok git=pushed <sha>` or `FAILED ...`). This version is git only; API callbacks come next. `tools/orbit-job/install.sh` installs the tool and its skill (`SKILL.md`) in a cloud session.
+Each command reports what really happened (`ok git=pushed <sha> api=sent`, `api=failed`, or `FAILED ...`). With `--api <url> --token <token>`, every step also calls ORBIT back and a check-in fetches steers queued through the API; the tool writes them into `.orbit/steer/` so git stays the complete record. If the API is unreachable, the step still lands in git.
+
+**Job API.** The owner registers a job with `POST /jobs {id}` and gets a token that works for that one job and expires in 24 hours; `POST /jobs/<id>/steer {text}` queues a steer. Runners talk to a separate listener (`ORBIT_INGRESS_PORT`, bound to 127.0.0.1 and published by Tailscale Funnel) that serves only `POST /v1/jobs/<id>/events` and `GET /v1/jobs/<id>/steers`, with the job's token. It has no access to memory, tools or owner routes. Replies and summaries notify the owner. `tools/orbit-job/install.sh` installs the tool and its skill (`SKILL.md`) in a cloud session.
 
 ## Model
 
