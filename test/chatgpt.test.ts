@@ -163,3 +163,70 @@ test("without a sign-in, status says how to sign in; stream parsing handles delt
   assert.match(model.status().detail, /Sign in from the web page/);
   assert.equal(textFromStream(`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "partial" })}\n`), "partial");
 });
+
+function tripwire() {
+  const calls: string[] = [];
+  const fetcher = (async (url: string) => {
+    calls.push(String(url));
+    throw new Error("no network allowed");
+  }) as unknown as typeof fetch;
+  return { fetcher, calls };
+}
+
+test("a restarted signed-in adapter is live before its first chat, from a local check only", () => {
+  const net = tripwire();
+  const file = tokenFile(undefined);
+  file.write(saved());
+  const t = Date.now();
+  const model = chatgptModel("gpt-x", file, { fetcher: net.fetcher, now: () => t });
+  const s = model.status();
+  assert.equal(s.state, "live");
+  assert.match(s.detail, /checked locally/);
+  assert.match(s.detail, /No model call has been made/);
+  assert.equal(s.verifiedAt, new Date(t).toISOString());
+  assert.equal(JSON.stringify(s).includes("access-0"), false);
+  assert.equal(JSON.stringify(s).includes("refresh-0"), false);
+  assert.deepEqual(net.calls, []);
+});
+
+test("readiness is not a successful call: a failed call still reports down, and a later success is live", async () => {
+  const file = tokenFile(undefined);
+  file.write(saved());
+  let ok = false;
+  const fetcher = (async (url: string) => {
+    if (!String(url).endsWith("/v1/responses")) return new Response("", { status: 404 });
+    return ok ? new Response(sse("hi")) : new Response("boom", { status: 500 });
+  }) as unknown as typeof fetch;
+  let t = Date.now();
+  const model = chatgptModel("gpt-x", file, { fetcher, now: () => t });
+  assert.equal(model.status().state, "live");
+  await assert.rejects(model.reply([{ role: "user", content: "hi" }], []), /HTTP 500/);
+  t += 1000;
+  assert.equal(model.status().state, "down");
+  assert.match(model.status().detail, /Last call failed/);
+  ok = true;
+  t += 1000;
+  await model.reply([{ role: "user", content: "hi" }], []);
+  assert.match(model.status().detail, /Answering/);
+});
+
+test("unusable saved logins are never live at startup and make no network call", () => {
+  const cases: [string, Partial<Tokens>, "down" | "degraded"][] = [
+    ["no refresh token", { refresh: "" }, "down"],
+    ["no access token", { access: "" }, "down"],
+    ["no client", { clientId: "" }, "down"],
+    ["no token sharing scope", { scope: "openid email" }, "down"],
+    ["expired access token", { expires: Date.now() - 1000 }, "degraded"],
+  ];
+  for (const [name, over, state] of cases) {
+    const net = tripwire();
+    const file = tokenFile(undefined);
+    file.write(saved(over));
+    const s = chatgptModel("gpt-x", file, { fetcher: net.fetcher }).status();
+    assert.equal(s.state, state, name);
+    assert.notEqual(s.verifiedAt, new Date(0).toISOString(), name);
+    assert.deepEqual(net.calls, [], name);
+  }
+  const signedOut = chatgptModel("gpt-x", tokenFile(undefined), { fetcher: tripwire().fetcher }).status();
+  assert.equal(signedOut.state, "down");
+});
