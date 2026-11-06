@@ -9,6 +9,7 @@ import { selectModel } from "./model.ts";
 import { nodes as devicePresence, tailscaleStatus } from "./nodes.ts";
 import { notifier, selectDiscord } from "./notify.ts";
 import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
+import { parseRoutineRepos, pullRequestOpener, selectPulls } from "./pull-requests.ts";
 import { memoryReport, modelTask, runner, toolCall } from "./runs.ts";
 import { scheduler } from "./schedule.ts";
 import { buildServer } from "./server.ts";
@@ -39,6 +40,7 @@ const owner = process.env.ORBIT_OWNER || undefined;
 const nodes = devicePresence(tailscaleStatus(), owner);
 const jobs = jobRegistry(jsonStore(stateDir, "jobs-cloud", []), jobSecret(stateDir), notify);
 const control = selectControl(process.env);
+pullRequestOpener(jobs, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), selectPulls(process.env), notify);
 const reconcile = control ? gitReconciler(jobs, control) : async () => {};
 
 // The job listener binds to localhost only; Tailscale Funnel is what publishes it.

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Identify } from "./identity.ts";
+import { jobRow } from "./job-view.ts";
 import type { Job, Jobs } from "./jobs.ts";
 import type { ControlRepo, Routine } from "./launcher.ts";
 import type { MemoryPort } from "./memory.ts";
@@ -238,7 +239,7 @@ export function buildServer({
       }
       const current = limits(isOwner);
       const offered = isOwner && model.step
-        ? chatTools({ memory, toolbox: tools, jobs, withHealth: jobs ? withHealth : undefined, notify, proposals, launchable })
+        ? chatTools({ memory, toolbox: tools, jobs, notify, proposals, launchable })
         : [];
       if (!offered.length) {
         current.push(
@@ -344,6 +345,7 @@ export function buildServer({
 
     if (jobs && url.pathname === "/jobs" && req.method === "GET") {
       if (!(await owned("jobs", "list"))) return;
+      if (url.searchParams.get("view") === "rows") return send(res, 200, { jobs: jobs.list().map((j) => jobRow(j, jobs.health(j))) });
       return send(res, 200, { jobs: jobs.list().map(withHealth) });
     }
     if (jobs && url.pathname === "/jobs/launch" && req.method === "POST") {
@@ -352,6 +354,11 @@ export function buildServer({
       if (!input) return;
       const result = await launchJob(String(input.routine ?? ""), typeof input.brief === "string" ? input.brief : "");
       return send(res, result.code, result.body);
+    }
+    // Open proposals from chat, so they can be confirmed or cancelled after the reply has scrolled away.
+    if (jobs && url.pathname === "/chat/proposals" && req.method === "GET") {
+      if (!(await owned("jobs", "proposals"))) return;
+      return send(res, 200, { proposals: proposals.list() });
     }
     // A chat proposal does nothing until Rai confirms it here; each proposal can be confirmed or cancelled once.
     const proposalMatch = url.pathname.match(/^\/chat\/proposals\/([0-9a-f-]+)\/(confirm|cancel)$/);

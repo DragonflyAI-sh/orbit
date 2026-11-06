@@ -13,7 +13,13 @@ Open `/` for web chat. Every reply is tagged `live` or `mock`, and the model is 
 
 ## Chat tools
 
-For the owner, the model can call ORBIT's own actions during a reply (up to 5 rounds): `memory_search`, `memory_read`, `github_repo_status`, `jobs_list`, `job_status`, `job_steer`, `notify` and `job_launch`. Each call is checked by `decide("agent", tool)`, and the reply lists every call with its provenance. `job_launch` only creates a proposal; the page shows it with Confirm and Cancel, and only a click calls the launcher (`POST /chat/proposals/:id/confirm`). Anyone else, or a model that cannot call tools (the mock), gets none and is told so.
+For the owner, the model can call ORBIT's own actions during a reply (up to 5 rounds): `memory_search`, `memory_read`, `github_repo_status`, `jobs_list` (a compact row per job and the true total), `job_status` (last 20 events and how many were left out), `job_steer`, `notify` and `job_launch`. Each call is checked by `decide("agent", tool)`, and the reply lists every call with its provenance. `job_launch` only creates a proposal; the page shows it with Confirm and Cancel, and only a click calls the launcher (`POST /chat/proposals/:id/confirm`). Anyone else, or a model that cannot call tools (the mock), gets none and is told so.
+
+## Jobs page and pull requests
+
+The owner's page has a Jobs tab next to chat (hidden for anyone else). It lists jobs with health (`not-started`, `quiet` and `launch-failed` stand out), the latest check-in and whether it came over the API or git, and a link to the session. Opening a job shows its events and steers and a steer box, which uses `POST /jobs/<id>/steer` because Rai is acting directly. Open chat proposals (launch and steer) are listed from `GET /chat/proposals` with Confirm and Cancel, so they survive the chat reply scrolling away. The page refreshes every 15 seconds while visible.
+
+When a job's summary arrives with status `done` (API or git) and its routine has a project repo in `ORBIT_ROUTINE_REPOS` (`orbit=DragonflyAI-sh/orbit,money-noodle=owner/name`), ORBIT opens a pull request from `orbit/<job-id>` to `main` there, if that branch exists. The token is the systemd credential `orbit.github-orbit-prs` (Pull requests read and write, Contents read). The title and body come from the summary's `## PR title` and `## PR body` sections (the body runs to the end, or to a later `## PR title`); otherwise `ORBIT job <id>` and the whole summary. A footer links the session. The PR URL is recorded on the job and shown on the page, only one is ever opened, and Rai is told `PR ready: <url>`. A failure is recorded, notified and not retried. No branch in the project repo means no PR and no message. Merging stays Rai's.
 
 ## Memory
 
