@@ -20,7 +20,18 @@ function credential(env: NodeJS.ProcessEnv, name: string): string | undefined {
   }
 }
 
-export type ControlRepo = { pushBrief(job: string, brief: string): Promise<{ branch: string; commit: string }> };
+export type GitRecord = { head?: string; started: boolean; summary?: { status: string; text: string } };
+export type ControlRepo = {
+  pushBrief(job: string, brief: string): Promise<{ branch: string; commit: string }>;
+  // What the runner wrote on orbit/<job>, read from git. Undefined when the branch does not exist.
+  readJob?(job: string): Promise<GitRecord | undefined>;
+};
+
+// Parses the summary front matter that orbit-job writes: ---\nstatus: done\nat: ...\n---\n\n<text>
+export function parseSummary(raw: string): { status: string; text: string } | undefined {
+  const m = raw.match(/^---\nstatus: (done|blocked|failed)\n(?:at: [^\n]*\n)?---\n\n?([\s\S]*)$/);
+  return m ? { status: m[1], text: m[2].trim() } : undefined;
+}
 
 // Creates orbit/<job> from main and commits .orbit/brief.md on it.
 export function githubControl(token: string, repo = CONTROL_REPO, fetcher: Fetch = fetch): ControlRepo {
@@ -49,6 +60,57 @@ export function githubControl(token: string, repo = CONTROL_REPO, fetcher: Fetch
       })) as { commit: { sha: string } };
       return { branch, commit: put.commit.sha };
     },
+
+    async readJob(job) {
+      const branch = encodeURIComponent(`orbit/${job}`);
+      const file = async (path: string) => {
+        const res = await fetcher(`${GITHUB}/repos/${repo}/contents/${path}?ref=${branch}`, {
+          headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github.raw+json", "user-agent": "orbit (github.com/DragonflyAI-sh/orbit)" },
+        });
+        if (res.status === 404) return undefined;
+        if (!res.ok) throw new Error(`GitHub read ${path} returned HTTP ${res.status}`);
+        return res.text();
+      };
+      let head: string | undefined;
+      try {
+        head = ((await call(`/commits/${branch}`)) as { sha?: string }).sha;
+      } catch (err) {
+        if (String(err).includes("HTTP 404") || String(err).includes("HTTP 422")) return undefined;
+        throw err;
+      }
+      const summary = await file(".orbit/summary.md");
+      return { head, started: (await file(".orbit/started.json")) !== undefined, summary: summary ? parseSummary(summary) : undefined };
+    },
+  };
+}
+
+// Fills in what the API missed: for open jobs not heard from over the API for 2 minutes,
+// read the git record at most every 2 minutes and record a start or summary found there.
+export function gitReconciler(jobs: import("./jobs.ts").Jobs, control: ControlRepo, now: () => number = Date.now) {
+  const lastRead = new Map<string, number>();
+  const QUIET_MS = 2 * 60_000;
+  return async (): Promise<void> => {
+    if (!control.readJob) return;
+    for (const job of jobs.list()) {
+      if (job.state !== "registered" && job.state !== "running") continue;
+      if (job.launch?.failedAt) continue;
+      const lastApi = job.lastEventAt ? new Date(job.lastEventAt).getTime() : new Date(job.launch?.at ?? job.createdAt).getTime();
+      if (now() - lastApi < QUIET_MS || now() - (lastRead.get(job.id) ?? 0) < QUIET_MS) continue;
+      lastRead.set(job.id, now());
+      let record: GitRecord | undefined;
+      try {
+        record = await control.readJob(job.id);
+      } catch {
+        continue; // GitHub was unreachable; try again next round.
+      }
+      if (!record) continue;
+      const types = new Set(job.events.map((e) => e.type));
+      // A job that has already reported anything has started; only an empty timeline needs the git start.
+      if (record.started && job.events.length === 0) jobs.record(job.id, { type: "started", via: "git" });
+      if (record.summary && !types.has("summary")) {
+        jobs.record(job.id, { type: "summary", status: record.summary.status, text: record.summary.text, sha: record.head?.slice(0, 64), via: "git" });
+      }
+    }
   };
 }
 

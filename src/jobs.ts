@@ -8,7 +8,7 @@ import type { Store } from "./store.ts";
 // Jobs run by Claude cloud runners. ORBIT registers a job, hands the runner a token that works for that job only,
 // queues steers for it, and receives its events. The git record in orbit-work stays the source of truth.
 
-export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "summary"; sha?: string; n?: number; status?: string; text?: string };
+export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "summary"; sha?: string; n?: number; status?: string; text?: string; via?: "api" | "git" };
 export type Steer = { n: number; text: string; at: string; deliveredAt?: string };
 export type Launch = { routine: string; at: string; branch?: string; briefCommit?: string; sessionId?: string; sessionUrl?: string; failedAt?: string; error?: string };
 export type Job = {
@@ -58,10 +58,11 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
       return { job, token: `${id}.${sign(id, expiresAt)}` };
     },
 
-    // A token is valid only for its own job, only until that job's expiry.
+    // A token is valid only for its own job, until that job finishes or expires, whichever comes first.
     verify(id: string, token: string | undefined): boolean {
       const job = find(id);
       if (!job || !token || new Date(job.expiresAt) <= now()) return false;
+      if (job.state === "done" || job.state === "blocked" || job.state === "failed") return false;
       const expected = Buffer.from(`${id}.${sign(id, job.expiresAt)}`);
       const given = Buffer.from(token);
       return given.length === expected.length && timingSafeEqual(given, expected);
@@ -71,13 +72,16 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
       const job = find(id);
       if (!job) return undefined;
       const at = now().toISOString();
-      const clean: JobEvent = { ...event, at, text: event.text?.slice(0, MAX_TEXT), status: event.status?.slice(0, 200) };
+      const clean: JobEvent = { ...event, at, via: event.via ?? "api", text: event.text?.slice(0, MAX_TEXT), status: event.status?.slice(0, 200) };
       const state: Job["state"] =
         event.type === "summary" && (event.status === "done" || event.status === "blocked" || event.status === "failed") ? event.status : "running";
       update(id, (j) => ({ ...j, state, lastEventAt: at, events: [...j.events, clean].slice(-KEEP_EVENTS) }));
       lastEventAt = at;
       if (event.type === "reply") notify.send(`Job ${id} replied to steer ${event.n}:\n\n${clean.text ?? "(see git)"}`, false);
-      if (event.type === "summary") notify.send(`Job ${id} finished: ${event.status}.\n\n${clean.text ?? "(see git)"}`, event.status !== "done");
+      if (event.type === "summary") {
+        const via = clean.via === "git" ? " (found in git; the API did not report it)" : "";
+        notify.send(`Job ${id} finished: ${event.status}${via}.\n\n${clean.text ?? "(see git)"}`, event.status !== "done");
+      }
       return find(id);
     },
 
@@ -116,7 +120,7 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
     list: (): Job[] => list().slice(-50).reverse(),
 
     status(): PortStatus {
-      const active = list().filter((j) => j.state === "registered" || j.state === "running").length;
+      const active = list().filter((j) => (j.state === "registered" || j.state === "running") && !j.launch?.failedAt).length;
       return {
         port: "jobs",
         state: store.persisted ? "live" : "degraded",
