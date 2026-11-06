@@ -7,6 +7,9 @@ import type { ControlRepo, Routine } from "./launcher.ts";
 import type { MemoryPort } from "./memory.ts";
 import type { Login } from "./chatgpt.ts";
 import type { Message, ModelPort } from "./model.ts";
+import { proposals as newProposals, runChat } from "./agent.ts";
+import type { Proposals } from "./agent.ts";
+import { chatTools } from "./chat-tools.ts";
 import type { Nodes } from "./nodes.ts";
 import type { Notifier } from "./notify.ts";
 import { decide } from "./policy.ts";
@@ -40,6 +43,7 @@ export type Deps = {
   owner?: string;
   identify: Identify;
   deploy?: () => unknown;
+  proposals?: Proposals;
 };
 
 export function withStaleness(status: PortStatus, now: Date): PortStatus {
@@ -90,6 +94,7 @@ export function buildServer({
   owner,
   identify,
   deploy = () => ({ state: "unknown" }),
+  proposals = newProposals(),
 }: Deps): Server {
   const byName = new Map(ports.map((p) => [p.name, p]));
   const fixed = (port: string, impl: string, detail: string): PortStatus => ({
@@ -122,6 +127,44 @@ export function buildServer({
     };
   };
   const withHealth = (job: Job) => ({ ...job, health: jobs!.health(job) });
+  const launchable = () => ({
+    routines: [...routines.keys()],
+    problem: !jobs ? "jobs are not enabled" : !control ? "no orbit-work GitHub credential is installed" : routines.size ? undefined : "no Routine is configured",
+  });
+
+  // The one launch path: the /jobs/launch route and a confirmed chat proposal both end here.
+  const launchJob = async (routineName: string, briefText: string): Promise<{ code: number; body: unknown }> => {
+    const routine = routines.get(routineName);
+    if (!routine) return { code: 400, body: { error: `Unknown routine. Configured: ${[...routines.keys()].join(", ") || "none"}.` } };
+    if (!control) return { code: 503, body: { error: "No orbit-work GitHub credential is installed, so the brief cannot be written." } };
+    if (!briefText.trim()) return { code: 400, body: { error: "A launch needs a brief." } };
+    const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);
+    const id = `${routine.name}-${stamp}-${Math.random().toString(36).slice(2, 6)}`;
+    const registered = jobs!.register(id);
+    if ("error" in registered) return { code: 400, body: { error: registered.error } };
+    const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString() };
+    const fail = (error: string) => {
+      jobs!.setLaunch(id, { ...launch, failedAt: new Date().toISOString(), error });
+      notify.send(`Job ${id} could not launch: ${error}`, false);
+      return { code: 502, body: { error, job: withHealth(jobs!.get(id)!) } };
+    };
+    try {
+      const pushed = await control.pushBrief(id, briefText.trim());
+      Object.assign(launch, { branch: pushed.branch, briefCommit: pushed.commit });
+      jobs!.setLaunch(id, launch);
+    } catch (err) {
+      return fail(`brief not written: ${err instanceof Error ? err.message : err}`);
+    }
+    // The token goes to the runner in the fire text, server to server; it is never returned or logged here.
+    const text = [`Job id: ${id}`, ...(publicJobUrl ? [`API: ${publicJobUrl}`, `Token: ${registered.token}`] : [])].join("\n");
+    try {
+      const fired = await routine.fire(text);
+      jobs!.setLaunch(id, { ...launch, ...fired });
+    } catch (err) {
+      return fail(`routine not fired: ${err instanceof Error ? err.message : err}`);
+    }
+    return { code: 202, body: withHealth(jobs!.get(id)!) };
+  };
 
   const isOwnerOf = async (req: IncomingMessage) => Boolean(owner) && (await identify(req)) === owner;
   const audit = (port: string, action: string, decision: { allow: boolean; reason: string }) =>
@@ -175,8 +218,34 @@ export function buildServer({
         notes = notes ? `${devices}\n\n${notes}` : devices;
       }
       const current = limits(isOwner);
+      const offered = isOwner && model.step
+        ? chatTools({ memory, toolbox: tools, jobs, withHealth: jobs ? withHealth : undefined, notify, proposals, launchable })
+        : [];
+      if (!offered.length) {
+        current.push(
+          !isOwner
+            ? "chat tools are refused: this request is not from the owner, so you cannot call any tools or take any action"
+            : "chat tools are unavailable: the connected model cannot call tools, so you cannot take any action; do not claim to have launched, steered or sent anything",
+        );
+      }
       try {
-        return send(res, 200, { reply: await model.reply(messages, current, notes), memory: used, limits: current });
+        if (!offered.length) return send(res, 200, { reply: await model.reply(messages, current, notes), memory: used, limits: current, calls: [], proposals: [] });
+        const before = new Set(proposals.list().map((p) => p.id));
+        const outcome = await runChat({
+          model,
+          messages,
+          limits: current,
+          notes,
+          tools: offered,
+          allow: (tool) => {
+            const decision = decide("agent", tool, isOwner);
+            audit("agent", tool, decision);
+            return decision.allow ? undefined : decision.reason;
+          },
+        });
+        const reply = { value: outcome.text || "(the model returned no text)", provenance: "live" as const, source: `model/${model.status().impl}` };
+        const fresh = proposals.list().filter((p) => !before.has(p.id));
+        return send(res, 200, { reply, memory: used, limits: current, calls: outcome.calls, proposals: fresh, capped: outcome.capped });
       } catch {
         return send(res, 502, { error: `The model call failed: ${model.status().detail}`, limits: current });
       }
@@ -262,36 +331,18 @@ export function buildServer({
       if (!(await owned("jobs", "launch"))) return;
       const input = await body();
       if (!input) return;
-      const routine = routines.get(String(input.routine ?? ""));
-      if (!routine) return send(res, 400, { error: `Unknown routine. Configured: ${[...routines.keys()].join(", ") || "none"}.` });
-      if (!control) return send(res, 503, { error: "No orbit-work GitHub credential is installed, so the brief cannot be written." });
-      if (typeof input.brief !== "string" || !input.brief.trim()) return send(res, 400, { error: "A launch needs a brief." });
-      const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);
-      const id = `${routine.name}-${stamp}-${Math.random().toString(36).slice(2, 6)}`;
-      const registered = jobs.register(id);
-      if ("error" in registered) return send(res, 400, { error: registered.error });
-      const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString() };
-      const fail = (error: string) => {
-        jobs.setLaunch(id, { ...launch, failedAt: new Date().toISOString(), error });
-        notify.send(`Job ${id} could not launch: ${error}`, false);
-        return send(res, 502, { error, job: withHealth(jobs.get(id)!) });
-      };
-      try {
-        const pushed = await control.pushBrief(id, input.brief.trim());
-        Object.assign(launch, { branch: pushed.branch, briefCommit: pushed.commit });
-        jobs.setLaunch(id, launch);
-      } catch (err) {
-        return fail(`brief not written: ${err instanceof Error ? err.message : err}`);
-      }
-      // The token goes to the runner in the fire text, server to server; it is never returned or logged here.
-      const text = [`Job id: ${id}`, ...(publicJobUrl ? [`API: ${publicJobUrl}`, `Token: ${registered.token}`] : [])].join("\n");
-      try {
-        const fired = await routine.fire(text);
-        jobs.setLaunch(id, { ...launch, ...fired });
-      } catch (err) {
-        return fail(`routine not fired: ${err instanceof Error ? err.message : err}`);
-      }
-      return send(res, 202, withHealth(jobs.get(id)!));
+      const result = await launchJob(String(input.routine ?? ""), typeof input.brief === "string" ? input.brief : "");
+      return send(res, result.code, result.body);
+    }
+    // A chat proposal does nothing until Rai confirms it here; each proposal can be confirmed or cancelled once.
+    const proposalMatch = url.pathname.match(/^\/chat\/proposals\/([0-9a-f-]+)\/(confirm|cancel)$/);
+    if (jobs && proposalMatch && req.method === "POST") {
+      if (!(await owned("jobs", proposalMatch[2] === "confirm" ? "launch" : "cancel"))) return;
+      const proposal = proposals.take(proposalMatch[1]);
+      if (!proposal) return send(res, 404, { error: "No open proposal with that id. It was already confirmed, cancelled or expired." });
+      if (proposalMatch[2] === "cancel") return send(res, 200, { cancelled: proposal.id });
+      const result = await launchJob(proposal.routine, proposal.brief);
+      return send(res, result.code, result.body);
     }
     if (jobs && url.pathname === "/jobs" && req.method === "POST") {
       if (!(await owned("jobs", "register"))) return;
