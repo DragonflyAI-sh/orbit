@@ -55,8 +55,19 @@ export type PullPort = {
   open(repo: string, job: string, title: string, body: string): Promise<{ status: "no-branch" } | { status: "opened" | "exists"; url: string }>;
 };
 
-export function githubPulls(token: string, fetcher: Fetch = fetch): PullPort {
-  const call = async (method: string, path: string, body?: unknown) => {
+export async function httpFailure(what: string, res: Response): Promise<never> {
+  let detail = "";
+  try {
+    const m = ((await res.json()) as { message?: unknown }).message;
+    if (typeof m === "string") detail = `: ${m.slice(0, 200)}`;
+  } catch {
+    /* no JSON body */
+  }
+  throw new Error(`${what} returned HTTP ${res.status}${detail}`);
+}
+
+export function githubCaller(token: string, fetcher: Fetch = fetch) {
+  return async (method: string, path: string, body?: unknown) => {
     const res = await fetcher(`${GITHUB}${path}`, {
       method,
       headers: {
@@ -70,16 +81,11 @@ export function githubPulls(token: string, fetcher: Fetch = fetch): PullPort {
     });
     return res;
   };
-  const fail = async (what: string, res: Response): Promise<never> => {
-    let detail = "";
-    try {
-      const m = ((await res.json()) as { message?: unknown }).message;
-      if (typeof m === "string") detail = `: ${m.slice(0, 200)}`;
-    } catch {
-      /* no JSON body */
-    }
-    throw new Error(`${what} returned HTTP ${res.status}${detail}`);
-  };
+}
+
+export function githubPulls(token: string, fetcher: Fetch = fetch): PullPort {
+  const call = githubCaller(token, fetcher);
+  const fail = httpFailure;
   return {
     async open(repo, job, title, body) {
       const branch = `orbit/${job}`;
@@ -106,7 +112,7 @@ export function selectPulls(env: NodeJS.ProcessEnv): PullPort | undefined {
 }
 
 // Registers on the job registry: a `done` summary, from the API or from git, opens at most one PR per job.
-export function pullRequestOpener(jobs: Jobs, repos: Map<string, string>, pulls: PullPort | undefined, notify: Notifier, now: () => Date = () => new Date()) {
+export function pullRequestOpener(jobs: Jobs, repos: Map<string, string>, pulls: PullPort | undefined, notify: Notifier, now: () => Date = () => new Date(), onOpened?: (job: Job, url: string) => void) {
   const handle = async (job: Job, summary: string): Promise<void> => {
     const repo = job.launch?.routine ? repos.get(job.launch.routine) : undefined;
     if (!repo) return;
@@ -127,6 +133,14 @@ export function pullRequestOpener(jobs: Jobs, repos: Map<string, string>, pulls:
       }
       jobs.setPr(job.id, { at, url: result.url });
       notify.send(`PR ready: ${result.url}`, false);
+      // Only a PR ORBIT just opened gets a review; one that already existed does not.
+      if (result.status === "opened") {
+        try {
+          onOpened?.(jobs.get(job.id) ?? job, result.url);
+        } catch (err) {
+          console.error(JSON.stringify({ at: new Date().toISOString(), review: String(err) }));
+        }
+      }
     } catch (err) {
       const error = err instanceof Error ? err.message : "unknown error";
       jobs.setPr(job.id, { at, error });
@@ -134,7 +148,7 @@ export function pullRequestOpener(jobs: Jobs, repos: Map<string, string>, pulls:
     }
   };
   jobs.onSummary((job, fullText) => {
-    if (job.state !== "done" || job.pr) return;
+    if (job.kind === "review" || job.state !== "done" || job.pr) return;
     void handle(job, fullText ?? "").catch((err) => console.error(JSON.stringify({ at: new Date().toISOString(), pr: String(err) })));
   });
 }

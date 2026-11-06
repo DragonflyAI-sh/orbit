@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Identify } from "./identity.ts";
+import { jobLauncher } from "./job-launch.ts";
 import { jobRow } from "./job-view.ts";
 import type { Job, Jobs } from "./jobs.ts";
 import type { ControlRepo, Routine } from "./launcher.ts";
@@ -137,39 +138,8 @@ export function buildServer({
     problem: !jobs ? "jobs are not enabled" : !control ? "no orbit-work GitHub credential is installed" : routines.size ? undefined : "no Routine is configured",
   });
 
-  // The one launch path: the /jobs/launch route and a confirmed chat proposal both end here.
-  const launchJob = async (routineName: string, briefText: string): Promise<{ code: number; body: unknown }> => {
-    const routine = routines.get(routineName);
-    if (!routine) return { code: 400, body: { error: `Unknown routine. Configured: ${[...routines.keys()].join(", ") || "none"}.` } };
-    if (!control) return { code: 503, body: { error: "No orbit-work GitHub credential is installed, so the brief cannot be written." } };
-    if (!briefText.trim()) return { code: 400, body: { error: "A launch needs a brief." } };
-    const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);
-    const id = `${routine.name}-${stamp}-${Math.random().toString(36).slice(2, 6)}`;
-    const registered = jobs!.register(id);
-    if ("error" in registered) return { code: 400, body: { error: registered.error } };
-    const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString() };
-    const fail = (error: string) => {
-      jobs!.setLaunch(id, { ...launch, failedAt: new Date().toISOString(), error });
-      notify.send(`Job ${id} could not launch: ${error}`, false);
-      return { code: 502, body: { error, job: withHealth(jobs!.get(id)!) } };
-    };
-    try {
-      const pushed = await control.pushBrief(id, briefText.trim());
-      Object.assign(launch, { branch: pushed.branch, briefCommit: pushed.commit });
-      jobs!.setLaunch(id, launch);
-    } catch (err) {
-      return fail(`brief not written: ${err instanceof Error ? err.message : err}`);
-    }
-    // The token goes to the runner in the fire text, server to server; it is never returned or logged here.
-    const text = [`Job id: ${id}`, ...(publicJobUrl ? [`API: ${publicJobUrl}`, `Token: ${registered.token}`] : [])].join("\n");
-    try {
-      const fired = await routine.fire(text);
-      jobs!.setLaunch(id, { ...launch, ...fired });
-    } catch (err) {
-      return fail(`routine not fired: ${err instanceof Error ? err.message : err}`);
-    }
-    return { code: 202, body: withHealth(jobs!.get(id)!) };
-  };
+  // The one launch path: the /jobs/launch route and a confirmed chat proposal both end here (ORBIT's own review launches use jobLauncher directly).
+  const launchJob = jobLauncher({ jobs, control, routines, notify, publicJobUrl });
 
   const isOwnerOf = async (req: IncomingMessage) => Boolean(owner) && (await identify(req)) === owner;
   const audit = (port: string, action: string, decision: { allow: boolean; reason: string }) =>

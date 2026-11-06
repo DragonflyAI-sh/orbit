@@ -12,8 +12,17 @@ export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "su
 export type Steer = { n: number; text: string; at: string; deliveredAt?: string };
 export type Launch = { routine: string; at: string; branch?: string; briefCommit?: string; sessionId?: string; sessionUrl?: string; failedAt?: string; error?: string };
 export type PullRequest = { at: string; url?: string; error?: string };
+// Set on a `work` job once ORBIT starts its one review job, and updated as the review finishes.
+export type ReviewOutcome = { id?: string; at: string; verdict?: Verdict; commentUrl?: string; error?: string };
+export type Verdict = "no blocking issues" | "blocking issues" | "no verdict";
+// Set on a `review` job: what it reviews, and what became of its findings.
+export type ReviewOf = { of: string; prUrl: string; repo: string; comment?: { at: string; url?: string; error?: string }; verdict?: Verdict };
 export type Job = {
   id: string;
+  // Absent means `work`. A review job never opens a PR and never starts a review.
+  kind?: "work" | "review";
+  review?: ReviewOf;
+  reviewJob?: ReviewOutcome;
   launch?: Launch;
   // Set when ORBIT starts opening the project PR; once set, ORBIT never opens another.
   pr?: PullRequest;
@@ -123,6 +132,16 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
 
     setPr(id: string, pr: PullRequest | undefined): void {
       update(id, (j) => ({ ...j, pr }));
+    },
+
+    // Marks a job as a review job, with what it reviews.
+    setReview(id: string, review: ReviewOf): void {
+      update(id, (j) => ({ ...j, kind: "review", review }));
+    },
+
+    // The review of a work job; once set, ORBIT never starts another.
+    setReviewJob(id: string, reviewJob: ReviewOutcome | undefined): void {
+      update(id, (j) => ({ ...j, reviewJob }));
     },
 
     setLaunch(id: string, launch: Launch): void {

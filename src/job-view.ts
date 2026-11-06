@@ -48,6 +48,13 @@ export function jobRow(job: Job, health: Health) {
     prUrl: job.pr?.url,
     prError: job.pr?.error,
     prOpening: Boolean(job.pr && !job.pr.url && !job.pr.error),
+    kind: job.kind ?? "work",
+    reviewOf: job.review?.of,
+    reviewVerdict: job.review?.verdict ?? job.reviewJob?.verdict,
+    reviewCommentUrl: job.review?.comment?.url ?? job.reviewJob?.commentUrl,
+    reviewError: job.review?.comment?.error ?? job.reviewJob?.error,
+    reviewJobId: job.reviewJob?.id,
+    reviewPending: Boolean(job.reviewJob && !job.reviewJob.verdict && !job.reviewJob.error),
     pendingSteers: job.steers.filter((s) => !s.deliveredAt).length,
   };
 }

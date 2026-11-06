@@ -272,13 +272,20 @@
   function jobCard(r) {
     const bad = r.health === "launch-failed", warn = r.health === "not-started" || r.health === "quiet";
     const card = el("div", { className: `card${bad ? " bad" : warn ? " warn" : ""}` });
-    const row = el("div", { className: "row" }, el("span", { className: "id", textContent: r.id }), el("span", { textContent: r.state }),
+    const row = el("div", { className: "row" }, el("span", { className: "id", textContent: r.id }), el("span", { className: "meta", textContent: r.kind === "review" ? `review of ${r.reviewOf}` : "work" }), el("span", { textContent: r.state }),
       el("span", { className: `health-${r.health}`, textContent: r.health }));
     const link = safeLink(r.sessionUrl, "session on claude.ai");
     if (link) row.append(link);
     const pr = safeLink(r.prUrl, "pull request");
     if (pr) row.append(pr); else if (r.prOpening) row.append(el("span", { className: "meta", textContent: "opening pull request…" }));
+    if (r.kind !== "review" && r.reviewJobId) {
+      const text = r.reviewVerdict ? `review: ${r.reviewVerdict}` : r.reviewError ? "review did not complete" : "review running…";
+      row.append(el("span", { className: r.reviewVerdict === "blocking issues" || r.reviewError ? "health-launch-failed" : "meta", textContent: text }));
+      const c = safeLink(r.reviewCommentUrl, "review comment");
+      if (c) row.append(c);
+    }
     card.append(row);
+    if (r.reviewError) card.append(el("div", { className: "latest health-launch-failed", textContent: `Review: ${r.reviewError}` }));
     if (r.prError) card.append(el("div", { className: "latest health-launch-failed", textContent: `Pull request not opened: ${r.prError}` }));
     if (r.launchError) card.append(el("div", { className: "latest health-launch-failed", textContent: r.launchError }));
     card.append(el("div", { className: "latest", textContent: r.latest?.text || (r.latest ? `${r.latest.type}${r.latest.status ? ": " + r.latest.status : ""}` : "No report yet") }));
