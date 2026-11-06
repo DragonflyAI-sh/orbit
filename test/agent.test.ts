@@ -256,3 +256,42 @@ test("state-changing requests from another site are refused; same-origin and non
   assert.equal((await launch({ "sec-fetch-site": "same-origin", origin: `http://${host}` })).status, 202);
   assert.equal((await fetch(`${base}/status`, { headers: { "sec-fetch-site": "cross-site" } })).status, 200, "reads are unaffected");
 });
+
+test("jobs_list gives the model the true total and short rows, even with many jobs", async () => {
+  caller = "rai@example.com";
+  for (let i = 0; i < 30; i++) {
+    const id = `many-${String(i).padStart(2, "0")}`;
+    jobs.register(id);
+    jobs.setLaunch(id, { routine: "orbit", at: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(), sessionUrl: `https://claude.ai/code/session_${i}` });
+    for (let k = 0; k < 30; k++) jobs.record(id, { type: "checkin", text: "x".repeat(300) });
+  }
+  const total = jobs.list().length;
+  const m = scripted([{ text: "", calls: [call("jobs_list", {})] }, { text: "counted", calls: [] }]);
+  model = m;
+  await (await chat()).json();
+  const out = m.seen[1].input.at(-1) as { output: string };
+  assert.ok(out.output.length < 8000, "the result is not clipped");
+  const result = JSON.parse(out.output).result;
+  assert.equal(result.total, jobs.all().length);
+  assert.equal(result.jobs.length, result.total, "every job is listed");
+  assert.ok(result.total >= 30 && total >= 30);
+  const ids = result.jobs.map((j: { id: string }) => j.id);
+  assert.ok(ids.indexOf("many-29") < ids.indexOf("many-00"), "newest first");
+  const row = result.jobs[ids.indexOf("many-29")];
+  assert.deepEqual(Object.keys(row).sort(), ["health", "id", "lastEvent", "launchedAt", "routine", "sessionUrl", "state"]);
+  assert.deepEqual(Object.keys(row.lastEvent).sort(), ["at", "status", "type"]);
+});
+
+test("job_status caps events to the last 20 and says how many were left out", async () => {
+  caller = "rai@example.com";
+  const m = scripted([{ text: "", calls: [call("job_status", { id: "many-00" })] }, { text: "ok", calls: [] }]);
+  model = m;
+  await (await chat()).json();
+  const out = m.seen[1].input.at(-1) as { output: string };
+  const r = JSON.parse(out.output).result;
+  assert.equal(r.events.length, 20);
+  assert.equal(r.eventsOmitted, 10);
+  assert.match(r.eventsNote, /10 earlier events left out/);
+  assert.ok(r.health);
+  assert.ok(Array.isArray(r.steers));
+});

@@ -1,5 +1,6 @@
 import type { ChatTool, Proposals } from "./agent.ts";
-import type { Jobs, Job } from "./jobs.ts";
+import { compactList, detailJob } from "./job-view.ts";
+import type { Jobs } from "./jobs.ts";
 import type { MemoryPort } from "./memory.ts";
 import type { Notifier } from "./notify.ts";
 import type { Toolbox } from "./tools.ts";
@@ -16,7 +17,6 @@ export type ChatToolDeps = {
   memory: MemoryPort;
   toolbox: Toolbox;
   jobs?: Jobs;
-  withHealth?: (job: Job) => unknown;
   notify: Notifier;
   proposals: Proposals;
   // Routine names that can be launched, and whether the brief can be written. Empty when launching is not possible.
@@ -54,22 +54,21 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
   ];
   const jobs = d.jobs;
   if (jobs) {
-    const view = (j: Job) => (d.withHealth ? d.withHealth(j) : j);
     tools.push(
       {
         name: "jobs_list",
-        description: "List ORBIT jobs (cloud runners) with state and health.",
+        description: "List all ORBIT jobs (cloud runners), newest first: total, then one short row per job. Use job_status for detail.",
         parameters: obj({}, []),
-        run: async () => ({ value: jobs.list().map(view), provenance: "live", source: "jobs" }),
+        run: async () => ({ value: compactList(jobs.all(), (j) => jobs.health(j)), provenance: "live", source: "jobs" }),
       },
       {
         name: "job_status",
-        description: "State, health, events and steers of one job.",
+        description: "State, health, steers and the last 20 events of one job (it says how many earlier events were left out).",
         parameters: obj({ id: str("Job id") }, ["id"]),
         run: async (a) => {
           const job = jobs.get(need(a, "id"));
           if (!job) throw new Error("No job with that id.");
-          return { value: view(job), provenance: "live", source: "jobs" };
+          return { value: detailJob(job, jobs.health(job)), provenance: "live", source: "jobs" };
         },
       },
       {

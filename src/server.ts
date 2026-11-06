@@ -238,7 +238,7 @@ export function buildServer({
       }
       const current = limits(isOwner);
       const offered = isOwner && model.step
-        ? chatTools({ memory, toolbox: tools, jobs, withHealth: jobs ? withHealth : undefined, notify, proposals, launchable })
+        ? chatTools({ memory, toolbox: tools, jobs, notify, proposals, launchable })
         : [];
       if (!offered.length) {
         current.push(

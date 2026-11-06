@@ -118,6 +118,8 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
 
     get: find,
     list: (): Job[] => list().slice(-50).reverse(),
+    // Every stored job, oldest first.
+    all: (): Job[] => list(),
 
     status(): PortStatus {
       const active = list().filter((j) => (j.state === "registered" || j.state === "running") && !j.launch?.failedAt).length;
