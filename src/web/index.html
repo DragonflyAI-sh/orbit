@@ -57,6 +57,32 @@
   .proposal pre { margin: 4px 0; white-space: pre-wrap; max-height: 240px; overflow-y: auto; font: 12px/1.4 ui-monospace, monospace; }
   .proposal button { padding: 4px 12px; margin-right: 6px; }
   .proposal button.cancel { background: var(--card); color: var(--fg); border: 1px solid var(--line); }
+  [hidden] { display: none !important; }
+  nav { display: flex; gap: 6px; margin-bottom: 8px; }
+  nav button { padding: 4px 14px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
+  nav button[aria-pressed="true"] { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: var(--on-accent); border-color: transparent; }
+  #jobs { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  #jobs h2 { margin: 6px 0 0; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .card { max-width: 720px; width: 100%; padding: 10px 12px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); overflow-wrap: anywhere; }
+  .card.bad { border-color: var(--down); }
+  .card.warn { border-color: var(--mock); }
+  .card .row { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+  .card .id { font: 600 13px ui-monospace, monospace; }
+  .card .meta { font-size: 12px; color: var(--muted); }
+  .card .latest { margin-top: 4px; font-size: 14px; }
+  .card a { color: var(--accent-2); }
+  .card button.open { margin-top: 6px; padding: 4px 12px; }
+  .health-not-started, .health-quiet { color: var(--mock); font-weight: 600; }
+  .health-launch-failed { color: var(--down); font-weight: 600; }
+  .health-ok { color: var(--live); }
+  .ev { font-size: 13px; padding: 4px 0; border-top: 1px solid var(--line); white-space: pre-wrap; }
+  .ev:first-child { border-top: 0; }
+  #jobs textarea { width: 100%; }
+  #jobs .steerbox { display: flex; flex-direction: column; gap: 6px; }
+  #jobs .steerbox button { align-self: flex-start; padding: 6px 16px; }
+  #jobs button.back, #jobs button.cancel { background: var(--card); color: var(--fg); border: 1px solid var(--line); padding: 4px 12px; align-self: flex-start; }
+  #jobs .empty { color: var(--muted); }
+  @media (max-width: 480px) { #jobs, #log { padding: 12px; } .card { padding: 8px 10px; } }
   form { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
   textarea { flex: 1; resize: none; font: inherit; padding: 8px; border-radius: 10px; border: 1px solid var(--line);
              background: var(--card); color: var(--fg); }
@@ -66,8 +92,9 @@
 </style>
 </head>
 <body>
-<header><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><div id="ports"></div><div id="signin"></div><div id="inbox"></div></header>
+<header><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" hidden><button type="button" data-tab="chat" aria-pressed="true">Chat</button><button type="button" data-tab="jobs" aria-pressed="false">Jobs <span id="jobsbadge"></span></button></nav><div id="ports"></div><div id="signin"></div><div id="inbox"></div></header>
 <main id="log"></main>
+<section id="jobs" hidden aria-live="off"></section>
 <form id="form"><textarea id="input" rows="2" placeholder="Message ORBIT" required></textarea><button>Send</button></form>
 <script>
   const history = [];
@@ -215,6 +242,128 @@
       box.append(document.createElement("br"), button);
     } catch { /* the next refresh tries again */ }
   }
+
+
+  // ---- Jobs view (owner only). The tabs appear only when the owner routes answer. ----
+  const jobsBox = document.getElementById("jobs");
+  const tabs = document.getElementById("tabs");
+  const chatForm = document.getElementById("form");
+  let tab = "chat";
+  let openJob = null;      // job id whose detail is showing
+  const el = (tag, props, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
+  const ago = (iso) => {
+    if (!iso) return "never";
+    const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    return s < 90 ? `${Math.round(s)}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`;
+  };
+  const safeLink = (url, text) => /^https:\/\/(claude\.ai|github\.com)\//.test(url || "")
+    ? el("a", { href: url, target: "_blank", rel: "noopener noreferrer", textContent: text }) : null;
+
+  function setTab(next) {
+    tab = next;
+    for (const b of tabs.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.tab === next));
+    document.getElementById("log").hidden = next !== "chat";
+    chatForm.hidden = next !== "chat";
+    jobsBox.hidden = next !== "jobs";
+    if (next === "jobs") refreshJobs();
+  }
+  tabs.addEventListener("click", (e) => { const t = e.target.closest("button")?.dataset.tab; if (t) setTab(t); });
+
+  function jobCard(r) {
+    const bad = r.health === "launch-failed", warn = r.health === "not-started" || r.health === "quiet";
+    const card = el("div", { className: `card${bad ? " bad" : warn ? " warn" : ""}` });
+    const row = el("div", { className: "row" }, el("span", { className: "id", textContent: r.id }), el("span", { textContent: r.state }),
+      el("span", { className: `health-${r.health}`, textContent: r.health }));
+    const link = safeLink(r.sessionUrl, "session on claude.ai");
+    if (link) row.append(link);
+    card.append(row);
+    if (r.launchError) card.append(el("div", { className: "latest health-launch-failed", textContent: r.launchError }));
+    card.append(el("div", { className: "latest", textContent: r.latest?.text || (r.latest ? `${r.latest.type}${r.latest.status ? ": " + r.latest.status : ""}` : "No report yet") }));
+    const reported = r.latest ? `reported ${ago(r.latest.at)} through ${r.latest.via === "git" ? "git" : "the API"}` : `launched ${ago(r.launchedAt)}; nothing reported`;
+    card.append(el("div", { className: "meta", textContent: reported + (r.pendingSteers ? ` · ${r.pendingSteers} steer(s) waiting` : "") }));
+    card.append(el("button", { type: "button", className: "open", textContent: "Open", onclick: () => { openJob = r.id; steerNote = ""; refreshJobs(); } }));
+    return card;
+  }
+
+  function proposalBox(p) {
+    const holder = el("div", { className: "card" });
+    showProposal(holder, p);
+    const box = holder.querySelector(".proposal");
+    // After an answer, drop the card on the next refresh instead of leaving a stale Confirm button.
+    box.addEventListener("click", () => setTimeout(refreshJobs, 1500));
+    return holder;
+  }
+
+  let steerDraft = "", steerNote = "";
+  async function renderDetail(id) {
+    const res = await fetch(`/jobs/${encodeURIComponent(id)}`);
+    if (!res.ok) { openJob = null; return renderList(); }
+    const j = await res.json();
+    const existing = jobsBox.querySelector("textarea.steer");
+    if (existing) steerDraft = existing.value;
+    const events = el("div", { className: "card" }, ...(j.events.length ? [...j.events].reverse().slice(0, 100).map((ev) =>
+      el("div", { className: "ev", textContent: `${ago(ev.at)} · ${ev.type}${ev.status ? " " + ev.status : ""} · ${ev.via === "git" ? "git" : "API"}${ev.text ? "\n" + ev.text : ""}` })) : [el("div", { className: "empty", textContent: "No events yet." })]));
+    const steers = el("div", { className: "card" }, ...(j.steers.length ? [...j.steers].reverse().map((s) =>
+      el("div", { className: "ev", textContent: `#${s.n} · ${ago(s.at)} · ${s.deliveredAt ? "picked up " + ago(s.deliveredAt) : "waiting for the runner"}\n${s.text}` })) : [el("div", { className: "empty", textContent: "No steers yet." })]));
+    const area = el("textarea", { className: "steer", rows: 3, placeholder: "Steer this job. It picks the message up at its next check-in." });
+    area.value = steerDraft;
+    const status = el("div", { className: "meta", textContent: steerNote });
+    const send = el("button", { type: "button", textContent: "Send steer" });
+    send.addEventListener("click", async () => {
+      const text = area.value.trim();
+      if (!text) return;
+      send.disabled = true;
+      try {
+        const r = await fetch(`/jobs/${encodeURIComponent(id)}/steer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+        const b = await r.json();
+        if (!r.ok) { steerNote = status.textContent = `Not sent: ${b.error}`; }
+        else { steerDraft = ""; area.value = ""; steerNote = status.textContent = `Steer ${b.n} queued.`; refreshJobs(); }
+      } catch { status.textContent = "ORBIT did not answer."; }
+      send.disabled = false;
+    });
+    const head = el("div", { className: "card" + (j.health === "launch-failed" ? " bad" : "") },
+      el("div", { className: "row" }, el("span", { className: "id", textContent: j.id }), el("span", { textContent: j.state }), el("span", { className: `health-${j.health}`, textContent: j.health }),
+        ...[safeLink(j.launch?.sessionUrl, "session on claude.ai")].filter(Boolean)));
+    jobsBox.replaceChildren(
+      el("button", { type: "button", className: "back", textContent: "← All jobs", onclick: () => { openJob = null; refreshJobs(); } }),
+      head, el("h2", { textContent: "Steer" }), el("div", { className: "card steerbox" }, area, send, status),
+      el("h2", { textContent: "Steers" }), steers, el("h2", { textContent: "Events (newest first)" }), events);
+  }
+
+  async function renderList() {
+    const [jr, pr] = await Promise.all([fetch("/jobs?view=rows"), fetch("/chat/proposals")]);
+    if (!jr.ok) { tabs.hidden = true; setTab("chat"); return; }
+    const rows = (await jr.json()).jobs;
+    const proposals = pr.ok ? (await pr.json()).proposals : [];
+    const attention = rows.filter((r) => ["not-started", "quiet", "launch-failed"].includes(r.health)).length + proposals.length;
+    document.getElementById("jobsbadge").textContent = attention ? `(${attention})` : "";
+    jobsBox.replaceChildren(
+      ...(proposals.length ? [el("h2", { textContent: `Waiting for your click (${proposals.length})` }), ...proposals.map(proposalBox)] : []),
+      el("h2", { textContent: `Jobs (${rows.length})` }),
+      ...(rows.length ? rows.map(jobCard) : [el("div", { className: "empty", textContent: "No jobs yet." })]));
+  }
+
+  async function refreshJobs() {
+    try {
+      if (tab !== "jobs") {
+        // Keep the tab badge fresh and discover whether this visitor is the owner.
+        const jr = await fetch("/jobs?view=rows");
+        tabs.hidden = !jr.ok;
+        if (jr.ok) {
+          const rows = (await jr.json()).jobs;
+          const pr = await fetch("/chat/proposals");
+          const n = rows.filter((r) => ["not-started", "quiet", "launch-failed"].includes(r.health)).length + (pr.ok ? (await pr.json()).proposals.length : 0);
+          document.getElementById("jobsbadge").textContent = n ? `(${n})` : "";
+        }
+        return;
+      }
+      if (openJob) await renderDetail(openJob); else await renderList();
+    } catch { /* the next refresh tries again */ }
+  }
+  // Every 15 seconds, only while the page is visible.
+  setInterval(() => { if (document.visibilityState === "visible") refreshJobs(); }, 15000);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refreshJobs(); });
+  refreshJobs();
 
   refreshStatus();
   refreshInbox();

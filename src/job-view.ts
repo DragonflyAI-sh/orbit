@@ -31,3 +31,20 @@ export function detailJob(job: Job, health: Health) {
   const omitted = job.events.length - events.length;
   return { ...job, health, events, eventsOmitted: omitted, eventsNote: omitted ? `${omitted} earlier events left out; ${events.length} of ${job.events.length} shown.` : undefined };
 }
+
+// One row for the jobs page: no events or steers, and the latest check-in line with how it arrived.
+export function jobRow(job: Job, health: Health) {
+  const last = [...job.events].reverse().find((e) => e.text) ?? job.events.at(-1);
+  return {
+    id: job.id,
+    state: job.state,
+    health,
+    routine: job.launch?.routine,
+    launchedAt: job.launch?.at,
+    launchError: job.launch?.error,
+    sessionUrl: job.launch?.sessionUrl,
+    latest: last ? { at: last.at, type: last.type, status: last.status, text: last.text?.slice(0, 300), via: last.via ?? "api" } : null,
+    lastEventAt: job.lastEventAt,
+    pendingSteers: job.steers.filter((s) => !s.deliveredAt).length,
+  };
+}

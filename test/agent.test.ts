@@ -295,3 +295,35 @@ test("job_status caps events to the last 20 and says how many were left out", as
   assert.ok(r.health);
   assert.ok(Array.isArray(r.steers));
 });
+
+test("open proposals can be listed by the owner after the chat reply is gone, and confirmed from that list", async () => {
+  caller = "rai@example.com";
+  jobs.register("listed");
+  model = scripted([{ text: "", calls: [call("job_steer", { id: "listed", text: "Please add a test." })] }, { text: "Proposed.", calls: [] }]);
+  const made = (await (await chat()).json()).proposals[0];
+  const open = (await (await fetch(`${base}/chat/proposals`)).json()).proposals;
+  assert.ok(open.some((p: { id: string; kind: string; text: string }) => p.id === made.id && p.kind === "job_steer" && p.text === "Please add a test."));
+  caller = "someone@example.com";
+  assert.equal((await fetch(`${base}/chat/proposals`)).status, 403, "only the owner sees proposals");
+  caller = "rai@example.com";
+  assert.equal((await fetch(`${base}/chat/proposals/${made.id}/confirm`, { method: "POST" })).status, 201);
+  const after = (await (await fetch(`${base}/chat/proposals`)).json()).proposals;
+  assert.ok(!after.some((p: { id: string }) => p.id === made.id), "a confirmed proposal is no longer open");
+});
+
+test("the jobs page rows carry the latest check-in line and how it arrived, without events or steers", async () => {
+  caller = "rai@example.com";
+  jobs.register("row-job");
+  jobs.record("row-job", { type: "checkin", text: "Working on commit 2" });
+  jobs.record("row-job", { type: "checkin", text: "Found in git", via: "git" });
+  const rows = (await (await fetch(`${base}/jobs?view=rows`)).json()).jobs;
+  const row = rows.find((r: { id: string }) => r.id === "row-job");
+  assert.equal(row.latest.text, "Found in git");
+  assert.equal(row.latest.via, "git");
+  assert.equal(row.health, "ok");
+  assert.equal(row.events, undefined);
+  assert.equal(row.steers, undefined);
+  caller = "someone@example.com";
+  assert.equal((await fetch(`${base}/jobs?view=rows`)).status, 403);
+  caller = "rai@example.com";
+});
