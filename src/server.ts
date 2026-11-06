@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Identify } from "./identity.ts";
-import type { Jobs } from "./jobs.ts";
+import type { Job, Jobs } from "./jobs.ts";
+import type { ControlRepo, Routine } from "./launcher.ts";
 import type { MemoryPort } from "./memory.ts";
 import type { Login } from "./chatgpt.ts";
 import type { Message, ModelPort } from "./model.ts";
@@ -33,6 +34,8 @@ export type Deps = {
   nodes: Nodes;
   jobs?: Jobs;
   publicJobUrl?: string;
+  control?: ControlRepo;
+  routines?: Map<string, Routine>;
   commit: string;
   owner?: string;
   identify: Identify;
@@ -81,6 +84,8 @@ export function buildServer({
   nodes,
   jobs,
   publicJobUrl,
+  control,
+  routines = new Map(),
   commit,
   owner,
   identify,
@@ -99,7 +104,7 @@ export function buildServer({
     return [
       fixed("policy", "fail-closed", "Allows reads and chat replies; memory, notify, schedule, runs, tools, devices and jobs for the owner only; refuses everything else."),
       fixed("channel", "web", "Web chat at /. Discord and CLI are not built."),
-      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...(jobs ? [jobs.status()] : []), ...ports.map((p) => p.status())].map((s) => withStaleness(s, now)),
+      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...(jobs ? [launcherStatus(jobs.status())] : []), ...ports.map((p) => p.status())].map((s) => withStaleness(s, now)),
     ];
   };
   const limits = (isOwner: boolean): string[] => [
@@ -108,6 +113,16 @@ export function buildServer({
       .map((s) => `${s.port} is ${s.state}: ${s.detail}`),
     ...(isOwner ? [] : ["memory is refused: this request is not from the owner, so you have no access to Rai's vault"]),
   ];
+  const launcherStatus = (st: PortStatus): PortStatus => {
+    const names = [...routines.keys()];
+    const ready = control && names.length;
+    return {
+      ...st,
+      detail: `${st.detail} ${ready ? `Launches through Routines: ${names.join(", ")}.` : `Cannot launch yet: ${control ? "" : "no orbit-work GitHub credential. "}${names.length ? "" : "no Routine configured."}`}`.trim(),
+    };
+  };
+  const withHealth = (job: Job) => ({ ...job, health: jobs!.health(job) });
+
   const isOwnerOf = async (req: IncomingMessage) => Boolean(owner) && (await identify(req)) === owner;
   const audit = (port: string, action: string, decision: { allow: boolean; reason: string }) =>
     console.log(JSON.stringify({ at: new Date().toISOString(), port, action, ...decision }));
@@ -241,7 +256,42 @@ export function buildServer({
 
     if (jobs && url.pathname === "/jobs" && req.method === "GET") {
       if (!(await owned("jobs", "list"))) return;
-      return send(res, 200, { jobs: jobs.list() });
+      return send(res, 200, { jobs: jobs.list().map(withHealth) });
+    }
+    if (jobs && url.pathname === "/jobs/launch" && req.method === "POST") {
+      if (!(await owned("jobs", "launch"))) return;
+      const input = await body();
+      if (!input) return;
+      const routine = routines.get(String(input.routine ?? ""));
+      if (!routine) return send(res, 400, { error: `Unknown routine. Configured: ${[...routines.keys()].join(", ") || "none"}.` });
+      if (!control) return send(res, 503, { error: "No orbit-work GitHub credential is installed, so the brief cannot be written." });
+      if (typeof input.brief !== "string" || !input.brief.trim()) return send(res, 400, { error: "A launch needs a brief." });
+      const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);
+      const id = `${routine.name}-${stamp}-${Math.random().toString(36).slice(2, 6)}`;
+      const registered = jobs.register(id);
+      if ("error" in registered) return send(res, 400, { error: registered.error });
+      const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString() };
+      const fail = (error: string) => {
+        jobs.setLaunch(id, { ...launch, failedAt: new Date().toISOString(), error });
+        notify.send(`Job ${id} could not launch: ${error}`, false);
+        return send(res, 502, { error, job: withHealth(jobs.get(id)!) });
+      };
+      try {
+        const pushed = await control.pushBrief(id, input.brief.trim());
+        Object.assign(launch, { branch: pushed.branch, briefCommit: pushed.commit });
+        jobs.setLaunch(id, launch);
+      } catch (err) {
+        return fail(`brief not written: ${err instanceof Error ? err.message : err}`);
+      }
+      // The token goes to the runner in the fire text, server to server; it is never returned or logged here.
+      const text = [`Job id: ${id}`, ...(publicJobUrl ? [`API: ${publicJobUrl}`, `Token: ${registered.token}`] : [])].join("\n");
+      try {
+        const fired = await routine.fire(text);
+        jobs.setLaunch(id, { ...launch, ...fired });
+      } catch (err) {
+        return fail(`routine not fired: ${err instanceof Error ? err.message : err}`);
+      }
+      return send(res, 202, withHealth(jobs.get(id)!));
     }
     if (jobs && url.pathname === "/jobs" && req.method === "POST") {
       if (!(await owned("jobs", "register"))) return;
@@ -255,7 +305,7 @@ export function buildServer({
     if (jobs && jobMatch && req.method === "GET" && !jobMatch[2]) {
       if (!(await owned("jobs", "get"))) return;
       const job = jobs.get(jobMatch[1]);
-      return job ? send(res, 200, job) : send(res, 404, { error: "No job with that id." });
+      return job ? send(res, 200, withHealth(job)) : send(res, 404, { error: "No job with that id." });
     }
     if (jobs && jobMatch && req.method === "POST" && jobMatch[2]) {
       if (!(await owned("jobs", "steer"))) return;

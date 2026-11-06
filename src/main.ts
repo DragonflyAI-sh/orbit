@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { tailscaleIdentify } from "./identity.ts";
 import { buildIngress } from "./ingress.ts";
 import { jobSecret, jobs as jobRegistry } from "./jobs.ts";
+import { selectControl, selectRoutines } from "./launcher.ts";
 import { selectMemory } from "./memory.ts";
 import { chatgptModel, tokenFile } from "./chatgpt.ts";
 import { selectModel } from "./model.ts";
@@ -66,6 +67,8 @@ buildServer({
   nodes,
   jobs,
   publicJobUrl: process.env.ORBIT_PUBLIC_JOB_URL || undefined,
+  control: selectControl(process.env),
+  routines: selectRoutines(process.env),
   commit,
   owner,
   identify: tailscaleIdentify(),
