@@ -19,6 +19,7 @@ import type { Runner } from "./runs.ts";
 import type { Toolbox } from "./tools.ts";
 import type { JobInput, Scheduler } from "./schedule.ts";
 import { parseJob } from "./schedule.ts";
+import type { Watch } from "./watch.ts";
 
 export const STALE_AFTER_MS = 5 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -45,6 +46,7 @@ export type Deps = {
   identify: Identify;
   deploy?: () => unknown;
   proposals?: Proposals;
+  watch?: Watch;
 };
 
 export function withStaleness(status: PortStatus, now: Date): PortStatus {
@@ -96,6 +98,7 @@ export function buildServer({
   identify,
   deploy = () => ({ state: "unknown" }),
   proposals = newProposals(),
+  watch,
 }: Deps): Server {
   const byName = new Map(ports.map((p) => [p.name, p]));
   const fixed = (port: string, impl: string, detail: string): PortStatus => ({
@@ -110,9 +113,10 @@ export function buildServer({
     return [
       fixed("policy", "fail-closed", "Allows reads and chat replies; memory, notify, schedule, runs, tools, devices and jobs for the owner only; refuses everything else."),
       fixed("channel", "web", "Web chat at /. Discord and CLI are not built."),
-      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...(jobs ? [launcherStatus(jobs.status())] : []), ...ports.map((p) => p.status())].map((s) => withStaleness(s, now)),
+      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...(jobs ? [launcherStatus(jobs.status())] : []), ...ports.map((p) => p.status()), ...(watch ? [watch.status()] : [])].map((s) => withStaleness(s, now)),
     ];
   };
+  watch?.attach(() => statuses().filter((st) => st.port !== "watch"));
   const limits = (isOwner: boolean): string[] => [
     ...statuses()
       .filter((s) => s.state !== "live" && s.port !== "model")

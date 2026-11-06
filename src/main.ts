@@ -14,6 +14,7 @@ import { memoryReport, modelTask, runner, toolCall } from "./runs.ts";
 import { scheduler } from "./schedule.ts";
 import { buildServer } from "./server.ts";
 import { jsonStore } from "./store.ts";
+import { watcher } from "./watch.ts";
 import { githubRepoStatus, toolbox } from "./tools.ts";
 
 const port = Number(process.env.PORT ?? 8790);
@@ -35,6 +36,7 @@ const stateDir = process.env.STATE_DIRECTORY;
 const model = selectModel(process.env, (name) => chatgptModel(name, tokenFile(stateDir)));
 const memory = selectMemory(process.env);
 const notify = notifier(jsonStore(stateDir, "notifications", []), selectDiscord(process.env));
+const watch = watcher(jsonStore(stateDir, "watch", { ports: {} }), notify);
 const tools = toolbox([githubRepoStatus()]);
 const owner = process.env.ORBIT_OWNER || undefined;
 const nodes = devicePresence(tailscaleStatus(), owner);
@@ -51,13 +53,21 @@ if (ingressPort) {
 const runs = runner(jsonStore(stateDir, "runs", []), [memoryReport(memory), modelTask(model), toolCall(tools)], notify);
 runs.recover();
 const schedule = scheduler(jsonStore(stateDir, "jobs", []), notify, () => new Date(), (worker, input) => runs.submit(worker, input));
+const watchTick = () => {
+  try {
+    watch.tick();
+  } catch (err) {
+    console.error(JSON.stringify({ at: new Date().toISOString(), watch: String(err) }));
+  }
+};
 const tick = () =>
   schedule
     .tick()
     .then(() => runs.pump())
     .then(() => nodes.refresh())
     .then(() => reconcile())
-    .catch((err) => console.error(JSON.stringify({ at: new Date().toISOString(), tick: String(err) })));
+    .catch((err) => console.error(JSON.stringify({ at: new Date().toISOString(), tick: String(err) })))
+    .finally(watchTick);
 tick();
 setInterval(tick, 30_000);
 
@@ -71,6 +81,7 @@ buildServer({
   tools,
   nodes,
   jobs,
+  watch,
   publicJobUrl: process.env.ORBIT_PUBLIC_JOB_URL || undefined,
   control,
   routines: selectRoutines(process.env),
