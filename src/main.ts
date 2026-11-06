@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { tailscaleIdentify } from "./identity.ts";
 import { buildIngress } from "./ingress.ts";
 import { jobSecret, jobs as jobRegistry } from "./jobs.ts";
-import { selectControl, selectRoutines } from "./launcher.ts";
+import { gitReconciler, selectControl, selectRoutines } from "./launcher.ts";
 import { selectMemory } from "./memory.ts";
 import { chatgptModel, tokenFile } from "./chatgpt.ts";
 import { selectModel } from "./model.ts";
@@ -38,6 +38,8 @@ const tools = toolbox([githubRepoStatus()]);
 const owner = process.env.ORBIT_OWNER || undefined;
 const nodes = devicePresence(tailscaleStatus(), owner);
 const jobs = jobRegistry(jsonStore(stateDir, "jobs-cloud", []), jobSecret(stateDir), notify);
+const control = selectControl(process.env);
+const reconcile = control ? gitReconciler(jobs, control) : async () => {};
 
 // The job listener binds to localhost only; Tailscale Funnel is what publishes it.
 const ingressPort = process.env.ORBIT_INGRESS_PORT ? Number(process.env.ORBIT_INGRESS_PORT) : undefined;
@@ -52,6 +54,7 @@ const tick = () =>
     .tick()
     .then(() => runs.pump())
     .then(() => nodes.refresh())
+    .then(() => reconcile())
     .catch((err) => console.error(JSON.stringify({ at: new Date().toISOString(), tick: String(err) })));
 tick();
 setInterval(tick, 30_000);
@@ -67,7 +70,7 @@ buildServer({
   nodes,
   jobs,
   publicJobUrl: process.env.ORBIT_PUBLIC_JOB_URL || undefined,
-  control: selectControl(process.env),
+  control,
   routines: selectRoutines(process.env),
   commit,
   owner,
