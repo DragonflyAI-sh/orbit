@@ -15,6 +15,8 @@ export type Step = { text: string; calls: ToolCall[] };
 
 export type ModelPort = {
   status(): PortStatus;
+  // Periodic upkeep (renewing a login before it expires). Never throws; absent when there is nothing to maintain.
+  maintain?(): Promise<void>;
   reply(messages: Message[], limits: string[], notes?: string): Promise<Result<string>>;
   // One model turn with tools offered. Absent when the model cannot call tools (the mock).
   step?(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<Step>;

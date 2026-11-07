@@ -35,7 +35,8 @@ function readDeploy(): unknown {
 
 // systemd sets STATE_DIRECTORY from StateDirectory=orbit. Without it, state is in memory and /status says so.
 const stateDir = process.env.STATE_DIRECTORY;
-const model = selectModel(process.env, (name) => chatgptModel(name, tokenFile(stateDir)));
+const chatgpt: { current?: ReturnType<typeof chatgptModel> } = {};
+const model = selectModel(process.env, (name) => (chatgpt.current = chatgptModel(name, tokenFile(stateDir))));
 const memory = selectMemory(process.env);
 const notify = notifier(jsonStore(stateDir, "notifications", []), selectDiscord(process.env));
 const tools = toolbox([githubRepoStatus()]);
@@ -66,16 +67,28 @@ const watchTick = () => {
     console.error(JSON.stringify({ at: new Date().toISOString(), watch: String(err) }));
   }
 };
-const tick = () =>
-  schedule
+const tick = () => {
+  // Renew the ChatGPT login shortly before it expires. Not awaited: a slow token endpoint must not hold up the tick
+  // or the watch. maintain() never throws and runs one renewal at a time.
+  void model.maintain?.();
+  return schedule
     .tick()
     .then(() => runs.pump())
     .then(() => nodes.refresh())
     .then(() => reconcile())
     .catch((err) => console.error(JSON.stringify({ at: new Date().toISOString(), tick: String(err) })))
     .finally(watchTick);
+};
 tick();
-setInterval(tick, 30_000);
+const ticker = setInterval(tick, 30_000);
+
+// On shutdown, stop ticking and let a renewal in flight finish, so a rotated token is saved before exit.
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.once(signal, () => {
+    clearInterval(ticker);
+    void Promise.race([chatgpt.current?.stop(), new Promise((r) => setTimeout(r, 10_000))]).finally(() => process.exit(0));
+  });
+}
 
 buildServer({
   ports: MOCK_PORT_NAMES.map((name) => mockPort(name)),

@@ -19,7 +19,17 @@ const REGISTER_CLIENT = "dynamic_agent_client";
 const SCOPE = "openid email profile resource.invoke chatgpt.tokens.use.direct offline_access";
 const SHARING_SCOPES = ["chatgpt.tokens.use.direct", "chatpass.enable.request.direct"];
 const LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
+// On-demand renewal (a call finds the token about to expire) happens inside this margin of expiry.
 const REFRESH_EARLY_MS = 5 * 60 * 1000;
+// Background renewal starts earlier, so it normally wins and a call never has to wait for it.
+const REFRESH_AHEAD_MS = 10 * 60 * 1000;
+// Either margin is capped at half of the last token lifetime seen, so a short-lived token is not renewed in a loop.
+// After a successful renewal, no further background attempt for at least this long.
+const MIN_RENEW_GAP_MS = 60 * 1000;
+// Retry delays after a failed renewal: 1, 2, 4, 8 minutes, then every 15. A revoked login is not retried.
+const BACKOFF_BASE_MS = 60 * 1000;
+const BACKOFF_MAX_MS = 15 * 60 * 1000;
+const TOKEN_REQUEST_TIMEOUT_MS = 20 * 1000;
 
 export type Tokens = {
   access: string;
@@ -71,15 +81,26 @@ const decodePart = (part: string) => JSON.parse(Buffer.from(part, "base64url").t
 
 type TokenResponse = { access_token?: string; refresh_token?: string; expires_in?: number; id_token?: string; token_type?: string; scope?: string; error?: unknown };
 
+// A renewal that failed. `permanent` means retrying cannot help: the person must sign in again.
+export class RenewalError extends Error {
+  permanent: boolean;
+  constructor(message: string, permanent = false) {
+    super(message);
+    this.permanent = permanent;
+  }
+}
+
 async function tokenRequest(fetcher: Fetch, form: Record<string, string>): Promise<TokenResponse> {
   const res = await fetcher(TOKEN_URL, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(form),
+    signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
   });
   const body = (await res.json().catch(() => ({}))) as TokenResponse;
   if (!res.ok) {
-    throw new Error(body.error === "invalid_grant" ? "ChatGPT connection expired or was revoked; sign in again" : `ChatGPT token ${form.grant_type} failed: HTTP ${res.status}`);
+    if (body.error === "invalid_grant") throw new RenewalError("ChatGPT connection expired or was revoked; sign in again", true);
+    throw new RenewalError(`ChatGPT token ${form.grant_type} failed: HTTP ${res.status}`);
   }
   return body;
 }
@@ -159,6 +180,8 @@ export function textFromStream(raw: string): string {
 }
 
 export type ChatGPTModel = ModelPort & {
+  // Stops background renewal and waits for one already in flight, so shutdown cannot lose a rotated token.
+  stop(): Promise<void>;
   login(): Login;
   startLogin(): Promise<Login>;
   finishLogin(callbackUrl: string): Promise<Login>;
@@ -173,8 +196,14 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
   let login: Login = saved ? { state: "signed-in", email: saved.email, since: new Date(now()).toISOString() } : { state: "signed-out" };
   let pending: { state: string; nonce: string; verifier: string; deadline: number } | undefined;
   let lastOk: string | undefined;
-  let lastError: { at: string; detail: string } | undefined;
+  let lastError: { at: string; detail: string; renewal?: boolean } | undefined;
   let refreshing: Promise<Tokens> | undefined;
+  let stopped = false;
+  // Credential renewal, kept apart from inference (lastOk/lastError): renewing a login is not a model answer.
+  let renewedAt: string | undefined;
+  let lifetimeMs: number | undefined;
+  let nextAttempt = 0;
+  let failure: { at: string; detail: string; attempts: number; permanent: boolean } | undefined;
   const impl = `chatgpt-token-sharing/${model}`;
   const at = () => new Date(now()).toISOString();
 
@@ -185,16 +214,17 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
       throw new Error("ChatGPT did not return a complete renewable login");
     }
     const claims = body.id_token ? await verifyIdToken(fetcher, idToken, clientId, nonce, now()) : decodePart(idToken.split(".")[1]);
-    if (previous && claims.sub !== previous.subject) throw new Error("ChatGPT account changed during refresh; sign in again");
+    if (previous && claims.sub !== previous.subject) throw new RenewalError("ChatGPT account changed during refresh; sign in again", true);
     const scope = body.scope ?? previous?.scope;
     const granted = new Set(scope?.split(/\s+/) ?? []);
     if (!granted.has("resource.invoke") || !SHARING_SCOPES.some((s) => granted.has(s))) {
-      throw new Error("ChatGPT sign-in worked but token sharing was not granted; sign in again and allow it");
+      throw new RenewalError("ChatGPT sign-in worked but token sharing was not granted; sign in again and allow it", true);
     }
+    lifetimeMs = (body.expires_in ?? 3600) * 1000;
     return {
       access: body.access_token,
       refresh,
-      expires: now() + (body.expires_in ?? 3600) * 1000,
+      expires: now() + lifetimeMs,
       idToken,
       clientId,
       subject: claims.sub,
@@ -203,19 +233,70 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
     };
   };
 
-  // One refresh at a time: a second concurrent refresh would reuse a token the first just replaced.
-  const fresh = async (force = false): Promise<Tokens> => {
-    const tokens = file.read();
-    if (!tokens) throw new Error("not signed in to ChatGPT");
-    if (!force && tokens.expires - REFRESH_EARLY_MS > now()) return tokens;
+  const margin = (base: number) => Math.min(base, (lifetimeMs ?? Infinity) / 2);
+
+  // One refresh at a time, shared by the background renewal and by calls: a second concurrent refresh would reuse a
+  // token the first just replaced. The new token is saved before anyone sees it.
+  const renew = (tokens: Tokens): Promise<Tokens> => {
     refreshing ??= tokenRequest(fetcher, { grant_type: "refresh_token", client_id: tokens.clientId, refresh_token: tokens.refresh, resource: RESOURCE })
       .then((body) => credential(body, tokens.clientId, undefined, tokens))
       .then((t) => {
         file.write(t);
+        renewedAt = at();
+        failure = undefined;
+        nextAttempt = now() + MIN_RENEW_GAP_MS;
+        // A call that failed only because the login could not be renewed no longer says anything.
+        if (lastError?.renewal) lastError = undefined;
         return t;
+      })
+      .catch((err) => {
+        const attempts = (failure?.attempts ?? 0) + 1;
+        const permanent = err instanceof RenewalError && err.permanent;
+        const detail = (err instanceof Error ? err.message : "unknown error").slice(0, 200);
+        failure = { at: at(), detail, attempts, permanent };
+        nextAttempt = permanent ? Infinity : now() + Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** (attempts - 1));
+        throw new RenewalError(detail, permanent);
       })
       .finally(() => (refreshing = undefined));
     return refreshing;
+  };
+
+  // The token for a call. Renews inside the margin; if that fails but the token still works, uses it. While backing
+  // off, a still-valid token is used as is; an expired one is always tried, because nothing else can work.
+  const fresh = async (force = false): Promise<Tokens> => {
+    const tokens = file.read();
+    if (!tokens) throw new Error("not signed in to ChatGPT");
+    if (!force) {
+      if (tokens.expires - margin(REFRESH_EARLY_MS) > now()) return tokens;
+      if (tokens.expires > now() && now() < nextAttempt && !refreshing) return tokens;
+    }
+    try {
+      return await renew(tokens);
+    } catch (err) {
+      // A transient failure with a working token is no reason to fail the call; a revoked or changed login is.
+      if (!force && tokens.expires > now() && !(err instanceof RenewalError && err.permanent)) return tokens;
+      throw err;
+    }
+  };
+
+  // A 401 means the token was refused. If something renewed it meanwhile, use that rather than rotating again.
+  const afterRefusal = (used: Tokens) => {
+    const current = file.read();
+    return current && current.access !== used.access ? Promise.resolve(current) : fresh(true);
+  };
+
+  // Called from the periodic tick. Renews shortly before expiry with no model call, never more than one at a time,
+  // and only when due: not inside the back-off, and not for a login that must be signed in again.
+  const maintain = async (): Promise<void> => {
+    const t = file.read();
+    if (stopped || !t || refreshing || now() < nextAttempt) return;
+    if (t.expires - margin(REFRESH_AHEAD_MS) > now()) return;
+    await renew(t).catch(() => {});
+  };
+
+  const record = (started: string, err: unknown) => {
+    // A renewal failure is reported by the renewal state, not as an inference failure.
+    lastError = { at: started, detail: err instanceof Error ? err.message : String(err), renewal: err instanceof RenewalError };
   };
 
   const call = (tokens: Tokens, body: string) =>
@@ -245,13 +326,27 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
     if (!granted.has("resource.invoke") || !SHARING_SCOPES.some((s) => granted.has(s))) {
       return down("Saved ChatGPT login lacks token sharing; sign in again from the web page.");
     }
-    if (t.expires - REFRESH_EARLY_MS <= now()) {
-      return { port: "model", state: "degraded", impl, detail: "Signed in; the access token has expired or is about to. It will be renewed on the next call, which has not been tried, so ChatGPT is unconfirmed.", verifiedAt: checked };
+    const renewed = renewedAt ? ` The login was last renewed at ${renewedAt}.` : "";
+    if (t.expires <= now()) {
+      return { port: "model", state: "degraded", impl, detail: `Signed in; the access token has expired and has not been renewed yet, so ChatGPT is unconfirmed.${renewed}`, verifiedAt: checked };
     }
-    return { port: "model", state: "live", impl, detail: "Signed in: saved ChatGPT login is complete and unexpired (checked locally). No model call has been made yet, so ChatGPT has not been contacted.", verifiedAt: checked };
+    return { port: "model", state: "live", impl, detail: `Signed in: saved ChatGPT login is complete and unexpired (checked locally). No model call has been made yet, so ChatGPT has not been contacted.${renewed}`, verifiedAt: checked };
+  };
+
+  // Renewing the login failed. Degraded while the old token still works, down once it does not.
+  const renewalFailed = (t: Tokens, f: NonNullable<typeof failure>): PortStatus => {
+    const expired = t.expires <= now();
+    const retry = f.permanent ? "Sign in again from the web page." : `Retrying (attempt ${f.attempts} failed).`;
+    const token = expired ? `The access token expired at ${new Date(t.expires).toISOString()}, so ChatGPT calls will fail until the login is renewed.` : `The current access token still works until ${new Date(t.expires).toISOString()}.`;
+    return { port: "model", state: expired ? "down" : "degraded", impl, detail: `Renewing the ChatGPT login failed: ${f.detail}. ${token} ${retry}`, verifiedAt: f.at };
   };
 
   return {
+    maintain,
+    async stop() {
+      stopped = true;
+      await refreshing?.catch(() => {});
+    },
     login: () => login,
 
     // Starts a sign-in: a PKCE authorization link that also registers ORBIT as its own ChatGPT client.
@@ -308,6 +403,9 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         });
         const tokens = await credential(body, ids[0], pending.nonce);
         file.write(tokens);
+        failure = undefined;
+        nextAttempt = 0;
+        if (lastError?.renewal) lastError = undefined;
         pending = undefined;
         login = { state: "signed-in", email: tokens.email, since: at() };
       } catch (err) {
@@ -320,14 +418,21 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
       if (login.state === "pending") {
         return { port: "model", state: "down", impl, detail: "Waiting for sign-in: approve on ChatGPT, then paste the localhost address into ORBIT.", verifiedAt: at() };
       }
-      if (!file.read()) {
+      const current = file.read();
+      if (!current) {
         const why = login.state === "failed" ? ` Last sign-in failed: ${login.detail}` : "";
         return { port: "model", state: "down", impl, detail: `Not signed in to ChatGPT. Sign in from the web page.${why}`, verifiedAt: at() };
       }
-      if (lastError && (!lastOk || lastError.at > lastOk)) {
+      if (lastError && !lastError.renewal && (!lastOk || lastError.at > lastOk)) {
         return { port: "model", state: "down", impl, detail: `Last call failed: ${lastError.detail}`, verifiedAt: lastError.at };
       }
-      if (lastOk) return { port: "model", state: "live", impl, detail: "Answering through your ChatGPT subscription.", verifiedAt: lastOk };
+      if (failure) return renewalFailed(current, failure);
+      if (lastOk) {
+        if (current.expires <= now()) {
+          return { port: "model", state: "degraded", impl, detail: "Answered before, but the access token has expired and has not been renewed yet.", verifiedAt: lastOk };
+        }
+        return { port: "model", state: "live", impl, detail: "Answering through your ChatGPT subscription.", verifiedAt: lastOk };
+      }
       return readiness();
     },
 
@@ -342,8 +447,9 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         store: false,
       });
       try {
-        let res = await call(await fresh(), body);
-        if (res.status === 401) res = await call(await fresh(true), body);
+        const used = await fresh();
+        let res = await call(used, body);
+        if (res.status === 401) res = await call(await afterRefusal(used), body);
         if (!res.ok) {
           const detail = await res.text().catch(() => "");
           throw new Error(`HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
@@ -353,7 +459,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         lastOk = started;
         return step;
       } catch (err) {
-        lastError = { at: started, detail: err instanceof Error ? err.message : String(err) };
+        record(started, err);
         throw err;
       }
     },
@@ -368,8 +474,9 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         store: false,
       });
       try {
-        let res = await call(await fresh(), body);
-        if (res.status === 401) res = await call(await fresh(true), body);
+        const used = await fresh();
+        let res = await call(used, body);
+        if (res.status === 401) res = await call(await afterRefusal(used), body);
         if (!res.ok) {
           const detail = await res.text().catch(() => "");
           throw new Error(`HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
@@ -379,7 +486,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         lastOk = started;
         return { value: text, provenance: "live" as const, source: `model/${impl}` };
       } catch (err) {
-        lastError = { at: started, detail: err instanceof Error ? err.message : String(err) };
+        record(started, err);
         throw err;
       }
     },
