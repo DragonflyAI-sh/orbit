@@ -14,5 +14,6 @@ ORBIT is Rai's assistant. It hands you a job id and a brief, and follows the job
 3. **Answer every steer.** A steer is a message from Rai or ORBIT. Act on it, write your answer to a file, then `orbit-job reply <n> <file>`. Run `orbit-job steers` whenever you finish a step.
 4. **Always write a summary before you stop**, whatever happened: `orbit-job summary --status done|blocked|failed <file>`. Use `blocked` when you need a decision or input, and say exactly what you need. A job without a summary looks stalled.
 5. **Code goes in the project repo**, on branch `orbit/<id>`, never in `orbit-work`. Do not open pull requests with `gh pr`; it is blocked here. Put the branch name and what changed in your summary.
+   **Never open, edit or comment on a pull request by any method** (`gh`, the GitHub API, `curl`, or anything else). ORBIT opens the pull request from your summary; if you open one yourself, ORBIT will not see it as its own. Put `## PR title` and `## PR body` sections in your summary.
 6. **Never edit** `.orbit/brief.md` or `.orbit/steer/*`. They are ORBIT's; the tool writes steers that arrive through the API. Never print or commit the token.
 7. **If `orbit-job` reports FAILED or `api=failed`**, say so in your next check-in or summary. Never claim a step was recorded when it was not.
