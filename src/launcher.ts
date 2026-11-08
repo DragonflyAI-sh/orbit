@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { normalizeToolCommit } from "./jobs.ts";
 
 // Starting cloud jobs: write the brief to orbit-work through GitHub's API, then fire a saved Routine
 // through its documented API trigger. Both tokens are systemd credentials and never leave this process.
@@ -20,7 +21,7 @@ export function credential(env: NodeJS.ProcessEnv, name: string): string | undef
   }
 }
 
-export type GitRecord = { head?: string; started: boolean; summary?: { status: string; text: string } };
+export type GitRecord = { head?: string; started: boolean; toolCommit?: string; summary?: { status: string; text: string } };
 export type ControlRepo = {
   pushBrief(job: string, brief: string): Promise<{ branch: string; commit: string }>;
   // What the runner wrote on orbit/<job>, read from git. Undefined when the branch does not exist.
@@ -79,7 +80,14 @@ export function githubControl(token: string, repo = CONTROL_REPO, fetcher: Fetch
         throw err;
       }
       const summary = await file(".orbit/summary.md");
-      return { head, started: (await file(".orbit/started.json")) !== undefined, summary: summary ? parseSummary(summary) : undefined };
+      const started = await file(".orbit/started.json");
+      let toolCommit: string | undefined;
+      try {
+        toolCommit = started === undefined ? undefined : normalizeToolCommit((JSON.parse(started) as { toolCommit?: unknown }).toolCommit);
+      } catch {
+        /* an unreadable started.json still means the job started; its tool commit is unknown */
+      }
+      return { head, started: started !== undefined, ...(toolCommit ? { toolCommit } : {}), summary: summary ? parseSummary(summary) : undefined };
     },
   };
 }
@@ -106,7 +114,9 @@ export function gitReconciler(jobs: import("./jobs.ts").Jobs, control: ControlRe
       if (!record) continue;
       const types = new Set(job.events.map((e) => e.type));
       // A job that has already reported anything has started; only an empty timeline needs the git start.
-      if (record.started && job.events.length === 0) jobs.record(job.id, { type: "started", via: "git" });
+      if (record.started && job.events.length === 0) jobs.record(job.id, { type: "started", via: "git", ...(record.toolCommit ? { toolCommit: record.toolCommit } : {}) });
+      // The API missed the start but reported later: the git record still tells which tool commit the runner used.
+      else if (record.toolCommit && !job.toolCommit) jobs.setToolCommit(job.id, record.toolCommit);
       if (record.summary && !types.has("summary")) {
         jobs.record(job.id, { type: "summary", status: record.summary.status, text: record.summary.text, sha: record.head?.slice(0, 64), via: "git" });
       }

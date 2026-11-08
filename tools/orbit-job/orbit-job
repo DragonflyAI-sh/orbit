@@ -8,7 +8,7 @@
 # unreachable the step still lands in git and reports api=failed.
 set -uo pipefail
 
-TOOL_VERSION=3
+TOOL_VERSION=4
 TIMEOUT=""; command -v timeout >/dev/null && TIMEOUT="timeout 30"
 STATE_DIR="${ORBIT_JOB_STATE:-$HOME/.orbit-job}"
 
@@ -125,16 +125,21 @@ record() {
 }
 
 cmd_start() {
-  local job="" control="" api="${ORBIT_JOB_API:-}" token="${ORBIT_JOB_TOKEN:-}"
+  # The commit this tool was copied from, as the runner verified it: --tool-commit, else ORBIT_JOB_TOOL_COMMIT, else
+  # the literal "unknown". Never inferred from the job checkout, HEAD, or anything else.
+  local job="" control="" api="${ORBIT_JOB_API:-}" token="${ORBIT_JOB_TOKEN:-}" tool_commit="${ORBIT_JOB_TOOL_COMMIT:-}"
   while [ $# -gt 0 ]; do
     case "$1" in
       --job) job=${2:-}; shift 2 ;;
       --control) control=${2:-}; shift 2 ;;
       --api) api=${2:-}; shift 2 ;;
       --token) token=${2:-}; shift 2 ;;
+      --tool-commit) tool_commit=${2:-}; shift 2 ;;
       *) die "unknown option: $1" ;;
     esac
   done
+  if [ -z "$tool_commit" ]; then tool_commit=unknown
+  elif [ "$tool_commit" != unknown ] && ! [[ $tool_commit =~ ^[0-9a-f]{40}$ ]]; then die "--tool-commit / ORBIT_JOB_TOOL_COMMIT must be the full 40-character lowercase hex commit, or be left out"; fi
   valid_id "$job" || die "--job <id> is required (letters, digits, dot, underscore, dash)"
   if [ -z "$control" ]; then control=$(find_control) || die "cannot find the orbit-work checkout; pass --control <path>"; fi
   CONTROL=$(cd "$control" && pwd) || die "no such directory: $control"
@@ -147,8 +152,8 @@ cmd_start() {
   API=${api%/}; TOKEN=$token; JOB=$job
   printf 'JOB=%q\nCONTROL=%q\nBRANCH=%q\nAPI=%q\nTOKEN=%q\n' "$job" "$CONTROL" "$BRANCH" "$API" "$TOKEN" >"$STATE_DIR/current"
   chmod 600 "$STATE_DIR/current"
-  printf '{"job":%s,"at":%s,"host":%s,"tool":%d}\n' "$(json "$job")" "$(json "$(now)")" "$(json "$(hostname)")" "$TOOL_VERSION" >"$CONTROL/.orbit/started.json"
-  record "orbit-job $job: started" '{"type":"started"}' .orbit/started.json || exit 1
+  printf '{"job":%s,"at":%s,"host":%s,"tool":%d,"toolCommit":%s}\n' "$(json "$job")" "$(json "$(now)")" "$(json "$(hostname)")" "$TOOL_VERSION" "$(json "$tool_commit")" >"$CONTROL/.orbit/started.json"
+  record "orbit-job $job: started" "{\"type\":\"started\",\"toolCommit\":$(json "$tool_commit")}" .orbit/started.json || exit 1
   say "brief: $CONTROL/.orbit/brief.md"
 }
 
@@ -305,7 +310,9 @@ cmd_summary() {
 usage() {
   cat <<'U'
 orbit-job: the ORBIT job protocol (git record, optional API callbacks)
-  orbit-job start --job <id> [--api <url> --token <t>] [--control <dir>]   check out orbit/<id>, record the start
+  orbit-job start --job <id> [--api <url> --token <t>] [--tool-commit <sha>] [--control <dir>]
+                                                                  check out orbit/<id>, record the start and the tool's source commit
+                                                                  (--tool-commit or ORBIT_JOB_TOOL_COMMIT; else recorded as "unknown")
   orbit-job checkin "<status>"                                    record progress, then show new steers
   orbit-job steers                                                show steers that have no reply yet
   orbit-job reply <n> <file>                                      answer steer n

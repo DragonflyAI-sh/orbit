@@ -9,7 +9,7 @@ ORBIT is Rai's assistant. It hands you a job id and a brief, and follows the job
 
 ## Rules
 
-1. **Start first.** Run `orbit-job start --job <id>` before anything else, adding `--api <url> --token <token>` when ORBIT gave you them. It checks out the job's control branch in the `orbit-work` checkout and prints where the brief is. Read the brief.
+1. **Start first.** Run `orbit-job start --job <id>` before anything else, adding `--api <url> --token <token>` when ORBIT gave you them, and `--tool-commit <sha>` with the full 40-character commit you actually verified and copied the tool from (the `$C` of your tool-commit check). Pass it only if that check passed; if you did not verify a commit, leave the option out and it is recorded as `unknown`. Never guess one, and never use the job branch, HEAD or ORBIT's version. (`ORBIT_JOB_TOOL_COMMIT` works the same way.) It checks out the job's control branch in the `orbit-work` checkout and prints where the brief is. Read the brief.
 2. **Check in at each milestone**, and at least every ten minutes of work: `orbit-job checkin "<one line: what you are doing>"`. It also shows any new steers.
 3. **Answer every steer.** A steer is a message from Rai or ORBIT. Act on it, write your answer to a file, then `orbit-job reply <n> <file>`. Run `orbit-job steers` whenever you finish a step.
 4. **Always write a summary before you stop**, whatever happened: `orbit-job summary --status done|blocked|failed <file>`. Use `blocked` when you need a decision or input, and say exactly what you need. A job without a summary looks stalled.

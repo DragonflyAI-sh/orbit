@@ -296,6 +296,16 @@
   }
   tabs.addEventListener("click", (e) => { const t = e.target.closest("button")?.dataset.tab; if (t) setTab(t); });
 
+  // The orbit-job source commit the runner reported. Unknown is shown as unknown; only a known commit that differs
+  // from the commit ORBIT is running is flagged. All text goes in through textContent.
+  function toolCommitBadge(r) {
+    const known = r.toolCommit && r.toolCommit !== "unknown";
+    const text = !known ? "tool commit: unknown" : `tool commit: ${String(r.toolCommit).slice(0, 7)}${r.toolCommitStatus === "mismatch" ? " ≠ running ORBIT" : r.toolCommitStatus === "match" ? " (matches ORBIT)" : " (ORBIT's own commit unknown)"}`;
+    const span = el("span", { className: r.toolCommitStatus === "mismatch" ? "health-launch-failed" : "meta", textContent: text });
+    if (known) span.title = String(r.toolCommit);
+    return span;
+  }
+
   function jobCard(r) {
     const bad = r.health === "launch-failed", warn = r.health === "not-started" || r.health === "quiet";
     const card = el("div", { className: `card${bad ? " bad" : warn ? " warn" : ""}` });
@@ -303,6 +313,7 @@
       el("span", { className: `health-${r.health}`, textContent: r.health }));
     const link = safeLink(r.sessionUrl, "session on claude.ai");
     if (link) row.append(link);
+    row.append(toolCommitBadge(r));
     const pr = safeLink(r.prUrl, "pull request");
     if (pr) row.append(pr); else if (r.prOpening) row.append(el("span", { className: "meta", textContent: "opening pull request…" }));
     if (r.kind !== "review" && r.reviewJobId) {
@@ -360,7 +371,7 @@
     });
     const head = el("div", { className: "card" + (j.health === "launch-failed" ? " bad" : "") },
       el("div", { className: "row" }, el("span", { className: "id", textContent: j.id }), el("span", { textContent: j.state }), el("span", { className: `health-${j.health}`, textContent: j.health }),
-        ...[safeLink(j.launch?.sessionUrl, "session on claude.ai"), safeLink(j.pr?.url, "pull request")].filter(Boolean)),
+        ...[safeLink(j.launch?.sessionUrl, "session on claude.ai"), safeLink(j.pr?.url, "pull request")].filter(Boolean), toolCommitBadge(j)),
       ...(j.pr?.error ? [el("div", { className: "latest health-launch-failed", textContent: `Pull request not opened: ${j.pr.error}` })] : []));
     jobsBox.replaceChildren(
       el("button", { type: "button", className: "back", textContent: "← All jobs", onclick: () => { openJob = null; refreshJobs(); } }),

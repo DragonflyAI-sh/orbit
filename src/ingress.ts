@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import { normalizeToolCommit } from "./jobs.ts";
 import type { JobEvent, Jobs } from "./jobs.ts";
 
 // The only listener meant to face the internet. It knows the job registry and nothing else:
@@ -59,6 +60,7 @@ export function buildIngress(jobs: Jobs, now: () => number = Date.now): Server {
       const event: Omit<JobEvent, "at"> = {
         type: body.type as JobEvent["type"],
         ...(typeof body.sha === "string" ? { sha: body.sha.slice(0, 64) } : {}),
+        ...(body.type === "started" && normalizeToolCommit(body.toolCommit) ? { toolCommit: normalizeToolCommit(body.toolCommit) } : {}),
         ...(Number.isInteger(body.n) ? { n: body.n as number } : {}),
         ...(typeof body.status === "string" ? { status: body.status } : {}),
         ...(typeof body.text === "string" ? { text: body.text } : {}),
