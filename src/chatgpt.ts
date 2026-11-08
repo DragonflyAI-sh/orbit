@@ -201,6 +201,9 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
   let stopped = false;
   // Credential renewal, kept apart from inference (lastOk/lastError): renewing a login is not a model answer.
   let renewedAt: string | undefined;
+  // When a background pass last found the saved login complete, sharing-enabled and unexpired with no failed renewal.
+  // A real check of the credential on disk, not a sign that the timer is alive; it never stands in for lastOk.
+  let checkedAt: string | undefined;
   let lifetimeMs: number | undefined;
   let nextAttempt = 0;
   let failure: { at: string; detail: string; attempts: number; permanent: boolean } | undefined;
@@ -289,7 +292,11 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
   // and only when due: not inside the back-off, and not for a login that must be signed in again.
   const maintain = async (): Promise<void> => {
     const t = file.read();
-    if (stopped || !t || refreshing || now() < nextAttempt) return;
+    if (stopped) return;
+    // Verify the saved login first. Skipped while a renewal is failing or in flight, and for a login that is
+    // incomplete or expired: only a login that checks out counts as verified.
+    if (t && !refreshing && !failure && !loginProblem(t) && t.expires > now()) checkedAt = at();
+    if (!t || refreshing || now() < nextAttempt) return;
     if (t.expires - margin(REFRESH_AHEAD_MS) > now()) return;
     await renew(t).catch(() => {});
   };
@@ -312,6 +319,14 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
       body,
     });
 
+  // What is wrong with the saved login on its face, if anything. Local only, no request to OpenAI.
+  const loginProblem = (t: Tokens): "incomplete" | "no-sharing" | undefined => {
+    if (typeof t.access !== "string" || !t.access || typeof t.refresh !== "string" || !t.refresh || !t.clientId || !t.idToken || !Number.isFinite(t.expires)) return "incomplete";
+    const granted = new Set(t.scope?.split(/\s+/) ?? []);
+    if (!granted.has("resource.invoke") || !SHARING_SCOPES.some((s) => granted.has(s))) return "no-sharing";
+    return undefined;
+  };
+
   // Before any call has been made: what can be checked on this machine alone, with no request to OpenAI. It says
   // the saved login looks complete and usable, never that the model answered. verifiedAt is when this local check
   // ran, not an inference time, so it never stands in for lastOk.
@@ -319,13 +334,9 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
     const t = file.read();
     const checked = at();
     const down = (detail: string): PortStatus => ({ port: "model", state: "down", impl, detail, verifiedAt: checked });
-    if (!t || typeof t.access !== "string" || !t.access || typeof t.refresh !== "string" || !t.refresh || !t.clientId || !t.idToken || !Number.isFinite(t.expires)) {
-      return down("Saved ChatGPT login is incomplete; sign in again from the web page.");
-    }
-    const granted = new Set(t.scope?.split(/\s+/) ?? []);
-    if (!granted.has("resource.invoke") || !SHARING_SCOPES.some((s) => granted.has(s))) {
-      return down("Saved ChatGPT login lacks token sharing; sign in again from the web page.");
-    }
+    const problem = t ? loginProblem(t) : "incomplete";
+    if (!t || problem === "incomplete") return down("Saved ChatGPT login is incomplete; sign in again from the web page.");
+    if (problem === "no-sharing") return down("Saved ChatGPT login lacks token sharing; sign in again from the web page.");
     const renewed = renewedAt ? ` The login was last renewed at ${renewedAt}.` : "";
     if (t.expires <= now()) {
       return { port: "model", state: "degraded", impl, detail: `Signed in; the access token has expired and has not been renewed yet, so ChatGPT is unconfirmed.${renewed}`, verifiedAt: checked };
@@ -431,7 +442,11 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         if (current.expires <= now()) {
           return { port: "model", state: "degraded", impl, detail: "Answered before, but the access token has expired and has not been renewed yet.", verifiedAt: lastOk };
         }
-        return { port: "model", state: "live", impl, detail: "Answering through your ChatGPT subscription.", verifiedAt: lastOk };
+        // An idle but healthy model stays live: the login being renewed or re-checked in the background is verification
+        // too. Only the answer time is shown when nothing newer exists. A failed call is handled above and is not
+        // cleared by a login check, which says nothing about whether the model answers.
+        const verified = [lastOk, renewedAt, checkedAt].filter((v): v is string => !!v).sort().at(-1)!;
+        return { port: "model", state: "live", impl, detail: "Answering through your ChatGPT subscription.", verifiedAt: verified };
       }
       return readiness();
     },
