@@ -31,6 +31,7 @@ The message after this one gives your job id, and may give an API URL and a toke
    git -C /home/user/orbit fetch -q origin main "$C"
    git -C /home/user/orbit merge-base --is-ancestor "$C" origin/main
    If any of these fail, or no tool commit was given, stop and say so plainly. Do not fall back to another commit.
+   echo "$C" > ~/.orbit-tool-commit
 2. Copy the tool out of that commit without changing the checkout's working tree:
    mkdir -p ~/.local/bin ~/.claude/skills/orbit-job
    git -C /home/user/orbit show "$C":tools/orbit-job/orbit-job > ~/.local/bin/orbit-job
@@ -38,8 +39,8 @@ The message after this one gives your job id, and may give an API URL and a toke
    chmod +x ~/.local/bin/orbit-job && export PATH="$HOME/.local/bin:$PATH"
 3. Read ~/.claude/skills/orbit-job/SKILL.md and follow it for the whole job.
 4. Run:
-   orbit-job start --job <id> --api <url> --token <token> --tool-commit "$C"
-   leaving out --api and --token if they were not given. Use the same C verified in step 1 and used to copy the tool in step 2; preserve it through this step. Never print, echo or commit the token. Then read the brief it prints and do what it says.
+   orbit-job start --job <id> --api <url> --token <token> --tool-commit "$(cat ~/.orbit-tool-commit)"
+   leaving out --api and --token if they were not given. Never print, echo or commit the token. Then read the brief it prints and do what it says.
 
 If no job id was given, or any step fails or is refused, stop and say so plainly. Never invent a job id or a commit, and never work around a refused step.
 ```
