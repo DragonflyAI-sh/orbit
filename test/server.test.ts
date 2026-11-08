@@ -65,7 +65,7 @@ const server = buildServer({
   publicJobUrl: "https://orbit.example:8443",
   control,
   routines: new Map([["orbit", routine]]),
-  commit: "abc123",
+  commit: "9991f4adb81fc41b8fe2f55ff923484303f2bf6b",
   owner: "rai@example.com",
   identify: async () => caller,
   deploy: () => deploy,
@@ -83,7 +83,7 @@ const chat = (body: unknown) =>
 
 test("status reports the commit and every port", async () => {
   const body = await (await fetch(`${base}/status`)).json();
-  assert.equal(body.commit, "abc123");
+  assert.equal(body.commit, "9991f4adb81fc41b8fe2f55ff923484303f2bf6b");
   assert.deepEqual(body.ports.map((p: PortStatus) => p.port), ["policy", "channel", "model", "memory", "notify", "schedule", "runs", "tools", "nodes", "jobs", ...MOCK_PORT_NAMES]);
 });
 
@@ -269,6 +269,8 @@ test("the owner launches a job: brief written, Routine fired with the job token,
   assert.ok(jobs.verify(job.id, token), "the fire text carries a token that works for this job");
   assert.match(fireText, /^Job id: orbit-/);
   assert.match(fireText, /^API: https:\/\/orbit\.example:8443$/m);
+  assert.match(fireText, /^Tool commit: 9991f4adb81fc41b8fe2f55ff923484303f2bf6b$/m, "the running ORBIT commit, not the brief or job branch commit");
+  assert.equal(fireText.includes("c0ffee"), false);
 });
 
 test("a launch that fails is recorded, notified, and flagged", async () => {

@@ -5,11 +5,22 @@ import type { Notifier } from "./notify.ts";
 // The one launch path: write the brief to orbit-work, register the job, fire the Routine. The /jobs/launch route,
 // a confirmed chat proposal and ORBIT's own review launches all end here.
 
+// The commit of the ORBIT runtime that generates the fire text: the ORBIT_COMMIT that deploy/pull-deploy.sh writes to the
+// release's release.env, which is also what /status reports. Never main's tip and never the job branch. Anything that is
+// not a hex commit id (unset, "unknown", a sentinel, multi-line junk) becomes "unknown", the existing unavailable
+// convention, so a SHA is never invented and the fire text stays one line.
+export const COMMIT_UNKNOWN = "unknown";
+export function toolCommit(commit: string | undefined): string {
+  const c = commit?.trim() ?? "";
+  return /^[0-9a-f]{7,64}$/i.test(c) ? c.toLowerCase() : COMMIT_UNKNOWN;
+}
+
 export type LaunchResult = { code: number; body: unknown };
 export type JobLauncher = (routineName: string, briefText: string, review?: NonNullable<Job["review"]>) => Promise<LaunchResult>;
 
-export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines?: Map<string, Routine>; notify: Notifier; publicJobUrl?: string }): JobLauncher {
+export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines?: Map<string, Routine>; notify: Notifier; publicJobUrl?: string; commit?: string }): JobLauncher {
   const { jobs, control, notify, publicJobUrl } = deps;
+  const commit = toolCommit(deps.commit);
   const routines = deps.routines ?? new Map<string, Routine>();
   const withHealth = (job: Job) => ({ ...job, health: jobs!.health(job) });
   return async (routineName, briefText, review) => {
@@ -37,7 +48,7 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
       return fail(`brief not written: ${err instanceof Error ? err.message : err}`);
     }
     // The token goes to the runner in the fire text, server to server; it is never returned or logged here.
-    const text = [`Job id: ${id}`, ...(publicJobUrl ? [`API: ${publicJobUrl}`, `Token: ${registered.token}`] : [])].join("\n");
+    const text = [`Job id: ${id}`, ...(publicJobUrl ? [`API: ${publicJobUrl}`, `Token: ${registered.token}`] : []), `Tool commit: ${commit}`].join("\n");
     try {
       const fired = await routine.fire(text);
       jobs.setLaunch(id, { ...launch, ...fired });
