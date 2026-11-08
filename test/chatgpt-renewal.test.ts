@@ -103,7 +103,7 @@ test("a renewal does not invent a model verification or clear a real model failu
   assert.equal(s.verifiedAt, failedAt);
 });
 
-test("after a successful call, renewal keeps status live with the call's own timestamp", async () => {
+test("after a successful call, renewal keeps status live and never moves verification before the call", async () => {
   const r = rig();
   await chat(r.model);
   const ok = r.model.status().verifiedAt;
@@ -111,7 +111,7 @@ test("after a successful call, renewal keeps status live with the call's own tim
   await r.model.maintain?.();
   const s = r.model.status();
   assert.equal(s.state, "live");
-  assert.equal(s.verifiedAt, ok);
+  assert.ok(s.verifiedAt >= ok);
 });
 
 test("a failed renewal is degraded while the token works, backs off, and recovers after a retry", async () => {

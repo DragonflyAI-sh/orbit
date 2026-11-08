@@ -56,6 +56,13 @@ export function withStaleness(status: PortStatus, now: Date): PortStatus {
   return { ...status, state: "degraded", detail: `Not verified since ${status.verifiedAt}. ${status.detail}` };
 }
 
+// Staleness as /status and the watch apply it. The model port is exempt: an idle model is not unhealthy, and it
+// reports its own degradation from real errors (failed calls, failed login checks or renewals, an expired token).
+// Every other port keeps the 5-minute rule.
+export function withFreshness(status: PortStatus, now: Date): PortStatus {
+  return status.port === "model" ? status : withStaleness(status, now);
+}
+
 function send(res: ServerResponse, code: number, body: unknown): void {
   res.writeHead(code, { "content-type": "application/json" });
   res.end(`${JSON.stringify(body, null, 2)}\n`);
@@ -114,7 +121,7 @@ export function buildServer({
     return [
       fixed("policy", "fail-closed", "Allows reads and chat replies; memory, notify, schedule, runs, tools, devices and jobs for the owner only; refuses everything else."),
       fixed("channel", "web", "Web chat at /. Discord and CLI are not built."),
-      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...(jobs ? [launcherStatus(jobs.status())] : []), ...ports.map((p) => p.status()), ...(watch ? [watch.status()] : [])].map((s) => withStaleness(s, now)),
+      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...(jobs ? [launcherStatus(jobs.status())] : []), ...ports.map((p) => p.status()), ...(watch ? [watch.status()] : [])].map((s) => withFreshness(s, now)),
     ];
   };
   watch?.attach(() => statuses().filter((st) => st.port !== "watch"));
