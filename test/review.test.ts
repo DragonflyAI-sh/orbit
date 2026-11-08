@@ -23,7 +23,7 @@ function setup(opts: { head?: { ref: string; repo: string } | null; pull?: "open
   const fired: string[] = [];
   const control = { pushBrief: async (id: string, text: string) => (briefs.push({ id, text }), { branch: `orbit/${id}`, commit: "c1" }) } as unknown as ControlRepo;
   const routine = { name: "orbit", fire: opts.fire ?? (async (text: string) => (fired.push(text), { sessionId: "s", sessionUrl: "https://claude.ai/code/s" })) };
-  const launch = jobLauncher({ jobs, control, routines: new Map([["orbit", routine]]), notify, publicJobUrl: "https://api.example" });
+  const launch = jobLauncher({ jobs, control, routines: new Map([["orbit", routine]]), notify, publicJobUrl: "https://api.example", commit: "9991f4adb81fc41b8fe2f55ff923484303f2bf6b" });
   const posted: { repo: string; pull: number; body: string }[] = [];
   const comments: CommentPort | undefined = "comments" in opts ? opts.comments : { post: async (repo, pull, body) => (posted.push({ repo, pull, body }), `${PR}#issuecomment-1`) };
   const review = reviewer(jobs, launch, comments, notify);
@@ -71,6 +71,7 @@ test("an opened PR starts exactly one review job on the same routine, marked as 
   assert.equal(rev.launch?.routine, "orbit");
   assert.match(s.briefs[0].text, /orbit\/w1/);
   assert.match(s.fired[0], /Job id: orbit-/);
+  assert.match(s.fired[0], /^Tool commit: 9991f4adb81fc41b8fe2f55ff923484303f2bf6b$/m, "internally launched review jobs carry it too");
   // A second summary for the work job changes nothing.
   s.jobs.record("w1", { type: "summary", status: "done", text: "again", via: "git" });
   await tick();

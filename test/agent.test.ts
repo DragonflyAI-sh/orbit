@@ -140,7 +140,7 @@ const makeServer = (withStep: boolean) =>
     publicJobUrl: "https://orbit.example",
     control,
     routines: new Map([["orbit", routine]]),
-    commit: "abc",
+    commit: "9991f4adb81fc41b8fe2f55ff923484303f2bf6b",
     owner: "rai@example.com",
     identify: async () => caller,
   });
@@ -174,6 +174,7 @@ test("job_launch returns a proposal and launches nothing until confirmed", async
   assert.equal(pushed.length, 1);
   assert.equal(fired.length, 1);
   assert.match(fired[0], /^Job id: orbit-/);
+  assert.match(fired[0], /^Tool commit: 9991f4adb81fc41b8fe2f55ff923484303f2bf6b$/m);
   assert.equal(jobs.list().length, 1);
   // A second confirm finds nothing: no double launch.
   const again = await fetch(`${base}/chat/proposals/${body.proposals[0].id}/confirm`, { method: "POST" });

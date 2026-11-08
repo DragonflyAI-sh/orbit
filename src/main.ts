@@ -48,7 +48,7 @@ const control = selectControl(process.env);
 const routines = selectRoutines(process.env);
 const publicJobUrl = process.env.ORBIT_PUBLIC_JOB_URL || undefined;
 // ORBIT starts reviews itself, from a PR it just opened: not a chat tool call, so no confirmation is needed.
-const review = reviewer(jobs, jobLauncher({ jobs, control, routines, notify, publicJobUrl }), selectComments(process.env), notify);
+const review = reviewer(jobs, jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit }), selectComments(process.env), notify);
 pullRequestOpener(jobs, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), selectPulls(process.env), notify, () => new Date(), (job, url) => void review.start(job, url));
 const reconcile = control ? gitReconciler(jobs, control) : async () => {};
 

@@ -119,3 +119,164 @@ test("a failed push is reported as FAILED, never as recorded", () => {
   assert.match(out.stdout, /FAILED git=push-failed/);
   assert.doesNotMatch(readFileSync(join(root, "orbit-work", ".orbit", "checkins.jsonl"), "utf8"), /^$/);
 });
+
+// ---- summary --status done: PR title and body are required when the job pushed a code branch ----
+
+const GOOD = "Implemented it.\n\n## PR title\nAdd the widget to the dashboard\n\n## PR body\nAdds a widget to the dashboard so Rai can see jobs at a glance. Typecheck and tests pass.\n";
+
+// A project repo with its own origin, checked out under the runner's HOME, with orbit/<job> pushed or not.
+function withProject(s: ReturnType<typeof setup>, opts: { push?: boolean } = {}) {
+  const remote = join(s.root, "project.git");
+  git(s.root, "init", "-q", "--bare", "-b", "main", remote);
+  const checkout = join(s.root, "project");
+  git(s.root, "clone", "-q", remote, checkout);
+  writeFileSync(join(checkout, "a.txt"), "a\n");
+  git(checkout, "add", ".");
+  git(checkout, "commit", "-q", "-m", "init");
+  git(checkout, "push", "-q", "origin", "HEAD:main");
+  git(checkout, "switch", "-q", "-c", `orbit/${s.job}`);
+  writeFileSync(join(checkout, "b.txt"), "b\n");
+  git(checkout, "add", ".");
+  git(checkout, "commit", "-q", "-m", "work");
+  if (opts.push !== false) git(checkout, "push", "-q", "origin", `orbit/${s.job}`);
+  return { remote, checkout };
+}
+// Only look inside the sandbox root, never at the real /home/user.
+const summarize = (s: ReturnType<typeof setup>, text: string, ...args: string[]) => {
+  const f = join(s.root, "summary-in.md");
+  writeFileSync(f, text);
+  return spawnSync("bash", [TOOL, "summary", "--status", "done", ...args, f], {
+    cwd: s.runner,
+    env: { ...process.env, ...identity, HOME: s.root, ORBIT_JOB_STATE: join(s.root, "state"), ORBIT_JOB_SEARCH: s.root },
+    encoding: "utf8",
+  });
+};
+const hasSummary = (s: ReturnType<typeof setup>) => spawnSync("git", ["--git-dir", join(s.root, "orbit-work.git"), "cat-file", "-e", `orbit/${s.job}:.orbit/summary.md`]).status === 0;
+
+test("done with a pushed code branch and both sections is recorded", () => {
+  const s = setup();
+  s.run("start", "--job", "j1");
+  withProject(s);
+  const out = summarize(s, GOOD);
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /ok git=pushed/);
+  assert.match(s.remoteFile(".orbit/summary.md"), /^---\nstatus: done/);
+});
+
+test("done with a pushed code branch is refused, and writes and sends nothing, when a section is missing or empty", () => {
+  const s = setup();
+  s.run("start", "--job", "j1");
+  withProject(s);
+  const cases: [string, RegExp[]][] = [
+    ["All done, no sections.\n", [/missing a '## PR title'/, /missing a '## PR body'/]],
+    ["## PR title\nAdd the widget to the dashboard\n", [/missing a '## PR body'/]],
+    ["## PR body\nAdds a widget to the dashboard so Rai can see jobs at a glance.\n", [/missing a '## PR title'/]],
+    ["## PR title\n\n## PR body\nAdds a widget to the dashboard so Rai can see jobs at a glance.\n", [/'## PR title' needs a real one-line title/]],
+    ["## PR title\nTBD\n\n## PR body\nAdds a widget to the dashboard so Rai can see jobs at a glance.\n", [/'## PR title' needs a real one-line title/]],
+    ["## PR title\nAdd the widget to the dashboard\n\n## PR body\n\n   \n", [/'## PR body' needs substantive content/]],
+    ["## PR title\nAdd the widget to the dashboard\n\n## PR body\nTODO\n", [/'## PR body' needs substantive content/]],
+    ["## PR body\nAdds a widget to the dashboard so Rai can see jobs at a glance.\n\n## PR title\n\n", [/'## PR title' needs a real one-line title/]],
+  ];
+  for (const [text, errors] of cases) {
+    const out = summarize(s, text);
+    assert.equal(out.status, 2, text);
+    assert.match(out.stderr, /summary NOT recorded: this job pushed a code branch/);
+    assert.match(out.stderr, /run the same command again/);
+    for (const e of errors) assert.match(out.stderr, e, text);
+    assert.equal(out.stdout.includes("ok git"), false);
+  }
+  assert.equal(hasSummary(s), false, "nothing was committed or pushed");
+  assert.equal(spawnSync("git", ["-C", s.runner, "status", "--porcelain"], { encoding: "utf8" }).stdout.includes("summary.md"), false, "nothing was left in the checkout");
+  // The correction is accepted on retry.
+  assert.equal(summarize(s, GOOD).status, 0);
+  assert.equal(hasSummary(s), true);
+});
+
+test("a refused done summary sends no API event", () => {
+  const s = setup();
+  s.run("start", "--job", "j1");
+  withProject(s);
+  // An unreachable https API: if the tool tried to send, it would write to api.err and say api=failed.
+  const state = join(s.root, "state");
+  writeFileSync(join(state, "current"), readFileSync(join(state, "current"), "utf8").replace(/^API=.*$/m, "API=https://127.0.0.1:9").replace(/^TOKEN=.*$/m, "TOKEN=t"));
+  const out = summarize(s, "no sections\n");
+  assert.equal(out.status, 2);
+  assert.equal(out.stdout.includes("api="), false);
+  assert.equal(out.stderr.includes("api=failed"), false);
+});
+
+test("done without a pushed code branch is unchanged: no sections needed", () => {
+  const noRepo = setup();
+  noRepo.run("start", "--job", "j1");
+  assert.equal(summarize(noRepo, "Researched it, nothing to push.\n").status, 0);
+
+  // A project checkout whose orbit/<job> was never pushed, and another job's pushed branch, are not evidence.
+  const local = setup();
+  local.run("start", "--job", "j1");
+  withProject(local, { push: false });
+  assert.equal(summarize(local, "Looked around, pushed nothing.\n").status, 0);
+
+  const other = setup();
+  other.run("start", "--job", "j1");
+  const p = withProject(other);
+  git(p.checkout, "push", "-q", "origin", "--delete", "orbit/j1");
+  git(p.checkout, "push", "-q", "origin", "orbit/j1:refs/heads/orbit/other-job");
+  assert.equal(summarize(other, "No branch for this job.\n").status, 0);
+});
+
+test("the orbit-work control branch is never counted as a pushed code branch", () => {
+  const s = setup();
+  s.run("start", "--job", "j1"); // orbit/j1 now exists on orbit-work's origin, and the runner and ORBIT checkouts sit under HOME
+  assert.equal(summarize(s, "Nothing to push.\n").status, 0);
+});
+
+test("blocked and failed summaries never need the sections, even with a pushed code branch", () => {
+  for (const status of ["blocked", "failed"]) {
+    const s = setup();
+    s.run("start", "--job", "j1");
+    withProject(s);
+    const f = join(s.root, "s.md");
+    writeFileSync(f, "Stopped early.\n");
+    const out = spawnSync("bash", [TOOL, "summary", "--status", status, f], {
+      cwd: s.runner,
+      env: { ...process.env, ...identity, HOME: s.root, ORBIT_JOB_STATE: join(s.root, "state"), ORBIT_JOB_SEARCH: s.root },
+      encoding: "utf8",
+    });
+    assert.equal(out.status, 0, out.stderr);
+    assert.match(s.remoteFile(".orbit/summary.md"), new RegExp(`status: ${status}`));
+  }
+});
+
+test("--repo points at a checkout outside the search path; --code-branch forces the check", () => {
+  const s = setup();
+  s.run("start", "--job", "j1");
+  const p = withProject(s);
+  const away = join(tmpdir(), `orbit-away-${process.pid}`);
+  execFileSync("mv", [p.checkout, away]);
+  assert.equal(summarize(s, "no sections\n").status, 0, "not found by search, so not detected (documented limitation)");
+  const viaRepo = summarize(s, "no sections\n", "--repo", away);
+  assert.equal(viaRepo.status, 2);
+  assert.match(viaRepo.stderr, /orbit\/j1 is on origin/);
+  const forced = summarize(s, "no sections\n", "--code-branch");
+  assert.equal(forced.status, 2);
+  assert.match(forced.stderr, /--code-branch given/);
+  assert.equal(summarize(s, GOOD, "--code-branch").status, 0);
+});
+
+test("a pushed branch is still detected from the remote-tracking ref when origin cannot be reached", () => {
+  const s = setup();
+  s.run("start", "--job", "j1");
+  const p = withProject(s);
+  git(p.checkout, "remote", "set-url", "origin", join(s.root, "gone.git"));
+  const out = summarize(s, "no sections\n");
+  assert.equal(out.status, 2);
+  assert.match(out.stderr, /remote-tracking ref/);
+});
+
+test("the heading match is as forgiving as ORBIT's: case and surrounding spaces, but a heading on its own line", () => {
+  const s = setup();
+  s.run("start", "--job", "j1");
+  withProject(s);
+  assert.equal(summarize(s, "  ## pr TITLE  \nAdd the widget to the dashboard\n\n## Pr Body\nAdds a widget to the dashboard so Rai can see jobs at a glance.\n").status, 0);
+  assert.equal(summarize(s, "text ## PR title\nAdd the widget\n\n## PR body\nAdds a widget to the dashboard so Rai can see jobs.\n").status, 2);
+});

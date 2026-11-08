@@ -8,7 +8,8 @@
 # unreachable the step still lands in git and reports api=failed.
 set -uo pipefail
 
-TOOL_VERSION=2
+TOOL_VERSION=3
+TIMEOUT=""; command -v timeout >/dev/null && TIMEOUT="timeout 30"
 STATE_DIR="${ORBIT_JOB_STATE:-$HOME/.orbit-job}"
 
 say() { echo "orbit-job: $*"; }
@@ -194,17 +195,109 @@ cmd_reply() {
   record "orbit-job $JOB: reply $n" "{\"type\":\"reply\",\"n\":$n,\"text\":$(json "$(head -c 4000 "$file")")}" ".orbit/replies/$n.md" || exit 1
 }
 
+# Checkouts that might hold the job's code branch: --repo, ORBIT_JOB_REPOS (colon-separated), here, and every checkout
+# directly under the directories in ORBIT_JOB_SEARCH (default $HOME:/home/user). The orbit-work checkout is never a candidate: its orbit/<job> branch is the control record.
+candidate_repos() {
+  local d url p seen=""
+  local -a extra=("$@")
+  [ -n "${ORBIT_JOB_REPOS:-}" ] && { IFS=: read -r -a more <<<"$ORBIT_JOB_REPOS"; extra+=("${more[@]}"); }
+  local -a roots
+  IFS=: read -r -a roots <<<"${ORBIT_JOB_SEARCH:-$HOME:/home/user}"
+  for p in "${roots[@]}"; do extra+=("$p"/*); done
+  for d in ${extra[@]+"${extra[@]}"} "$PWD"; do
+    [ -n "$d" ] && [ -e "$d/.git" ] || continue
+    p=$(cd "$d" 2>/dev/null && pwd -P) || continue
+    case " $seen " in *" $p "*) continue ;; esac
+    seen="$seen $p"
+    url=$(git -C "$p" remote get-url origin 2>/dev/null) || continue
+    case "$url" in */orbit-work | */orbit-work.git) continue ;; esac
+    echo "$p"
+  done
+}
+
+# Prints one line of evidence and returns 0 if orbit/<job> was pushed to a project repo; returns 1 if there is none.
+# Evidence is the branch on the repo's origin (git ls-remote). If origin cannot be reached, the checkout's own
+# remote-tracking ref origin/orbit/<job> (written by a successful push or fetch) counts instead.
+pushed_code_branch() {
+  local d rc ref="refs/heads/orbit/$JOB"
+  while IFS= read -r d; do
+    GIT_TERMINAL_PROMPT=0 $TIMEOUT git -C "$d" ls-remote --exit-code --heads origin "$ref" >/dev/null 2>&1; rc=$?
+    if [ "$rc" = 0 ]; then echo "$d: orbit/$JOB is on origin"; return 0; fi
+    if [ "$rc" != 2 ] && git -C "$d" rev-parse -q --verify "refs/remotes/origin/orbit/$JOB" >/dev/null 2>&1; then
+      echo "$d: origin/orbit/$JOB is a remote-tracking ref (origin could not be reached)"; return 0
+    fi
+  done < <(candidate_repos ${@+"$@"})
+  return 1
+}
+
+# Checks a summary file for `## PR title` and `## PR body` the way ORBIT reads them (src/pull-requests.ts prSections).
+# Prints every problem and returns 1 if there are any.
+check_pr_sections() {
+  local out title nonws bad=0
+  out=$(awk '
+    function trim(s) { gsub(/^[ \t\r]+|[ \t\r]+$/, "", s); return s }
+    { lines[NR] = $0 }
+    END {
+      t = 0; b = 0
+      for (i = 1; i <= NR; i++) {
+        l = tolower(trim(lines[i]))
+        if (!t && l == "## pr title") t = i
+        if (!b && l == "## pr body") b = i
+      }
+      print "has_title=" (t ? 1 : 0)
+      print "has_body=" (b ? 1 : 0)
+      if (t) {
+        end = NR + 1
+        for (i = t + 1; i <= NR; i++) if (substr(lines[i], 1, 3) == "## ") { end = i; break }
+        for (i = t + 1; i < end; i++) if (trim(lines[i]) != "") { x = trim(lines[i]); sub(/^#+[ \t]*/, "", x); print "title=" x; break }
+      }
+      if (b) {
+        end = (t > b) ? t : NR + 1
+        n = 0
+        for (i = b + 1; i < end; i++) { x = lines[i]; gsub(/[ \t\r]/, "", x); n += length(x) }
+        print "body_chars=" n
+      }
+    }' "$1")
+  title=$(printf '%s\n' "$out" | sed -n 's/^title=//p' | head -n 1)
+  nonws=$(printf '%s\n' "$out" | sed -n 's/^body_chars=//p')
+  if ! printf '%s\n' "$out" | grep -qx 'has_title=1'; then
+    echo "  - missing a '## PR title' heading on its own line" >&2; bad=1
+  elif [ "${#title}" -lt 8 ] || ! [[ $title =~ [A-Za-z0-9].*[A-Za-z0-9].*[A-Za-z0-9] ]] || [[ ${title,,} =~ ^(tbd|todo|n/?a|none|title|pr\ title|\.+)$ ]]; then
+    echo "  - '## PR title' needs a real one-line title (at least 8 characters) on the line after the heading" >&2; bad=1
+  fi
+  if ! printf '%s\n' "$out" | grep -qx 'has_body=1'; then
+    echo "  - missing a '## PR body' heading on its own line" >&2; bad=1
+  elif [ "${nonws:-0}" -lt 40 ]; then
+    echo "  - '## PR body' needs substantive content (at least 40 non-space characters): what changed, why, and how it was tested" >&2; bad=1
+  fi
+  return $bad
+}
+
 cmd_summary() {
-  local status="" file=""
+  local status="" file="" force=0 evidence
+  local -a repos=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --status) status=${2:-}; shift 2 ;;
+      --repo) [ -n "${2:-}" ] || die "--repo needs a checkout directory"; repos+=("$2"); shift 2 ;;
+      --code-branch) force=1; shift ;;
       *) file=$1; shift ;;
     esac
   done
-  case "$status" in done | blocked | failed) ;; *) die "usage: orbit-job summary --status done|blocked|failed <file>" ;; esac
+  case "$status" in done | blocked | failed) ;; *) die "usage: orbit-job summary --status done|blocked|failed [--repo <dir>] [--code-branch] <file>" ;; esac
   [ -f "$file" ] || die "no such file: $file"
   load
+  # A `done` job that pushed a code branch must carry the PR title and body ORBIT opens the pull request from.
+  # This runs before anything is written, committed or sent, so a refused summary leaves no trace and can be retried.
+  if [ "$status" = done ]; then
+    if evidence=$(pushed_code_branch ${repos[@]+"${repos[@]}"}); then :; elif [ "$force" = 1 ]; then evidence="--code-branch given"; else evidence=""; fi
+    if [ -n "$evidence" ] && ! check_pr_sections "$file" 2>"$STATE_DIR/pr.err"; then
+      echo "orbit-job: summary NOT recorded: this job pushed a code branch ($evidence) but the summary is not ready for the pull request:" >&2
+      cat "$STATE_DIR/pr.err" >&2
+      echo "  Add both sections to $file (the body runs to the end of the file), then run the same command again. Use --status blocked if the work is not finished." >&2
+      exit 2
+    fi
+  fi
   { printf -- '---\nstatus: %s\nat: %s\n---\n\n' "$status" "$(now)"; cat "$file"; } >"$CONTROL/.orbit/summary.md"
   record "orbit-job $JOB: summary ($status)" "{\"type\":\"summary\",\"status\":\"$status\",\"text\":$(json "$(head -c 4000 "$file")")}" .orbit/summary.md || exit 1
 }
@@ -216,7 +309,9 @@ orbit-job: the ORBIT job protocol (git record, optional API callbacks)
   orbit-job checkin "<status>"                                    record progress, then show new steers
   orbit-job steers                                                show steers that have no reply yet
   orbit-job reply <n> <file>                                      answer steer n
-  orbit-job summary --status done|blocked|failed <file>           final summary; write one on every exit
+  orbit-job summary --status done|blocked|failed [--repo <dir>] [--code-branch] <file>
+                                                                  final summary; write one on every exit.
+                                                                  done + a pushed orbit/<id> code branch needs ## PR title and ## PR body
 U
 }
 

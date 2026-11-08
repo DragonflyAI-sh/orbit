@@ -146,7 +146,7 @@ export function buildServer({
   });
 
   // The one launch path: the /jobs/launch route and a confirmed chat proposal both end here (ORBIT's own review launches use jobLauncher directly).
-  const launchJob = jobLauncher({ jobs, control, routines, notify, publicJobUrl });
+  const launchJob = jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit });
 
   const isOwnerOf = async (req: IncomingMessage) => Boolean(owner) && (await identify(req)) === owner;
   const audit = (port: string, action: string, decision: { allow: boolean; reason: string }) =>
