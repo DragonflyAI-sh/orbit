@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Identify } from "./identity.ts";
 import { jobLauncher } from "./job-launch.ts";
-import { jobRow } from "./job-view.ts";
+import { jobRow, toolCommitStatus } from "./job-view.ts";
 import type { Job, Jobs } from "./jobs.ts";
 import type { ControlRepo, Routine } from "./launcher.ts";
 import type { MemoryPort } from "./memory.ts";
@@ -139,7 +139,7 @@ export function buildServer({
       detail: `${st.detail} ${ready ? `Launches through Routines: ${names.join(", ")}.` : `Cannot launch yet: ${control ? "" : "no orbit-work GitHub credential. "}${names.length ? "" : "no Routine configured."}`}`.trim(),
     };
   };
-  const withHealth = (job: Job) => ({ ...job, health: jobs!.health(job) });
+  const withHealth = (job: Job) => ({ ...job, toolCommit: job.toolCommit ?? "unknown", toolCommitStatus: toolCommitStatus(job.toolCommit, commit), health: jobs!.health(job) });
   const launchable = () => ({
     routines: [...routines.keys()],
     problem: !jobs ? "jobs are not enabled" : !control ? "no orbit-work GitHub credential is installed" : routines.size ? undefined : "no Routine is configured",
@@ -326,7 +326,7 @@ export function buildServer({
 
     if (jobs && url.pathname === "/jobs" && req.method === "GET") {
       if (!(await owned("jobs", "list"))) return;
-      if (url.searchParams.get("view") === "rows") return send(res, 200, { jobs: jobs.list().map((j) => jobRow(j, jobs.health(j))) });
+      if (url.searchParams.get("view") === "rows") return send(res, 200, { jobs: jobs.list().map((j) => jobRow(j, jobs.health(j), commit)) });
       return send(res, 200, { jobs: jobs.list().map(withHealth) });
     }
     if (jobs && url.pathname === "/jobs/launch" && req.method === "POST") {

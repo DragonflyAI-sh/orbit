@@ -8,7 +8,7 @@ import type { Store } from "./store.ts";
 // Jobs run by Claude cloud runners. ORBIT registers a job, hands the runner a token that works for that job only,
 // queues steers for it, and receives its events. The git record in orbit-work stays the source of truth.
 
-export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "summary"; sha?: string; n?: number; status?: string; text?: string; via?: "api" | "git" };
+export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "summary"; sha?: string; toolCommit?: string; n?: number; status?: string; text?: string; via?: "api" | "git" };
 export type Steer = { n: number; text: string; at: string; deliveredAt?: string };
 export type Launch = { routine: string; at: string; branch?: string; briefCommit?: string; sessionId?: string; sessionUrl?: string; failedAt?: string; error?: string };
 export type PullRequest = { at: string; url?: string; error?: string };
@@ -24,6 +24,8 @@ export type Job = {
   review?: ReviewOf;
   reviewJob?: ReviewOutcome;
   launch?: Launch;
+  // The commit the runner reports it copied orbit-job from, taken from its start. Absent on older jobs: unknown, not a mismatch.
+  toolCommit?: string;
   // Set when ORBIT starts opening the project PR; once set, ORBIT never opens another.
   pr?: PullRequest;
   createdAt: string;
@@ -33,6 +35,11 @@ export type Job = {
   events: JobEvent[];
   steers: Steer[];
 };
+
+// A reported tool commit is a full lowercase hex commit id; "unknown", missing and anything else are not recorded.
+export function normalizeToolCommit(value: unknown): string | undefined {
+  return typeof value === "string" && /^[0-9a-f]{40}$/.test(value) ? value : undefined;
+}
 
 export const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -89,7 +96,10 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
       const clean: JobEvent = { ...event, at, via: event.via ?? "api", text: event.text?.slice(0, MAX_TEXT), status: event.status?.slice(0, 200) };
       const state: Job["state"] =
         event.type === "summary" && (event.status === "done" || event.status === "blocked" || event.status === "failed") ? event.status : "running";
-      update(id, (j) => ({ ...j, state, lastEventAt: at, events: [...j.events, clean].slice(-KEEP_EVENTS) }));
+      const reported = event.type === "started" ? normalizeToolCommit(event.toolCommit) : undefined;
+      if (reported) clean.toolCommit = reported;
+      else delete clean.toolCommit;
+      update(id, (j) => ({ ...j, ...(reported ? { toolCommit: reported } : {}), state, lastEventAt: at, events: [...j.events, clean].slice(-KEEP_EVENTS) }));
       lastEventAt = at;
       if (event.type === "reply") notify.send(`Job ${id} replied to steer ${event.n}:\n\n${clean.text ?? "(see git)"}`, false);
       if (event.type === "summary") {
@@ -142,6 +152,11 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
     // The review of a work job; once set, ORBIT never starts another.
     setReviewJob(id: string, reviewJob: ReviewOutcome | undefined): void {
       update(id, (j) => ({ ...j, reviewJob }));
+    },
+
+    setToolCommit(id: string, toolCommit: string): void {
+      const valid = normalizeToolCommit(toolCommit);
+      if (valid) update(id, (j) => ({ ...j, toolCommit: valid }));
     },
 
     setLaunch(id: string, launch: Launch): void {
