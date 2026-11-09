@@ -176,7 +176,7 @@ test("the Jobs page shows the commit as text, flags only a mismatch, and shows u
   const fn = html.match(/function toolCommitBadge\(r\) \{[\s\S]*?\n  \}\n/)?.[0] ?? "";
   assert.ok(fn, "toolCommitBadge exists");
   assert.ok(!/innerHTML/.test(fn), "text only");
-  const el = (_tag: string, props: Record<string, string>) => ({ ...props, title: "" });
+  const el = (_tag: string, props: Record<string, string>) => ({ ...props, title: "", setAttribute() {} });
   const badge = new Function("el", `${fn}; return toolCommitBadge;`)(el) as (r: object) => { className: string; textContent: string };
   const m = badge({ toolCommit: A, toolCommitStatus: "mismatch" });
   assert.match(m.textContent, /aaaaaaa ≠ running ORBIT/);
