@@ -298,13 +298,16 @@
 
   // The orbit-job source commit the runner reported. Unknown is shown as unknown; only a known commit that differs
   // from the commit ORBIT is running is flagged. All text goes in through textContent.
+  // <tool-commit-badge>
   function toolCommitBadge(r) {
     const known = r.toolCommit && r.toolCommit !== "unknown";
     const text = !known ? "tool commit: unknown" : `tool commit: ${String(r.toolCommit).slice(0, 7)}${r.toolCommitStatus === "mismatch" ? " ≠ running ORBIT" : r.toolCommitStatus === "match" ? " (matches ORBIT)" : " (ORBIT's own commit unknown)"}`;
     const span = el("span", { className: r.toolCommitStatus === "mismatch" ? "health-launch-failed" : "meta", textContent: text });
-    if (known) span.title = String(r.toolCommit);
+    // The full commit is the hover text and the accessible name, so it can be copied exactly; unknown has neither.
+    if (known) { span.title = String(r.toolCommit); span.setAttribute("role", "note"); span.setAttribute("aria-label", `tool commit ${String(r.toolCommit)}`); }
     return span;
   }
+  // </tool-commit-badge>
 
   function jobCard(r) {
     const bad = r.health === "launch-failed", warn = r.health === "not-started" || r.health === "quiet";
