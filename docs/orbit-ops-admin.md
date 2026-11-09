@@ -12,7 +12,7 @@ Tier 1 (`docs/orbit-ops.md`) answers questions. Tier 2 lets ORBIT **change** a s
 | `ops_propose_config_change` | `apply_config` | edits `orbit.env`, restarts, verifies, restores the backup if unhealthy | `/status` healthy on the same commit within 60 s (and, for `ORBIT_INGRESS_PORT`, the job listener answers on the new port) |
 | `ops_propose_refresh_vault` | `refresh_vault` | `pull-deploy.sh --refresh-vault`: fast-forward pull of `/opt/orbit/vault`, writes `state/vault.json` | `state/vault.json` was written during the run with a valid commit |
 
-`ops_admin_operations` lists confirmed operations with what the helper observed. Everything else (arbitrary commands, other units, other `orbit.env` keys, reboots, OS updates, Funnel/Tailscale changes, credentials, OpenClaw) has no action and cannot be requested.
+`ops_admin_operations` lists confirmed operations with what the helper observed. Everything else (arbitrary commands, other units, other `orbit.env` keys, credentials, OpenClaw) has no action and cannot be requested here. Reboots, OS updates and the orbit-jobs Funnel are **tier 3** (`docs/orbit-ops-sys.md`): a separate, separately installed helper that is not part of tier 2.
 
 ### Rollback target
 

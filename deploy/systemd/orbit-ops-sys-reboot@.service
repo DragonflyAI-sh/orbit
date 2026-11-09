@@ -1,0 +1,36 @@
+[Unit]
+Description=ORBIT tier 3 host reboot %i
+
+[Service]
+# One accepted reboot_host operation. It saves the pre-reboot boot id and the deployed commit, then runs `systemctl reboot` once.
+# It cannot verify anything itself (it dies with the host); orbit-ops-sys-recover.service verifies after the boot. No network.
+Type=oneshot
+ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/sys-run.ts %i reboot
+TimeoutStartSec=900
+MemoryMax=128M
+TasksMax=32
+StateDirectory=orbit-ops-sys
+StateDirectoryMode=0700
+ProtectSystem=strict
+# The deploy lock file (state/deploy.lock) is taken so a reboot cannot interleave with a deploy, rollback or config change.
+ReadWritePaths=/opt/orbit/state
+ReadOnlyPaths=/opt/orbit
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077

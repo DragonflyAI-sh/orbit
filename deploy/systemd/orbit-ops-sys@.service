@@ -1,0 +1,39 @@
+[Unit]
+Description=ORBIT tier 3 helper front (validate, record and dispatch one request)
+
+[Service]
+# Validates one request, writes a durable operation record and starts a separate runner unit. It performs no change itself and
+# has no network and no capabilities. Code is installed by install-sys.sh under /usr/local/lib/orbit/ops, not taken from /opt/orbit.
+ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/sys-helper.ts
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+RuntimeMaxSec=30
+MemoryMax=192M
+TasksMax=32
+LimitNOFILE=64
+# The only writable path is its own state directory. It is persistent (/var/lib), so an operation record and the one-at-a-time
+# slot survive an ORBIT restart and a host reboot.
+StateDirectory=orbit-ops-sys
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077

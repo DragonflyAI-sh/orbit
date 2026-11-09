@@ -1,0 +1,284 @@
+import type { Proposal, Proposals } from "./agent.ts";
+import type { Jobs } from "./jobs.ts";
+import type { Notifier } from "./notify.ts";
+import type { SysClient } from "./ops-sys-client.ts";
+import {
+  FUNNEL_HTTPS_PORT,
+  SYS_CONFIRM_TTL_MS,
+  cap,
+  isFunnelAction,
+  isSysTerminal,
+  sysDigestOf,
+  sysOpIdFor,
+  type FunnelTarget,
+  type SysEvidence,
+  type SysMutatingAction,
+  type SysState,
+  type SysTarget,
+} from "./ops/sys-protocol.ts";
+import type { Store } from "./store.ts";
+
+// ORBIT's side of tier 3: turns a model request into an owner-only proposal and a confirmed proposal into exactly one helper
+// operation. A proposal exists only if every check passed (helper present, target known, no operation already open); otherwise the
+// tool throws and nothing exists. The ledger is persisted (STATE_DIRECTORY), so a confirmation and its result survive an ORBIT
+// restart or a host reboot; afterwards ORBIT asks the helper for the outcome and reports it once.
+
+export const SYS_PROPOSAL_TTL_MS = SYS_CONFIRM_TTL_MS;
+const LEDGER_MAX = 50;
+
+export type LedgerState = "dispatching" | SysState | "not_dispatched";
+export type SysLedgerEntry = {
+  opId: string;
+  proposalId: string;
+  action: SysMutatingAction;
+  summary: string;
+  target: SysTarget;
+  digest: string;
+  confirmedAt: string;
+  expiresAt: string;
+  state: LedgerState;
+  result?: string;
+  verification?: { checked: boolean; healthy?: boolean; detail: string; evidence?: SysEvidence };
+  finishedAt?: string;
+  checkedAt?: string;
+  reportedAt?: string;
+  error?: string;
+  // What ORBIT knew about jobs when the owner confirmed (for the record only; the helper cannot see jobs).
+  jobsAtConfirm?: JobsSnapshot;
+};
+
+const ended = (s: LedgerState) => s === "not_dispatched" || isSysTerminal(s);
+
+// ---- active-job state: ORBIT-side only. The privileged helper cannot see jobs, so ORBIT is the one that checks, twice. ----
+
+export type JobsSnapshot = {
+  // false when ORBIT cannot tell (no job registry, or one that is not persisted): treated as "jobs may be running".
+  known: boolean;
+  active: string[];
+  // Registered/running but quiet or never started: possibly dead, possibly working silently. Counted as possibly affected.
+  uncertain: string[];
+  detail: string;
+};
+export type JobState = () => JobsSnapshot;
+
+export function jobStateOf(jobs: Jobs | undefined, now: () => Date = () => new Date()): JobState {
+  return () => {
+    if (!jobs) return { known: false, active: [], uncertain: [], detail: "ORBIT has no job registry here, so which jobs are running is unknown." };
+    if (jobs.status().state !== "live") return { known: false, active: [], uncertain: [], detail: "ORBIT's job state is not persisted, so it may have lost track of running jobs: which jobs are running is unknown." };
+    const active: string[] = [];
+    const uncertain: string[] = [];
+    for (const j of jobs.all()) {
+      if ((j.state !== "registered" && j.state !== "running") || j.launch?.failedAt) continue;
+      if (new Date(j.expiresAt) <= now()) continue; // an expired registration cannot report any more
+      (jobs.health(j) === "ok" ? active : uncertain).push(j.id);
+    }
+    const parts = [`${active.length} active`, `${uncertain.length} quiet or not started (possibly still working)`];
+    return { known: true, active, uncertain, detail: parts.join(", ") };
+  };
+}
+
+const list = (ids: string[]) => (ids.length ? ids.slice(0, 8).join(", ") + (ids.length > 8 ? ` and ${ids.length - 8} more` : "") : "none");
+
+export function jobWarning(s: JobsSnapshot, what: string): string {
+  if (!s.known) return `Which jobs are running is UNKNOWN (${s.detail}). Assume running jobs can be cut off by ${what}.`;
+  if (!s.active.length && !s.uncertain.length) return `No active or quiet jobs are registered.`;
+  return `Jobs that ${what} can affect: ${s.active.length} active (${list(s.active)})${s.uncertain.length ? `; ${s.uncertain.length} quiet or not started, possibly still working (${list(s.uncertain)})` : ""}.`;
+}
+
+// Disruptive actions refuse a confirmation when jobs appeared since the owner saw the card, or when ORBIT could tell then and cannot now.
+export function jobsWorsened(held: JobsSnapshot, now: JobsSnapshot): string | undefined {
+  if (held.known && !now.known) return "ORBIT can no longer tell which jobs are running.";
+  const was = new Set([...held.active, ...held.uncertain]);
+  const added = [...now.active, ...now.uncertain].filter((id) => !was.has(id));
+  return added.length ? `New job(s) are running since the card was shown: ${list(added)}.` : undefined;
+}
+
+const DISRUPTIVE: readonly SysMutatingAction[] = ["reboot_host", "funnel_disable"];
+
+export type JobsTarget = () => { host: string; port: number } | undefined;
+
+export type SysOps = ReturnType<typeof sysOps>;
+export type SysProposal = Proposal & { kind: "ops_sys" };
+
+export function sysOps(deps: { client?: SysClient; store: Store<SysLedgerEntry[]>; notify: Notifier; proposals: Proposals; jobState: JobState; jobsTarget: JobsTarget; now?: () => Date }) {
+  const { client, store, notify, proposals } = deps;
+  const now = deps.now ?? (() => new Date());
+  // Exact validated targets (and the job state the owner was shown) for open proposals, in memory only. A restart drops them
+  // together with the proposals.
+  const pending = new Map<string, { action: SysMutatingAction; target: SysTarget; jobs: JobsSnapshot; expiresAt: string }>();
+  let refreshing: Promise<void> | undefined;
+
+  const save = (entries: SysLedgerEntry[]) => store.write(entries.slice(-LEDGER_MAX));
+  const update = (opId: string, patch: Partial<SysLedgerEntry>) => {
+    const all = store.read();
+    const i = all.findIndex((e) => e.opId === opId);
+    if (i >= 0) {
+      all[i] = { ...all[i]!, ...patch };
+      save(all);
+    }
+  };
+
+  const text = (action: SysMutatingAction, target: SysTarget, jobs: JobsSnapshot): { summary: string; warnings: string[]; display: Record<string, string> } => {
+    const host = (target as { host: string }).host;
+    switch (action) {
+      case "install_os_updates":
+        return {
+          summary: `Install pending OS package upgrades on host "${host}" with apt-get upgrade only (no distribution upgrade, no package removed or newly installed; refused if the simulation says otherwise). It NEVER reboots.`,
+          warnings: [
+            `This is a SHARED host: production OpenClaw runs on it as well as ORBIT. Upgraded libraries and daemons can briefly stall or break services there. ORBIT's own health is checked afterwards; OpenClaw is NOT checked by this tool.`,
+            `Recovery limits: package upgrades cannot be rolled back by ORBIT. A failed or half-finished upgrade is left for an operator to repair (dpkg --configure -a). If the host then needs a reboot, that is a separate proposal.`,
+            jobWarning(jobs, "service restarts or a stalled package upgrade"),
+          ],
+          display: { action: "install_os_updates", host, policy: "apt-get upgrade only; no removals, no new packages, no reboot" },
+        };
+      case "reboot_host":
+        return {
+          summary: `REBOOT the whole host "${host}" now.`,
+          warnings: [
+            `This is a SHARED host: ORBIT, production OpenClaw and the public job listener all go down for the length of the reboot (typically minutes).`,
+            `Recovery limits: if the host does not come back, ORBIT cannot help (it is down too) and you need provider console access. After it returns, ORBIT verifies a changed boot id and its own health only; OpenClaw is NOT checked, and until then the result is "rebooting", never success.`,
+            jobWarning(jobs, "the reboot"),
+          ],
+          display: { action: "reboot_host", host },
+        };
+      case "funnel_enable":
+      case "funnel_disable": {
+        const t = target as FunnelTarget;
+        const on = action === "funnel_enable";
+        return {
+          summary: `${on ? "ENABLE" : "DISABLE"} the public Tailscale Funnel of the orbit-jobs node ${t.host} (https ${FUNNEL_HTTPS_PORT} → http://127.0.0.1:${t.port}), changing the orbit-jobs node only; this host's own Tailscale is never touched.`,
+          warnings: on
+            ? [
+                `This publishes ORBIT's job listener (127.0.0.1:${t.port}) on the public internet at https://${t.host}. Job endpoints require a per-job token, but it is a public surface.`,
+                `Verification reads the orbit-jobs node's own configuration. Public reachability from outside is NOT tested.`,
+              ]
+            : [
+                `Cloud job runners reach ORBIT through this Funnel. Disabling it cuts running jobs off from check-ins and steers, and new jobs cannot report. ${jobWarning(jobs, "disabling the Funnel")}`,
+                `Recovery limits: turning it back on needs another confirmation through this same path. If you are locked out, run on the host: tailscale --socket=/run/orbit-tailscale-jobs/tailscaled.sock funnel --bg --https=443 http://127.0.0.1:${t.port}`,
+                `Verification reads the orbit-jobs node's own configuration. Public reachability from outside is NOT tested.`,
+              ],
+          display: { action, node: t.host, https: String(FUNNEL_HTTPS_PORT), proxy: `http://127.0.0.1:${t.port}` },
+        };
+      }
+    }
+  };
+
+  return {
+    available: Boolean(client),
+
+    // Validates and checks the helper, then makes an owner-only proposal. Nothing is changed. If any check fails this THROWS and no
+    // proposal exists: the caller (and the model) must not say otherwise.
+    async propose(action: SysMutatingAction): Promise<SysProposal> {
+      if (!client) throw new Error("Tier 3 is not available: no helper client is configured. No proposal was created. See docs/orbit-ops-sys.md for installation.");
+      let status;
+      try {
+        status = await client.call({ action: "sys_status" });
+      } catch (err) {
+        throw new Error(`${cap(err instanceof Error ? err.message : "error", 200)} No proposal was created. Manual installation steps are in docs/orbit-ops-sys.md.`);
+      }
+      if (!status.ok) throw new Error(`The tier 3 helper refused: ${status.message}. No proposal was created.`);
+      const d = status.data as { hostname?: unknown; orbitJobsSocketPresent?: unknown; openOperation?: { action?: string; state?: string } | null };
+      if (d.openOperation) throw new Error(`Another tier 3 operation (${String(d.openOperation.action)}, ${String(d.openOperation.state)}) is still open on the host. No proposal was created; wait for its result.`);
+      let target: SysTarget;
+      if (isFunnelAction(action)) {
+        const t = deps.jobsTarget();
+        if (!t) throw new Error("ORBIT does not know its orbit-jobs target (ORBIT_PUBLIC_JOB_URL and ORBIT_INGRESS_PORT are not both set), so there is nothing here to change. No proposal was created.");
+        if (d.orbitJobsSocketPresent !== true) {
+          throw new Error(
+            "The orbit-jobs Tailscale node is not on this host (its socket /run/orbit-tailscale-jobs/tailscaled.sock is absent), so there is no helper that can reach it. Nothing was proposed, and the host's own Tailscale will NOT be changed instead. Install the orbit-jobs node here (deploy/install.sh does, with its auth key) or change Funnel by hand on the machine that runs it: see docs/orbit-ops-sys.md.",
+          );
+        }
+        target = { host: t.host, port: t.port };
+      } else {
+        if (typeof d.hostname !== "string" || !d.hostname) throw new Error("The helper did not report its host name. No proposal was created.");
+        target = { host: d.hostname };
+      }
+      const jobs = deps.jobState();
+      const { summary, warnings, display } = text(action, target, jobs);
+      const digest = sysDigestOf(action, target);
+      const p = proposals.propose({ kind: "ops_sys", action, summary, display, warnings, digest }, SYS_PROPOSAL_TTL_MS) as SysProposal;
+      for (const id of pending.keys()) if (!proposals.peek(id)) pending.delete(id);
+      pending.set(p.id, { action, target, jobs, expiresAt: p.expiresAt });
+      return p;
+    },
+
+    // Called after the route checked the owner and the digest the owner confirmed, and spent the proposal. Re-checks both against
+    // what was validated at proposal time, rechecks job state, then makes one dispatch.
+    async confirm(p: SysProposal): Promise<{ code: number; body: unknown }> {
+      const held = pending.get(p.id);
+      pending.delete(p.id);
+      if (!held || held.action !== p.action || sysDigestOf(held.action, held.target) !== p.digest) {
+        return { code: 409, body: { error: "This proposal no longer matches what was validated (or ORBIT restarted since). Nothing was done; ask again." } };
+      }
+      if (!client) return { code: 503, body: { error: "The tier 3 helper is not configured. Nothing was done." } };
+      if (Date.parse(held.expiresAt) <= now().getTime()) return { code: 410, body: { error: "This proposal expired. Nothing was done; ask again." } };
+      if (DISRUPTIVE.includes(held.action)) {
+        const worse = jobsWorsened(held.jobs, deps.jobState());
+        if (worse) return { code: 409, body: { error: `Not done: the job situation changed since this card was shown. ${worse} Nothing was done; ask again to see the current state.` } };
+      }
+      const opId = sysOpIdFor(p.id);
+      const all = store.read();
+      if (all.some((e) => e.proposalId === p.id || e.opId === opId)) return { code: 409, body: { error: "This confirmation was already used. Nothing was done." } };
+      save([...all, { opId, proposalId: p.id, action: p.action, summary: p.summary, target: held.target, digest: p.digest, confirmedAt: now().toISOString(), expiresAt: held.expiresAt, state: "dispatching", jobsAtConfirm: deps.jobState() }]);
+      let reply;
+      try {
+        reply = await client.call({ action: p.action, opId, target: held.target, digest: p.digest, expiresAt: held.expiresAt });
+      } catch (err) {
+        // The call may or may not have reached the helper: leave it dispatching; refresh() will ask the helper and settle it.
+        update(opId, { error: cap(err instanceof Error ? err.message : "error", 200) });
+        return { code: 502, body: { error: `The tier 3 helper did not confirm the dispatch (${cap(err instanceof Error ? err.message : "error", 160)}). Nothing is verified. ORBIT will check with the helper and report.`, opId } };
+      }
+      if (!reply.ok) {
+        update(opId, { state: "not_dispatched", error: `${reply.code}: ${reply.message}`, finishedAt: now().toISOString(), reportedAt: now().toISOString() });
+        return { code: reply.code === "busy" || reply.code === "cooldown" ? 409 : 502, body: { error: `The tier 3 helper refused: ${reply.message} Nothing was done.`, opId } };
+      }
+      const op = reply.data.operation as { state?: LedgerState } | undefined;
+      update(opId, { state: op?.state && op.state !== ("dispatching" as string) ? op.state : "accepted" });
+      return {
+        code: 202,
+        body: {
+          status: "dispatched",
+          dispatched: true,
+          verified: false,
+          opId,
+          action: p.action,
+          note: "Dispatched to the privileged helper's separate runner. Nothing is verified yet: ORBIT will report the verified result, and ops_sys_operations shows it.",
+        },
+      };
+    },
+
+    list: (): SysLedgerEntry[] => store.read(),
+
+    // Asks the helper about every operation that has not ended and records what it observed. Reports each end once. An unreachable
+    // helper changes nothing (for example while the host reboots): the last known state stays, marked with when it was checked.
+    refresh(): Promise<void> {
+      refreshing ??= (async () => {
+        if (!client) return;
+        for (const e of store.read().filter((x) => !ended(x.state))) {
+          try {
+            const r = await client.call({ action: "op_status", opId: e.opId });
+            const at = now().toISOString();
+            if (!r.ok) {
+              if (r.code === "not_found") {
+                update(e.opId, e.state === "dispatching" ? { state: "not_dispatched", result: "The helper has no record of this operation: it never started, nothing was done.", finishedAt: at, checkedAt: at } : { state: "interrupted", result: "The helper lost this operation's record; the outcome is unknown. Check the server.", finishedAt: at, checkedAt: at });
+              }
+              continue;
+            }
+            const op = (r.data.operation ?? {}) as Partial<SysLedgerEntry> & { summary?: string };
+            update(e.opId, { state: op.state ?? e.state, ...(op.summary ? { result: cap(op.summary, 500) } : {}), ...(op.verification ? { verification: op.verification } : {}), ...(op.finishedAt ? { finishedAt: op.finishedAt } : {}), checkedAt: at });
+          } catch {
+            // helper unreachable (reboot, restart); try again on the next tick
+          }
+        }
+        for (const e of store.read().filter((x) => ended(x.state) && !x.reportedAt)) {
+          const label = e.state === "verified" ? "verified" : e.state.replace("_", " ");
+          const text = `Server action "${e.action}" ${label}: ${e.result ?? e.error ?? "no detail"}`;
+          update(e.opId, { reportedAt: now().toISOString() });
+          // Urgent so it is not held for quiet hours: the owner confirmed this and is waiting for the outcome.
+          notify.send(cap(text, 700), true);
+        }
+      })().finally(() => (refreshing = undefined));
+      return refreshing;
+    },
+  };
+}
