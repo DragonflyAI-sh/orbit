@@ -153,7 +153,8 @@ export function adminOps(deps: { client?: AdminClient; store: Store<LedgerEntry[
         for (const e of store.read().filter((x) => ended(x.state) && !x.reportedAt)) {
           const text = `Server action "${e.action}" ${e.state === "verified" ? "verified" : e.state.replace("_", " ")}: ${e.result ?? e.error ?? "no detail"}`;
           update(e.opId, { reportedAt: now().toISOString() });
-          notify.send(cap(text, 600), e.state === "failed" || e.state === "restore_failed" || e.state === "interrupted");
+          // Urgent so it is not held for quiet hours: the owner confirmed this and is waiting for the outcome.
+          notify.send(cap(text, 600), true);
         }
       })().finally(() => (refreshing = undefined));
       return refreshing;

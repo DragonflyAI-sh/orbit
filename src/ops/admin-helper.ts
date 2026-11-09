@@ -122,10 +122,10 @@ export async function runAdminAction(raw: string, env: AdminEnv, c: AdminConfig)
       accepted: dispatched || replayed,
       replayed,
       operation: publicRecord(record),
-      note: dispatched
-        ? "Dispatched to a separate runner. Nothing is verified yet: ask op_status for the result."
-        : replayed
-          ? "This operation id was already used; it was not run again."
+      note: replayed
+        ? "This operation id was already used; it was not run again. Its recorded state is shown."
+        : dispatched
+          ? "Dispatched to a separate runner. Nothing is verified yet: ask op_status for the result."
           : "The operation could not be started.",
     },
   };

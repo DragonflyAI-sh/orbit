@@ -58,7 +58,7 @@ export function validateConfigValue(key: string, value: unknown): string {
   if (!(CONFIG_KEYS as readonly string[]).includes(key)) return bad(`${key} is not a setting this action may change.`);
   if (key === "ORBIT_INGRESS_PORT") {
     const text = typeof value === "number" ? String(value) : value;
-    if (typeof text !== "string" || !/^[1-9][0-9]{3,4}$/.test(text)) return bad("ORBIT_INGRESS_PORT must be a whole number.");
+    if (typeof text !== "string" || !/^[1-9][0-9]{0,4}$/.test(text)) return bad("ORBIT_INGRESS_PORT must be a whole number.");
     const n = Number(text);
     if (n < INGRESS_PORT_MIN || n > 65535) return bad(`ORBIT_INGRESS_PORT must be from ${INGRESS_PORT_MIN} to 65535.`);
     return text;

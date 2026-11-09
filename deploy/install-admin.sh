@@ -29,6 +29,6 @@ systemctl daemon-reload
 systemctl enable orbit-ops-admin.socket
 systemctl restart orbit-ops-admin.socket
 if ! systemctl show orbit.service -p SupplementaryGroups --value 2>/dev/null | grep -qw orbit-ops; then
-  echo "install-admin: WARNING: orbit.service is not in group orbit-ops yet; install tier 1 (deploy/install.sh) and restart orbit.service" >&2
+  echo "install-admin: WARNING: orbit.service is not in group orbit-ops yet; install tier 1 (deploy/install.sh) and then restart the ORBIT service" >&2
 fi
 echo "install-admin: done. Socket: $(ls -l /run/orbit-ops-admin.sock 2>/dev/null || echo missing)"
