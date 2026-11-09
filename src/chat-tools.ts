@@ -3,7 +3,9 @@ import { compactList, detailJob } from "./job-view.ts";
 import type { Jobs } from "./jobs.ts";
 import type { MemoryPort } from "./memory.ts";
 import type { Notifier } from "./notify.ts";
+import type { AdminOps } from "./ops-admin.ts";
 import type { Ops } from "./ops-client.ts";
+import { CONFIG_KEYS, type MutatingAction } from "./ops/admin-protocol.ts";
 import { LOG_LINES_DEFAULT, LOG_LINES_MAX } from "./ops/protocol.ts";
 import type { Toolbox } from "./tools.ts";
 
@@ -21,6 +23,8 @@ export type ChatToolDeps = {
   jobs?: Jobs;
   // The root helper (read-only server operations). Absent means the tools are not offered.
   ops?: Ops;
+  // Tier 2 (owner-confirmed server operations). Absent means the proposal tools are not offered.
+  admin?: AdminOps;
   notify: Notifier;
   proposals: Proposals;
   // Routine names that can be launched, and whether the brief can be written. Empty when launching is not possible.
@@ -84,6 +88,57 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
       op("ops_tailscale_status", "tailscale_status", "Tailscale state of this host and of the orbit-jobs node, with the LOCAL Funnel configuration. It does not test remote Funnel reachability."),
       op("ops_vault_sync", "vault_sync", "Which vault commit the server copy is at and how old that sync is."),
       op("ops_credentials", "credentials", "Which credential files are present on the server: names, sizes and dates only. Contents are never read."),
+    );
+  }
+  const admin = d.admin;
+  if (admin) {
+    // Every one of these only PROPOSES. The operation runs after Rai clicks Confirm on the page, and ORBIT reports what the
+    // helper observed afterwards; "dispatched" is never "done".
+    const propose = (name: string, action: MutatingAction, description: string, parameters: Record<string, unknown> = obj({}, []), pick?: (a: Record<string, unknown>) => { changes?: unknown }): ChatTool => ({
+      name,
+      description: `${description} This does NOT do it: it creates a proposal that Rai must confirm with a button on the page, and the action is then carried out by a separate privileged helper. Never say it happened until ops_admin_operations shows a verified result.`,
+      parameters,
+      run: async (a) => {
+        const input = pick ? pick(a) : {};
+        if (!pick && Object.keys(a).length) throw new Error("This tool takes no arguments.");
+        const p = admin.propose(action, input);
+        return {
+          value: { status: "pending-confirmation", executed: false, proposalId: p.id, action, summary: p.summary, settings: p.display, digest: p.digest, expiresAt: p.expiresAt, note: "Nothing has been done. Rai must click Confirm on the page." },
+          provenance: "live",
+          source: "chat/proposals",
+        };
+      },
+    });
+    tools.push(
+      propose("ops_propose_restart_orbit", "restart_orbit", "Propose restarting the ORBIT service."),
+      propose("ops_propose_deploy_now", "deploy_now", "Propose running the deploy now (the same service the deploy timer starts)."),
+      propose("ops_propose_rollback", "rollback_release", "Propose rolling back to the previous known-good release."),
+      propose("ops_propose_refresh_vault", "refresh_vault", "Propose refreshing the server's vault copy now."),
+      propose(
+        "ops_propose_config_change",
+        "apply_config",
+        "Propose changing orbit.env settings. Only these five can be changed, and unknown keys or invalid values are refused: ORBIT_MODEL (model name), ORBIT_ROUTINES (name=trig_<id>,...), ORBIT_ROUTINE_REPOS (name=owner/repo,...), ORBIT_PUBLIC_JOB_URL (https://<name>.ts.net), ORBIT_INGRESS_PORT (integer 1024-65535). ORBIT restarts to apply them, and the old file is restored if /status is not healthy within 60 seconds.",
+        {
+          type: "object",
+          properties: { changes: { type: "object", additionalProperties: false, properties: Object.fromEntries(CONFIG_KEYS.map((k) => [k, k === "ORBIT_INGRESS_PORT" ? { type: "integer", minimum: 1024, maximum: 65535 } : { type: "string" }])) } },
+          required: ["changes"],
+          additionalProperties: false,
+        },
+        (a) => {
+          if (Object.keys(a).some((k) => k !== "changes")) throw new Error("Only {changes: {...}} is accepted.");
+          return { changes: a.changes };
+        },
+      ),
+      {
+        name: "ops_admin_operations",
+        description: "Server operations Rai has confirmed (restart, deploy, rollback, config change, vault refresh), newest first, with what the helper actually observed: state, whether /status was verified healthy on which commit, and the outcome. Refreshes in-flight ones from the helper first. 'accepted' or 'running' means NOT verified yet.",
+        parameters: obj({}, []),
+        run: async (a) => {
+          if (Object.keys(a).length) throw new Error("This tool takes no arguments.");
+          await admin.refresh();
+          return { value: admin.list().slice(-10).reverse().map(({ proposalId: _p, digest: _d, ...e }) => e), provenance: "live", source: "ops-admin/ledger" };
+        },
+      },
     );
   }
   const jobs = d.jobs;

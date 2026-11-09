@@ -6,9 +6,12 @@ import { jobSecret, jobs as jobRegistry } from "./jobs.ts";
 import { gitReconciler, selectControl, selectRoutines } from "./launcher.ts";
 import { selectMemory } from "./memory.ts";
 import { chatgptModel, tokenFile } from "./chatgpt.ts";
+import { proposals as newProposals } from "./agent.ts";
 import { selectModel } from "./model.ts";
 import { nodes as devicePresence, tailscaleStatus } from "./nodes.ts";
 import { notifier, selectDiscord } from "./notify.ts";
+import { adminOps } from "./ops-admin.ts";
+import { adminClient } from "./ops-admin-client.ts";
 import { opsClient } from "./ops-client.ts";
 import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
 import { parseRoutineRepos, pullRequestOpener, selectPulls } from "./pull-requests.ts";
@@ -42,6 +45,9 @@ const memory = selectMemory(process.env);
 const notify = notifier(jsonStore(stateDir, "notifications", []), selectDiscord(process.env));
 const tools = toolbox([githubRepoStatus()]);
 const ops = opsClient();
+// Server operations (tier 2): proposals need the owner's confirmation; the ledger is persisted so results survive a restart.
+const proposals = newProposals();
+const admin = adminOps({ client: adminClient(), store: jsonStore(stateDir, "ops-admin", []), notify, proposals });
 const owner = process.env.ORBIT_OWNER || undefined;
 const nodes = devicePresence(tailscaleStatus(), owner);
 const jobs = jobRegistry(jsonStore(stateDir, "jobs-cloud", []), jobSecret(stateDir), notify);
@@ -70,6 +76,8 @@ const watchTick = () => {
   }
 };
 const tick = () => {
+  // Collect the outcome of any server operation still in flight (including one that restarted this process).
+  void admin.refresh().catch(() => {});
   // Renew the ChatGPT login shortly before it expires. Not awaited: a slow token endpoint must not hold up the tick
   // or the watch. maintain() never throws and runs one renewal at a time.
   void model.maintain?.();
@@ -101,6 +109,8 @@ buildServer({
   runs,
   tools,
   ops,
+  adminOps: admin,
+  proposals,
   nodes,
   jobs,
   watch,

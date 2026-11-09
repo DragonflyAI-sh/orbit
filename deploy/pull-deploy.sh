@@ -2,7 +2,7 @@
 # Pull-based deploy, run by orbit-deploy.timer on the host.
 #   pull-deploy.sh           deploy the newest main commit whose `checks` passed; restore the previous release if /status fails
 #   pull-deploy.sh --drill   opt-in rollback drill (see docs/rollback-drill.md); never part of the timer path
-#   pull-deploy.sh --rollback        owner-confirmed manual rollback to the previous known-good release (docs/orbit-ops-admin.md);
+#   pull-deploy.sh --rollback        owner-confirmed manual rollback to the previous known-good release (tier 2 admin doc);
 #                                    exits 0 verified, 1 candidate failed and the running release restored, 2 restoration failed, 64 refused, 75 lock busy
 #   pull-deploy.sh --refresh-vault   fast-forward the read-only vault copy now and record state/vault.json; 0 ok, 1 failed, 64 no vault, 75 lock busy
 # All modes share one lock, one switch-and-verify flow and one rollback flow (switch_and_verify / rollback_to).
