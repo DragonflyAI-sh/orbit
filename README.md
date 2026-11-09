@@ -90,4 +90,6 @@ To sign in, press "Sign in with ChatGPT" on the web page, open the link and appr
 
 An OpenAI API key at `/etc/credstore/orbit.openai` (root, 0600) takes precedence if present. Without either, replies are mock and `/status` says why.
 
+**Server operations (tier 2).** ORBIT can propose a restart, a deploy now, a rollback, a change to five `orbit.env` settings, or a vault refresh. Each is an owner-only proposal that does nothing until Rai confirms the exact action, and then runs through a separate privileged helper whose result ORBIT reports only once it has verified `/status`. See `docs/orbit-ops-admin.md` (privileges, install commands, acceptance checks).
+
 **Rollback drill.** `deploy/pull-deploy.sh --drill` is an opt-in, operator-run drill of the real rollback path; see `docs/rollback-drill.md`. An app deploy does not update `/usr/local/lib/orbit/pull-deploy.sh`; the runbook says how to verify and install it.

@@ -1,0 +1,42 @@
+[Unit]
+Description=ORBIT admin operation %i (restart, deploy, rollback or orbit.env change)
+
+[Service]
+# One accepted operation, started by orbit-ops-admin@.service. A separate unit, so it keeps running when orbit.service restarts.
+# It runs fixed commands only (systemctl start/restart on orbit.service and orbit-deploy.service, the installed deploy script
+# with --rollback), edits only the five permitted orbit.env settings, and verifies /status itself before it records a result.
+Type=oneshot
+ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/admin-run.ts %i ops
+# lock wait + deploy + health checks, with room to spare
+TimeoutStartSec=2400
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=128
+StateDirectory=orbit-ops-admin
+StateDirectoryMode=0700
+ProtectSystem=strict
+# /opt/orbit must be writable as a directory: orbit.env and the `current` link are replaced by rename. The checkouts are not needed.
+ReadWritePaths=/opt/orbit
+ReadOnlyPaths=/opt/orbit/repo /opt/orbit/vault
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+# Network only to probe /status on this host (HOST:PORT from orbit.env, and the job listener on 127.0.0.1). Nothing else is reachable.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost 100.64.0.0/10 fd7a:115c:a1e0::/48
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077

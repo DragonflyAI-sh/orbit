@@ -140,18 +140,21 @@
     box.className = "proposal";
     const head = document.createElement("div");
     const steer = p.kind === "job_steer";
-    head.textContent = steer ? `Proposed steer for job ${p.job}. Nothing has been sent yet.` : `Proposed job on routine "${p.routine}". Nothing has launched yet.`;
+    const ops = p.kind === "ops_admin";
+    head.textContent = ops ? `Proposed server action: ${p.summary} Nothing has been done yet.` : steer ? `Proposed steer for job ${p.job}. Nothing has been sent yet.` : `Proposed job on routine "${p.routine}". Nothing has launched yet.`;
     const brief = document.createElement("pre");
-    brief.textContent = steer ? p.text : p.brief;
+    brief.textContent = ops ? (p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action) + `\n\ndigest ${p.digest.slice(0, 16)}`  : steer ? p.text : p.brief;
     const status = document.createElement("div");
     const done = (text) => { box.replaceChildren(head, brief, Object.assign(document.createElement("div"), { textContent: text })); };
     const act = async (verb) => {
       confirm.disabled = cancel.disabled = true;
       try {
-        const res = await fetch(`/chat/proposals/${p.id}/${verb}`, { method: "POST" });
+        const res = await fetch(`/chat/proposals/${p.id}/${verb}`, ops && verb === "confirm"
+          ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ digest: p.digest }) }
+          : { method: "POST" });
         const body = await res.json();
-        if (!res.ok) return done(`${verb === "confirm" ? (steer ? "Steer failed" : "Launch failed") : "Not cancelled"}: ${body.error}`);
-        done(verb === "cancel" ? "Cancelled." : steer ? `Steer ${body.steer.n} queued for ${body.steered}; the job picks it up at its next check-in.` : `Launched job ${body.id}${body.launch?.sessionUrl ? " · " + body.launch.sessionUrl : ""}. Ask ORBIT for its status.`);
+        if (!res.ok) return done(`${verb === "confirm" ? (ops ? "Not dispatched" : steer ? "Steer failed" : "Launch failed") : "Not cancelled"}: ${body.error}`);
+        done(verb === "cancel" ? "Cancelled." : ops ? "Dispatched to the server helper. This is NOT verified yet: ORBIT will report the verified result when it has it (ask it for the operations)." : steer ? `Steer ${body.steer.n} queued for ${body.steered}; the job picks it up at its next check-in.` : `Launched job ${body.id}${body.launch?.sessionUrl ? " · " + body.launch.sessionUrl : ""}. Ask ORBIT for its status.`);
       } catch { done("ORBIT did not answer."); }
     };
     const confirm = Object.assign(document.createElement("button"), { type: "button", textContent: "Confirm" });

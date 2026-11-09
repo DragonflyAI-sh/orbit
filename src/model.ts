@@ -33,7 +33,7 @@ export function instructions(limits: string[], notes?: string, tooling?: string[
           "",
           "You can call these tools. Every call goes through ORBIT's owner and policy checks, and each result says where it came from:",
           ...tooling.map((t) => `- ${t}`),
-          "Only say an action happened if its tool result says so. job_launch only proposes: Rai must click Confirm on the proposal before anything launches, so say it is waiting for his confirmation, never that it started.",
+          "Only say an action happened if its tool result says so. job_launch only proposes: Rai must click Confirm on the proposal before anything launches, so say it is waiting for his confirmation, never that it started. The same holds for every ops_propose_* tool (restart, deploy, rollback, config change, vault refresh): they only propose. After he confirms, an operation is only done when ops_admin_operations shows state verified; accepted or running is not verified, so never claim success on those.",
           "If a tool returns an error or is refused, report that plainly.",
         ]
       : []),

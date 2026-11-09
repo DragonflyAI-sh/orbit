@@ -69,4 +69,4 @@ Then ask ORBIT in chat (as the owner) for the server status; the reply should li
 - Written and tested against fakes and real temp directories; the units have not been exercised on a live host by the runner. The first install should be watched with `journalctl -u 'orbit-ops@*' -f`. If the syscall filter or capability set blocks something on your distribution, the helper answers `unavailable` or `internal_error` for that action rather than failing open; loosen `SystemCallFilter=`/`CapabilityBoundingSet=` only as needed.
 - Pending-update data needs `/var/lib/update-notifier/updates-available` (Ubuntu). Elsewhere it is reported unavailable.
 - Requires `/usr/local/bin/node` (the same node the ORBIT unit uses; Node 22.18+ runs the `.ts` helper directly).
-- Tier 2 and 3 actions (restarts, deploy triggers, installs) and scheduling are not implemented.
+- Tier 2 (owner-confirmed restart, deploy-now, rollback, `orbit.env` changes, vault refresh) is a separate helper: see `docs/orbit-ops-admin.md`. Tier 3 and scheduling are not implemented.

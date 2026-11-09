@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Item, ModelPort, ToolDef } from "./model.ts";
+import type { MutatingAction } from "./ops/admin-protocol.ts";
 import type { Result } from "./ports.ts";
 
 // Tool use inside a chat reply. The model may call ChatTools; every call is checked by `allow` (ORBIT's policy)
@@ -102,7 +103,13 @@ async function execute(
 
 // Actions with effects outside the conversation wait here for a click on Confirm: launching a job, and
 // steering one (a steered runner has push access, and tool results can carry text written by others).
-export type ProposalAction = { kind: "job_launch"; routine: string; brief: string } | { kind: "job_steer"; job: string; text: string };
+// ops_admin is a server operation (restart, deploy, rollback, orbit.env change, vault refresh). The proposal carries what Rai is
+// shown (a summary, masked settings) and a digest of the exact validated action and arguments; the arguments themselves stay with
+// ORBIT's admin ledger (src/ops-admin.ts), so a proposal listing never holds a setting value in full.
+export type ProposalAction =
+  | { kind: "job_launch"; routine: string; brief: string }
+  | { kind: "job_steer"; job: string; text: string }
+  | { kind: "ops_admin"; action: MutatingAction; summary: string; display: Record<string, string> | null; digest: string };
 export type Proposal = ProposalAction & { id: string; createdAt: string; expiresAt: string };
 
 export const PROPOSAL_TTL_MS = 30 * 60 * 1000;
@@ -114,13 +121,18 @@ export function proposals(now: () => Date = () => new Date()) {
     for (const [id, p] of open) if (new Date(p.expiresAt) <= now()) open.delete(id);
   };
   return {
-    propose(action: ProposalAction): Proposal {
+    propose(action: ProposalAction, ttlMs: number = PROPOSAL_TTL_MS): Proposal {
       sweep();
       while (open.size >= MAX_PROPOSALS) open.delete(open.keys().next().value!);
       const at = now();
-      const p: Proposal = { ...action, id: randomUUID(), createdAt: at.toISOString(), expiresAt: new Date(at.getTime() + PROPOSAL_TTL_MS).toISOString() };
+      const p: Proposal = { ...action, id: randomUUID(), createdAt: at.toISOString(), expiresAt: new Date(at.getTime() + ttlMs).toISOString() };
       open.set(p.id, p);
       return p;
+    },
+    // Looks without consuming (the confirm route checks the digest before it spends the proposal).
+    peek(id: string): Proposal | undefined {
+      sweep();
+      return open.get(id);
     },
     // Removes the proposal: a confirm or a cancel can happen once.
     take(id: string): Proposal | undefined {
