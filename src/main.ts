@@ -9,6 +9,7 @@ import { chatgptModel, tokenFile } from "./chatgpt.ts";
 import { selectModel } from "./model.ts";
 import { nodes as devicePresence, tailscaleStatus } from "./nodes.ts";
 import { notifier, selectDiscord } from "./notify.ts";
+import { opsClient } from "./ops-client.ts";
 import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
 import { parseRoutineRepos, pullRequestOpener, selectPulls } from "./pull-requests.ts";
 import { reviewer, selectComments } from "./review.ts";
@@ -40,6 +41,7 @@ const model = selectModel(process.env, (name) => (chatgpt.current = chatgptModel
 const memory = selectMemory(process.env);
 const notify = notifier(jsonStore(stateDir, "notifications", []), selectDiscord(process.env));
 const tools = toolbox([githubRepoStatus()]);
+const ops = opsClient();
 const owner = process.env.ORBIT_OWNER || undefined;
 const nodes = devicePresence(tailscaleStatus(), owner);
 const jobs = jobRegistry(jsonStore(stateDir, "jobs-cloud", []), jobSecret(stateDir), notify);
@@ -98,6 +100,7 @@ buildServer({
   schedule,
   runs,
   tools,
+  ops,
   nodes,
   jobs,
   watch,

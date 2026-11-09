@@ -1,0 +1,17 @@
+[Unit]
+Description=ORBIT ops helper socket (read-only server operations for the ORBIT service)
+
+[Socket]
+# Authorization is the kernel's: only root and members of the system group orbit-ops can connect.
+# install.sh makes that group and the ORBIT service (a DynamicUser) joins it through SupplementaryGroups=.
+ListenStream=/run/orbit-ops.sock
+SocketUser=root
+SocketGroup=orbit-ops
+SocketMode=0660
+# One short-lived orbit-ops@.service instance per connection.
+Accept=yes
+MaxConnections=8
+PassCredentials=no
+
+[Install]
+WantedBy=sockets.target
