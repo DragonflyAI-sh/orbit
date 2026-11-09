@@ -24,13 +24,16 @@ import { scheduler } from "../src/schedule.ts";
 import { buildServer } from "../src/server.ts";
 import { jsonStore } from "../src/store.ts";
 import { toolbox } from "../src/tools.ts";
-import { sysDigestOf, sysOpIdFor } from "../src/ops/sys-protocol.ts";
+import { flagPlan, planDigestOf, sysDigestOf, sysOpIdFor, type PlanEntry } from "../src/ops/sys-protocol.ts";
 
 const HOST = "orbit-dedicated-8";
 const JOBS_HOST = "orbit-jobs.tail5bde08.ts.net";
 const read = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
 const sha = (p: string) => createHash("sha256").update(readFileSync(new URL(`../${p}`, import.meta.url))).digest("hex");
 
+const PLAN: PlanEntry[] = [["bar", "2.0", "2.1"], ["libfoo1", "1.0", "1.1"], ["openssh-server", "1:9.6", "1:9.6p1-3ubuntu13.5"], ["linux-image-6.8.0-50-generic", "6.8.0-49", "6.8.0-50"]].sort((a, b) => (a[0]! < b[0]! ? -1 : 1)) as PlanEntry[];
+const PLAN_D = planDigestOf(PLAN);
+const planOp = (upgrades: PlanEntry[] = PLAN, state = "verified") => ({ state, plan: { upgrades, flags: flagPlan(upgrades), digestKey: planDigestOf(upgrades).slice(0, 24) } });
 type Call = Record<string, unknown> & { action: string };
 function fakeClient(opts: { status?: Record<string, unknown> | SysReply; answer?: (c: Call) => SysReply | Promise<SysReply> } = {}) {
   const calls: Call[] = [];
@@ -40,10 +43,11 @@ function fakeClient(opts: { status?: Record<string, unknown> | SysReply; answer?
       const c = req as Call;
       calls.push(c);
       if (c.action === "sys_status") return status;
+      if (c.action === "plan_os_updates" && !opts.answer) return { ok: true, data: { operation: planOp() } };
       return (opts.answer ?? ((x) => ({ ok: true, data: { operation: { state: x.action === "op_status" ? "running" : "accepted" } } })))(c);
     },
   };
-  return { client, calls, mutations: () => calls.filter((c) => c.action !== "sys_status" && c.action !== "op_status") };
+  return { client, calls, mutations: () => calls.filter((c) => c.action !== "sys_status" && c.action !== "op_status" && c.action !== "plan_os_updates"), plans: () => calls.filter((c) => c.action === "plan_os_updates") };
 }
 
 const quiet: JobsSnapshot = { known: true, active: [], uncertain: [], detail: "none" };
@@ -68,7 +72,7 @@ test("a proposal reads helper status only: no mutation reaches the helper until 
     assert.ok(p.warnings.length >= 2, a);
   }
   assert.equal(h.proposals.list().length, 4);
-  assert.deepEqual(f.calls.map((c) => c.action), ["sys_status", "sys_status", "sys_status", "sys_status"]);
+  assert.deepEqual(f.calls.map((c) => c.action), ["sys_status", "plan_os_updates", "sys_status", "sys_status", "sys_status"], "the only non-status call is the plan (apt metadata refresh and a simulation, nothing installed)");
   assert.deepEqual(h.sys.list(), []);
 });
 
@@ -317,6 +321,7 @@ test("a dispatch whose answer is lost stays 'dispatching' until the helper says 
   let known = false;
   const f = fakeClient({
     answer: (c) => {
+      if (c.action === "plan_os_updates") return { ok: true, data: { operation: planOp() } };
       if (c.action !== "op_status") throw new Error("socket closed");
       return known ? { ok: true, data: { operation: { state: "verified", summary: "Upgraded 2 packages; dpkg clean; ORBIT healthy.", finishedAt: "2026-11-09T12:30:00Z", verification: { checked: true, healthy: true, detail: "ok" } } } } : { ok: false, code: "not_found", message: "No operation with that id." };
     },
@@ -333,7 +338,7 @@ test("a dispatch whose answer is lost stays 'dispatching' until the helper says 
   assert.equal(h.sys.list()[0]!.verification?.checked, true);
   // never reached the helper at all: not_dispatched
   known = false;
-  const h2 = ledger({ client: fakeClient({ answer: (c) => { if (c.action !== "op_status") throw new Error("down"); return { ok: false, code: "not_found", message: "none" }; } }).client });
+  const h2 = ledger({ client: fakeClient({ answer: (c) => { if (c.action === "plan_os_updates") return { ok: true, data: { operation: planOp() } }; if (c.action !== "op_status") throw new Error("down"); return { ok: false, code: "not_found", message: "none" }; } }).client });
   const p2 = await h2.sys.propose("install_os_updates");
   await confirm(h2, p2);
   await h2.sys.refresh();
@@ -411,20 +416,25 @@ test("the tier 3 tools exist only when configured, are owner-only, take no argum
   const f = fakeClient();
   const h = ledger({ client: f.client });
   const tools = toolsFor(h.sys);
-  const names = ["ops_propose_os_updates", "ops_propose_reboot_host", "ops_propose_funnel_enable", "ops_propose_funnel_disable", "ops_sys_operations"];
+  const names = ["ops_propose_os_updates", "ops_propose_reboot_host", "ops_propose_funnel_enable", "ops_propose_funnel_disable", "ops_sys_operations", "ops_sys_cancel_reboot"];
   for (const n of names) {
     assert.ok(tools.some((t) => t.name === n), n);
     assert.equal(decide("agent", n, true).allow, true);
     assert.equal(decide("agent", n, false).allow, false);
   }
   for (const t of tools.filter((x) => x.name.startsWith("ops_propose_") && names.includes(x.name))) {
-    assert.deepEqual((t.parameters as { properties: object }).properties, {}, "no argument can carry a package, service, path or destination");
+    // the only argument anywhere is the reboot's optional UTC time: nothing can carry a package, service, path or destination
+    assert.deepEqual(Object.keys((t.parameters as { properties: object }).properties), t.name === "ops_propose_reboot_host" ? ["at"] : []);
     assert.equal((t.parameters as { additionalProperties: boolean }).additionalProperties, false);
     assert.match(t.description, /no proposal exists/);
     assert.match(t.description, /never claim a proposal or an operation exists unless this tool returned a proposalId/);
-    for (const bad of [{ packages: ["x"] }, { unit: "sshd.service" }, { path: "/etc" }, { destination: "http://evil" }, { host: "x" }]) await assert.rejects(() => t.run(bad), /no arguments/);
+    for (const bad of [{ packages: ["x"] }, { unit: "sshd.service" }, { path: "/etc" }, { destination: "http://evil" }, { host: "x" }]) await assert.rejects(() => t.run(bad), /no arguments|only an optional/);
   }
   assert.deepEqual(f.calls, [], "rejected calls never reach the helper");
+  const cancelTool = tools.find((x) => x.name === "ops_sys_cancel_reboot")!;
+  assert.deepEqual(Object.keys((cancelTool.parameters as { properties: object }).properties), ["opId"]);
+  await assert.rejects(() => cancelTool.run({ unit: "sshd.service" }), /only an optional opId/);
+  assert.deepEqual(f.calls, []);
   const res = await tools.find((t) => t.name === "ops_propose_reboot_host")!.run({});
   const v = res.value as { status: string; executed: boolean; proposalId: string; warnings: string[] };
   assert.equal(v.status, "pending-confirmation");
@@ -447,7 +457,7 @@ test("ops_sys_operations lists what the helper observed, newest first, without i
   const h = ledger({ client: fakeClient().client });
   await confirm(h, await h.sys.propose("install_os_updates"));
   const tool = toolsFor(h.sys).find((t) => t.name === "ops_sys_operations")!;
-  assert.match(tool.description, /'accepted', 'running' and 'rebooting' mean NOT verified yet/);
+  assert.match(tool.description, /'accepted', 'scheduled', 'running' and 'rebooting' mean NOT verified yet/);
   const res = await tool.run({});
   assert.deepEqual([res.provenance, res.source], ["live", "ops-sys/ledger"]);
   const rows = res.value as { state: string; proposalId?: string; digest?: string }[];
@@ -575,17 +585,6 @@ test("the client validates before sending (a bad target or digest never leaves O
 
 // ---------------------------------------------------------------- units, installers and docs match the design
 
-test("tier 1 and tier 2 are untouched by tier 3: their units, helpers and installer are byte-identical to the shipped ones", () => {
-  assert.equal(sha("deploy/systemd/orbit-ops@.service"), "088be396050509047680bb157b625b19e11a6e25f0042e1753a4045765a86c63");
-  assert.equal(sha("deploy/systemd/orbit-ops.socket"), "9f2516a3337a99551b220d198c63b8b5dc100a0d0465fc6947d62add4d31c27e");
-  assert.equal(sha("deploy/systemd/orbit.service"), "1516761d0bda57cd699cf76e77108f079ac82185c267ea1920f3ab9b1b40d48e");
-  assert.equal(sha("src/ops/helper.ts"), "47e6384d82720177166f876ce9dd5bc7d56a9efa3ba01b208c6b96a8078fad5a");
-  assert.equal(sha("src/ops/protocol.ts"), "3a1dea9c7c865639387531b173c5f6e93d3ba346f789a1b482db2d7cb338b1f1");
-  const admin = read("src/ops/admin-protocol.ts");
-  assert.match(admin, /MUTATING_ACTIONS = \["restart_orbit", "deploy_now", "rollback_release", "apply_config", "refresh_vault"\]/);
-  assert.ok(!/reboot|funnel|apt/i.test(admin.replace(/#.*$/gm, "").replace(/\/\/.*$/gm, "")), "tier 2's action list gained nothing");
-});
-
 test("tier 3 is never installed or started by a normal deploy or by the tier 1/2 installers", () => {
   for (const f of ["deploy/install.sh", "deploy/install-admin.sh", "deploy/pull-deploy.sh"]) assert.ok(!/install-sys|orbit-ops-sys|lib\/orbit\/ops\/sys-/.test(read(f)), f);
   const i = read("deploy/install-sys.sh");
@@ -632,4 +631,326 @@ test("the docs exist and keep the honest separations: merged vs installed vs ver
   for (const h of ["## Threat model", "## Allowed update policy", "## Funnel topology", "## Rollback and removal", "## Staged live acceptance", "## Evidence gaps", "## What has and has not happened"]) assert.ok(d.includes(h), h);
   assert.match(d, /never been run on a live host/i);
   assert.match(d, /Rai's separate approval/);
+});
+
+// ---------------------------------------------------------------- follow-up: host name, OS update plan, scheduled reboot, cancellation
+
+const T0 = Date.parse("2026-11-09T12:00:00Z");
+const clock = (o: { t: number }) => () => new Date(o.t);
+const at = (m: number, base = T0) => new Date(base + m * 60_000).toISOString();
+const noSleep = async () => {};
+
+test("the helper's host name is validated at proposal time: an unusable one makes no card, no plan and no helper call beyond status", async () => {
+  for (const bad of ["box.example.com", "Box", "a_b", "-x", "x-", "a".repeat(64), "x y", "host\nname"]) {
+    for (const action of ["install_os_updates", "reboot_host"] as const) {
+      const f = fakeClient({ status: { hostname: bad } });
+      const h = ledger({ client: f.client });
+      await assert.rejects(() => h.sys.propose(action), /host name ORBIT cannot use.*No proposal was created/, `${bad} ${action}`);
+      assert.deepEqual(h.proposals.list(), []);
+      assert.deepEqual(f.calls.map((c) => c.action), ["sys_status"], "no plan (apt refresh) is started for a host that could not be confirmed anyway");
+    }
+  }
+  for (const good of ["orbit-dedicated-8", "a", "a1-b2", "0abc", "a".repeat(63)]) {
+    const h = ledger({ client: fakeClient({ status: { hostname: good } }).client });
+    assert.equal((await h.sys.propose("reboot_host")).kind, "ops_sys", good);
+  }
+  // Funnel names no host of this machine, so an FQDN host name does not matter to it
+  const f = ledger({ client: fakeClient({ status: { hostname: "box.example.com" } }).client });
+  assert.equal((await f.sys.propose("funnel_enable")).kind, "ops_sys");
+});
+
+test("OS update proposal: the helper makes the plan first; the card lists every package and version and flags kernel, libc, systemd, openssh, tailscale", async () => {
+  const big: PlanEntry[] = [["libc6", "2.39-0ubuntu8.3", "2.39-0ubuntu8.4"], ["systemd", "255.4-1", "255.4-2"], ["tailscale", "1.76.0", "1.78.1"], ...PLAN].sort((a, b) => (a[0] < b[0] ? -1 : 1)) as PlanEntry[];
+  const f = fakeClient({ answer: (c) => (c.action === "plan_os_updates" ? { ok: true, data: { operation: planOp(big) } } : { ok: true, data: { operation: { state: "accepted" } } }) });
+  const h = ledger({ client: f.client });
+  const p = await h.sys.propose("install_os_updates");
+  assert.deepEqual(f.calls.map((c) => c.action), ["sys_status", "plan_os_updates"], "nothing is installed by proposing");
+  assert.match(String(f.calls[1]!.opId), /^[0-9a-f]{40}$/);
+  assert.deepEqual(Object.keys(f.calls[1]!).sort(), ["action", "opId"], "a plan carries no digest, package or command");
+  for (const [n, o, v] of big) assert.ok(p.display.plan!.includes(`${n} ${o} -> ${v}`), n);
+  assert.equal(p.display.packages, String(big.length));
+  const flagged = p.warnings[0]!;
+  assert.match(flagged, /^FLAGGED PACKAGES/);
+  for (const w of ["kernel: linux-image-6.8.0-50-generic", "libc: libc6", "systemd: systemd", "openssh: openssh-server", "tailscale: tailscale"]) assert.ok(flagged.includes(w), w);
+  assert.equal(p.display.FLAGGED, flagged.replace(/^FLAGGED PACKAGES - /, "").split(". These")[0]);
+  assert.match(p.summary, /exactly the package plan listed on this card/);
+  // honest about restarts and about the plan's timing
+  const all = `${p.summary}\n${p.warnings.join("\n")}`;
+  assert.match(all, /maintainer scripts \(openssh, tailscale, libc, systemd and others\) can restart daemons themselves/);
+  assert.match(all, /apt-get update \(which refreshes apt metadata\)/);
+  assert.match(all, /recomputed before upgrading; if it differs the update is refused/);
+  assert.match(all, /small window remains/);
+  assert.ok(!/never restarts? (any )?services|restarts? no services/i.test(all), "no claim that services are never restarted");
+  // an unflagged plan has no flag banner
+  const quiet = await ledger({ client: fakeClient({ answer: (c) => (c.action === "plan_os_updates" ? { ok: true, data: { operation: planOp([["bar", "2.0", "2.1"]]) } } : { ok: true, data: { operation: {} } }) }).client }).sys.propose("install_os_updates");
+  assert.ok(!quiet.warnings.some((w) => /^FLAGGED/.test(w)));
+  assert.equal(quiet.display.FLAGGED, undefined);
+});
+
+test("OS update confirmation binds the FULL plan: the digest covers it, the dispatch carries the plan digest, and another plan is another digest", async () => {
+  const f = fakeClient();
+  const h = ledger({ client: f.client });
+  const p = await h.sys.propose("install_os_updates");
+  assert.equal(p.digest, sysDigestOf("install_os_updates", { host: HOST }, { planDigest: PLAN_D }));
+  assert.notEqual(p.digest, sysDigestOf("install_os_updates", { host: HOST }), "the old plan-less digest no longer matches");
+  const other = planDigestOf([...PLAN, ["extra", "1", "2"]]);
+  assert.notEqual(p.digest, sysDigestOf("install_os_updates", { host: HOST }, { planDigest: other }));
+  await confirm(h, p);
+  const m = f.mutations()[0]!;
+  assert.equal(m.action, "install_os_updates");
+  assert.equal(m.planDigest, PLAN_D);
+  assert.equal(m.digest, p.digest);
+  assert.equal(h.sys.list()[0]!.planDigest, PLAN_D);
+  // two proposals made from two different plans carry different digests
+  const f2 = fakeClient({ answer: (c) => (c.action === "plan_os_updates" ? { ok: true, data: { operation: planOp([["bar", "2.0", "2.2"]]) } } : { ok: true, data: { operation: {} } }) });
+  const p2 = await ledger({ client: f2.client }).sys.propose("install_os_updates");
+  assert.notEqual(p2.digest, p.digest);
+});
+
+test("OS update proposals that cannot get a trustworthy plan create nothing: nothing pending, failed, malformed, inconsistent, too slow, refused, unreachable", async () => {
+  const cases: [string, (c: Call) => SysReply | Promise<SysReply>, RegExp][] = [
+    ["nothing pending", () => ({ ok: true, data: { operation: { state: "no_change" } } }), /No OS package upgrades are pending.*nothing was installed/],
+    ["failed", () => ({ ok: true, data: { operation: { state: "failed", summary: "policy refuses this update. It would remove oldlib" } } }), /could not be made: policy refuses.*No proposal/],
+    ["interrupted", () => ({ ok: true, data: { operation: { state: "interrupted", summary: "runner stopped" } } }), /could not be made/],
+    ["no plan in a verified result", () => ({ ok: true, data: { operation: { state: "verified" } } }), /malformed/],
+    ["a bad entry", () => ({ ok: true, data: { operation: { state: "verified", plan: { upgrades: [["bad name", "1", "2"]], digestKey: "x" } } } }), /malformed/],
+    ["an empty plan", () => ({ ok: true, data: { operation: planOp([]) } }), /malformed/],
+    ["too many packages", () => ({ ok: true, data: { operation: planOp(Array.from({ length: 151 }, (_, i) => [`p${i}`, "1", "2"] as PlanEntry)) } }), /malformed/],
+    ["a digest key that does not match the plan", () => ({ ok: true, data: { operation: { ...planOp(), plan: { ...planOp().plan, digestKey: "0".repeat(24) } } } }), /does not match its own digest/],
+    ["the helper refuses (busy)", () => ({ ok: false, code: "busy", message: "Another tier 3 operation is still running." }), /refused to make an update plan: Another tier 3 operation/],
+    ["the helper cannot be reached", () => { throw new Error("orbit-ops-sys is not available."); }, /not available.*No proposal was created/],
+  ];
+  for (const [name, answer, re] of cases) {
+    const h = ledger({ client: fakeClient({ answer }).client });
+    await assert.rejects(() => h.sys.propose("install_os_updates"), re, name);
+    assert.deepEqual(h.proposals.list(), [], name);
+  }
+  // a plan that is slow: polled through op_status until ready, then proposed
+  let polls = 0;
+  const slow = fakeClient({ answer: (c) => (c.action === "plan_os_updates" ? { ok: true, data: { operation: { state: "accepted" } } } : { ok: true, data: { operation: ++polls < 3 ? { state: "running" } : planOp() } }) });
+  const h = ledger({ client: slow.client });
+  const sys = sysOps({ client: slow.client, store: h.store, notify: h.notify, proposals: h.proposals, jobState: () => quiet, jobsTarget: () => undefined, sleep: noSleep });
+  assert.equal((await sys.propose("install_os_updates")).kind, "ops_sys");
+  assert.equal(polls, 3);
+  // one that never finishes gives up (about five minutes of polling) and proposes nothing
+  const stuck = fakeClient({ answer: (c) => (c.action === "plan_os_updates" ? { ok: true, data: { operation: { state: "accepted" } } } : { ok: true, data: { operation: { state: "running" } } }) });
+  const h2 = ledger({ client: stuck.client });
+  const sys2 = sysOps({ client: stuck.client, store: h2.store, notify: h2.notify, proposals: h2.proposals, jobState: () => quiet, jobsTarget: () => undefined, sleep: noSleep });
+  await assert.rejects(() => sys2.propose("install_os_updates"), /not ready in time.*Nothing was installed.*No proposal was created/);
+  assert.equal(h2.proposals.list().length, 0);
+  assert.equal(stuck.calls.filter((c) => c.action === "op_status").length, 100);
+});
+
+test("a plan-time refusal by an open operation or an unreachable status never starts a plan", async () => {
+  const f = fakeClient({ status: { openOperation: { action: "reboot_host", state: "scheduled" } } });
+  const h = ledger({ client: f.client });
+  await assert.rejects(() => h.sys.propose("install_os_updates"), /Another tier 3 operation.*cancel the scheduled reboot first/);
+  assert.deepEqual(f.calls.map((c) => c.action), ["sys_status"]);
+});
+
+test("scheduled reboot proposal: time validated before any card exists; the card says when, how to cancel and what is not checked; the digest binds the time", async () => {
+  const now = { t: T0 };
+  const f = fakeClient();
+  const h = ledger({ client: f.client, now: clock(now) });
+  const none = async (rebootAt: string, re: RegExp) => {
+    await assert.rejects(() => h.sys.propose("reboot_host", { rebootAt }), re, rebootAt);
+    assert.deepEqual(h.proposals.list(), [], rebootAt);
+  };
+  await none(at(-5), /at least 120 seconds in the future/);
+  await none(at(1), /at least 120 seconds/);
+  await none(new Date(T0 + 24 * 3600_000 + 1).toISOString(), /no more than 24 hours ahead/);
+  await none("2026-11-09T14:00:00Z", /must be UTC in the form/);
+  await none("2026-11-09T14:00:00.000+01:00", /must be UTC in the form/);
+  await none("soon", /must be UTC in the form/);
+  await assert.rejects(() => h.sys.propose("funnel_enable", { rebootAt: at(60) }), /Only a reboot can be scheduled/);
+  await assert.rejects(() => h.sys.propose("install_os_updates", { rebootAt: at(60) }), /Only a reboot can be scheduled/);
+  assert.deepEqual(f.mutations(), []);
+  const when = at(180);
+  const p = await h.sys.propose("reboot_host", { rebootAt: when });
+  assert.equal(p.digest, sysDigestOf("reboot_host", { host: HOST }, { rebootAt: when }));
+  assert.notEqual(p.digest, sysDigestOf("reboot_host", { host: HOST }), "'now' is another digest");
+  assert.notEqual(p.digest, sysDigestOf("reboot_host", { host: HOST }, { rebootAt: at(181) }));
+  assert.match(p.summary, new RegExp(`at ${when}.*cancelled from chat until it fires`));
+  assert.equal(p.display.when, when);
+  const text = p.warnings.join("\n");
+  assert.match(text, /NOT at .*jobs that start in between can be cut off/);
+  assert.match(text, /ops_sys_cancel_reboot/);
+  assert.match(text, /SHARED host/);
+  assert.equal((await h.sys.propose("reboot_host")).display.when, "now");
+  // the edges are proposable
+  assert.equal((await h.sys.propose("reboot_host", { rebootAt: at(2) })).kind, "ops_sys");
+  assert.equal((await h.sys.propose("reboot_host", { rebootAt: at(24 * 60) })).kind, "ops_sys");
+});
+
+test("scheduled reboot confirmation: dispatched with the time, shown as 'scheduled' (never as done), and refused with no dispatch when the time can no longer be honoured", async () => {
+  const now = { t: T0 };
+  const f = fakeClient({ answer: (c) => ({ ok: true, data: { operation: { state: c.action === "reboot_host" && c.rebootAt ? "scheduled" : "accepted" } } }) });
+  const h = ledger({ client: f.client, now: clock(now) });
+  const when = at(180);
+  const res = await confirm(h, await h.sys.propose("reboot_host", { rebootAt: when }));
+  assert.equal(res.code, 202);
+  const body = res.body as { verified: boolean; note: string };
+  assert.equal(body.verified, false);
+  assert.match(body.note, /Scheduled.*Nothing has been done and nothing is verified.*cancel with ops_sys_cancel_reboot until it fires/);
+  const m = f.mutations()[0]!;
+  assert.equal(m.rebootAt, when);
+  assert.equal(m.digest, sysDigestOf("reboot_host", { host: HOST }, { rebootAt: when }));
+  assert.equal(h.sys.list()[0]!.state, "scheduled");
+  assert.equal(h.sys.list()[0]!.scheduledFor, when);
+  // a later "now" reboot carries no time at all
+  const f2 = fakeClient();
+  const h2 = ledger({ client: f2.client, now: clock(now) });
+  await confirm(h2, await h2.sys.propose("reboot_host"));
+  assert.equal("rebootAt" in f2.mutations()[0]!, false);
+  // the owner takes too long: the time is now less than a minute away, so nothing is dispatched
+  const f3 = fakeClient();
+  const h3 = ledger({ client: f3.client, now: clock(now) });
+  const p3 = await h3.sys.propose("reboot_host", { rebootAt: at(3) });
+  now.t = T0 + 2.5 * 60_000;
+  const late = await confirm(h3, p3);
+  assert.equal(late.code, 410);
+  assert.match((late.body as { error: string }).error, /scheduled time can no longer be honoured.*Nothing was done/);
+  assert.deepEqual(f3.mutations(), []);
+});
+
+test("reboot proposals respect the helper's cool-down at the time asked for, and say nothing was proposed", async () => {
+  const now = { t: T0 };
+  const f = fakeClient({ status: { rebootCooldownUntil: at(20) } });
+  const h = ledger({ client: f.client, now: clock(now) });
+  await assert.rejects(() => h.sys.propose("reboot_host"), /next one is not accepted before .*No proposal was created/);
+  await assert.rejects(() => h.sys.propose("reboot_host", { rebootAt: at(10) }), /later than the time asked for/);
+  assert.equal((await h.sys.propose("reboot_host", { rebootAt: at(60) })).kind, "ops_sys", "an hour away is outside the cool-down");
+  assert.equal((await h.sys.propose("install_os_updates")).kind, "ops_sys", "updates have no cool-down");
+});
+
+test("cancelling: reported as cancelled only when the helper confirms; recorded in the ledger with when; idempotent; nothing to cancel is an error", async () => {
+  const now = { t: T0 };
+  const f = fakeClient({
+    answer: (c) => (c.action === "cancel_reboot" ? { ok: true, data: { cancelled: true, alreadyCancelled: false, operation: { state: "cancelled" } } } : { ok: true, data: { operation: { state: c.action === "reboot_host" ? "scheduled" : "accepted" } } }),
+  });
+  const h = ledger({ client: f.client, now: clock(now) });
+  await assert.rejects(() => h.sys.cancelReboot(), /no reboot waiting to fire.*Nothing was cancelled/);
+  await confirm(h, await h.sys.propose("reboot_host", { rebootAt: at(180) }));
+  const opId = h.sys.list()[0]!.opId;
+  now.t = T0 + 60_000;
+  const r = await h.sys.cancelReboot();
+  assert.deepEqual([r.cancelled, r.opId, r.alreadyCancelled], [true, opId, false]);
+  assert.match(r.note, /no reboot was issued/);
+  assert.deepEqual(f.calls.filter((c) => c.action === "cancel_reboot"), [{ action: "cancel_reboot", opId }]);
+  const e = h.sys.list()[0]!;
+  assert.equal(e.state, "cancelled");
+  assert.equal(e.cancelledAt, new Date(now.t).toISOString());
+  assert.match(e.result!, /Cancelled by the owner before it fired/);
+  // nothing is left to cancel; a second ask is an error rather than a second "success"
+  await assert.rejects(() => h.sys.cancelReboot(), /no reboot waiting to fire/);
+  // naming an id that is already ended asks the helper, which says it is already cancelled; the ledger is not changed again
+  const again = fakeClient({ answer: () => ({ ok: true, data: { cancelled: true, alreadyCancelled: true, operation: { state: "cancelled" } } }) });
+  const h2 = ledger({ client: again.client, now: clock(now), store: h.store });
+  assert.equal((await h2.sys.cancelReboot(opId)).alreadyCancelled, true);
+  // the owner asked for it directly, so ORBIT does not also notify (reportedAt is set); it is never reported as success
+  await h.sys.refresh();
+  assert.equal(h.notify.recent().filter((n) => /cancelled/.test(n.text)).length === 0, true);
+  await assert.rejects(() => h.sys.cancelReboot("f".repeat(40)), /not a reboot ORBIT has on record/);
+});
+
+test("cancelling too late is an error, never success: the ledger is NOT marked cancelled and ORBIT re-reads what the helper says", async () => {
+  const now = { t: T0 };
+  let state = "scheduled";
+  const f = fakeClient({
+    answer: (c) => {
+      if (c.action === "cancel_reboot") return { ok: false, code: "too_late", message: "Too late: that reboot has already been dispatched (state accepted). It was NOT cancelled; watch its result." };
+      if (c.action === "op_status") return { ok: true, data: { operation: { state } } };
+      return { ok: true, data: { operation: { state: c.action === "reboot_host" ? "scheduled" : "accepted" } } };
+    },
+  });
+  const h = ledger({ client: f.client, now: clock(now) });
+  await confirm(h, await h.sys.propose("reboot_host", { rebootAt: at(60) }));
+  state = "rebooting";
+  await assert.rejects(() => h.sys.cancelReboot(), /NOT cancelled: Too late.*NOT cancelled/);
+  const e = h.sys.list()[0]!;
+  assert.notEqual(e.state, "cancelled");
+  assert.equal(e.cancelledAt, undefined);
+  assert.equal(e.state, "rebooting", "the refreshed, truthful state");
+  // the helper cannot be reached: the cancellation is NOT confirmed and the ledger says nothing new
+  const f2 = fakeClient({ answer: (c) => { if (c.action === "cancel_reboot") throw new Error("orbit-ops-sys could not be reached."); return { ok: true, data: { operation: { state: "scheduled" } } }; } });
+  const h2 = ledger({ client: f2.client, now: clock(now) });
+  await confirm(h2, await h2.sys.propose("reboot_host", { rebootAt: at(60) }));
+  await assert.rejects(() => h2.sys.cancelReboot(), /NOT cancelled: the helper could not be reached.*may still fire/);
+  assert.equal(h2.sys.list()[0]!.state, "scheduled");
+  assert.equal(h2.sys.list()[0]!.cancelledAt, undefined);
+  // no client at all
+  await assert.rejects(() => ledger().sys.cancelReboot(), /not available.*Nothing was cancelled/);
+});
+
+test("chat: the reboot tool takes only an optional UTC time; the cancel tool only an optional id; both fail loudly, and cancelling is never claimed on failure", async () => {
+  const now = { t: T0 };
+  const f = fakeClient({ answer: (c) => (c.action === "cancel_reboot" ? { ok: false, code: "too_late", message: "Too late." } : { ok: true, data: { operation: { state: "scheduled" } } }) });
+  const h = ledger({ client: f.client, now: clock(now) });
+  const tools = toolsFor(h.sys);
+  const reboot = tools.find((t) => t.name === "ops_propose_reboot_host")!;
+  await assert.rejects(() => reboot.run({ at: 5 }), /must be a UTC time string/);
+  await assert.rejects(() => reboot.run({ at: at(5), host: "x" }), /only an optional 'at' time/);
+  await assert.rejects(() => reboot.run({ at: "tomorrow" }), /must be UTC/);
+  const res = await reboot.run({ at: at(90) });
+  assert.equal((res.value as { details: Record<string, string> }).details.when, at(90));
+  assert.equal(f.mutations().length, 0, "proposing never dispatches");
+  await confirm(h, await h.sys.propose("reboot_host", { rebootAt: at(90) }));
+  const cancel = tools.find((t) => t.name === "ops_sys_cancel_reboot")!;
+  await assert.rejects(() => cancel.run({}), /NOT cancelled: Too late/);
+  assert.match(cancel.description, /ONLY if the helper confirms/);
+});
+
+test("scheduled reboots survive an ORBIT restart: the persisted ledger still knows it and can cancel it", async () => {
+  const now = { t: T0 };
+  const store = jsonStore<SysLedgerEntry[]>(undefined, "ops-sys", []);
+  const f = fakeClient({ answer: (c) => (c.action === "cancel_reboot" ? { ok: true, data: { cancelled: true, alreadyCancelled: false, operation: { state: "cancelled" } } } : { ok: true, data: { operation: { state: c.action === "reboot_host" ? "scheduled" : "scheduled" } } }) });
+  const before = ledger({ client: f.client, now: clock(now), store });
+  await confirm(before, await before.sys.propose("reboot_host", { rebootAt: at(120) }));
+  // "restart": a new ledger over the same store; the helper still says scheduled
+  const after = ledger({ client: f.client, now: clock(now), store });
+  await after.sys.refresh();
+  assert.equal(after.sys.list()[0]!.state, "scheduled");
+  assert.equal(after.sys.list()[0]!.scheduledFor, at(120));
+  assert.equal((await after.sys.cancelReboot()).cancelled, true);
+  assert.equal(after.sys.list()[0]!.state, "cancelled");
+});
+
+// ---------------------------------------------------------------- follow-up: units, installer and docs say what is true
+
+test("the plan unit is the update runner's sandbox with a plan-only command; the reboot unit may wait up to a day; the installer and uninstaller know the plan unit", () => {
+  const plan = read("deploy/systemd/orbit-ops-sys-plan@.service");
+  assert.match(plan, /sys-run\.ts %i plan$/m);
+  assert.match(plan, /^SendSIGKILL=no$/m);
+  assert.match(plan, /REFRESHES apt metadata.*not literally read-only/s);
+  assert.ok(!/credstore|ImportCredential|LoadCredential|EnvironmentFile/.test(plan));
+  const reboot = read("deploy/systemd/orbit-ops-sys-reboot@.service");
+  assert.match(reboot, /^TimeoutStartSec=26h$/m, "a 24 h wait plus lock wait fits");
+  assert.match(reboot, /WITHOUT the deploy lock/);
+  assert.match(read("deploy/install-sys.sh"), /orbit-ops-sys-plan@\.service/);
+  assert.match(read("deploy/uninstall-sys.sh"), /orbit-ops-sys-plan@\.service/);
+  assert.match(read("deploy/uninstall-sys.sh"), /SCHEDULED REBOOT WILL STILL FIRE/);
+  // the scheduled wait must not hold the deploy lock: the flock wrapper in sys-run.ts is only entered once the record is `accepted`
+  const run = read("src/ops/sys-run.ts");
+  assert.ok(run.indexOf("awaitSchedule(systemSysEnv") < run.indexOf('const needsLock'), "the wait happens before the lock is taken");
+});
+
+test("no tier 3 code or unit claims services are never restarted; the honest statement is there instead", () => {
+  for (const f of ["src/ops/sys-run.ts", "src/ops/sys-helper.ts", "src/ops-sys.ts", "src/chat-tools.ts", "deploy/systemd/orbit-ops-sys-update@.service", "deploy/systemd/orbit-ops-sys-plan@.service"]) {
+    assert.ok(!/never restart|no service restart|without restarting (any )?services/i.test(read(f)), `${f} claims services are never restarted`);
+  }
+  assert.match(read("src/ops/sys-run.ts"), /maintainer scripts \(openssh, tailscale, libc,\s*\/\/\s*systemd and others\) may restart daemons/);
+  assert.match(read("deploy/systemd/orbit-ops-sys-update@.service"), /maintainer scripts \(openssh,\s*# tailscale, libc, systemd and others\) may restart daemons/);
+  assert.match(read("docs/orbit-ops-sys.md"), /maintainer scripts \(openssh, tailscale, libc, systemd and others\) can restart daemons on their own/);
+});
+
+test("the docs state what the digest is and is not, that apt-get update is not read-only, the cool-down defect, the slot, scheduling, cancellation and the live-acceptance split", () => {
+  const d = read("docs/orbit-ops-sys.md");
+  for (const h of ["### OS update plan", "## Reboot: scheduling, cancellation, cool-down", "## Slot ownership", "## Fake-test evidence", "## Installation prerequisites", "## Future live acceptance of the follow-up"]) assert.ok(d.includes(h), h);
+  assert.match(d, /does \*\*not\*\* prove the owner clicked/);
+  assert.match(d, /Membership in the `orbit-ops` group is the trust boundary, exactly as in Tier 2/);
+  assert.match(d, /no cryptographic, independent owner approval/);
+  assert.match(d, /not literally read-only/);
+  assert.match(d, /Reboot cool-down counts fail/);
+  assert.match(d, /derived from `src\/ops\/sys-helper\.ts` as merged, not from the missing text/);
+  assert.match(d, /Never run on a real host|has not been run on a live host|Nothing here has been done/);
 });

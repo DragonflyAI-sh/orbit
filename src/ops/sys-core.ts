@@ -2,7 +2,8 @@
 // replace, and the operation-record store. Records live in a root-only directory; every write is a temp file plus rename.
 // Nothing here talks to the host's own tailscaled: only the orbit-jobs node's socket is ever named (jobsSocket).
 import { execFile } from "node:child_process";
-import { readFileSync, readdirSync, rmSync, mkdirSync, chmodSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync, mkdirSync, chmodSync, writeFileSync, linkSync, unlinkSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import { writeAtomic, systemAdminEnv, type AdminEnv, type Exec } from "./admin-core.ts";
 import { redactDeep } from "./protocol.ts";
@@ -13,7 +14,7 @@ export { writeAtomic };
 export type SysConfig = {
   root: string; // /opt/orbit
   stateDir: string; // /var/lib/orbit-ops-sys (persistent: survives a reboot, which is the point)
-  units: { update: string; reboot: string; funnel: string }; // template prefixes; the validated opId completes the instance name
+  units: { update: string; reboot: string; funnel: string; plan: string }; // template prefixes; the validated opId completes the instance name
   bootIdFile: string; // /proc/sys/kernel/random/boot_id
   rebootRequiredFile: string; // /run/reboot-required
   jobsSocket: string; // the orbit-jobs tailscaled ONLY. The host's own tailscaled socket is never referenced by tier 3.
@@ -31,7 +32,7 @@ export type SysConfig = {
 export const SYS_CONFIG: SysConfig = {
   root: "/opt/orbit",
   stateDir: "/var/lib/orbit-ops-sys",
-  units: { update: "orbit-ops-sys-update@", reboot: "orbit-ops-sys-reboot@", funnel: "orbit-ops-sys-funnel@" },
+  units: { update: "orbit-ops-sys-update@", reboot: "orbit-ops-sys-reboot@", funnel: "orbit-ops-sys-funnel@", plan: "orbit-ops-sys-plan@" },
   bootIdFile: "/proc/sys/kernel/random/boot_id",
   rebootRequiredFile: "/run/reboot-required",
   jobsSocket: "/run/orbit-tailscale-jobs/tailscaled.sock",
@@ -121,12 +122,120 @@ export function addStep(c: SysConfig, rec: SysRecord, env: Pick<SysEnv, "now">, 
   audit({ at: s.at, opId: rec.opId.slice(0, 12), action: rec.action, step: s.step, detail: s.detail });
 }
 
-export function releaseSlot(c: SysConfig, opId: string): void {
+// ---- the one-operation slot ----
+// Ownership is a file `active` holding the owner's op id. Two rules make every change of owner atomic:
+//  1. It is created by link(2) of a fully written temp file: it appears whole or not at all (never empty to a reader), and link
+//     fails if it already exists, so two requests cannot both get a free slot.
+//  2. It is removed only by whoever first creates the one-time marker retired/<holder> (also exclusive). Only that one party may
+//     unlink a slot that holds <holder>; the slot cannot hold <holder> again (op ids are never reused) and cannot be taken by
+//     anyone else while it exists, so the unlink can never remove a replacement holder's slot, however requests interleave.
+// A process that dies between creating the marker and the unlink leaves the slot held (fail closed): see docs/orbit-ops-sys.md.
+export const retiredDir = (c: SysConfig) => `${c.stateDir}/retired`;
+export const readSlot = (c: SysConfig): string | undefined => {
   try {
-    if (readFileSync(activePath(c), "utf8").trim() === opId) rmSync(activePath(c), { force: true });
+    return readFileSync(activePath(c), "utf8").trim();
   } catch {
-    // no slot
+    return undefined;
   }
+};
+
+export function tryAcquireSlot(c: SysConfig, opId: string): boolean {
+  const tmp = `${c.stateDir}/active.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  writeFileSync(tmp, opId, { mode: 0o600 });
+  try {
+    linkSync(tmp, activePath(c));
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw err;
+  } finally {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // already gone
+    }
+  }
+}
+
+// Remove the slot if (and only if) it still holds `holderId` and this caller is the one entitled to retire that holder.
+export function retireSlot(c: SysConfig, holderId: string): boolean {
+  if (readSlot(c) !== holderId) return false;
+  mkdirSync(retiredDir(c), { recursive: true, mode: 0o700 });
+  try {
+    writeFileSync(`${retiredDir(c)}/${holderId}`, "", { flag: "wx", mode: 0o600 });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return false; // someone else retired (or is retiring) this holder
+    throw err;
+  }
+  if (readSlot(c) === holderId) rmSync(activePath(c), { force: true });
+  return true;
+}
+
+// A holder's own release when its operation ends (or is settled). A no-op if the slot was already taken over.
+export function releaseSlot(c: SysConfig, opId: string): void {
+  retireSlot(c, opId);
+}
+
+// A request that took the slot but is refused before it recorded anything gives it straight back. Nobody can have retired it: a
+// slot with no record is "busy" to everyone else until it is old.
+export function abandonSlot(c: SysConfig, opId: string): void {
+  if (readSlot(c) === opId) rmSync(activePath(c), { force: true });
+}
+
+export const slotAgeMs = (c: SysConfig): number | undefined => {
+  try {
+    return Date.now() - statSync(activePath(c)).mtimeMs;
+  } catch {
+    return undefined;
+  }
+};
+
+// ---- cancel versus fire: one arbiter ----
+// decided/<opId> is created exclusively with "cancel" or "fire". Whoever creates it first decides; the other reads the answer.
+// A scheduled reboot is only ever issued after "fire" was written by its runner, and only ever cancelled after "cancel" was written
+// by the front, so a cancellation can never be reported as done after the reboot was dispatched, and vice versa.
+export const decidedDir = (c: SysConfig) => `${c.stateDir}/decided`;
+export type Decision = "cancel" | "fire";
+export function decide(c: SysConfig, opId: string, want: Decision): { won: boolean; decision: Decision } {
+  mkdirSync(decidedDir(c), { recursive: true, mode: 0o700 });
+  const path = `${decidedDir(c)}/${opId}`;
+  try {
+    writeFileSync(path, want, { flag: "wx", mode: 0o600 });
+    return { won: true, decision: want };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    const got = readFileSync(path, "utf8").trim();
+    return { won: false, decision: got === "cancel" ? "cancel" : "fire" };
+  }
+}
+export const decisionOf = (c: SysConfig, opId: string): Decision | undefined => {
+  try {
+    const v = readFileSync(`${decidedDir(c)}/${opId}`, "utf8").trim();
+    return v === "cancel" ? "cancel" : v === "fire" ? "fire" : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+// ---- reboot cool-down ----
+// Anchored on when a reboot was actually ISSUED (reboot.issuedAt, persisted before the command, plus a stamp file that survives
+// record pruning), not on when a request was accepted: a request that never issued anything starts no cool-down.
+export const rebootStampPath = (c: SysConfig) => `${c.stateDir}/last-reboot-issued`;
+export function lastRebootIssuedMs(c: SysConfig): number | undefined {
+  const times: number[] = [];
+  for (const r of allRecords(c)) if (r.action === "reboot_host" && r.reboot?.issuedAt) times.push(Date.parse(r.reboot.issuedAt));
+  try {
+    times.push(Date.parse(readFileSync(rebootStampPath(c), "utf8").trim()));
+  } catch {
+    // no stamp
+  }
+  const ok = times.filter((t) => !Number.isNaN(t));
+  return ok.length ? Math.max(...ok) : undefined;
+}
+// Milliseconds until a reboot at `atMs` would be outside the cool-down (0 = fine).
+export function cooldownRemainingMs(c: SysConfig, atMs: number): number {
+  const last = lastRebootIssuedMs(c);
+  return last === undefined ? 0 : Math.max(0, last + c.rebootCooldownMs - atMs);
 }
 
 // Remove old finished records; never an unfinished one.
@@ -134,10 +243,24 @@ export function pruneRecords(c: SysConfig): void {
   const recs = allRecords(c);
   if (recs.length <= c.keepRecords) return;
   const old = recs.filter((r) => isSysTerminal(r.state)).sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
-  for (const r of old.slice(0, Math.max(0, recs.length - c.keepRecords))) rmSync(recordPath(c, r.opId), { force: true });
+  for (const r of old.slice(0, Math.max(0, recs.length - c.keepRecords))) {
+    rmSync(recordPath(c, r.opId), { force: true });
+    // markers of a pruned record go with it, so an id that is ever used again is not blocked by a stale marker
+    rmSync(`${retiredDir(c)}/${r.opId}`, { force: true });
+    rmSync(`${decidedDir(c)}/${r.opId}`, { force: true });
+  }
 }
 
 // What leaves the helper about an operation: bounded and redacted.
 export function publicRecord(rec: SysRecord): unknown {
-  return redactDeep({ ...rec, steps: rec.steps.slice(-12), ...(rec.summary ? { summary: cap(rec.summary, 500) } : {}) });
+  // Digests are 64 hex characters, which redaction would blank (it takes them for secrets), so a plan travels with a 24-character
+  // key of its digest, like bootKey; the receiver recomputes the full digest from the plan itself and compares the key.
+  const { plan, planDigest, ...rest } = rec;
+  return redactDeep({
+    ...rest,
+    steps: rec.steps.slice(-12),
+    ...(rec.summary ? { summary: cap(rec.summary, 500) } : {}),
+    ...(plan ? { plan: { upgrades: plan.upgrades, flags: plan.flags, digestKey: plan.digest.slice(0, 24) } } : {}),
+    ...(planDigest ? { planKey: planDigest.slice(0, 24) } : {}),
+  });
 }
