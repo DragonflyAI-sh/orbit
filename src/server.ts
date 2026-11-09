@@ -17,6 +17,7 @@ import type { Notifier } from "./notify.ts";
 import { decide } from "./policy.ts";
 import type { Port, PortStatus } from "./ports.ts";
 import type { Runner } from "./runs.ts";
+import type { Ops } from "./ops-client.ts";
 import type { Toolbox } from "./tools.ts";
 import type { JobInput, Scheduler } from "./schedule.ts";
 import { parseJob } from "./schedule.ts";
@@ -37,6 +38,7 @@ export type Deps = {
   schedule: Scheduler;
   runs: Runner;
   tools: Toolbox;
+  ops?: Ops;
   nodes: Nodes;
   jobs?: Jobs;
   publicJobUrl?: string;
@@ -96,6 +98,7 @@ export function buildServer({
   schedule,
   runs,
   tools,
+  ops,
   nodes,
   jobs,
   publicJobUrl,
@@ -220,7 +223,7 @@ export function buildServer({
       }
       const current = limits(isOwner);
       const offered = isOwner && model.step
-        ? chatTools({ memory, toolbox: tools, jobs, notify, proposals, launchable })
+        ? chatTools({ memory, toolbox: tools, ops, jobs, notify, proposals, launchable })
         : [];
       if (!offered.length) {
         current.push(

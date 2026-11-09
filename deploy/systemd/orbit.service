@@ -17,8 +17,8 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
-# Reads the vault copy (group orbit-vault) and asks tailscaled who sent each request.
-SupplementaryGroups=orbit-vault
+# Reads the vault copy (group orbit-vault), asks tailscaled who sent each request, and may connect to /run/orbit-ops.sock (group orbit-ops).
+SupplementaryGroups=orbit-vault orbit-ops
 ReadWritePaths=/run/tailscale
 # Notifications and jobs persist here (STATE_DIRECTORY).
 StateDirectory=orbit
