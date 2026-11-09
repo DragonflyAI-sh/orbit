@@ -2,7 +2,10 @@
 # Pull-based deploy, run by orbit-deploy.timer on the host.
 #   pull-deploy.sh           deploy the newest main commit whose `checks` passed; restore the previous release if /status fails
 #   pull-deploy.sh --drill   opt-in rollback drill (see docs/rollback-drill.md); never part of the timer path
-# Both modes share one lock, one switch-and-verify flow and one rollback flow (switch_and_verify / rollback_to).
+#   pull-deploy.sh --rollback        owner-confirmed manual rollback to the previous known-good release (docs/orbit-ops-admin.md);
+#                                    exits 0 verified, 1 candidate failed and the running release restored, 2 restoration failed, 64 refused, 75 lock busy
+#   pull-deploy.sh --refresh-vault   fast-forward the read-only vault copy now and record state/vault.json; 0 ok, 1 failed, 64 no vault, 75 lock busy
+# All modes share one lock, one switch-and-verify flow and one rollback flow (switch_and_verify / rollback_to).
 # Exit codes: 0 ok/no-op, 1 candidate failed and rollback verified, 2 ROLLBACK FAILED (needs an operator),
 #             3 drill: injection did not fail the candidate (known-good restored and verified),
 #             5 drill: candidate activation/restart failed or it never answered /status, so the smoke failure was NOT exercised
@@ -17,16 +20,18 @@ mode=deploy
 case "${1:-}" in
   "") ;;
   --drill) mode=drill ;;
-  *) echo "usage: pull-deploy.sh [--drill]" >&2; exit 64 ;;
+  --rollback) mode=rollback ;;
+  --refresh-vault) mode=vault ;;
+  *) echo "usage: pull-deploy.sh [--drill|--rollback|--refresh-vault]" >&2; exit 64 ;;
 esac
 mkdir -p "$STATE" "$ROOT/releases"
 
-# One lock for the timer, manual runs and drills. The timer path skips when busy; a drill waits briefly, then refuses.
+# One lock for the timer, manual runs, drills, rollbacks and vault refreshes. The timer path skips when busy; the other modes wait briefly, then refuse.
 exec 9>"$STATE/deploy.lock"
-if [ "$mode" = drill ]; then lock_wait="${ORBIT_LOCK_WAIT:-60}"; else lock_wait="${ORBIT_LOCK_WAIT:-0}"; fi
+if [ "$mode" != deploy ]; then lock_wait="${ORBIT_LOCK_WAIT:-60}"; else lock_wait="${ORBIT_LOCK_WAIT:-0}"; fi
 if ! flock -w "$lock_wait" 9; then
   echo "deploy: another deploy or drill holds $STATE/deploy.lock; not running"
-  if [ "$mode" = drill ]; then exit 75; else exit 0; fi
+  if [ "$mode" != deploy ]; then exit 75; else exit 0; fi
 fi
 
 # shellcheck source=/dev/null
@@ -227,20 +232,71 @@ drill() {
   echo "drill: PASSED (candidate activated, intended smoke failure observed, recovery verified; normal deploy state untouched)"
 }
 
-if [ "$mode" = drill ]; then
-  drill; exit $?
-fi
-recover_interrupted_drill
-
 # Refresh the read-only vault copy. A failure here never blocks a deploy; /status shows the sync age.
-if [ -d "$ROOT/vault/.git" ]; then
+# Returns 0 refreshed (state/vault.json written), 1 failed, 64 there is no vault copy.
+refresh_vault() {
+  [ -d "$ROOT/vault/.git" ] || { echo "deploy: no vault copy at $ROOT/vault"; return 64; }
   if git -C "$ROOT/vault" pull -q --ff-only; then
     jq -n --arg c "$(git -C "$ROOT/vault" rev-parse HEAD)" --arg at "$(date -u +%FT%TZ)" '{commit: $c, at: $at}' > "$STATE/vault.json.new" \
       && mv "$STATE/vault.json.new" "$STATE/vault.json"
   else
     echo "deploy: vault refresh failed"
+    return 1
   fi
-fi
+}
+
+# Successful deploys, oldest first, so a manual rollback knows which release was live before. Newest 50 kept.
+HISTORY="$STATE/history.jsonl"
+history_add() { # history_add <commit>
+  jq -cn --arg c "$1" --arg at "$(date -u +%FT%TZ)" '{commit: $c, at: $at}' >> "$HISTORY" \
+    && tail -n 50 "$HISTORY" > "$HISTORY.new" && mv "$HISTORY.new" "$HISTORY"
+}
+
+# Manual rollback to the previous known-good release, with the same switch-and-verify and restore flow a failed deploy uses.
+# "Previous" is the newest earlier release in the deploy history that still exists, was not itself rolled back from (state/rejected),
+# and whose COMMIT matches its directory. The release rolled back from is then also written to state/failed, so the timer does not
+# redeploy that same commit; a newer commit on main deploys as usual.
+rollback() {
+  local current cur_commit prev="" sha dir rc=0
+  current="$(readlink -f "$ROOT/current" 2>/dev/null || true)"
+  cur_commit="$(commit_of "$current")"
+  if [[ ! "$cur_commit" =~ ^[0-9a-f]{40}$ ]] || [ "$(dirname "$current")" != "$ROOT/releases" ]; then
+    echo "rollback: refused: $ROOT/current must point at a release under $ROOT/releases with a 40-hex COMMIT"; return 64
+  fi
+  if compgen -G "$STATE/rollback-failed-*.json" >/dev/null; then echo "rollback: refused: an unresolved rollback failure is recorded in $STATE"; return 64; fi
+  if [ -f "$DRILL_DIR/in-progress.json" ]; then echo "rollback: refused: a rollback drill did not finish"; return 64; fi
+  if [ ! -s "$HISTORY" ]; then echo "rollback: refused: no deploy history is recorded yet; it starts with the first deploy after this script was installed"; return 64; fi
+  while read -r sha; do
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
+    [ "$sha" = "$cur_commit" ] && continue
+    if grep -qx "$sha" "$STATE/rejected" 2>/dev/null; then continue; fi
+    dir="$ROOT/releases/$sha"
+    if [ -d "$dir" ] && [ ! -L "$dir" ] && [ -f "$dir/release.env" ] && [ "$(commit_of "$dir")" = "$sha" ]; then prev="$sha"; break; fi
+  done < <(jq -r '.commit // empty' "$HISTORY" 2>/dev/null | tac)
+  if [ -z "$prev" ]; then echo "rollback: refused: no earlier known-good release is available"; return 64; fi
+  echo "rollback: $cur_commit -> $prev"
+  switch_and_verify "$ROOT/releases/$prev" "$prev" "$current" "$cur_commit" || rc=$?
+  if [ "$rc" = 0 ]; then
+    echo "$cur_commit" >> "$STATE/rejected"
+    echo "$cur_commit" > "$STATE/failed"
+    record "$STATE/deploy.json" lastDeployed "$prev"
+    record "$STATE/deploy.json" lastRolledBack "$cur_commit"
+    echo "rollback: rolled back from $cur_commit to $prev (verified serving)"
+    return 0
+  fi
+  if [ "$rc" = 2 ]; then echo "rollback: FAILED and restoration is not verified"; return 2; fi
+  echo "rollback: $prev failed its health check; $cur_commit was restored"
+  return 1
+}
+
+case "$mode" in
+  drill) drill; exit $? ;;
+  rollback) rc=0; rollback || rc=$?; exit "$rc" ;;
+  vault) rc=0; refresh_vault || rc=$?; exit "$rc" ;;
+esac
+recover_interrupted_drill
+
+refresh_vault || true
 
 git -C "$ROOT/repo" fetch -q origin main
 sha="$(git -C "$ROOT/repo" rev-parse origin/main)"
@@ -274,6 +330,9 @@ switch_and_verify "$release" "$sha" "$previous" "$prev_commit" || rc=$?
 if [ "$rc" = 0 ]; then
   rm -f "$STATE/failed"
   record "$STATE/deploy.json" lastDeployed "$sha"
+  # Seed the history with the release that was running, so the first deploy after install already has something to roll back to.
+  if [ ! -s "$HISTORY" ] && [[ "$prev_commit" =~ ^[0-9a-f]{40}$ ]]; then history_add "$prev_commit"; fi
+  history_add "$sha"
   echo "deploy: $sha is live"
 else
   echo "$sha" > "$STATE/failed"
