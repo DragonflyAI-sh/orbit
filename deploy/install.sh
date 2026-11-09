@@ -13,6 +13,8 @@ mkdir -p "$ROOT/state" "$ROOT/releases" /usr/local/lib/orbit
 
 # Read-only vault copy: markdown only, cloned from this host's vault clone, so no GitHub credential is needed.
 getent group orbit-vault >/dev/null || groupadd --system orbit-vault
+# Membership of orbit-ops is what lets the ORBIT service talk to the root ops helper socket. Nothing else belongs in it.
+getent group orbit-ops >/dev/null || groupadd --system orbit-ops
 if [ ! -d "$ROOT/vault/.git" ]; then
   git clone -q --no-checkout "$vault_source" "$ROOT/vault"
   git -C "$ROOT/vault" sparse-checkout set --no-cone '*.md' '!/.obsidian/'
@@ -33,6 +35,11 @@ mv "$ROOT/orbit.env.new" "$ROOT/orbit.env"
 
 install -m 755 "$src/pull-deploy.sh" /usr/local/lib/orbit/pull-deploy.sh
 install -m 644 "$src"/systemd/orbit.service "$src"/systemd/orbit-deploy.service "$src"/systemd/orbit-deploy.timer /etc/systemd/system/
+# Root ops helper (read-only, tier 1). Its code is copied here, root-owned and not writable by anyone else, so a normal
+# app deploy never changes what runs as root; re-run this script to update it.
+install -d -m 755 -o root -g root /usr/local/lib/orbit/ops
+install -m 644 -o root -g root "$src"/../src/ops/helper.ts "$src"/../src/ops/protocol.ts /usr/local/lib/orbit/ops/
+install -m 644 "$src"/systemd/orbit-ops.socket "$src"/systemd/orbit-ops@.service /etc/systemd/system/
 # Public job listener: its own Tailscale node, orbit-jobs, publishing only 127.0.0.1:8791 on port 443.
 # Set up only when the one-time auth key exists; the cloud proxy only reaches port 443.
 jobs_key=/etc/credstore/orbit.tailscale-jobs
@@ -50,6 +57,8 @@ fi
 
 systemctl daemon-reload
 systemctl enable orbit.service
+systemctl enable orbit-ops.socket
+systemctl restart orbit-ops.socket
 systemctl enable --now orbit-deploy.timer
 systemctl start orbit-deploy.service
 systemctl restart orbit.service

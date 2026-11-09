@@ -1,0 +1,36 @@
+[Unit]
+Description=ORBIT ops helper (one read-only request)
+
+[Service]
+# Runs as root only because some answers (journal, credential metadata, tailscaled) need it; sandboxed to read-only.
+# The code is installed by install.sh under /usr/local/lib/orbit/ops, not taken from /opt/orbit releases, so a normal deploy never changes what runs as root.
+ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/helper.ts
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+RuntimeMaxSec=20
+MemoryMax=192M
+TasksMax=32
+LimitNOFILE=64
+# Nothing is writable: the audit line goes to the journal over stderr.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077

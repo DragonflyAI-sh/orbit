@@ -3,6 +3,8 @@ import { compactList, detailJob } from "./job-view.ts";
 import type { Jobs } from "./jobs.ts";
 import type { MemoryPort } from "./memory.ts";
 import type { Notifier } from "./notify.ts";
+import type { Ops } from "./ops-client.ts";
+import { LOG_LINES_DEFAULT, LOG_LINES_MAX } from "./ops/protocol.ts";
 import type { Toolbox } from "./tools.ts";
 
 const obj = (properties: Record<string, unknown>, required: string[]) => ({ type: "object", properties, required, additionalProperties: false });
@@ -17,6 +19,8 @@ export type ChatToolDeps = {
   memory: MemoryPort;
   toolbox: Toolbox;
   jobs?: Jobs;
+  // The root helper (read-only server operations). Absent means the tools are not offered.
+  ops?: Ops;
   notify: Notifier;
   proposals: Proposals;
   // Routine names that can be launched, and whether the brief can be written. Empty when launching is not possible.
@@ -52,6 +56,36 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
       run: async (a) => ({ value: d.notify.send(need(a, "text").slice(0, 2000), false), provenance: "live", source: "notify" }),
     },
   ];
+  const ops = d.ops;
+  if (ops) {
+    const op = (name: string, action: Parameters<Ops["call"]>[0], description: string): ChatTool => ({
+      name,
+      description: `${description} Read-only, from the orbit-ops root helper; nothing is changed or refreshed.`,
+      parameters: obj({}, []),
+      run: (a) => {
+        if (Object.keys(a).length) throw new Error("This tool takes no arguments.");
+        return ops.call(action);
+      },
+    });
+    tools.push(
+      op("ops_orbit_status", "orbit_status", "Status of the ORBIT service on the server: systemd state, restarts, and the commit it is serving."),
+      {
+        name: "ops_orbit_logs",
+        description: `The last N lines of the ORBIT service log (default ${LOG_LINES_DEFAULT}, at most ${LOG_LINES_MAX}; long lines are cut and secrets are redacted). Read-only.`,
+        parameters: obj({ lines: { type: "integer", minimum: 1, maximum: LOG_LINES_MAX, description: "How many recent lines" } }, []),
+        run: (a) => {
+          const extra = Object.keys(a).filter((k) => k !== "lines");
+          if (extra.length) throw new Error("Only {lines: integer} is accepted.");
+          return ops.call("orbit_logs", "lines" in a ? { lines: a.lines } : {});
+        },
+      },
+      op("ops_deploy_state", "deploy_state", "Deploy state: deployed commit, last failure, recent releases and the deploy timer."),
+      op("ops_host_health", "host_health", "Host health: disk, memory, load, uptime, pending OS updates (existing cache) and whether a restart is required."),
+      op("ops_tailscale_status", "tailscale_status", "Tailscale state of this host and of the orbit-jobs node, with the LOCAL Funnel configuration. It does not test remote Funnel reachability."),
+      op("ops_vault_sync", "vault_sync", "Which vault commit the server copy is at and how old that sync is."),
+      op("ops_credentials", "credentials", "Which credential files are present on the server: names, sizes and dates only. Contents are never read."),
+    );
+  }
   const jobs = d.jobs;
   if (jobs) {
     tools.push(
