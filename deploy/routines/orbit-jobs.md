@@ -27,20 +27,23 @@ The message after this one gives your job id, and may give an API URL and a toke
 
 1. Check the tool commit before using it. It must be exactly 40 lowercase hex characters, and it must be on DragonflyAI-sh/orbit's main branch:
    C=<the tool commit>
-   echo "$C" | grep -Eq '^[0-9a-f]{40}$'
-   git -C /home/user/orbit fetch -q origin main "$C"
-   git -C /home/user/orbit merge-base --is-ancestor "$C" origin/main
-   If any of these fail, or no tool commit was given, stop and say so plainly. Do not fall back to another commit.
+   rm -f ~/.orbit-tool-commit &&
+   echo "$C" | grep -Eq '^[0-9a-f]{40}$' &&
+   git -C /home/user/orbit fetch -q origin main "$C" &&
+   git -C /home/user/orbit merge-base --is-ancestor "$C" origin/main &&
    echo "$C" > ~/.orbit-tool-commit
-2. Copy the tool out of that commit without changing the checkout's working tree:
-   mkdir -p ~/.local/bin ~/.claude/skills/orbit-job
-   git -C /home/user/orbit show "$C":tools/orbit-job/orbit-job > ~/.local/bin/orbit-job
-   git -C /home/user/orbit show "$C":tools/orbit-job/SKILL.md > ~/.claude/skills/orbit-job/SKILL.md
-   chmod +x ~/.local/bin/orbit-job && export PATH="$HOME/.local/bin:$PATH"
+   If any of these fail, or no tool commit was given, stop and say so plainly. Do not fall back to another commit.
+2. Each step runs in a fresh shell: variables and PATH from earlier steps are gone. Copy the tool out of the commit saved by step 1, without changing the checkout's working tree:
+   C="$(cat ~/.orbit-tool-commit)" && echo "$C" | grep -Eq '^[0-9a-f]{40}$' &&
+   mkdir -p ~/.local/bin ~/.claude/skills/orbit-job &&
+   git -C /home/user/orbit show "$C":tools/orbit-job/orbit-job > ~/.local/bin/orbit-job &&
+   git -C /home/user/orbit show "$C":tools/orbit-job/SKILL.md > ~/.claude/skills/orbit-job/SKILL.md &&
+   chmod +x ~/.local/bin/orbit-job
+   If any of these fail, stop and say so plainly.
 3. Read ~/.claude/skills/orbit-job/SKILL.md and follow it for the whole job.
 4. Run:
-   orbit-job start --job <id> --api <url> --token <token> --tool-commit "$(cat ~/.orbit-tool-commit)"
-   leaving out --api and --token if they were not given. Never print, echo or commit the token. Then read the brief it prints and do what it says.
+   ~/.local/bin/orbit-job start --job <id> --api <url> --token <token> --tool-commit "$(cat ~/.orbit-tool-commit)"
+   leaving out --api and --token if they were not given. Never print, echo or commit the token. Then read the brief it prints and do what it says. Run every later orbit-job command as ~/.local/bin/orbit-job, since PATH is not carried between shells.
 
 If no job id was given, or any step fails or is refused, stop and say so plainly. Never invent a job id or a commit, and never work around a refused step.
 ```
@@ -61,3 +64,4 @@ The prompt expects the fire text ORBIT sends (`src/job-launch.ts`): `Job id: …
 - 2026-11-04 created; multi-repo sources tested.
 - 2026-11-06 moved to the ORBIT jobs environment; API trigger added; tool copied from the `orbit` source at a pinned commit.
 - 2026-11-08 pin replaced by `Tool commit` from the fire text (PR #28); connectors cleared; schedule removed; `--tool-commit` passed to `orbit-job start` (PR #29).
+- 2026-11-08 every step made self-contained for separate shells (commit re-read from `~/.orbit-tool-commit`, tool run by its home path).
