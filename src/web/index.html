@@ -301,10 +301,12 @@
   // <tool-commit-badge>
   function toolCommitBadge(r) {
     const known = r.toolCommit && r.toolCommit !== "unknown";
-    const text = !known ? "tool commit: unknown" : `tool commit: ${String(r.toolCommit).slice(0, 7)}${r.toolCommitStatus === "mismatch" ? " ≠ running ORBIT" : r.toolCommitStatus === "match" ? " (matches ORBIT)" : " (ORBIT's own commit unknown)"}`;
+    const status = r.toolCommitStatus === "mismatch" ? " ≠ running ORBIT" : r.toolCommitStatus === "match" ? " (matches ORBIT)" : " (ORBIT's own commit unknown)";
+    const text = !known ? "tool commit: unknown" : `tool commit: ${String(r.toolCommit).slice(0, 7)}${status}`;
     const span = el("span", { className: r.toolCommitStatus === "mismatch" ? "health-launch-failed" : "meta", textContent: text });
-    // The full commit is the hover text and the accessible name, so it can be copied exactly; unknown has neither.
-    if (known) { span.title = String(r.toolCommit); span.setAttribute("role", "note"); span.setAttribute("aria-label", `tool commit ${String(r.toolCommit)}`); }
+    // The full commit is the hover text and part of the accessible name, which keeps the visible status (e.g. the
+    // mismatch) so the label never drops what the text says; unknown has neither.
+    if (known) { span.title = String(r.toolCommit); span.setAttribute("role", "note"); span.setAttribute("aria-label", `tool commit ${String(r.toolCommit)}${status}`); }
     return span;
   }
   // </tool-commit-badge>

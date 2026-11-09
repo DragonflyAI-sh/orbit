@@ -16,7 +16,7 @@ test("a known tool commit shows 7 characters, with the full commit as title and 
   const n = badge({ toolCommit: FULL, toolCommitStatus: "match" });
   assert.equal(n.textContent, "tool commit: e4c35fa (matches ORBIT)");
   assert.equal(n.title, FULL);
-  assert.equal(n.attrs["aria-label"], `tool commit ${FULL}`);
+  assert.equal(n.attrs["aria-label"], `tool commit ${FULL} (matches ORBIT)`);
   assert.equal(n.attrs.role, "note");
 });
 
@@ -34,6 +34,13 @@ test("a mismatch is flagged and still exposes the full commit", () => {
   assert.equal(n.className, "health-launch-failed");
   assert.match(n.textContent!, /≠ running ORBIT/);
   assert.equal(n.title, FULL);
+  assert.equal(n.attrs["aria-label"], `tool commit ${FULL} ≠ running ORBIT`);
+  assert.ok(n.attrs["aria-label"].includes(FULL) && n.attrs["aria-label"].includes("≠ running ORBIT"));
+});
+
+test("when ORBIT's own commit is unknown the accessible name says so and keeps the full commit", () => {
+  const n = badge({ toolCommit: FULL, toolCommitStatus: "unknown" });
+  assert.equal(n.attrs["aria-label"], `tool commit ${FULL} (ORBIT's own commit unknown)`);
 });
 
 test("markup in a commit value stays text: it is never interpreted as HTML", () => {
