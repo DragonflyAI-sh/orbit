@@ -40,6 +40,8 @@ install -m 644 "$src"/systemd/orbit.service "$src"/systemd/orbit-deploy.service 
 install -d -m 755 -o root -g root /usr/local/lib/orbit/ops
 install -m 644 -o root -g root "$src"/../src/ops/helper.ts "$src"/../src/ops/protocol.ts /usr/local/lib/orbit/ops/
 install -m 644 "$src"/systemd/orbit-ops.socket "$src"/systemd/orbit-ops@.service /etc/systemd/system/
+# Tier 2 admin helper (owner-confirmed server operations). Same rules: root-owned code, installed only by a person running this.
+"$src/install-admin.sh"
 # Public job listener: its own Tailscale node, orbit-jobs, publishing only 127.0.0.1:8791 on port 443.
 # Set up only when the one-time auth key exists; the cloud proxy only reaches port 443.
 jobs_key=/etc/credstore/orbit.tailscale-jobs

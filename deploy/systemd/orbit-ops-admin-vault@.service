@@ -1,0 +1,39 @@
+[Unit]
+Description=ORBIT admin vault refresh %i
+
+[Service]
+# Refreshes ORBIT's own read-only vault copy (/opt/orbit/vault, a fast-forward git pull from this host's vault clone) through the
+# installed deploy script. A separate, smaller unit than the one that can change releases: no network, and it can only write the
+# vault copy, the deploy state directory and its own records.
+Type=oneshot
+ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/admin-run.ts %i vault
+TimeoutStartSec=600
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=128
+StateDirectory=orbit-ops-admin
+StateDirectoryMode=0700
+ProtectSystem=strict
+ReadWritePaths=/opt/orbit/vault /opt/orbit/state
+# The vault copy is a clone of /root/orbit-vault (install.sh default), so its origin must be readable. Read-only, nothing is written there.
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+Environment=HOME=/nonexistent
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077

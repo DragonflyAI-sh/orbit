@@ -1,0 +1,17 @@
+[Unit]
+Description=ORBIT admin helper socket (owner-confirmed server operations, tier 2)
+
+[Socket]
+# Authorization is the kernel's, exactly as for tier 1: only root and members of the system group orbit-ops can connect.
+# The ORBIT service already joins that group (SupplementaryGroups=orbit-vault orbit-ops), so orbit.service needs no change.
+# ORBIT only calls this socket for an operation the owner confirmed on the page; the socket itself cannot know that.
+ListenStream=/run/orbit-ops-admin.sock
+SocketUser=root
+SocketGroup=orbit-ops
+SocketMode=0660
+Accept=yes
+MaxConnections=4
+PassCredentials=no
+
+[Install]
+WantedBy=sockets.target

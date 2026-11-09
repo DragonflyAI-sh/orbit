@@ -1,0 +1,39 @@
+[Unit]
+Description=ORBIT admin helper front (validate, record and dispatch one request)
+
+[Service]
+# Validates one request, writes a durable operation record and starts a separate runner unit. It performs no change itself.
+# Code is installed by install-admin.sh under /usr/local/lib/orbit/ops, not taken from /opt/orbit releases.
+ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/admin-helper.ts
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+RuntimeMaxSec=30
+MemoryMax=192M
+TasksMax=32
+LimitNOFILE=64
+# The only writable path is its own state directory (/var/lib/orbit-ops-admin): operation records and the one-at-a-time slot.
+StateDirectory=orbit-ops-admin
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+# No capabilities: it only needs to be root-owned files' owner and to ask systemd to start a runner (systemctl over AF_UNIX).
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
