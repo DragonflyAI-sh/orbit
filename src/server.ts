@@ -18,6 +18,7 @@ import { decide } from "./policy.ts";
 import type { Port, PortStatus } from "./ports.ts";
 import type { Runner } from "./runs.ts";
 import type { AdminOps } from "./ops-admin.ts";
+import type { SysOps } from "./ops-sys.ts";
 import type { Ops } from "./ops-client.ts";
 import type { Toolbox } from "./tools.ts";
 import type { JobInput, Scheduler } from "./schedule.ts";
@@ -42,6 +43,8 @@ export type Deps = {
   ops?: Ops;
   // Tier 2: owner-confirmed server operations (src/ops-admin.ts). Absent means no admin tools are offered.
   adminOps?: AdminOps;
+  // Tier 3: owner-confirmed OS updates, reboot and orbit-jobs Funnel (src/ops-sys.ts). Absent means no tier 3 tools are offered.
+  sysOps?: SysOps;
   nodes: Nodes;
   jobs?: Jobs;
   publicJobUrl?: string;
@@ -103,6 +106,7 @@ export function buildServer({
   tools,
   ops,
   adminOps,
+  sysOps,
   nodes,
   jobs,
   publicJobUrl,
@@ -227,7 +231,7 @@ export function buildServer({
       }
       const current = limits(isOwner);
       const offered = isOwner && model.step
-        ? chatTools({ memory, toolbox: tools, ops, admin: adminOps, jobs, notify, proposals, launchable })
+        ? chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, jobs, notify, proposals, launchable })
         : [];
       if (!offered.length) {
         current.push(
@@ -344,7 +348,7 @@ export function buildServer({
       return send(res, result.code, result.body);
     }
     // Open proposals from chat, so they can be confirmed or cancelled after the reply has scrolled away.
-    if ((jobs || adminOps) && url.pathname === "/chat/proposals" && req.method === "GET") {
+    if ((jobs || adminOps || sysOps) && url.pathname === "/chat/proposals" && req.method === "GET") {
       if (!(await owned("jobs", "proposals"))) return;
       return send(res, 200, { proposals: proposals.list() });
     }
@@ -354,9 +358,14 @@ export function buildServer({
       await adminOps.refresh();
       return send(res, 200, { operations: adminOps.list().slice().reverse() });
     }
+    if (sysOps && url.pathname === "/ops/sys" && req.method === "GET") {
+      if (!(await owned("ops", "list"))) return;
+      await sysOps.refresh();
+      return send(res, 200, { operations: sysOps.list().slice().reverse() });
+    }
     // A chat proposal does nothing until Rai confirms it here; each proposal can be confirmed or cancelled once.
     const proposalMatch = url.pathname.match(/^\/chat\/proposals\/([0-9a-f-]+)\/(confirm|cancel)$/);
-    if ((jobs || adminOps) && proposalMatch && req.method === "POST") {
+    if ((jobs || adminOps || sysOps) && proposalMatch && req.method === "POST") {
       const confirming = proposalMatch[2] === "confirm";
       if (!(await owned("jobs", confirming ? "confirm" : "cancel"))) return;
       const open = proposals.peek(proposalMatch[1]);
@@ -373,10 +382,23 @@ export function buildServer({
         const result = await adminOps.confirm(taken);
         return send(res, result.code, result.body);
       }
+      if (open?.kind === "ops_sys" && confirming) {
+        // Tier 3 is confirmed the same way, against the digest of the exact action and target on the card, separately for every
+        // action. The helper checks the digest again, and the expiry, at the privileged boundary.
+        const input = await body();
+        if (!input) return;
+        if (input.digest !== open.digest) return send(res, 409, { error: "The confirmation does not match this proposal's digest. Nothing was done." });
+        if (!sysOps) return send(res, 503, { error: "Tier 3 server operations are not enabled." });
+        const taken = proposals.take(open.id);
+        if (!taken || taken.kind !== "ops_sys") return send(res, 404, { error: "No open proposal with that id. It was already confirmed, cancelled or expired." });
+        audit("ops", `confirm:${taken.action}`, { allow: true, reason: `owner confirmed proposal ${taken.id} (digest ${taken.digest.slice(0, 12)})` });
+        const result = await sysOps.confirm(taken);
+        return send(res, result.code, result.body);
+      }
       const proposal = proposals.take(proposalMatch[1]);
       if (!proposal) return send(res, 404, { error: "No open proposal with that id. It was already confirmed, cancelled or expired." });
       if (proposalMatch[2] === "cancel") return send(res, 200, { cancelled: proposal.id });
-      if (proposal.kind === "ops_admin") return send(res, 409, { error: "Not confirmed: server operations need their digest." });
+      if (proposal.kind === "ops_admin" || proposal.kind === "ops_sys") return send(res, 409, { error: "Not confirmed: server operations need their digest." });
       if (!jobs) return send(res, 503, { error: "Jobs are not enabled." });
       if (proposal.kind === "job_steer") {
         const steer = jobs.steer(proposal.job, proposal.text);

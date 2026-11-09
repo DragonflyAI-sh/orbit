@@ -1,0 +1,18 @@
+[Unit]
+Description=ORBIT tier 3 helper socket (owner-confirmed OS updates, reboot and orbit-jobs Funnel)
+
+[Socket]
+# Authorization is the kernel's, exactly as for tiers 1 and 2: only root and members of the system group orbit-ops can connect.
+# The ORBIT service already joins that group, so orbit.service needs no change. ORBIT only calls this socket for an operation the
+# owner confirmed on the page; the socket cannot know that, so the helper itself also checks the exact digest, the expiry, the host
+# name and the one-at-a-time slot (docs/orbit-ops-sys.md, threat model). Not installed by a normal deploy: see deploy/install-sys.sh.
+ListenStream=/run/orbit-ops-sys.sock
+SocketUser=root
+SocketGroup=orbit-ops
+SocketMode=0660
+Accept=yes
+MaxConnections=4
+PassCredentials=no
+
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,44 @@
+[Unit]
+Description=ORBIT tier 3 post-boot verification of a requested reboot
+# Ordered after ORBIT but not pulling it in: it only observes. If ORBIT never comes up it records that, it does not start it.
+After=network-online.target orbit.service
+
+[Service]
+# Runs once per boot. For a record in state `rebooting` whose boot id has changed it checks the host and ORBIT, saves the evidence
+# and finishes the record. It never starts a runner, never reboots and never runs any other mutation: an ambiguous operation is
+# not relaunched after recovery.
+Type=oneshot
+ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/sys-run.ts recover
+# waits up to 5 minutes for ORBIT to be healthy
+TimeoutStartSec=420
+MemoryMax=128M
+TasksMax=32
+StateDirectory=orbit-ops-sys
+StateDirectoryMode=0700
+ProtectSystem=strict
+ReadOnlyPaths=/opt/orbit
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+# Only to probe ORBIT's /status on this host (HOST:PORT from orbit.env).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost 100.64.0.0/10 fd7a:115c:a1e0::/48
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Item, ModelPort, ToolDef } from "./model.ts";
 import type { MutatingAction } from "./ops/admin-protocol.ts";
+import type { SysMutatingAction } from "./ops/sys-protocol.ts";
 import type { Result } from "./ports.ts";
 
 // Tool use inside a chat reply. The model may call ChatTools; every call is checked by `allow` (ORBIT's policy)
@@ -109,7 +110,9 @@ async function execute(
 export type ProposalAction =
   | { kind: "job_launch"; routine: string; brief: string }
   | { kind: "job_steer"; job: string; text: string }
-  | { kind: "ops_admin"; action: MutatingAction; summary: string; display: Record<string, string> | null; digest: string };
+  | { kind: "ops_admin"; action: MutatingAction; summary: string; display: Record<string, string> | null; digest: string }
+  // Tier 3 (OS updates, reboot, orbit-jobs Funnel): same shape, plus the impact and recovery warnings the owner must see.
+  | { kind: "ops_sys"; action: SysMutatingAction; summary: string; display: Record<string, string>; warnings: string[]; digest: string };
 export type Proposal = ProposalAction & { id: string; createdAt: string; expiresAt: string };
 
 export const PROPOSAL_TTL_MS = 30 * 60 * 1000;

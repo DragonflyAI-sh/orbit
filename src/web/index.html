@@ -140,10 +140,11 @@
     box.className = "proposal";
     const head = document.createElement("div");
     const steer = p.kind === "job_steer";
-    const ops = p.kind === "ops_admin";
+    const sysop = p.kind === "ops_sys";
+    const ops = p.kind === "ops_admin" || sysop;
     head.textContent = ops ? `Proposed server action: ${p.summary} Nothing has been done yet.` : steer ? `Proposed steer for job ${p.job}. Nothing has been sent yet.` : `Proposed job on routine "${p.routine}". Nothing has launched yet.`;
     const brief = document.createElement("pre");
-    brief.textContent = ops ? (p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action) + `\n\ndigest ${p.digest.slice(0, 16)}`  : steer ? p.text : p.brief;
+    brief.textContent = sysop ? `${p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action}\n\n${(p.warnings || []).map((w) => `! ${w}`).join("\n\n")}\n\ndigest ${p.digest.slice(0, 16)}` : ops ? (p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action) + `\n\ndigest ${p.digest.slice(0, 16)}`  : steer ? p.text : p.brief;
     const status = document.createElement("div");
     const done = (text) => { box.replaceChildren(head, brief, Object.assign(document.createElement("div"), { textContent: text })); };
     const act = async (verb) => {

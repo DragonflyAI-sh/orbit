@@ -4,8 +4,10 @@ import type { Jobs } from "./jobs.ts";
 import type { MemoryPort } from "./memory.ts";
 import type { Notifier } from "./notify.ts";
 import type { AdminOps } from "./ops-admin.ts";
+import type { SysOps } from "./ops-sys.ts";
 import type { Ops } from "./ops-client.ts";
 import { CONFIG_KEYS, type MutatingAction } from "./ops/admin-protocol.ts";
+import type { SysMutatingAction } from "./ops/sys-protocol.ts";
 import { LOG_LINES_DEFAULT, LOG_LINES_MAX } from "./ops/protocol.ts";
 import type { Toolbox } from "./tools.ts";
 
@@ -25,6 +27,8 @@ export type ChatToolDeps = {
   ops?: Ops;
   // Tier 2 (owner-confirmed server operations). Absent means the proposal tools are not offered.
   admin?: AdminOps;
+  // Tier 3 (owner-confirmed OS updates, reboot, orbit-jobs Funnel). Absent means those proposal tools are not offered.
+  sys?: SysOps;
   notify: Notifier;
   proposals: Proposals;
   // Routine names that can be launched, and whether the brief can be written. Empty when launching is not possible.
@@ -137,6 +141,41 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
           if (Object.keys(a).length) throw new Error("This tool takes no arguments.");
           await admin.refresh();
           return { value: admin.list().slice(-10).reverse().map(({ proposalId: _p, digest: _d, ...e }) => e), provenance: "live", source: "ops-admin/ledger" };
+        },
+      },
+    );
+  }
+  const sys = d.sys;
+  if (sys) {
+    // Each of these only PROPOSES, and only if every check passed: when one fails the tool throws and NO proposal exists. Three
+    // separate actions, three separate confirmations: nothing is bundled.
+    const proposeSys = (name: string, action: SysMutatingAction, description: string): ChatTool => ({
+      name,
+      description: `${description} This does NOT do it: it creates a proposal that Rai must confirm with a button on the page (a separate confirmation for each action), and a privileged helper then carries it out. If this tool returns an error, no proposal exists: say so, and never claim a proposal or an operation exists unless this tool returned a proposalId. Never say it happened until ops_sys_operations shows 'verified'; 'accepted', 'running' and 'rebooting' are not success.`,
+      parameters: obj({}, []),
+      run: async (a) => {
+        if (Object.keys(a).length) throw new Error("This tool takes no arguments.");
+        const p = await sys.propose(action);
+        return {
+          value: { status: "pending-confirmation", executed: false, proposalId: p.id, action, summary: p.summary, warnings: p.warnings, details: p.display, digest: p.digest, expiresAt: p.expiresAt, note: "Nothing has been done. Rai must click Confirm on the page, after reading the warnings." },
+          provenance: "live",
+          source: "chat/proposals",
+        };
+      },
+    });
+    tools.push(
+      proposeSys("ops_propose_os_updates", "install_os_updates", "Propose installing pending OS package upgrades on this shared host (apt-get upgrade only; never a distribution upgrade, removal or reboot). Affects production OpenClaw as well as ORBIT."),
+      proposeSys("ops_propose_reboot_host", "reboot_host", "Propose rebooting this whole shared host (ORBIT, production OpenClaw and the job listener all go down). Separate from OS updates."),
+      proposeSys("ops_propose_funnel_enable", "funnel_enable", "Propose enabling the existing public Tailscale Funnel of the orbit-jobs node. Never touches this host's own Tailscale; fails closed if the orbit-jobs node is not on this host."),
+      proposeSys("ops_propose_funnel_disable", "funnel_disable", "Propose disabling the existing public Tailscale Funnel of the orbit-jobs node (cuts running jobs off from ORBIT; active jobs are listed in the warning). Never touches this host's own Tailscale."),
+      {
+        name: "ops_sys_operations",
+        description: "Tier 3 operations Rai has confirmed (OS updates, reboot, Funnel), newest first, with what the helper actually observed: state, verification and evidence. Refreshes in-flight ones from the helper first. 'accepted', 'running' and 'rebooting' mean NOT verified yet; 'unverified' means a command ran but nothing could confirm the result.",
+        parameters: obj({}, []),
+        run: async (a) => {
+          if (Object.keys(a).length) throw new Error("This tool takes no arguments.");
+          await sys.refresh();
+          return { value: sys.list().slice(-10).reverse().map(({ proposalId: _p, digest: _d, ...e }) => e), provenance: "live", source: "ops-sys/ledger" };
         },
       },
     );

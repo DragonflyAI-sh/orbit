@@ -1,0 +1,39 @@
+[Unit]
+Description=ORBIT tier 3 orbit-jobs Funnel change %i
+
+[Service]
+# One accepted funnel_enable / funnel_disable operation. It talks to the orbit-jobs tailscaled over its own unix socket and to
+# nothing else: no network, no other socket path. It never names the host's own tailscaled (/run/tailscale), which this unit
+# cannot see for writing. It reads /opt/orbit/orbit.env (read-only) to learn the approved target.
+Type=oneshot
+ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/sys-run.ts %i funnel
+TimeoutStartSec=300
+MemoryMax=128M
+TasksMax=32
+StateDirectory=orbit-ops-sys
+StateDirectoryMode=0700
+ProtectSystem=strict
+ReadWritePaths=/run/orbit-tailscale-jobs
+ReadOnlyPaths=/opt/orbit
+InaccessiblePaths=/run/tailscale
+Environment=HOME=/nonexistent
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077

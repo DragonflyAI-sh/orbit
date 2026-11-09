@@ -12,6 +12,8 @@ import { nodes as devicePresence, tailscaleStatus } from "./nodes.ts";
 import { notifier, selectDiscord } from "./notify.ts";
 import { adminOps } from "./ops-admin.ts";
 import { adminClient } from "./ops-admin-client.ts";
+import { jobStateOf, sysOps } from "./ops-sys.ts";
+import { sysClient } from "./ops-sys-client.ts";
 import { opsClient } from "./ops-client.ts";
 import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
 import { parseRoutineRepos, pullRequestOpener, selectPulls } from "./pull-requests.ts";
@@ -51,6 +53,23 @@ const admin = adminOps({ client: adminClient(), store: jsonStore(stateDir, "ops-
 const owner = process.env.ORBIT_OWNER || undefined;
 const nodes = devicePresence(tailscaleStatus(), owner);
 const jobs = jobRegistry(jsonStore(stateDir, "jobs-cloud", []), jobSecret(stateDir), notify);
+// Tier 3 (OS updates, reboot, orbit-jobs Funnel): separate socket, separate ledger, a separate confirmation for every action.
+const sys = sysOps({
+  client: sysClient(),
+  store: jsonStore(stateDir, "ops-sys", []),
+  notify,
+  proposals,
+  jobState: jobStateOf(jobs),
+  jobsTarget: () => {
+    const url = process.env.ORBIT_PUBLIC_JOB_URL;
+    const port = Number(process.env.ORBIT_INGRESS_PORT);
+    try {
+      return url && Number.isInteger(port) ? { host: new URL(url).hostname, port } : undefined;
+    } catch {
+      return undefined;
+    }
+  },
+});
 const watch = watcher(jsonStore(stateDir, "watch", { ports: {} }), notify, () => new Date(), jobs);
 const control = selectControl(process.env);
 const routines = selectRoutines(process.env);
@@ -78,6 +97,7 @@ const watchTick = () => {
 const tick = () => {
   // Collect the outcome of any server operation still in flight (including one that restarted this process).
   void admin.refresh().catch(() => {});
+  void sys.refresh().catch(() => {});
   // Renew the ChatGPT login shortly before it expires. Not awaited: a slow token endpoint must not hold up the tick
   // or the watch. maintain() never throws and runs one renewal at a time.
   void model.maintain?.();
@@ -110,6 +130,7 @@ buildServer({
   tools,
   ops,
   adminOps: admin,
+  sysOps: sys,
   proposals,
   nodes,
   jobs,
