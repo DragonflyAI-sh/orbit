@@ -2,7 +2,7 @@ import type { MemoryPort } from "./memory.ts";
 import type { ModelPort } from "./model.ts";
 import type { Store } from "./store.ts";
 import type { VaultClone } from "./vault/clone.ts";
-import { bodyShaOf, splitFrontmatter, VaultError } from "./vault/edit.ts";
+import { applyEdit, bodyShaOf, setFrontmatter, splitFrontmatter, VaultError } from "./vault/edit.ts";
 import type { VaultEdit } from "./vault/edit.ts";
 import { dataBlock, neutralize } from "./thread-context.ts";
 import { maskText } from "./threads.ts";
@@ -86,15 +86,18 @@ export function vaultRecentContext(d: {
         await d.clone.sync();
         const sources = [...new Set(note.sources.map(shortId))].slice(0, 5);
         const existing = d.clone.readNote(RECENT_NOTE_PATH);
+        // One commit: the body, and each front matter field that actually changes (an unchanged field is not an edit).
         const edits: VaultEdit[] =
           existing === undefined
             ? [{ op: "create_note", path: RECENT_NOTE_PATH, content: `---\nupdatedAt: ${note.updatedAt}\nsources: [${sources.join(", ")}]\n---\n${note.text}` }]
-            : [
-                { op: "rewrite_body", path: RECENT_NOTE_PATH, expectBodySha: bodyShaOf(existing), text: note.text },
-                { op: "set_frontmatter", path: RECENT_NOTE_PATH, key: "updatedAt", value: note.updatedAt },
-                { op: "set_frontmatter", path: RECENT_NOTE_PATH, key: "sources", value: sources },
-              ];
-        await d.clone.write(edits, { kind: "direct" }, { actor: "recent-context" });
+            : [{ op: "rewrite_body", path: RECENT_NOTE_PATH, expectBodySha: bodyShaOf(existing), text: note.text }];
+        if (existing !== undefined) {
+          const after = applyEdit(edits[0]!, (p) => (p === RECENT_NOTE_PATH ? existing : undefined)).after;
+          for (const [key, value] of [["updatedAt", note.updatedAt], ["sources", sources]] as const) {
+            if (setFrontmatter(after, key, value) !== after) edits.push({ op: "set_frontmatter", path: RECENT_NOTE_PATH, key, value });
+          }
+        }
+        await d.clone.write(edits, { kind: "direct" }, { actor: "recent-context", summary: `refreshed the rolling recent-work note (${RECENT_NOTE_PATH})` });
         d.memory.invalidate?.();
         saved = { at: now().toISOString() };
         failed = undefined;

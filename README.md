@@ -35,7 +35,9 @@ Jobs have a `kind`: `work` (default) or `review`. When ORBIT *opens* a PR for a 
 
 ## Memory
 
-Keyword search over the vault copy, read-only. Only the owner can use it: ORBIT asks tailscaled who sent each request and compares that login with `ORBIT_OWNER`. Anyone else, or a request it cannot identify, gets no memory.
+Keyword search over the vault, owner only: ORBIT asks tailscaled who sent each request and compares that login with `ORBIT_OWNER`. Anyone else, or a request it cannot identify, gets no memory. With the `orbit.github-vault` credential installed, memory searches and reads ORBIT's own writable clone of the vault (fetched from GitHub, so it is fresh and shows ORBIT's own writes); without it, it reads the read-only server copy, which lags. Every answer's `source` says which one answered and how fresh it is.
+
+**Vault writes and the config view (general tools, part 1).** Six owner-only chat tools (`vault_policy`, `vault_create_note`, `vault_append_section`, `vault_replace_text`, `vault_set_frontmatter`, `vault_archive_note`) edit the vault under its own `AGENTS.md`: direct writes only where it allows them, a proposal card for anything it protects, secret-shaped text refused, one commit per write (author ORBIT) with a Log line in the same commit, pushed without force and verified on the remote. `orbit_config_view` is a read-only view of how ORBIT is configured. Architecture, policy, authentication, failure behaviour and what must happen before it is switched on: `docs/vault-writes.md`.
 
 ## Notify and schedule
 

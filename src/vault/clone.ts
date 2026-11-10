@@ -30,7 +30,8 @@ export function credentialFile(env: NodeJS.ProcessEnv): () => string | undefined
 }
 
 export type WriteMode = { kind: "direct" } | { kind: "confirmed"; reasons: string[] };
-export type WriteMeta = { actor: string };
+// `summary` replaces the per-edit description in the log line and the commit subject (the rolling note uses it).
+export type WriteMeta = { actor: string; summary?: string };
 
 export type WriteResult = {
   status: "committed";
@@ -223,7 +224,7 @@ export function vaultClone(deps: VaultCloneDeps) {
   type Plan = { writes: Map<string, string | null>; files: string[]; describe: string[]; agentsSha: string; logFile: string };
 
   // Applies the edits to what the working tree holds right now. No file is touched here.
-  function plan(edits: VaultEdit[], mode: WriteMode, actor: string): Plan {
+  function plan(edits: VaultEdit[], mode: WriteMode, actor: string, summary?: string): Plan {
     const docs = policyDocs();
     const overlay = new Map<string, string | null>();
     const read = (p: string): string | undefined => (overlay.has(p) ? (overlay.get(p) ?? undefined) : diskRead(p));
@@ -248,7 +249,7 @@ export function vaultClone(deps: VaultCloneDeps) {
     }
     const t = stamp(now());
     const logFile = `Log/${t.year}/${t.date}-orbit.md`;
-    const line = `- ${t.time} orbit: ${describe.join("; ")} (${actor})`;
+    const line = `- ${t.time} orbit: ${summary ?? describe.join("; ")} (${actor})`;
     if (secretFindings([line])) fail("secret_refused", "The log line for this change looks like it holds a secret. Nothing was written.");
     const existing = read(logFile);
     overlay.set(logFile, existing === undefined ? `# ${t.date} orbit\n\n${line}\n` : `${existing.endsWith("\n") ? existing : `${existing}\n`}${line}\n`);
@@ -270,7 +271,7 @@ export function vaultClone(deps: VaultCloneDeps) {
         firstBase ??= base;
         let p: Plan;
         try {
-          p = plan(edits, mode, meta.actor);
+          p = plan(edits, mode, meta.actor, meta.summary);
         } catch (err) {
           // After a competing remote change, an edit that no longer applies is a conflict, reported with its files.
           if (attempt === 2 && err instanceof VaultError && err.code === "precondition_failed") {
@@ -280,7 +281,7 @@ export function vaultClone(deps: VaultCloneDeps) {
         }
         for (const [path, content] of p.writes) placeFile(path, content);
         await git.run(["add", "-A", "--", ...p.files], { cwd: dir });
-        const message = `orbit: ${summarize(edits[0]!).slice(0, 70)}${edits.length > 1 ? ` (+${edits.length - 1})` : ""}\n\n${p.describe.map((d) => `- ${d}`).join("\n")}\n\nWritten by ORBIT (${meta.actor}) under vault AGENTS.md ${p.agentsSha.slice(0, 12)}.\n`;
+        const message = `orbit: ${(meta.summary ?? summarize(edits[0]!)).slice(0, 70)}${edits.length > 1 && !meta.summary ? ` (+${edits.length - 1})` : ""}\n\n${p.describe.map((d) => `- ${d}`).join("\n")}\n\nWritten by ORBIT (${meta.actor}) under vault AGENTS.md ${p.agentsSha.slice(0, 12)}.\n`;
         await git.run(["commit", "--quiet", "--no-verify", "-F", "-"], { cwd: dir, input: message });
         const commit = (await git.run(["rev-parse", "HEAD"], { cwd: dir })).stdout.trim();
         await deps.beforePush?.(attempt);
