@@ -15,7 +15,7 @@ import { vaultMemory } from "../src/memory.ts";
 import type { Item, ModelPort, Step } from "../src/model.ts";
 import { nodes as devicePresence } from "../src/nodes.ts";
 import { notifier } from "../src/notify.ts";
-import { jobStateOf, sysOps, type JobsSnapshot, type SysLedgerEntry } from "../src/ops-sys.ts";
+import { PLAN_MAX_POLLS, jobStateOf, sysOps, type JobsSnapshot, type SysLedgerEntry } from "../src/ops-sys.ts";
 import { sysClient, type SysClient, type SysReply } from "../src/ops-sys-client.ts";
 import { decide } from "../src/policy.ts";
 import { MOCK_PORT_NAMES, mockPort } from "../src/ports.ts";
@@ -736,9 +736,9 @@ test("OS update proposals that cannot get a trustworthy plan create nothing: not
   const stuck = fakeClient({ answer: (c) => (c.action === "plan_os_updates" ? { ok: true, data: { operation: { state: "accepted" } } } : { ok: true, data: { operation: { state: "running" } } }) });
   const h2 = ledger({ client: stuck.client });
   const sys2 = sysOps({ client: stuck.client, store: h2.store, notify: h2.notify, proposals: h2.proposals, jobState: () => quiet, jobsTarget: () => undefined, sleep: noSleep });
-  await assert.rejects(() => sys2.propose("install_os_updates"), /not ready in time.*Nothing was installed.*No proposal was created/);
+  await assert.rejects(() => sys2.propose("install_os_updates"), /STILL running on the helper.*did not stop it.*Nothing was installed.*No proposal was created/);
   assert.equal(h2.proposals.list().length, 0);
-  assert.equal(stuck.calls.filter((c) => c.action === "op_status").length, 100);
+  assert.equal(stuck.calls.filter((c) => c.action === "op_status").length, PLAN_MAX_POLLS);
 });
 
 test("a plan-time refusal by an open operation or an unreachable status never starts a plan", async () => {
@@ -953,4 +953,126 @@ test("the docs state what the digest is and is not, that apt-get update is not r
   assert.match(d, /Reboot cool-down counts fail/);
   assert.match(d, /derived from `src\/ops\/sys-helper\.ts` as merged, not from the missing text/);
   assert.match(d, /Never run on a real host|has not been run on a live host|Nothing here has been done/);
+});
+
+// ================================================================= follow-up 2: plan timeouts, and the exclusivity matrix at the proposal
+
+import { PLAN_APT_LOCK_WAIT_MS, PLAN_AUDIT_LIMIT_MS, PLAN_REFRESH_LIMIT_MS, PLAN_RUNNER_MAX_MS, PLAN_SIMULATE_LIMIT_MS, PLAN_WAIT_MS } from "../src/ops/sys-protocol.ts";
+import { PLAN_POLL_MS } from "../src/ops-sys.ts";
+
+test("plan timeouts: ORBIT waits at least as long as the plan runner may run, and the runner's limits come from the same constants", () => {
+  assert.equal(PLAN_RUNNER_MAX_MS, PLAN_AUDIT_LIMIT_MS + PLAN_REFRESH_LIMIT_MS + PLAN_SIMULATE_LIMIT_MS + 2 * PLAN_APT_LOCK_WAIT_MS);
+  assert.ok(PLAN_WAIT_MS > PLAN_RUNNER_MAX_MS, "a margin on top of the runner's own budget");
+  assert.ok(PLAN_MAX_POLLS * PLAN_POLL_MS >= PLAN_RUNNER_MAX_MS, "the polling budget covers the runner's budget (it used to be 300 s against a 600 s apt-get update)");
+  assert.ok(PLAN_MAX_POLLS * PLAN_POLL_MS >= PLAN_WAIT_MS);
+  const run = read("src/ops/sys-run.ts");
+  assert.match(run, /"update"\], PLAN_REFRESH_LIMIT_MS, noKillOpts\)/);
+  assert.match(run, /"-s", "upgrade"\], PLAN_SIMULATE_LIMIT_MS, noKillOpts\)/);
+  assert.match(run, /\["--audit"\], PLAN_AUDIT_LIMIT_MS\)/);
+  assert.doesNotMatch(run.slice(run.indexOf("async function simulatePlan"), run.indexOf("async function installOsUpdates")), /\b(600_000|120_000|60_000)\b/, "no literal limit is left in the plan path");
+  assert.match(read("src/ops/sys-run.ts"), /DPkg::Lock::Timeout=120/);
+  assert.equal(PLAN_APT_LOCK_WAIT_MS, 120_000, "matches the -o DPkg::Lock::Timeout=120 the runner passes");
+});
+
+// A plan that becomes ready after `readyAfterMs` of (virtual) waiting. sleep advances the virtual clock.
+function planReadyAfter(readyAfterMs: number) {
+  const v = { t: 0 };
+  const f = fakeClient({ answer: (c) => (c.action === "plan_os_updates" ? { ok: true, data: { operation: { state: "accepted" } } } : { ok: true, data: { operation: v.t >= readyAfterMs ? planOp() : { state: "running" } } }) });
+  const h = ledger({ client: f.client });
+  const sys = sysOps({ client: f.client, store: h.store, notify: h.notify, proposals: h.proposals, jobState: () => quiet, jobsTarget: () => undefined, sleep: async (ms) => void (v.t += ms) });
+  return { sys, f, h, v };
+}
+
+test("plan timeouts: boundaries. Ready exactly when the runner's budget ends, or at the very last poll: proposed. One poll later: refused, naming the plan as still running", async () => {
+  for (const [name, readyAt] of [
+    ["at the runner's maximum", PLAN_RUNNER_MAX_MS],
+    ["at the last poll ORBIT makes", PLAN_MAX_POLLS * PLAN_POLL_MS],
+  ] as const) {
+    const t = planReadyAfter(readyAt);
+    assert.equal((await t.sys.propose("install_os_updates")).kind, "ops_sys", name);
+  }
+  const late = planReadyAfter((PLAN_MAX_POLLS + 1) * PLAN_POLL_MS);
+  await assert.rejects(() => late.sys.propose("install_os_updates"), /STILL running on the helper/);
+  assert.equal(late.h.proposals.list().length, 0);
+  assert.equal(late.f.calls.filter((c) => c.action === "op_status").length, PLAN_MAX_POLLS, "polled for the whole budget, no more");
+  assert.ok(late.v.t >= PLAN_WAIT_MS, "and waited at least as long as the runner may run");
+});
+
+test("plan timeouts: when ORBIT gives up it says the plan is still running and that giving up did not stop it; it never claims a cancellation, and sends no cancel", async () => {
+  const t = planReadyAfter(Number.MAX_SAFE_INTEGER);
+  let msg = "";
+  await t.sys.propose("install_os_updates").catch((e: Error) => void (msg = e.message));
+  assert.match(msg, /operation [0-9a-f]{12}\) is STILL running on the helper/);
+  assert.match(msg, /did not stop it/);
+  assert.match(msg, /cannot be cancelled/);
+  assert.match(msg, /holds the tier 3 slot until it ends/);
+  assert.match(msg, /Nothing was installed.*No proposal was created/);
+  assert.doesNotMatch(msg, /was cancelled|has been cancelled|stopped the plan|plan was stopped|timed out and stopped/i);
+  assert.deepEqual(t.f.calls.filter((c) => c.action !== "sys_status" && c.action !== "op_status" && c.action !== "plan_os_updates"), [], "no cancel or any other mutation was sent");
+  assert.equal(t.f.plans().length, 1);
+});
+
+test("plan timeouts: outstanding plan, then slot cleanup. While the helper still reports the plan, new proposals are refused with the true reason; once it has ended (slot released) the next works", async () => {
+  const state = { phase: "clean" as "clean" | "plan-running" | "ended" };
+  const open = { opId: "9".repeat(40), action: "plan_os_updates", state: "running" };
+  const calls: Call[] = [];
+  const client: SysClient = {
+    call: async (req) => {
+      const c = req as Call;
+      calls.push(c);
+      if (c.action === "sys_status") return { ok: true, data: { hostname: HOST, orbitJobsSocketPresent: true, openOperation: state.phase === "plan-running" ? open : null, openOperations: state.phase === "plan-running" ? [open] : [] } };
+      if (c.action === "plan_os_updates") return { ok: true, data: { operation: state.phase === "ended" ? planOp() : { state: "accepted" } } };
+      return { ok: true, data: { operation: state.phase === "ended" ? planOp() : { state: "running" } } };
+    },
+  };
+  const h = ledger({ client });
+  const sys = sysOps({ client, store: h.store, notify: h.notify, proposals: h.proposals, jobState: () => quiet, jobsTarget: () => ({ host: JOBS_HOST, port: 8791 }), sleep: async () => {} });
+  await assert.rejects(() => sys.propose("install_os_updates"), /STILL running/);
+  state.phase = "plan-running"; // the helper's runner has not ended: it still holds the slot
+  const before = calls.length;
+  await assert.rejects(() => sys.propose("install_os_updates"), /Another tier 3 operation \(plan_os_updates, running\).*an earlier update plan is still running on the helper.*which does not stop it/s);
+  await assert.rejects(() => sys.propose("reboot_host"), /plan_os_updates, running/);
+  await assert.rejects(() => sys.propose("funnel_disable"), /plan_os_updates, running/);
+  assert.deepEqual(calls.slice(before).map((c) => c.action), ["sys_status", "sys_status", "sys_status"], "refused at the status check: no second plan was started");
+  state.phase = "ended"; // the runner ended and released the slot
+  assert.equal((await sys.propose("install_os_updates")).kind, "ops_sys");
+  assert.equal((await sys.propose("funnel_disable")).kind, "ops_sys");
+});
+
+test("exclusivity at the proposal: a waiting scheduled reboot does not block a Funnel proposal; everything else is exclusive with it, and cancelling never consults the status", async () => {
+  const waiting = { opId: "8".repeat(40), action: "reboot_host", state: "scheduled" };
+  const f = fakeClient({ status: { openOperation: waiting, openOperations: [waiting] } });
+  const h = ledger({ client: f.client });
+  for (const a of ["funnel_enable", "funnel_disable"] as const) assert.equal((await h.sys.propose(a)).kind, "ops_sys", a);
+  for (const a of ["install_os_updates", "reboot_host"] as const) await assert.rejects(() => h.sys.propose(a), /cancel the scheduled reboot first/, a);
+  await assert.rejects(() => h.sys.propose("reboot_host", { rebootAt: at(180) }), /cancel the scheduled reboot first/);
+  assert.equal(f.plans().length, 0, "no plan was started while the reboot waits");
+  // the other way round: a Funnel change in flight allows a scheduled reboot, but not update, plan or reboot now
+  const fun = { opId: "7".repeat(40), action: "funnel_enable", state: "running" };
+  const g = fakeClient({ status: { openOperation: fun, openOperations: [fun] } });
+  const gh = ledger({ client: g.client, now: clock({ t: T0 }) });
+  assert.equal((await gh.sys.propose("reboot_host", { rebootAt: at(180) })).kind, "ops_sys");
+  for (const a of ["install_os_updates", "reboot_host", "funnel_enable", "funnel_disable"] as const) await assert.rejects(() => gh.sys.propose(a), /Another tier 3 operation \(funnel_enable, running\)/, a);
+  // an old helper that only reports openOperation still behaves (and is stricter, never looser)
+  const old = fakeClient({ status: { openOperation: waiting } });
+  const oh = ledger({ client: old.client });
+  assert.equal((await oh.sys.propose("funnel_disable")).kind, "ops_sys");
+  await assert.rejects(() => oh.sys.propose("install_os_updates"), /cancel the scheduled reboot first/);
+});
+
+test("cancelling a scheduled reboot is not gated on the helper's open operations: it works while a Funnel change is in flight and asks no status", async () => {
+  const now = { t: T0 };
+  const fun = { opId: "7".repeat(40), action: "funnel_enable", state: "running" };
+  const f = fakeClient({
+    status: { openOperation: fun, openOperations: [fun] },
+    answer: (c) => (c.action === "cancel_reboot" ? { ok: true, data: { cancelled: true, alreadyCancelled: false, operation: { state: "cancelled" } } } : { ok: true, data: { operation: { state: c.action === "reboot_host" ? "scheduled" : "accepted" } } }),
+  });
+  const h = ledger({ client: f.client, now: clock(now) });
+  const gate = fakeClient();
+  const h0 = ledger({ client: gate.client, now: clock(now), store: h.store });
+  await confirm(h0, await h0.sys.propose("reboot_host", { rebootAt: at(180) })); // scheduled while the helper was idle
+  f.calls.length = 0;
+  const r = await h.sys.cancelReboot();
+  assert.equal(r.cancelled, true);
+  assert.deepEqual(f.calls.map((c) => c.action), ["cancel_reboot"]);
 });

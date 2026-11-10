@@ -96,6 +96,17 @@ export function rebootAtProblem(at: string, nowMs: number, minLeadMs = REBOOT_MI
 // One upgrade: [package, installed version, version it would become]. The whole list, sorted by package name, is what the owner
 // confirms (as planDigest) and what the runner recomputes before it upgrades anything.
 export type PlanEntry = [string, string, string];
+// Plan timing, in ONE place so the runner and ORBIT cannot drift apart (finding 5). These are the per-step limits the plan runner
+// passes to its commands; apt-get is never killed (noKill), so they are nominal: they say how long the runner is EXPECTED to take,
+// not a guarantee that it stops. ORBIT therefore waits at least PLAN_RUNNER_MAX_MS (plus a margin) and, if it still gives up, says
+// the plan is still running instead of implying that giving up stopped it. See docs/orbit-ops-sys.md "Plan timeouts".
+export const PLAN_AUDIT_LIMIT_MS = 60_000; // dpkg --audit
+export const PLAN_REFRESH_LIMIT_MS = 600_000; // apt-get update
+export const PLAN_SIMULATE_LIMIT_MS = 120_000; // apt-get -s upgrade
+export const PLAN_APT_LOCK_WAIT_MS = 120_000; // -o DPkg::Lock::Timeout=120, applied to each of the two apt-get commands
+export const PLAN_RUNNER_MAX_MS = PLAN_AUDIT_LIMIT_MS + PLAN_REFRESH_LIMIT_MS + PLAN_SIMULATE_LIMIT_MS + 2 * PLAN_APT_LOCK_WAIT_MS;
+export const PLAN_WAIT_MARGIN_MS = 60_000;
+export const PLAN_WAIT_MS = PLAN_RUNNER_MAX_MS + PLAN_WAIT_MARGIN_MS; // how long ORBIT waits for a plan: never less than the runner may run
 export const MAX_PLAN_PACKAGES = 150; // keeps a plan inside the helper's response limit; a bigger backlog is refused, not truncated
 const PKG = /^[a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)?$/;
 const VER = /^[A-Za-z0-9][A-Za-z0-9.+~:_-]*$/;

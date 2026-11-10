@@ -26,6 +26,8 @@ export type SysConfig = {
   rebootCooldownMs: number; // no second reboot this soon after one was accepted
   lockWaitSeconds: number;
   staleAfterMs: number;
+  orphanMarkerAfterMs: number; // a retired/<holder> marker older than this, whose holder's record is terminal, is an orphan (see recoverOrphanedRetirement)
+  fireSlotWaitMs: number; // a reboot that is due waits at most this long for the running-operation slot, then does not fire
   keepRecords: number;
 };
 
@@ -44,6 +46,8 @@ export const SYS_CONFIG: SysConfig = {
   rebootCooldownMs: 30 * 60_000,
   lockWaitSeconds: 300,
   staleAfterMs: 30_000,
+  orphanMarkerAfterMs: 10 * 60_000,
+  fireSlotWaitMs: 2 * 60_000,
   keepRecords: 50,
 };
 
@@ -122,28 +126,53 @@ export function addStep(c: SysConfig, rec: SysRecord, env: Pick<SysEnv, "now">, 
   audit({ at: s.at, opId: rec.opId.slice(0, 12), action: rec.action, step: s.step, detail: s.detail });
 }
 
-// ---- the one-operation slot ----
-// Ownership is a file `active` holding the owner's op id. Two rules make every change of owner atomic:
+// ---- the operation slots ----
+// Two lanes, both files in the persistent state directory holding an operation id (docs/orbit-ops-sys.md "Exclusivity matrix"):
+//   main       `active`            the operation that is RUNNING or being accepted: update, plan, reboot, funnel
+//   scheduled  `active-scheduled`  a reboot that is WAITING for its time. It is not running anything, so it does not take `main`
+//                                  (that is what lets a Funnel change and a cancellation proceed meanwhile); it takes `main` itself
+//                                  when it fires (sys-run.ts awaitSchedule).
+// Ownership of a lane is a file holding the owner's op id. Two rules make every change of owner atomic:
 //  1. It is created by link(2) of a fully written temp file: it appears whole or not at all (never empty to a reader), and link
-//     fails if it already exists, so two requests cannot both get a free slot.
-//  2. It is removed only by whoever first creates the one-time marker retired/<holder> (also exclusive). Only that one party may
-//     unlink a slot that holds <holder>; the slot cannot hold <holder> again (op ids are never reused) and cannot be taken by
-//     anyone else while it exists, so the unlink can never remove a replacement holder's slot, however requests interleave.
-// A process that dies between creating the marker and the unlink leaves the slot held (fail closed): see docs/orbit-ops-sys.md.
+//     fails if it already exists, so two requests cannot both get a free lane.
+//  2. It is removed only by whoever first creates the one-time marker retired/<holder> (also exclusive; for the scheduled lane
+//     retired/<holder>.scheduled). Only that one party may unlink a slot that holds <holder>; the slot cannot hold <holder> again
+//     (op ids are never reused in a lane) and cannot be taken by anyone else while it exists, so the unlink can never remove a
+//     replacement holder's slot, however requests interleave.
+//  3. The unlink itself (removeIfHolder) runs under an exclusive claim recovering/<holder>, re-reads the slot and removes it only if
+//     it STILL holds <holder>: the original retirer and a recoverer are serialised, so neither can delete a replacement.
+// A process that dies between creating the marker and the unlink leaves an ORPHANED marker and the slot held (fail closed). That
+// is recovered automatically, once the marker is older than orphanMarkerAfterMs and the holder's record is terminal
+// (recoverOrphanedRetirement). The protocol and the safe age are documented in docs/orbit-ops-sys.md "Slot ownership".
+export type Lane = "main" | "scheduled";
+export const LANES: readonly Lane[] = ["main", "scheduled"];
 export const retiredDir = (c: SysConfig) => `${c.stateDir}/retired`;
-export const readSlot = (c: SysConfig): string | undefined => {
+export const recoveringDir = (c: SysConfig) => `${c.stateDir}/recovering`;
+export const lanePath = (c: SysConfig, lane: Lane) => (lane === "main" ? activePath(c) : `${c.stateDir}/active-scheduled`);
+const suffix = (lane: Lane) => (lane === "main" ? "" : `.${lane}`);
+export const markerPath = (c: SysConfig, holderId: string, lane: Lane = "main") => `${retiredDir(c)}/${holderId}${suffix(lane)}`;
+const claimPath = (c: SysConfig, holderId: string, lane: Lane) => `${recoveringDir(c)}/${holderId}${suffix(lane)}`;
+
+// Test seam (fakes only; unset in production): lets a test run code at exact points of the protocol, deterministically, e.g. a
+// retirement and a takeover between a contender's read and its removal, or an injected failure. Not used by any production path.
+export const slotHooks: { afterRead?: (lane: Lane, value: string | undefined) => void; beforeRemove?: (what: "slot" | "marker", path: string) => void } = {};
+
+export const readSlot = (c: SysConfig, lane: Lane = "main"): string | undefined => {
+  let v: string | undefined;
   try {
-    return readFileSync(activePath(c), "utf8").trim();
+    v = readFileSync(lanePath(c, lane), "utf8").trim();
   } catch {
-    return undefined;
+    v = undefined;
   }
+  slotHooks.afterRead?.(lane, v);
+  return v;
 };
 
-export function tryAcquireSlot(c: SysConfig, opId: string): boolean {
+export function tryAcquireSlot(c: SysConfig, opId: string, lane: Lane = "main"): boolean {
   const tmp = `${c.stateDir}/active.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   writeFileSync(tmp, opId, { mode: 0o600 });
   try {
-    linkSync(tmp, activePath(c));
+    linkSync(tmp, lanePath(c, lane));
     return true;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
@@ -157,34 +186,103 @@ export function tryAcquireSlot(c: SysConfig, opId: string): boolean {
   }
 }
 
-// Remove the slot if (and only if) it still holds `holderId` and this caller is the one entitled to retire that holder.
-export function retireSlot(c: SysConfig, holderId: string): boolean {
-  if (readSlot(c) !== holderId) return false;
-  mkdirSync(retiredDir(c), { recursive: true, mode: 0o700 });
+type Removal = "removed" | "not_holder" | "claimed";
+// The ONLY place a slot file is removed. The caller must be entitled to (it created the retirement marker, or it is recovering an
+// orphaned one). It first takes the exclusive removal claim recovering/<holder>: while a claim is held nobody else removes this
+// holder's slot, so the read-check-remove below cannot interleave with another remover, and a replacement holder (who can only
+// take the slot after it is gone) is never deleted. The claim is released as soon as the removal is done.
+function removeIfHolder(c: SysConfig, holderId: string, lane: Lane): Removal {
+  mkdirSync(recoveringDir(c), { recursive: true, mode: 0o700 });
+  const claim = claimPath(c, holderId, lane);
   try {
-    writeFileSync(`${retiredDir(c)}/${holderId}`, "", { flag: "wx", mode: 0o600 });
+    writeFileSync(claim, "", { flag: "wx", mode: 0o600 });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return "claimed";
+    throw err;
+  }
+  try {
+    slotHooks.beforeRemove?.("slot", lanePath(c, lane));
+    if (readSlot(c, lane) !== holderId) return "not_holder";
+    rmSync(lanePath(c, lane), { force: true });
+    return "removed";
+  } finally {
+    try {
+      rmSync(claim, { force: true });
+    } catch {
+      // a claim left behind makes later removals answer "claimed" (fail closed); docs/orbit-ops-sys.md
+    }
+  }
+}
+
+// Remove the slot if (and only if) it still holds `holderId` and this caller is the one entitled to retire that holder. If the
+// removal itself fails, the marker is taken back so a failure never leaves an orphaned marker behind (the slot stays held, which
+// fails closed, and the next caller may retire it normally).
+export function retireSlot(c: SysConfig, holderId: string, lane: Lane = "main"): boolean {
+  if (readSlot(c, lane) !== holderId) return false;
+  mkdirSync(retiredDir(c), { recursive: true, mode: 0o700 });
+  const marker = markerPath(c, holderId, lane);
+  try {
+    writeFileSync(marker, "", { flag: "wx", mode: 0o600 });
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "EEXIST") return false; // someone else retired (or is retiring) this holder
     throw err;
   }
-  if (readSlot(c) === holderId) rmSync(activePath(c), { force: true });
-  return true;
-}
-
-// A holder's own release when its operation ends (or is settled). A no-op if the slot was already taken over.
-export function releaseSlot(c: SysConfig, opId: string): void {
-  retireSlot(c, opId);
-}
-
-// A request that took the slot but is refused before it recorded anything gives it straight back. Nobody can have retired it: a
-// slot with no record is "busy" to everyone else until it is old.
-export function abandonSlot(c: SysConfig, opId: string): void {
-  if (readSlot(c) === opId) rmSync(activePath(c), { force: true });
-}
-
-export const slotAgeMs = (c: SysConfig): number | undefined => {
   try {
-    return Date.now() - statSync(activePath(c)).mtimeMs;
+    return removeIfHolder(c, holderId, lane) !== "claimed"; // "claimed": a recoverer is finishing it and clears the marker
+  } catch (err) {
+    try {
+      rmSync(marker, { force: true });
+    } catch {
+      // cannot take the marker back either: recoverOrphanedRetirement handles it once it is old enough
+    }
+    throw err;
+  }
+}
+
+export type OrphanOutcome = "recovered" | "no_marker" | "young" | "no_record" | "nonterminal" | "claimed" | "ambiguous";
+
+// Finish a retirement whose retirer died between creating retired/<holder> and removing the slot. ALL of these must hold, else it
+// does nothing (and says why): the marker exists, is a regular file and is older than orphanMarkerAfterMs; the holder's record
+// exists and is terminal; and the exclusive removal claim is won (removeIfHolder), so no other remover acts at the same time. The
+// slot is removed only if it STILL holds that holder, so a newer holder is never deleted; the marker is then cleared. Missing,
+// unreadable or odd state is "ambiguous"/"no_record": fail safe, nothing is touched.
+export function recoverOrphanedRetirement(c: SysConfig, holderId: string, nowMs: number, lane: Lane = "main"): OrphanOutcome {
+  if (!SYS_OP_ID.test(holderId)) return "ambiguous";
+  const marker = markerPath(c, holderId, lane);
+  let st;
+  try {
+    st = statSync(marker);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT" ? "no_marker" : "ambiguous";
+  }
+  if (!st.isFile()) return "ambiguous";
+  const age = nowMs - st.mtimeMs;
+  if (!Number.isFinite(age) || age < 0) return "ambiguous"; // a marker from the future: the clock or the file is not to be trusted
+  if (age < c.orphanMarkerAfterMs) return "young";
+  const rec = loadRecord(c, holderId);
+  if (!rec) return "no_record";
+  if (!isSysTerminal(rec.state)) return "nonterminal";
+  if (removeIfHolder(c, holderId, lane) === "claimed") return "claimed";
+  rmSync(marker, { force: true });
+  return "recovered";
+}
+
+// A holder's own release when its operation ends (or is settled). A no-op in a lane that was already taken over. An operation can
+// hold both lanes for a moment (a scheduled reboot hands over), so it releases whichever it holds.
+export function releaseSlot(c: SysConfig, opId: string): void {
+  for (const lane of LANES) retireSlot(c, opId, lane);
+}
+
+// A request that took a slot but fails before it recorded anything (refused, or any throw) gives it straight back, through the
+// same marker protocol as every other removal: it never removes a slot that holds someone else, and a failed removal leaves no
+// orphaned marker (retireSlot).
+export function abandonSlot(c: SysConfig, opId: string): void {
+  for (const lane of LANES) retireSlot(c, opId, lane);
+}
+
+export const slotAgeMs = (c: SysConfig, lane: Lane = "main"): number | undefined => {
+  try {
+    return Date.now() - statSync(lanePath(c, lane)).mtimeMs;
   } catch {
     return undefined;
   }
@@ -246,7 +344,7 @@ export function pruneRecords(c: SysConfig): void {
   for (const r of old.slice(0, Math.max(0, recs.length - c.keepRecords))) {
     rmSync(recordPath(c, r.opId), { force: true });
     // markers of a pruned record go with it, so an id that is ever used again is not blocked by a stale marker
-    rmSync(`${retiredDir(c)}/${r.opId}`, { force: true });
+    for (const lane of LANES) rmSync(markerPath(c, r.opId, lane), { force: true });
     rmSync(`${decidedDir(c)}/${r.opId}`, { force: true });
   }
 }

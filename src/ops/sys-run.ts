@@ -20,6 +20,9 @@ import { execFile } from "node:child_process";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import {
   MAX_PLAN_PACKAGES,
+  PLAN_AUDIT_LIMIT_MS,
+  PLAN_REFRESH_LIMIT_MS,
+  PLAN_SIMULATE_LIMIT_MS,
   flagPlan,
   parsePlan,
   planDigestOf,
@@ -40,7 +43,7 @@ import {
   type SysEvidence,
   type SysRecord,
 } from "./sys-protocol.ts";
-import { SYS_CONFIG, addStep, cooldownRemainingMs, decide, decisionOf, loadRecord, allRecords, rebootStampPath, releaseSlot, saveRecord, systemSysEnv, writeAtomic, type SysConfig, type SysEnv } from "./sys-core.ts";
+import { SYS_CONFIG, addStep, cooldownRemainingMs, decide, decisionOf, loadRecord, allRecords, rebootStampPath, readSlot, recoverOrphanedRetirement, releaseSlot, retireSlot, saveRecord, tryAcquireSlot, systemSysEnv, writeAtomic, type SysConfig, type SysEnv } from "./sys-core.ts";
 
 const SYSTEMCTL = "/usr/bin/systemctl";
 const APT_GET = "/usr/bin/apt-get";
@@ -149,7 +152,7 @@ type Planned = { ok: true; plan: PlanEntry[] } | { ok: false; end: () => void };
 // `apt-get -s upgrade` -> a validated plan, or the operation's refusal. Used by the plan runner and again by the update runner.
 async function simulatePlan(x: Ctx): Promise<Planned> {
   const { env } = x;
-  const sim = await env.exec(APT_GET, [...APT_BASE, "-s", "upgrade"], 120_000, noKillOpts);
+  const sim = await env.exec(APT_GET, [...APT_BASE, "-s", "upgrade"], PLAN_SIMULATE_LIMIT_MS, noKillOpts);
   if (sim.code !== 0) {
     const busy = LOCK_TEXT.test(sim.stderr + sim.stdout);
     return { ok: false, end: () => finish(x, "failed", busy ? "Nothing changed: the package manager is busy (another apt, dpkg or unattended-upgrades holds the lock). It was not interrupted and no lock was removed. Ask again later." : `Nothing changed: the upgrade simulation failed (exit ${sim.code}).`, { checked: false, detail: busy ? "Package manager busy." : "Simulation failed." }) };
@@ -165,7 +168,7 @@ async function simulatePlan(x: Ctx): Promise<Planned> {
 }
 
 async function auditClean(x: Ctx): Promise<boolean> {
-  const a = await x.env.exec(DPKG, ["--audit"], 60_000);
+  const a = await x.env.exec(DPKG, ["--audit"], PLAN_AUDIT_LIMIT_MS);
   if (a.code === 0 && !a.stdout.trim()) return true;
   finish(x, "failed", `Nothing changed: the package system is not in a clean state (dpkg --audit reports problems). An operator must fix it first (usually dpkg --configure -a). ${lastLines(a.stdout, 2)}`, { checked: true, healthy: false, detail: "dpkg --audit not clean before starting." });
   return false;
@@ -177,7 +180,7 @@ async function planOsUpdates(x: Ctx): Promise<void> {
   const { env } = x;
   if (!(await auditClean(x))) return;
   step(x, "refresh", "apt-get update (refreshes apt package-list metadata; no package is installed or upgraded)");
-  const upd = await env.exec(APT_GET, [...APT_BASE, "update"], 600_000, noKillOpts);
+  const upd = await env.exec(APT_GET, [...APT_BASE, "update"], PLAN_REFRESH_LIMIT_MS, noKillOpts);
   step(x, "refresh-result", `exit ${upd.code}${upd.stderr ? `: ${lastLines(upd.stderr, 1)}` : ""}`);
   if (upd.code !== 0) {
     const busy = LOCK_TEXT.test(upd.stderr + upd.stdout);
@@ -256,8 +259,11 @@ async function installOsUpdates(x: Ctx): Promise<void> {
 // ================================================================= reboot
 
 // A scheduled reboot waits here (in the unit, WITHOUT the deploy lock, so a long wait never blocks a deploy), until its time or
-// until it is cancelled. At the time it claims "fire" against any cancellation; from then on it can no longer be cancelled.
-export async function awaitSchedule(env: SysEnv, c: SysConfig, opId: string, audit: Audit): Promise<"due" | "cancelled" | "not_scheduled"> {
+// until it is cancelled. While it waits it holds only the `scheduled` lane, so Funnel changes and cancellation are not blocked.
+// When due it must take the running-operation slot (`main`) BEFORE it claims "fire": so a Funnel change still in flight finishes
+// first, no new one can start once the reboot holds `main`, and a cancellation stays possible until the moment it fires. If `main`
+// is still not free after fireSlotWaitMs, it does NOT fire: nothing is issued, the record ends failed and says so ("blocked").
+export async function awaitSchedule(env: SysEnv, c: SysConfig, opId: string, audit: Audit): Promise<"due" | "cancelled" | "not_scheduled" | "blocked"> {
   const first = loadRecord(c, opId);
   if (!first || first.action !== "reboot_host" || first.state !== "scheduled" || !first.schedule) return "not_scheduled";
   const at = Date.parse(first.schedule.at);
@@ -267,12 +273,43 @@ export async function awaitSchedule(env: SysEnv, c: SysConfig, opId: string, aud
     if (left <= 0) break;
     await env.sleep(Math.min(left, 15_000));
   }
+  // Due. Take `main` (cancellation is still honoured while waiting for it).
+  const giveUpAt = env.now().getTime() + c.fireSlotWaitMs;
+  for (;;) {
+    if (decisionOf(c, opId) === "cancel") return "cancelled";
+    if (tryAcquireSlot(c, opId, "main")) break;
+    const holder = readSlot(c, "main");
+    if (holder === opId) break; // this runner was restarted after it took the slot
+    // A finished holder (or one whose retirement was orphaned) is cleared; a live one is waited for; nothing is guessed about a dead one.
+    const hrec = holder && SYS_OP_ID.test(holder) ? loadRecord(c, holder) : undefined;
+    if (holder && hrec && isSysTerminal(hrec.state) && !retireSlot(c, holder, "main")) recoverOrphanedRetirement(c, holder, env.now().getTime(), "main");
+    if (env.now().getTime() >= giveUpAt) {
+      const rec = loadRecord(c, opId);
+      if (!rec || rec.state !== "scheduled") return "cancelled"; // not ours to change
+      const x: Ctx = { env, c, rec, audit };
+      step(x, "blocked", `The scheduled time arrived but another operation (${hrec?.action ?? "unknown"}) still held the running-operation slot after ${Math.round(c.fireSlotWaitMs / 1000)}s.`);
+      finish(x, "failed", `NOT rebooted: the scheduled time arrived but another tier 3 operation (${hrec?.action ?? "unknown"}) was still running after ${Math.round(c.fireSlotWaitMs / 1000)}s, so this reboot did not fire and NO reboot was issued by this operation. Schedule it again if it is still wanted.`, { checked: false, detail: "Did not fire: the running-operation slot stayed busy." });
+      rec.finishedAt = env.now().toISOString();
+      saveRecord(c, rec, env);
+      releaseSlot(c, opId);
+      audit({ at: env.now().toISOString(), opId: opId.slice(0, 12), action: rec.action, step: "result", detail: `failed: ${rec.summary ?? ""}`.slice(0, 300) });
+      return "blocked";
+    }
+    await env.sleep(Math.min(5_000, Math.max(1, giveUpAt - env.now().getTime())));
+  }
   const d = decide(c, opId, "fire");
-  if (!d.won && d.decision === "cancel") return "cancelled";
+  if (!d.won && d.decision === "cancel") {
+    retireSlot(c, opId, "main"); // give back what was taken; the cancelling front releases the scheduled lane
+    return "cancelled";
+  }
   const rec = loadRecord(c, opId);
-  if (!rec || rec.state !== "scheduled") return "cancelled"; // cannot happen once "fire" is claimed; fail safe: never reboot on a surprise
+  if (!rec || rec.state !== "scheduled") {
+    retireSlot(c, opId, "main");
+    return "cancelled"; // cannot happen once "fire" is claimed; fail safe: never reboot on a surprise
+  }
   rec.state = "accepted";
   addStep(c, rec, env, "due", "The scheduled time arrived and the reboot was claimed: it can no longer be cancelled.", audit);
+  retireSlot(c, opId, "scheduled"); // `main` is held, so exclusion is continuous; the waiting lane is no longer needed
   return "due";
 }
 

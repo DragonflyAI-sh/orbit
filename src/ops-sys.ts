@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import {
   FUNNEL_HTTPS_PORT,
   MAX_PLAN_PACKAGES,
+  PLAN_WAIT_MS,
   REBOOT_PROPOSE_MIN_LEAD_MS,
   SYS_CONFIRM_TTL_MS,
   cap,
@@ -117,8 +118,11 @@ export type JobsTarget = () => { host: string; port: number } | undefined;
 export type SysOps = ReturnType<typeof sysOps>;
 export type SysProposal = Proposal & { kind: "ops_sys" };
 
-const PLAN_POLL_MS = 3_000;
-const PLAN_MAX_POLLS = 100; // about five minutes: apt-get update on a slow mirror can take a while
+// ORBIT waits for a plan at least as long as the plan runner may run (PLAN_WAIT_MS = the runner's declared limits + lock waits + a
+// margin, sys-protocol.ts), so it never gives up on a runner that is still within its own budget. See docs/orbit-ops-sys.md
+// "Plan timeouts".
+export const PLAN_POLL_MS = 3_000;
+export const PLAN_MAX_POLLS = Math.ceil(PLAN_WAIT_MS / PLAN_POLL_MS);
 
 export function sysOps(deps: { client?: SysClient; store: Store<SysLedgerEntry[]>; notify: Notifier; proposals: Proposals; jobState: JobState; jobsTarget: JobsTarget; now?: () => Date; sleep?: (ms: number) => Promise<void>; newId?: () => string }) {
   const { client, store, notify, proposals } = deps;
@@ -228,7 +232,12 @@ export function sysOps(deps: { client?: SysClient; store: Store<SysLedgerEntry[]
         if (typeof op.plan?.digestKey !== "string" || op.plan.digestKey !== digest.slice(0, 24)) throw new Error(`The helper's update plan does not match its own digest, so it cannot be bound to a confirmation. ${none}`);
         return { upgrades, flags: flagPlan(upgrades), digest };
       }
-      if (i >= PLAN_MAX_POLLS) throw new Error(`The update plan was not ready in time (the helper may still be refreshing apt). Nothing was installed. ${none}`);
+      if (i >= PLAN_MAX_POLLS) {
+        // Giving up does NOT stop the plan: a plan cannot be cancelled (apt-get is never killed), so say what is true. The last status
+        // read just now is the evidence; the plan keeps the helper's slot until its runner ends or is found dead.
+        const st = typeof op.state === "string" ? op.state : "unknown";
+        throw new Error(`The update plan (operation ${planId.slice(0, 12)}) is STILL ${st} on the helper: ORBIT stopped waiting after ${Math.round((PLAN_MAX_POLLS * PLAN_POLL_MS) / 60000)} minutes, and that did not stop it (a plan cannot be cancelled; the helper never kills apt). It may still be refreshing apt metadata and it holds the tier 3 slot until it ends, so other tier 3 operations are refused meanwhile. Nothing was installed. Its result is discarded; ask again once it has ended. ${none}`);
+      }
       await sleep(PLAN_POLL_MS);
       try {
         r = await client!.call({ action: "op_status", opId: planId });
@@ -254,10 +263,16 @@ export function sysOps(deps: { client?: SysClient; store: Store<SysLedgerEntry[]
         throw new Error(`${cap(err instanceof Error ? err.message : "error", 200)} No proposal was created. Manual installation steps are in docs/orbit-ops-sys.md.`);
       }
       if (!status.ok) throw new Error(`The tier 3 helper refused: ${status.message}. No proposal was created.`);
-      const d = status.data as { hostname?: unknown; orbitJobsSocketPresent?: unknown; rebootCooldownUntil?: unknown; openOperation?: { action?: string; state?: string } | null };
-      if (d.openOperation) {
-        const sched = d.openOperation.action === "reboot_host" && d.openOperation.state === "scheduled";
-        throw new Error(`Another tier 3 operation (${String(d.openOperation.action)}, ${String(d.openOperation.state)}) is still open on the host. No proposal was created; ${sched ? "cancel the scheduled reboot first (ops_sys_cancel_reboot) or wait for it" : "wait for its result"}.`);
+      const d = status.data as { hostname?: unknown; orbitJobsSocketPresent?: unknown; rebootCooldownUntil?: unknown; openOperation?: { action?: string; state?: string } | null; openOperations?: unknown };
+      // The helper decides (the exclusivity matrix, docs/orbit-ops-sys.md); this refuses early, before any plan or card. A scheduled
+      // reboot that is only waiting does not block a Funnel change; update, plan and reboot are exclusive with everything open.
+      const open = (Array.isArray(d.openOperations) ? d.openOperations : d.openOperation ? [d.openOperation] : []) as { action?: string; state?: string }[];
+      const waiting = (o: { action?: string; state?: string }) => o.action === "reboot_host" && o.state === "scheduled";
+      const blocking = open.filter((o) => !(isFunnelAction(action) && waiting(o)) && !(opts.rebootAt !== undefined && (o.action === "funnel_enable" || o.action === "funnel_disable")));
+      if (blocking[0]) {
+        const o = blocking[0];
+        const hint = waiting(o) ? "cancel the scheduled reboot first (ops_sys_cancel_reboot) or wait for it" : o.action === "plan_os_updates" ? "an earlier update plan is still running on the helper (ORBIT may have stopped waiting for it, which does not stop it); wait for it to end" : "wait for its result";
+        throw new Error(`Another tier 3 operation (${String(o.action)}, ${String(o.state)}) is still open on the host. No proposal was created; ${hint}.`);
       }
       let rebootAt: string | undefined;
       if (opts.rebootAt !== undefined) {
