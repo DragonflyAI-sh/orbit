@@ -18,7 +18,7 @@ import { jsonStore } from "../src/store.ts";
 import { call, say, scripted } from "./threads-fixture.ts";
 
 const ping: ChatTool = { name: "jobs_list", description: "d", parameters: { type: "object", properties: {} }, run: async () => ({ value: { total: 0, jobs: [] }, provenance: "live", source: "jobs" }) };
-const prep = (tools: ChatTool[] = [ping]): TurnPrep => ({ memory: [], limits: [], tools });
+const prep = (tools: ChatTool[] = [ping]): TurnPrep => ({ memory: [], limits: [], tools, isOwner: true });
 const long = (tag: string, n = 400) => `${tag} ${"lorem ipsum dolor sit amet ".repeat(Math.ceil(n / 27))}`.slice(0, n);
 
 async function talk(svc: ReturnType<typeof threadService>, id: string, n: number, tools = [ping]) {
@@ -190,7 +190,7 @@ test("recent context sits behind a replaceable port: the state-backed one round-
   const dir = mkdtempSync(join(tmpdir(), "orbit-rc-"));
   const a = stateRecentContext(jsonStore<RecentContext | null>(dir, "recent-context", null));
   assert.equal(await a.read(), undefined);
-  await a.write({ text: "Working on threads.", updatedAt: "2026-11-10T00:00:00Z", sources: ["t1"] });
+  await a.write({ text: "Working on threads.", updatedAt: "2026-11-10T00:00:00Z", sources: ["t1"] }, { isOwner: true });
   const b = stateRecentContext(jsonStore<RecentContext | null>(dir, "recent-context", null));
   assert.equal((await b.read())!.text, "Working on threads.");
   assert.match(b.describe(), /state directory/);
@@ -235,7 +235,7 @@ test("the note is rewritten only after notable threads, no more often than the g
   assert.match(rc.status().lastError!.detail, /HTTP 500/);
   // A mock model never rewrites.
   const mock = recentContext({ port: memoryPort(), threads, model: scripted(() => say("x"), { state: "mock" }), now: () => clock });
-  assert.equal(mock.consider(t.id), false);
+  assert.equal(mock.consider(t.id, { isOwner: true }), false);
 });
 
 test("a card or a job tool call makes a short thread notable; archiving asks for a rewrite without waiting for the gap", async () => {
@@ -250,7 +250,7 @@ test("a card or a job tool call makes a short thread notable; archiving asks for
   const m = threads.beginAssistant(t.id);
   threads.addCall(t.id, m, { callId: "x", name: "job_status", arguments: "{}", output: "{}", ok: true, summary: "", at: "t" });
   assert.equal(isNotable(threads.get(t.id)!), true);
-  assert.equal(rc.consider(t.id, { force: true }), true);
+  assert.equal(rc.consider(t.id, { force: true, isOwner: true }), true);
   await rc.idle();
   assert.equal(port.note!.text, "fresh note");
 });

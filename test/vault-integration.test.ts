@@ -37,7 +37,7 @@ test("memory: the clone answers when the credential is installed and says which 
   await memory.refresh!(0);
   const r = memory.search("alpha");
   assert.equal(r.value[0]!.path, "Projects/alpha.md");
-  assert.match(r.source, /^memory\/vault-clone@[0-9a-f]{7} \(fetched 20\d\d-/);
+  assert.match(r.source, /^memory\/vault-clone@[0-9a-f]{7} \(last good fetch 20\d\d-/);
   assert.doesNotMatch(r.source, /FALLBACK|STALE/);
   assert.equal(memory.status().state, "live");
   assert.match(memory.status().detail, /writable vault clone/);
@@ -75,7 +75,7 @@ test("memory: a failing fetch keeps answering from the last good clone and says 
   }
   const stale = memory.search("alpha");
   assert.equal(stale.value[0]!.path, "Projects/alpha.md");
-  assert.match(stale.source, /STALE: the last fetch failed at .*:/);
+  assert.match(stale.source, /STALE: this is the last good clone and the latest fetch failed at .*:/);
   assert.equal(memory.status().state, "degraded");
   assert.doesNotMatch(JSON.stringify([stale, memory.status()]), new RegExp(TOKEN));
 
@@ -112,7 +112,7 @@ test("rolling note: written to Memory/recent-context.md through the vault pipeli
   assert.equal((await port.read())?.text, "Old note about work.");
 
   const id = "0f8fad5b-d9cb-469f-a165-70867728950e";
-  await port.write({ text: "Working on the vault tools. Open: confirm flow.", updatedAt: "2026-11-10T18:00:00.000Z", sources: [id] });
+  await port.write({ text: "Working on the vault tools. Open: confirm flow.", updatedAt: "2026-11-10T18:00:00.000Z", sources: [id] }, { isOwner: true });
   const remote = fx.remoteFile(RECENT_NOTE_PATH);
   assert.match(remote, /^---\nupdatedAt: 2026-11-10T18:00:00\.000Z\nsources: \[0f8fad5b\]\n---\nWorking on the vault tools\./);
   assert.match(fx.remoteFile("Log/2026/2026-11-10-orbit.md"), /refreshed the rolling recent-work note \(Memory\/recent-context\.md\) \(recent-context\)/);
@@ -130,16 +130,16 @@ test("rolling note: a missing note is created; secrets and new sensitive categor
   const memory = cloneMemory(clone, undefined);
   await memory.refresh!(0);
   const port = vaultRecentContext({ memory, clone });
-  await port.write({ text: "First note.", updatedAt: "2026-11-10T18:00:00.000Z", sources: ["abc"] });
+  await port.write({ text: "First note.", updatedAt: "2026-11-10T18:00:00.000Z", sources: ["abc"] }, { isOwner: true });
   assert.match(fx.remoteFile(RECENT_NOTE_PATH), /First note\./);
   const head = fx.remoteHead();
 
   // Sensitive-category approval has no automatic bypass: the write is refused, and nothing is claimed.
-  await assert.rejects(port.write({ text: "First note. Rai started therapy.", updatedAt: "2026-11-10T19:00:00.000Z", sources: ["abc"] }), /NOT saved to the vault: .*confirmation.*sensitive/);
+  await assert.rejects(port.write({ text: "First note. Rai started therapy.", updatedAt: "2026-11-10T19:00:00.000Z", sources: ["abc"] }, { isOwner: true }), /NOT saved to the vault: .*confirmation.*sensitive/);
   assert.match(port.describe(), /last save FAILED/);
   assert.match(port.describe(), /not being updated/);
   // A secret-shaped value is refused, not redacted into the commit.
-  await assert.rejects(port.write({ text: `key ${["gh", "p_"].join("")}abcdefghijklmnopqrstuvwx`, updatedAt: "2026-11-10T19:00:00.000Z", sources: [] }), /secret/);
+  await assert.rejects(port.write({ text: `key ${["gh", "p_"].join("")}abcdefghijklmnopqrstuvwx`, updatedAt: "2026-11-10T19:00:00.000Z", sources: [] }, { isOwner: true }), /secret/);
   assert.equal(fx.remoteHead(), head);
   assert.doesNotMatch(fx.remoteFile(RECENT_NOTE_PATH), /therapy|ghp_/);
 });
@@ -153,7 +153,7 @@ test("rolling note: no credential means nothing is saved, and the status says so
   const port = vaultRecentContext({ memory, clone, legacy });
   assert.equal((await port.read())?.text, "Legacy note");
   assert.match(port.describe(), /NOT saving: the vault write credential is not installed/);
-  await assert.rejects(port.write({ text: "x", updatedAt: "2026-11-10T00:00:00.000Z", sources: [] }), /NOT saved to the vault: .*credential/);
+  await assert.rejects(port.write({ text: "x", updatedAt: "2026-11-10T00:00:00.000Z", sources: [] }, { isOwner: true }), /NOT saved to the vault: .*credential/);
   assert.match(port.describe(), /last save FAILED/);
   assert.equal(fx.remoteHead(), git(fx.work, "rev-parse", "HEAD").trim());
 });
@@ -171,7 +171,7 @@ test("rolling note: the refresher hands the vault port unmasked text so it can r
   const rc = recentContext({ port, threads, model, now: () => clock });
   const svc = threadService({ threads, model, proposals: newProposals(), recent: rc, now: () => clock });
   const t = threads.create();
-  for (let i = 0; i < 3; i++) await svc.turn(t.id, `m${i}`, { memory: [], limits: [], tools: [] });
+  for (let i = 0; i < 3; i++) await svc.turn(t.id, `m${i}`, { memory: [], limits: [], tools: [], isOwner: true });
   await rc.idle();
   assert.match(rc.status().lastError!.detail, /NOT saved to the vault.*secret/);
   assert.equal((await port.read())?.text, "Old note about work.");
