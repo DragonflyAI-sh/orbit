@@ -92,9 +92,9 @@ export function threadService(d: {
   function cardLines(t: Thread): string[] {
     return t.cards.map((c) => {
       const live = liveOf(c);
-      const what = c.kind === "job_launch" ? `launch on routine ${c.routine}` : c.kind === "job_steer" ? `steer of job ${c.job}` : `server operation ${c.action}`;
+      const what = c.kind === "job_launch" ? `launch on routine ${c.routine}` : c.kind === "job_steer" ? `steer of job ${c.job}` : c.kind === "vault_edit" ? `vault edit ${c.summary ?? c.action}` : `server operation ${c.action}`;
       const rec = c.state !== "confirmed" ? "" : live ? (live.found ? `; record now: ${live.state}${live.health ? ` (${live.health})` : ""}` : "; the record could not be found") : c.outcome?.error ? `; confirmation problem: ${c.outcome.error}` : "; no result recorded yet";
-      const id = c.outcome?.jobId ?? c.outcome?.opId;
+      const id = c.outcome?.jobId ?? c.outcome?.opId ?? (c.outcome?.commit ? `commit ${c.outcome.commit.slice(0, 7)} (pushed, remote verified)` : undefined);
       return `- proposal ${c.id.slice(0, 8)} (${what}): ${c.state}${id ? `, id ${id}` : ""}${rec}${c.duplicates?.length ? `; was flagged as similar to ${c.duplicates.map((x) => x.job).join(", ")}` : ""}`;
     });
   }
@@ -202,16 +202,17 @@ export function threadService(d: {
     // What a confirmation returned, recorded on the card: ids into the authoritative records, or a refusal.
     settle(proposalId: string, result: { code: number; body: unknown }): void {
       if (!threads.threadOfCard(proposalId)) return;
-      const b = (result.body ?? {}) as { id?: unknown; opId?: unknown; steer?: { n?: unknown }; error?: unknown; job?: { id?: unknown } };
+      const b = (result.body ?? {}) as { id?: unknown; opId?: unknown; commit?: unknown; steer?: { n?: unknown }; error?: unknown; job?: { id?: unknown } };
       const jobId = typeof b.id === "string" ? b.id : typeof b.job?.id === "string" ? b.job.id : undefined;
       const opId = typeof b.opId === "string" ? b.opId : undefined;
       const steerN = typeof b.steer?.n === "number" ? b.steer.n : undefined;
       const error = typeof b.error === "string" ? b.error : undefined;
       // A confirmation that failed is "refused" when nothing was started: no job or operation id, or the ledger says the helper never took it.
       const entry = opId ? [...(admin?.list() ?? []), ...(sys?.list() ?? [])].find((e) => e.opId === opId) : undefined;
-      const produced = Boolean(jobId || steerN || (opId && entry?.state !== "not_dispatched"));
+      const commit = typeof b.commit === "string" ? b.commit : undefined;
+      const produced = Boolean(jobId || steerN || commit || (opId && entry?.state !== "not_dispatched"));
       const state: CardState = result.code < 300 || produced ? "confirmed" : "refused";
-      threads.recordOutcome(proposalId, { ...(jobId ? { jobId } : {}), ...(opId ? { opId } : {}), ...(steerN ? { steerN } : {}), httpStatus: result.code, ...(error ? { error: error.slice(0, 300) } : {}) }, state);
+      threads.recordOutcome(proposalId, { ...(jobId ? { jobId } : {}), ...(opId ? { opId } : {}), ...(commit ? { commit } : {}), ...(steerN ? { steerN } : {}), httpStatus: result.code, ...(error ? { error: error.slice(0, 300) } : {}) }, state);
     },
   };
 }

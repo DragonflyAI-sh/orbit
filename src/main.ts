@@ -21,7 +21,11 @@ import { reviewer, selectComments } from "./review.ts";
 import { memoryReport, modelTask, runner, toolCall } from "./runs.ts";
 import { scheduler } from "./schedule.ts";
 import { buildServer } from "./server.ts";
-import { stateRecentContext } from "./recent-context.ts";
+import { stateRecentContext, vaultRecentContext } from "./recent-context.ts";
+import { credentialFile, DEFAULT_REMOTE, vaultClone } from "./vault/clone.ts";
+import { vaultEdits as newVaultEdits } from "./vault/tools.ts";
+import { configView } from "./config-view.ts";
+import { decide } from "./policy.ts";
 import { jsonStore } from "./store.ts";
 import { threadStore } from "./threads.ts";
 import { join } from "node:path";
@@ -46,7 +50,12 @@ function readDeploy(): unknown {
 const stateDir = process.env.STATE_DIRECTORY;
 const chatgpt: { current?: ReturnType<typeof chatgptModel> } = {};
 const model = selectModel(process.env, (name) => (chatgpt.current = chatgptModel(name, tokenFile(stateDir))));
-const memory = selectMemory(process.env);
+// The writable vault clone needs a state directory and the orbit.github-vault credential (read when used, never cached). Without
+// either, memory reads the read-only server copy and no vault write tool is offered; /status and the tool results say so.
+const vault = stateDir
+  ? vaultClone({ dir: join(stateDir, "vault-clone"), remote: process.env.ORBIT_VAULT_REMOTE || DEFAULT_REMOTE, branch: process.env.ORBIT_VAULT_BRANCH || undefined, credential: credentialFile(process.env), onChange: () => memory.invalidate?.() })
+  : undefined;
+const memory = selectMemory(process.env, vault);
 const notify = notifier(jsonStore(stateDir, "notifications", []), selectDiscord(process.env));
 const tools = toolbox([githubRepoStatus()]);
 const ops = opsClient();
@@ -54,6 +63,8 @@ const ops = opsClient();
 const proposals = newProposals();
 const admin = adminOps({ client: adminClient(), store: jsonStore(stateDir, "ops-admin", []), notify, proposals });
 const owner = process.env.ORBIT_OWNER || undefined;
+const vaultEdits = vault ? newVaultEdits({ clone: vault, memory, proposals }) : undefined;
+const config = configView({ env: process.env, ops, commit });
 const nodes = devicePresence(tailscaleStatus(), owner);
 const jobs = jobRegistry(jsonStore(stateDir, "jobs-cloud", []), jobSecret(stateDir), notify);
 // Tier 3 (OS updates, reboot, orbit-jobs Funnel): separate socket, separate ledger, a separate confirmation for every action.
@@ -104,6 +115,8 @@ const tick = () => {
   // Renew the ChatGPT login shortly before it expires. Not awaited: a slow token endpoint must not hold up the tick
   // or the watch. maintain() never throws and runs one renewal at a time.
   void model.maintain?.();
+  // Fetch the writable vault clone (at most once a minute) so search sees other people's changes. Failures show in /status.
+  void memory.refresh?.(60_000);
   return schedule
     .tick()
     .then(() => runs.pump())
@@ -136,8 +149,22 @@ buildServer({
   sysOps: sys,
   proposals,
   threads: threadStore(stateDir ? join(stateDir, "threads") : undefined),
-  // The rolling note stays in ORBIT's state for now; Memory/recent-context.md in the vault is a later RecentContextPort.
-  recentContext: stateRecentContext(jsonStore(stateDir, "recent-context", null)),
+  vaultEdits,
+  configView: config,
+  // The rolling note is the vault file Memory/recent-context.md when the clone exists (written through the vault tools, with the
+  // same policy, secret refusal, log line and git pipeline); otherwise it stays in ORBIT's state directory.
+  recentContext: vault
+    ? vaultRecentContext({
+        memory,
+        clone: vault,
+        legacy: jsonStore(stateDir, "recent-context", null),
+        authorize: () => {
+          const d = decide("vault", "recent-context", true);
+          console.log(JSON.stringify({ at: new Date().toISOString(), port: "vault", action: "recent-context", ...d }));
+          return d.allow ? undefined : d.reason;
+        },
+      })
+    : stateRecentContext(jsonStore(stateDir, "recent-context", null)),
   nodes,
   jobs,
   watch,

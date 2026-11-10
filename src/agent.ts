@@ -117,7 +117,10 @@ export type ProposalAction =
   | { kind: "job_steer"; job: string; text: string }
   | { kind: "ops_admin"; action: MutatingAction; summary: string; display: Record<string, string> | null; digest: string }
   // Tier 3 (OS updates, reboot, orbit-jobs Funnel): same shape, plus the impact and recovery warnings the owner must see.
-  | { kind: "ops_sys"; action: SysMutatingAction; summary: string; display: Record<string, string>; warnings: string[]; digest: string };
+  | { kind: "ops_sys"; action: SysMutatingAction; summary: string; display: Record<string, string>; warnings: string[]; digest: string }
+  // A vault edit AGENTS.md section 4 protects. The exact validated edit stays with src/vault/tools.ts; the proposal carries what Rai
+  // is shown, the reasons it needs him, and a digest of the exact edit and reasons.
+  | { kind: "vault_edit"; action: string; summary: string; display: Record<string, string>; digest: string; reasons: string[] };
 export type Proposal = ProposalAction & { id: string; createdAt: string; expiresAt: string };
 
 export const PROPOSAL_TTL_MS = 30 * 60 * 1000;
