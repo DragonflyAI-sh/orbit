@@ -155,10 +155,11 @@
     const head = document.createElement("div");
     const steer = p.kind === "job_steer";
     const sysop = p.kind === "ops_sys";
-    const ops = p.kind === "ops_admin" || sysop;
-    head.textContent = ops ? `Proposed server action: ${p.summary} Nothing has been done yet.` : steer ? `Proposed steer for job ${p.job}. Nothing has been sent yet.` : `Proposed job on routine "${p.routine}". Nothing has launched yet.`;
+    const vault = p.kind === "vault_edit";
+    const ops = p.kind === "ops_admin" || sysop || vault;
+    head.textContent = vault ? `Proposed vault change: ${p.summary} Nothing has been written yet.` : ops ? `Proposed server action: ${p.summary} Nothing has been done yet.` : steer ? `Proposed steer for job ${p.job}. Nothing has been sent yet.` : `Proposed job on routine "${p.routine}". Nothing has launched yet.`;
     const brief = document.createElement("pre");
-    brief.textContent = sysop ? `${p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action}\n\n${(p.warnings || []).map((w) => `! ${w}`).join("\n\n")}\n\ndigest ${p.digest.slice(0, 16)}` : ops ? (p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action) + `\n\ndigest ${p.digest.slice(0, 16)}`  : steer ? p.text : p.brief;
+    brief.textContent = vault ? `${Object.entries(p.display || {}).map(([k, v]) => `${k}: ${v}`).join("\n")}\n\ndigest ${p.digest.slice(0, 16)}` : sysop ? `${p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action}\n\n${(p.warnings || []).map((w) => `! ${w}`).join("\n\n")}\n\ndigest ${p.digest.slice(0, 16)}` : ops ? (p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action) + `\n\ndigest ${p.digest.slice(0, 16)}`  : steer ? p.text : p.brief;
     const status = document.createElement("div");
     const dups = (p.duplicates || []).map((d) => Object.assign(document.createElement("div"), { className: "dup", textContent: `Possible duplicate: this brief is ${Math.round(d.similarity * 100)}% similar to job ${d.job} (${d.state}), launched ${d.launchedAt || "recently"}. Check before confirming.` }));
     const done = (text) => { box.replaceChildren(head, brief, Object.assign(document.createElement("div"), { textContent: text })); if (after) after(); };
@@ -169,8 +170,8 @@
           ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ digest: p.digest }) }
           : { method: "POST" });
         const body = await res.json();
-        if (!res.ok) return done(`${verb === "confirm" ? (ops ? "Not dispatched" : steer ? "Steer failed" : "Launch failed") : "Not cancelled"}: ${body.error}`);
-        done(verb === "cancel" ? "Cancelled." : ops ? "Dispatched to the server helper. This is NOT verified yet: ORBIT will report the verified result when it has it (ask it for the operations)." : steer ? `Steer ${body.steer.n} queued for ${body.steered}; the job picks it up at its next check-in.` : `Launched job ${body.id}${body.launch?.sessionUrl ? " · " + body.launch.sessionUrl : ""}. Ask ORBIT for its status.`);
+        if (!res.ok) return done(`${verb === "confirm" ? (ops ? (vault ? "Not saved" : "Not dispatched") : steer ? "Steer failed" : "Launch failed") : "Not cancelled"}: ${body.error}`);
+        done(verb === "cancel" ? "Cancelled." : vault ? `Committed and pushed. ORBIT read the remote branch back: it points at commit ${String(body.commit).slice(0, 7)}.` : ops ? "Dispatched to the server helper. This is NOT verified yet: ORBIT will report the verified result when it has it (ask it for the operations)." : steer ? `Steer ${body.steer.n} queued for ${body.steered}; the job picks it up at its next check-in.` : `Launched job ${body.id}${body.launch?.sessionUrl ? " · " + body.launch.sessionUrl : ""}. Ask ORBIT for its status.`);
       } catch { done("ORBIT did not answer."); }
     };
     const confirm = Object.assign(document.createElement("button"), { type: "button", textContent: "Confirm" });
@@ -611,7 +612,7 @@
     return `${t.title}${t.archived ? " (archived)" : ""}${t.openCards ? ` · ${t.openCards} waiting` : ""}${t.busy ? " · replying…" : ""}`;
   }
   function cardTitle(card) {
-    const what = card.kind === "job_steer" ? `steer for job ${card.job}` : card.kind === "job_launch" ? `job on routine "${card.routine}"` : `server action: ${card.summary || card.action}`;
+    const what = card.kind === "vault_edit" ? `vault change: ${card.summary || card.action}` : card.kind === "job_steer" ? `steer for job ${card.job}` : card.kind === "job_launch" ? `job on routine "${card.routine}"` : `server action: ${card.summary || card.action}`;
     return [`Proposed ${what}. ${CARD_STATE_TEXT[card.state] || card.state}.`];
   }
   // What a decided card says. The live line comes from ORBIT's own job and operation records at the time the thread was
@@ -622,6 +623,7 @@
     if (card.state === "confirmed") {
       const id = card.outcome?.jobId || card.outcome?.opId;
       if (card.kind === "job_steer") line(card.outcome?.steerN ? `Steer ${card.outcome.steerN} queued for ${card.job}.` : "Confirmed, but no result was recorded.");
+      else if (card.kind === "vault_edit" && card.outcome?.commit) line(`Committed and pushed: commit ${card.outcome.commit.slice(0, 7)} (the remote branch was read back and matches).`);
       else if (id) line(`${card.kind === "job_launch" ? "Job" : "Operation"} ${id}`);
       else line("Confirmed, but no job or operation id was recorded (ORBIT may have restarted). Check the Jobs tab; do not assume it ran.", "bad");
       if (card.outcome?.error) line(`Problem: ${card.outcome.error}`, "bad");

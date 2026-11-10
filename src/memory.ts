@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
-import type { PortStatus, Result } from "./ports.ts";
+import type { VaultClone } from "./vault/clone.ts";
+import type { PortState, PortStatus, Result } from "./ports.ts";
 
 export type Hit = { path: string; snippet: string; score: number };
 
@@ -9,6 +10,13 @@ export type MemoryPort = {
   status(): PortStatus;
   search(query: string, limit?: number): Result<Hit[]>;
   read(path: string): Result<string>;
+  // Brings the notes up to date from their source if they are older than maxAgeMs (the writable clone fetches; the read-only
+  // copy has nothing to fetch). Never throws: a failure shows up in status() and in the `source` of the next answer.
+  refresh?(maxAgeMs?: number): Promise<void>;
+  // Drops cached notes so the next search sees what was just written.
+  invalidate?(): void;
+  // Where the next answer would come from: the writable clone or the read-only fallback copy, and why.
+  sourceInfo?(): { via: "clone" | "fallback"; reason?: string };
 };
 
 const REFRESH_MS = 60 * 1000;
@@ -22,6 +30,8 @@ function collect(root: string, dir = root, out = new Map<string, string>()): Map
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (SKIP.has(entry.name)) continue;
     const full = join(dir, entry.name);
+    // A symlink could point outside the vault (the clone holds whatever the remote does): never followed.
+    if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) collect(root, full, out);
     else if (entry.name.endsWith(".md")) out.set(relative(root, full), readFileSync(full, "utf8"));
   }
@@ -49,7 +59,14 @@ function snippet(text: string, words: string[]): string {
 }
 
 // Read-only keyword search over a vault copy. Semantic search comes later.
-export function vaultMemory(root: string, syncFile?: string, now: () => Date = () => new Date()): MemoryPort {
+export type VaultMemoryOptions = {
+  // The `source` of every answer. Defaults to memory/vault@<commit> from the sync record.
+  source?: () => string;
+  // Replaces the status text and state (the clone reports its own freshness).
+  describe?: (noteCount: number) => { state: PortState; detail: string };
+};
+
+export function vaultMemory(root: string, syncFile?: string, now: () => Date = () => new Date(), options: VaultMemoryOptions = {}): MemoryPort {
   let notes = new Map<string, string>();
   let index = new Map<string, { tf: Map<string, number>; length: number; name: Set<string> }>();
   let df = new Map<string, number>();
@@ -86,7 +103,7 @@ export function vaultMemory(root: string, syncFile?: string, now: () => Date = (
     }
   };
 
-  const source = () => `memory/vault@${(sync().commit ?? "unknown").slice(0, 7)}`;
+  const source = options.source ?? (() => `memory/vault@${(sync().commit ?? "unknown").slice(0, 7)}`);
 
   return {
     name: "memory",
@@ -96,6 +113,7 @@ export function vaultMemory(root: string, syncFile?: string, now: () => Date = (
       if (error || !loadedAt) {
         return { port: "memory", state: "down", impl: "vault-keyword", detail: `Cannot read the vault copy: ${error}`, verifiedAt: at };
       }
+      if (options.describe) return { port: "memory", impl: "vault-keyword", verifiedAt: loadedAt.toISOString(), ...options.describe(notes.size) };
       const s = sync();
       const synced = s.at ? `synced ${s.at}` : "sync time unknown";
       const stale = !s.at || now().getTime() - new Date(s.at).getTime() > SYNC_STALE_MS;
@@ -128,6 +146,9 @@ export function vaultMemory(root: string, syncFile?: string, now: () => Date = (
       hits.sort((a, b) => b.score - a.score);
       return { value: hits.slice(0, limit), provenance: "live", source: source() };
     },
+    invalidate: () => {
+      loadedAt = undefined;
+    },
     read: (path) => {
       load();
       const full = resolve(root, path);
@@ -151,7 +172,13 @@ export function memoryUnavailable(detail: string): MemoryPort {
   };
 }
 
-export function selectMemory(env: NodeJS.ProcessEnv): MemoryPort {
+export function selectMemory(env: NodeJS.ProcessEnv, clone?: VaultClone): MemoryPort {
+  const copy = selectCopy(env);
+  if (!clone) return copy;
+  return cloneMemory(clone, copy.status().state === "down" && copy.status().impl === "none" ? undefined : copy);
+}
+
+function selectCopy(env: NodeJS.ProcessEnv): MemoryPort {
   const root = env.ORBIT_VAULT;
   if (!root) return memoryUnavailable("No vault is configured (ORBIT_VAULT unset).");
   try {
@@ -160,4 +187,67 @@ export function selectMemory(env: NodeJS.ProcessEnv): MemoryPort {
     return memoryUnavailable(`The vault copy at ${root} is not readable.`);
   }
   return vaultMemory(root, env.ORBIT_VAULT_STATE);
+}
+
+const CLONE_STALE_MS = 10 * 60 * 1000;
+
+// Memory over ORBIT's writable clone of the vault when the write credential is installed and the clone has synced; the
+// read-only /opt/orbit/vault copy otherwise. Every answer's `source` says which one answered and how fresh it is, and why the
+// fallback was used when it was. The clone is the same working tree the write tools change, so a search sees ORBIT's own
+// writes at once and other people's changes at the next fetch (at most a minute old while ORBIT runs).
+export function cloneMemory(clone: VaultClone, fallback: MemoryPort | undefined, now: () => Date = () => new Date()): MemoryPort {
+  const fetchError = () => clone.state().syncError;
+  const cloneLabel = (): string => {
+    const st = clone.state();
+    const err = st.syncError;
+    return `memory/vault-clone@${(st.head ?? "unknown").slice(0, 7)} (fetched ${st.fetchedAt ?? "never"}${err ? `; STALE: the last fetch failed at ${err.at}: ${err.message}` : ""})`;
+  };
+  const inClone = vaultMemory(clone.dir, undefined, now, {
+    source: cloneLabel,
+    describe: (n) => {
+      const st = clone.state();
+      const old = !st.fetchedAt || now().getTime() - new Date(st.fetchedAt).getTime() > CLONE_STALE_MS;
+      return {
+        state: st.syncError || old ? "degraded" : "live",
+        detail: `Keyword search over ${n} notes in ORBIT's writable vault clone, commit ${(st.head ?? "unknown").slice(0, 7)}, fetched ${st.fetchedAt ?? "never"}${st.syncError ? `; the last fetch failed (${st.syncError.message})` : ""}. Writes go to this clone and are pushed to GitHub. Owner only.`,
+      };
+    },
+  });
+  const info = (): { via: "clone" | "fallback"; reason?: string } => {
+    const st = clone.state();
+    if (st.credential === "missing") return { via: "fallback", reason: "the vault write credential (orbit.github-vault) is not installed in this ORBIT process" };
+    if (st.clone !== "ready") return { via: "fallback", reason: `the writable clone is not available yet${st.syncError ? `: ${st.syncError.message}` : st.lastError ? `: ${st.lastError.message}` : ""}` };
+    return { via: "clone" };
+  };
+  const label = (src: string, why: string | undefined) => (why === undefined ? src : `${src} (FALLBACK: ${why}; this is the read-only server copy and may lag GitHub)`);
+  const answer = <T>(use: (m: MemoryPort) => Result<T>): Result<T> => {
+    const i = info();
+    if (i.via === "clone") return use(inClone);
+    if (!fallback) throw new Error(`No vault is available: ${i.reason}, and no read-only copy is configured.`);
+    const r = use(fallback);
+    return { ...r, source: label(r.source, i.reason) };
+  };
+  return {
+    name: "memory",
+    sourceInfo: info,
+    invalidate: () => {
+      inClone.invalidate?.();
+      fallback?.invalidate?.();
+    },
+    refresh: async (maxAgeMs = 60_000) => {
+      if (!clone.credentialPresent()) return;
+      const at = clone.state().fetchedAt;
+      if (at && now().getTime() - new Date(at).getTime() < maxAgeMs) return;
+      await clone.sync().catch(() => {});
+      inClone.invalidate?.();
+    },
+    status: () => {
+      const i = info();
+      if (i.via === "clone") return inClone.status();
+      const base = fallback ? fallback.status() : ({ port: "memory", state: "down", impl: "none", detail: "No read-only copy is configured.", verifiedAt: now().toISOString() } as PortStatus);
+      return { ...base, state: base.state === "down" ? "down" : "degraded", detail: `FALLBACK: ${i.reason}. ${base.detail} Vault write tools are unavailable.` };
+    },
+    search: (query, limit) => answer((m) => m.search(query, limit)),
+    read: (path) => answer((m) => m.read(path)),
+  };
 }
