@@ -39,7 +39,8 @@ export function compactList(all: Job[], health: (j: Job) => Health) {
 export function detailJob(job: Job, health: Health, running?: string) {
   const events = job.events.slice(-DETAIL_EVENTS);
   const omitted = job.events.length - events.length;
-  return { ...job, ...toolCommitFields(job, running), health, events, eventsOmitted: omitted, eventsNote: omitted ? `${omitted} earlier events left out; ${events.length} of ${job.events.length} shown.` : undefined };
+  const { briefWords: _words, ...launch } = job.launch ?? ({} as NonNullable<Job["launch"]>);
+  return { ...job, ...(job.launch ? { launch } : {}), ...toolCommitFields(job, running), health, events, eventsOmitted: omitted, eventsNote: omitted ? `${omitted} earlier events left out; ${events.length} of ${job.events.length} shown.` : undefined };
 }
 
 // One row for the jobs page: no events or steers, and the latest check-in line with how it arrived.

@@ -1,5 +1,6 @@
 import type { Job, Jobs } from "./jobs.ts";
 import type { ControlRepo, Routine } from "./launcher.ts";
+import { briefWords } from "./duplicates.ts";
 import type { Notifier } from "./notify.ts";
 
 // The one launch path: write the brief to orbit-work, register the job, fire the Routine. The /jobs/launch route,
@@ -34,7 +35,7 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
     const registered = jobs.register(id);
     if ("error" in registered) return { code: 400, body: { error: registered.error } };
     if (review) jobs.setReview(id, review);
-    const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString() };
+    const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString(), briefWords: briefWords(briefText) };
     const fail = (error: string) => {
       jobs.setLaunch(id, { ...launch, failedAt: new Date().toISOString(), error });
       notify.send(`Job ${id} could not launch: ${error}`, false);

@@ -49,6 +49,18 @@
   .note button.x { color: var(--muted); font-size: 16px; line-height: 1; }
   .note a, .ev a, .latest a { color: var(--accent-2); }
   #inbox .showall { align-self: flex-start; background: none; border: 0; padding: 2px 0; color: var(--accent-2); font: inherit; font-size: 13px; cursor: pointer; }
+  #threadbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; align-items: center; }
+  #threadbar select { flex: 1 1 160px; min-width: 0; padding: 6px 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font: inherit; }
+  #threadbar button { padding: 5px 12px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
+  #threadbar label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
+  .banner { align-self: stretch; max-width: 720px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--gold); background: var(--card); font-size: 14px; overflow-wrap: anywhere; }
+  .banner button { margin-top: 6px; padding: 4px 12px; display: block; }
+  .compact { align-self: stretch; max-width: 720px; padding: 6px 10px; border-radius: 10px; border: 1px dashed var(--line); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+  .compact pre { white-space: pre-wrap; margin: 4px 0 0; font: 12px/1.4 ui-monospace, monospace; }
+  .compact .warn, .dup { color: var(--mock); font-weight: 600; }
+  .cardstate { margin-top: 6px; font-size: 13px; overflow-wrap: anywhere; }
+  .cardstate .ok { color: var(--live); } .cardstate .bad { color: var(--down); }
+  .proposal.closed { border-color: var(--line); }
   #signin:not(:empty) { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
   #signin button { padding: 4px 12px; margin-top: 4px; }
   #signin code { font-size: 16px; letter-spacing: .12em; color: var(--gold); }
@@ -57,6 +69,8 @@
   .msg { max-width: 720px; padding: 8px 12px; border-radius: 12px; background: var(--card);
          border: 1px solid var(--line); white-space: pre-wrap; }
   .user { align-self: flex-end; background: var(--accent); color: var(--on-accent); border-color: transparent; }
+  .msg a { color: var(--accent-2); overflow-wrap: anywhere; }
+  .msg.user a { color: inherit; text-decoration: underline; }
   .tag { display: block; font-size: 11px; margin-top: 4px; }
   .calls { display: block; margin-top: 6px; font-size: 12px; color: var(--muted); }
   .calls div { margin-top: 2px; }
@@ -99,7 +113,7 @@
 </style>
 </head>
 <body>
-<header><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" hidden><button type="button" data-tab="chat" aria-pressed="true">Chat</button><button type="button" data-tab="jobs" aria-pressed="false">Jobs <span id="jobsbadge"></span></button></nav><div id="ports"></div><div id="signin"></div><div id="inbox"></div></header>
+<header><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" hidden><button type="button" data-tab="chat" aria-pressed="true">Chat</button><button type="button" data-tab="jobs" aria-pressed="false">Jobs <span id="jobsbadge"></span></button></nav><div id="threadbar" hidden><select id="threadsel" aria-label="Thread"></select><button type="button" id="tnew">New</button><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button><label><input type="checkbox" id="tshowarch"> archived</label></div><div id="ports"></div><div id="signin"></div><div id="inbox"></div></header>
 <main id="log"></main>
 <section id="jobs" hidden aria-live="off"></section>
 <form id="form"><textarea id="input" rows="2" placeholder="Message ORBIT" required></textarea><button>Send</button></form>
@@ -135,7 +149,7 @@
     el.append(box);
   }
 
-  function showProposal(el, p) {
+  function showProposal(el, p, after) {
     const box = document.createElement("div");
     box.className = "proposal";
     const head = document.createElement("div");
@@ -146,7 +160,8 @@
     const brief = document.createElement("pre");
     brief.textContent = sysop ? `${p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action}\n\n${(p.warnings || []).map((w) => `! ${w}`).join("\n\n")}\n\ndigest ${p.digest.slice(0, 16)}` : ops ? (p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action) + `\n\ndigest ${p.digest.slice(0, 16)}`  : steer ? p.text : p.brief;
     const status = document.createElement("div");
-    const done = (text) => { box.replaceChildren(head, brief, Object.assign(document.createElement("div"), { textContent: text })); };
+    const dups = (p.duplicates || []).map((d) => Object.assign(document.createElement("div"), { className: "dup", textContent: `Possible duplicate: this brief is ${Math.round(d.similarity * 100)}% similar to job ${d.job} (${d.state}), launched ${d.launchedAt || "recently"}. Check before confirming.` }));
+    const done = (text) => { box.replaceChildren(head, brief, Object.assign(document.createElement("div"), { textContent: text })); if (after) after(); };
     const act = async (verb) => {
       confirm.disabled = cancel.disabled = true;
       try {
@@ -162,7 +177,7 @@
     const cancel = Object.assign(document.createElement("button"), { type: "button", textContent: "Cancel", className: "cancel" });
     confirm.addEventListener("click", () => act("confirm"));
     cancel.addEventListener("click", () => act("cancel"));
-    box.append(head, brief, confirm, cancel, status);
+    box.append(head, ...dups, brief, confirm, cancel, status);
     el.append(box);
   }
 
@@ -181,12 +196,161 @@
     log.scrollTop = log.scrollHeight;
   }
 
+  // ---- Threads (owner): stored on the server, shared by every device. The page keeps only the selected id (per device). ----
+  const THREAD_KEY = "orbit.thread";
+  let threadMode = null;      // null until known; "server" for the owner, "legacy" for anyone else (no stored history)
+  let threadList = [];
+  let current = null;         // the thread being shown, as the server sent it
+  let sending = false;
+  let showArchived = false;
+  const tsel = document.getElementById("threadsel");
+  const readSel = () => { try { return localStorage.getItem(THREAD_KEY); } catch { return null; } };
+  const writeSel = (id) => { try { id ? localStorage.setItem(THREAD_KEY, id) : localStorage.removeItem(THREAD_KEY); } catch { /* per-device convenience only */ } };
+
+  async function tapi(path, method, body) {
+    const res = await fetch(path, method === "GET" ? undefined : { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) });
+    let data = {};
+    try { data = await res.json(); } catch { /* not JSON */ }
+    return { ok: res.ok, status: res.status, data };
+  }
+
+  function renderBar() {
+    const rows = threadList.filter((t) => showArchived || !t.archived || t.id === current?.id);
+    tsel.replaceChildren(...rows.map((t) => Object.assign(document.createElement("option"), { value: t.id, textContent: threadOption(t), selected: t.id === current?.id })));
+    if (!rows.length) tsel.append(Object.assign(document.createElement("option"), { value: "", textContent: "No threads yet" }));
+    document.getElementById("tarchive").textContent = current?.archived ? "Restore" : "Archive";
+    document.getElementById("trename").disabled = document.getElementById("tarchive").disabled = !current;
+    const input = document.getElementById("input");
+    input.disabled = Boolean(current?.archived);
+    input.placeholder = current?.archived ? "This thread is archived. Restore it to continue." : "Message ORBIT";
+  }
+
+  function renderCard(card) {
+    const holder = el("div", { className: "cardwrap" });
+    if (card.state === "open") { showProposal(holder, card, () => loadThread(current.id)); return holder; }
+    const head = el("div", {}, ...cardTitle(card));
+    holder.append(el("div", { className: "proposal closed" }, head, ...(card.brief || card.text ? [el("pre", { textContent: String(card.brief ?? card.text).slice(0, 1200) })] : []), ...cardStateNodes(card, el)));
+    return holder;
+  }
+
+  function renderThread(view, keepScroll) {
+    current = view;
+    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+    const byId = new Map(view.cards.map((c) => [c.id, c]));
+    const nodes = [];
+    if (pendingNotice) nodes.push(noticeBanner(pendingNotice));
+    view.messages.forEach((m, i) => {
+      if (view.summary && i === view.summary.covers) nodes.push(compactionNode(view, el));
+      nodes.push(renderStoredMessage(m, el, (id) => { const c = byId.get(id); return c ? renderCard(c) : null; }));
+    });
+    if (view.summary && view.summary.covers >= view.messages.length) nodes.push(compactionNode(view, el));
+    if (!view.messages.length) nodes.push(el("div", { className: "compact", textContent: "This thread is empty. Messages are saved on ORBIT's server and show on your other devices." }));
+    log.replaceChildren(...nodes);
+    if (!keepScroll || atBottom) log.scrollTop = log.scrollHeight;
+    renderBar();
+  }
+
+  let pendingNotice = null;
+  function noticeBanner(n) {
+    return el("div", { className: "banner", role: "note" }, n.text, el("button", { type: "button", textContent: "Got it", onclick: async () => { await tapi("/threads/notice/ack", "POST"); pendingNotice = null; if (current) renderThread(current, true); else showEmpty(); } }));
+  }
+  function showEmpty() {
+    log.replaceChildren(...(pendingNotice ? [noticeBanner(pendingNotice)] : []), el("div", { className: "compact", textContent: "No thread is open. Send a message to start one; it is saved on ORBIT's server." }));
+    renderBar();
+  }
+
+  async function loadList() {
+    const r = await tapi("/threads?archived=1", "GET");
+    if (!r.ok) { if (r.status === 403) threadMode = "legacy"; return false; }
+    threadMode = "server";
+    threadList = r.data.threads;
+    pendingNotice = r.data.notice;
+    document.getElementById("threadbar").hidden = false;
+    return true;
+  }
+  async function loadThread(id, keepScroll) {
+    const r = await tapi(`/threads/${encodeURIComponent(id)}`, "GET");
+    if (!r.ok) { if (r.status === 404) { writeSel(null); current = null; } return false; }
+    writeSel(id);
+    renderThread(r.data.thread, keepScroll);
+    return true;
+  }
+  async function initThreads() {
+    if (!(await loadList())) return;
+    const wanted = readSel();
+    const first = threadList.find((t) => t.id === wanted) || threadList.find((t) => !t.archived);
+    if (first && (await loadThread(first.id))) return;
+    current = null;
+    showEmpty();
+  }
+  async function pollThreads() {
+    try {
+      await loadList();
+      if (current) {
+        const meta = threadList.find((t) => t.id === current.id);
+        // Re-draw when another device changed the thread, or while a confirmed card's live state can still change.
+        if (meta && (meta.rev !== current.rev || meta.busy !== current.busy || current.cards.some((c) => c.state === "confirmed"))) await loadThread(current.id, true);
+      }
+      renderBar();
+    } catch { /* the next poll tries again */ }
+  }
+
+  tsel.addEventListener("change", () => { if (tsel.value) loadThread(tsel.value); });
+  document.getElementById("tshowarch").addEventListener("change", (e) => { showArchived = e.target.checked; renderBar(); });
+  document.getElementById("tnew").addEventListener("click", async () => {
+    const r = await tapi("/threads", "POST", {});
+    if (!r.ok) return;
+    await loadList();
+    renderThread(r.data.thread);
+    writeSel(r.data.thread.id);
+    document.getElementById("input").focus();
+  });
+  document.getElementById("trename").addEventListener("click", async () => {
+    if (!current) return;
+    const title = window.prompt("Rename thread", current.title);
+    if (!title || !title.trim()) return;
+    const r = await tapi(`/threads/${current.id}/rename`, "POST", { title });
+    if (r.ok) { await loadList(); renderThread(r.data.thread, true); }
+  });
+  document.getElementById("tarchive").addEventListener("click", async () => {
+    if (!current) return;
+    const restoring = current.archived;
+    const r = await tapi(`/threads/${current.id}/archive`, "POST", { archived: !restoring });
+    if (!r.ok) { add("orbit", r.data.error || "Could not archive.", "error", "down"); return; }
+    await loadList();
+    if (restoring) return renderThread(r.data.thread);
+    const next = threadList.find((t) => !t.archived);
+    if (next) await loadThread(next.id); else { current = null; writeSel(null); showEmpty(); }
+  });
+
+  async function sendThreaded(content) {
+    sending = true;
+    try {
+      if (!current) {
+        const made = await tapi("/threads", "POST", {});
+        if (!made.ok) { add("orbit", made.data.error || "Could not start a thread.", "error", "down"); return; }
+        current = made.data.thread;
+        writeSel(current.id);
+      }
+      log.append(el("div", { className: "msg user", textContent: content }), el("div", { className: "msg orbit", textContent: "Working…" }));
+      log.scrollTop = log.scrollHeight;
+      const r = await tapi(`/threads/${current.id}/messages`, "POST", { text: content });
+      if (r.data.thread) renderThread(r.data.thread);
+      else { await loadThread(current.id); add("orbit", r.data.error || "ORBIT did not answer.", "error", "down"); }
+      if (!r.ok && r.data.error) add("orbit", r.data.error, "error", "down");
+      await loadList();
+      renderBar();
+    } catch { add("orbit", "ORBIT did not answer.", "error", "down"); }
+    finally { sending = false; }
+  }
+
   document.getElementById("form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const input = document.getElementById("input");
     const content = input.value.trim();
-    if (!content) return;
+    if (!content || sending) return;
     input.value = "";
+    if (threadMode === "server") { await sendThreaded(content); refreshStatus(); return; }
     history.push({ role: "user", content });
     add("user", content);
     try {
@@ -439,6 +603,64 @@
   }
   // </notes>
 
+  // <threads>
+  // Pure helpers for the thread view. Stored text is only ever put in with textContent or the safe linkify above; nothing here
+  // parses HTML. Tests load this block (with the notes block) on its own.
+  const CARD_STATE_TEXT = { open: "Waiting for your click", confirmed: "Confirmed", cancelled: "Cancelled", expired: "Expired: nothing was done", refused: "Refused: nothing was done" };
+  function threadOption(t) {
+    return `${t.title}${t.archived ? " (archived)" : ""}${t.openCards ? ` · ${t.openCards} waiting` : ""}${t.busy ? " · replying…" : ""}`;
+  }
+  function cardTitle(card) {
+    const what = card.kind === "job_steer" ? `steer for job ${card.job}` : card.kind === "job_launch" ? `job on routine "${card.routine}"` : `server action: ${card.summary || card.action}`;
+    return [`Proposed ${what}. ${CARD_STATE_TEXT[card.state] || card.state}.`];
+  }
+  // What a decided card says. The live line comes from ORBIT's own job and operation records at the time the thread was
+  // loaded; a confirmed card never says "done" on its own.
+  function cardStateNodes(card, mk) {
+    const out = [];
+    const line = (text, cls) => out.push(mk("div", { className: `cardstate${cls ? " " + cls : ""}`, textContent: text }));
+    if (card.state === "confirmed") {
+      const id = card.outcome?.jobId || card.outcome?.opId;
+      if (card.kind === "job_steer") line(card.outcome?.steerN ? `Steer ${card.outcome.steerN} queued for ${card.job}.` : "Confirmed, but no result was recorded.");
+      else if (id) line(`${card.kind === "job_launch" ? "Job" : "Operation"} ${id}`);
+      else line("Confirmed, but no job or operation id was recorded (ORBIT may have restarted). Check the Jobs tab; do not assume it ran.", "bad");
+      if (card.outcome?.error) line(`Problem: ${card.outcome.error}`, "bad");
+      const l = card.live;
+      if (l) {
+        if (!l.found) line(`${l.detail || "No record found."}`, "bad");
+        else line(`Record now (${l.source}): ${l.state}${l.health ? ` · ${l.health}` : ""}${l.detail ? ` · ${l.detail}` : ""}. Only "verified" or a finished job state means the work is confirmed.`);
+      }
+    } else if (card.outcome?.error) line(card.outcome.error, "bad");
+    for (const d of card.duplicates || []) line(`Possible duplicate: ${Math.round(d.similarity * 100)}% similar to job ${d.job} (${d.state}).`, "bad");
+    if (card.state !== "confirmed" && card.state !== "open") line(CARD_STATE_TEXT[card.state] || card.state);
+    return out;
+  }
+  function compactionNode(view, mk) {
+    const s = view.summary;
+    const kids = [`${s.covers} earlier message(s) are summarized for the model (${s.method === "model" ? "model-written" : "mechanical digest"}). All of them are kept and shown above.`];
+    const node = mk("div", { className: "compact" }, ...kids);
+    if (s.degraded) node.append(mk("div", { className: "warn", textContent: s.degraded }));
+    const det = mk("details", {}, mk("summary", { textContent: "Summary the model sees" }), mk("pre", { textContent: s.text }));
+    node.append(det);
+    return node;
+  }
+  function renderStoredMessage(m, mk, cardFor) {
+    const node = mk("div", { className: `msg ${m.role === "user" ? "user" : "orbit"}` });
+    const text = m.status === "pending" ? "Working…" : m.text || (m.error ? "" : m.role === "assistant" ? "(no text)" : "");
+    node.append(...linkify(text, mk));
+    const mem = m.memory && m.memory.length ? ` · memory: ${m.memory.join(", ")}` : "";
+    const tag = m.status === "error" || m.status === "interrupted" ? `${m.status}: ${m.error || ""}` : m.role === "assistant" && m.provenance ? `${m.provenance} · ${m.source}${mem}` : "";
+    if (tag) node.append(mk("span", { className: `tag ${m.status === "error" || m.status === "interrupted" ? "down" : m.provenance || ""}`, textContent: tag }));
+    if (m.calls && m.calls.length) {
+      const box = mk("span", { className: "calls" }, `Tool calls (${m.calls.length}):`);
+      for (const c of m.calls) box.append(mk("div", { textContent: `${c.ok ? "✓" : "✗"} ${c.name}(${String(c.arguments).slice(0, 120)}) [${c.ok ? `${c.provenance} · ${c.source}` : "failed"}] ${String(c.summary).slice(0, 160)}` }));
+      node.append(box);
+    }
+    for (const id of m.cards || []) { const c = cardFor && cardFor(id); if (c) node.append(c); }
+    return node;
+  }
+  // </threads>
+
   // <poller>
   // Runs `refresh` when `shouldRun()` says so, never two at once. Tests load this block on its own.
   function makePoller(refresh, shouldRun, schedule, ms) {
@@ -474,6 +696,9 @@
   })();
 
   refreshStatus();
+  initThreads();
+  // Another device's messages and card changes show up within 10 seconds while the Chat tab is visible. Never two polls at once.
+  makePoller(pollThreads, () => threadMode === "server" && !sending && tab === "chat" && document.visibilityState === "visible", setInterval, 10000).start();
   refreshInbox();
   refreshSignin();
   setInterval(refreshStatus, 30000);

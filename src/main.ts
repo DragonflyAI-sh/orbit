@@ -21,7 +21,10 @@ import { reviewer, selectComments } from "./review.ts";
 import { memoryReport, modelTask, runner, toolCall } from "./runs.ts";
 import { scheduler } from "./schedule.ts";
 import { buildServer } from "./server.ts";
+import { stateRecentContext } from "./recent-context.ts";
 import { jsonStore } from "./store.ts";
+import { threadStore } from "./threads.ts";
+import { join } from "node:path";
 import { watcher } from "./watch.ts";
 import { githubRepoStatus, toolbox } from "./tools.ts";
 
@@ -132,6 +135,9 @@ buildServer({
   adminOps: admin,
   sysOps: sys,
   proposals,
+  threads: threadStore(stateDir ? join(stateDir, "threads") : undefined),
+  // The rolling note stays in ORBIT's state for now; Memory/recent-context.md in the vault is a later RecentContextPort.
+  recentContext: stateRecentContext(jsonStore(stateDir, "recent-context", null)),
   nodes,
   jobs,
   watch,

@@ -10,7 +10,9 @@ import type { Store } from "./store.ts";
 
 export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "summary"; sha?: string; toolCommit?: string; n?: number; status?: string; text?: string; via?: "api" | "git" };
 export type Steer = { n: number; text: string; at: string; deliveredAt?: string };
-export type Launch = { routine: string; at: string; branch?: string; briefCommit?: string; sessionId?: string; sessionUrl?: string; failedAt?: string; error?: string };
+export type Launch = { routine: string; at: string; branch?: string; briefCommit?: string; sessionId?: string; sessionUrl?: string; failedAt?: string; error?: string;
+  // Distinct words of the brief, for the duplicate-launch warning (src/duplicates.ts). Not the brief itself.
+  briefWords?: string };
 export type PullRequest = { at: string; url?: string; error?: string };
 // Set on a `work` job once ORBIT starts its one review job, and updated as the review finishes.
 export type ReviewOutcome = { id?: string; at: string; verdict?: Verdict; commentUrl?: string; error?: string };
