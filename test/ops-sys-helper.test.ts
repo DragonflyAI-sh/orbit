@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Exec, Probe } from "../src/ops/admin-core.ts";
-import { SYS_CONFIG, activePath, loadRecord, type SysConfig, type SysEnv } from "../src/ops/sys-core.ts";
+import { SYS_CONFIG, activePath, lanePath, loadRecord, type SysConfig, type SysEnv } from "../src/ops/sys-core.ts";
 import { cancelReboot } from "../src/ops/sys-helper.ts";
 import { handle, settleIfDead, type SysAudit } from "../src/ops/sys-helper.ts";
 import {
@@ -285,7 +285,7 @@ test("sys_status reports presence facts only (never a Funnel or reachability cla
   const w = world();
   const s = await send(w, { action: "sys_status" });
   assert.equal(s.ok, true);
-  assert.deepEqual(Object.keys(s.data).sort(), ["bootKey", "hostname", "installed", "openOperation", "orbitJobsSocketPresent", "rebootCooldownUntil", "rebootRequired", "tier"]);
+  assert.deepEqual(Object.keys(s.data).sort(), ["bootKey", "hostname", "installed", "openOperation", "openOperations", "orbitJobsSocketPresent", "rebootCooldownUntil", "rebootRequired", "tier"]);
   assert.equal(s.data.hostname, HOST);
   assert.equal(s.data.orbitJobsSocketPresent, true);
   assert.equal(s.data.bootKey, bootKey(BOOT1));
@@ -1166,9 +1166,9 @@ test("cool-down starts when the reboot is issued (not accepted), survives record
   assert.equal((await send(w, { action: "sys_status" })).data.rebootCooldownUntil, new Date(Date.parse(issued) + w.cfg.rebootCooldownMs).toISOString());
   // records may be pruned: the stamp still enforces it
   rmSync(join(w.cfg.stateDir, "ops", `${OP}.json`));
-  assert.equal((await send(w, req(w, "reboot_host", { opId: OP2 }))).error?.code, "cooldown");
+  assert.equal((await send(w, req(w, "reboot_host", { opId: OP3 }))).error?.code, "cooldown");
   w.advance(6 * 60_000);
-  assert.equal((await send(w, req(w, "reboot_host", { opId: OP2 }))).ok, true);
+  assert.equal((await send(w, req(w, "reboot_host", { opId: OP4 }))).ok, true);
   assert.equal((await send(w, { action: "sys_status" })).data.rebootCooldownUntil, new Date(Date.parse(issued) + w.cfg.rebootCooldownMs).toISOString() > new Date(w.clock()).toISOString() ? (await send(w, { action: "sys_status" })).data.rebootCooldownUntil : null);
 });
 
@@ -1225,7 +1225,8 @@ test("scheduled reboot: accepted as 'scheduled' (nothing done), runner started a
   assert.equal(out.data.operation.schedule.at, r.rebootAt);
   assert.match(out.data.note, /Nothing is verified yet/);
   assert.deepEqual(calls(w), [`systemctl start --no-block orbit-ops-sys-reboot@${OP}.service`], "no reboot, only the runner that will wait");
-  assert.equal(readFileSync(activePath(w.cfg), "utf8"), OP, "the slot is held while it is scheduled");
+  assert.equal(readFileSync(lanePath(w.cfg, "scheduled"), "utf8"), OP, "the scheduled lane is held while it waits");
+  assert.equal(existsSync(activePath(w.cfg)), false, "the running-operation slot is NOT held while it waits");
   // another process/reader sees it
   const st = await send(w, { action: "sys_status" });
   assert.deepEqual(st.data.openOperation, { opId: OP, action: "reboot_host", state: "scheduled", scheduledFor: r.rebootAt });
@@ -1416,14 +1417,522 @@ test("cool-down and schedules: a time inside the cool-down is refused at accepta
   assert.equal(early.error?.code, "cooldown");
   assert.equal(loadRecord(w.cfg, OP), undefined);
   assert.equal(existsSync(activePath(w.cfg)), false);
-  const okLater = await send(w, sched(w, 60)); // fires 70 min after: fine
+  const okLater = await send(w, sched(w, 60, { opId: OP2 })); // fires 70 min after: fine
   assert.equal(okLater.ok, true);
   // another reboot is issued (by hand, or by tier 3 before this was accepted elsewhere) before it fires
-  assert.equal(await awaitSchedule(w.env, w.cfg, OP, () => {}), "due");
+  assert.equal(await awaitSchedule(w.env, w.cfg, OP2, () => {}), "due");
   writeFileSync(rebootStampPath(w.cfg), new Date(w.clock() - 60_000).toISOString());
   w.execs.length = 0;
-  const r = await run(w, "reboot_host");
+  const r = await run(w, "reboot_host", OP2);
   assert.equal(r.state, "failed");
   assert.match(r.summary!, /cool-down.*Nothing was issued/);
   assert.ok(!calls(w).some((c) => c.includes("reboot")), "no reboot command");
+});
+
+// ================================================================= follow-up 2: slot races, orphaned markers, lanes, abandon
+// Fakes only: real temp directories, a fake clock, a fake exec. `slotHooks` (sys-core.ts) is the deterministic seam: it runs test
+// code at an exact point of the slot protocol (right after a read, right before a removal) and can inject a failure there.
+
+import { abandonSlot, decisionOf, ensureDirs, markerPath, recoverOrphanedRetirement, recoveringDir, slotHooks } from "../src/ops/sys-core.ts";
+
+const FIN = "f".repeat(40);
+const hooked = async (fn: () => Promise<void> | void) => {
+  try {
+    await fn();
+  } finally {
+    delete slotHooks.afterRead;
+    delete slotHooks.beforeRemove;
+  }
+};
+// Run `fn` once, the first time a slot read returns `value` (then disarm), so an interleaving happens exactly once.
+const onceAfterRead = (value: string, nth: number, fn: () => void) => {
+  let seen = 0;
+  slotHooks.afterRead = (_lane, v) => {
+    if (v === value && ++seen === nth) {
+      delete slotHooks.afterRead;
+      fn();
+    }
+  };
+};
+const mkRecord = (w: World, opId: string, state: SysRecord["state"], action: SysRecord["action"] = "funnel_enable") => {
+  ensureDirs(w.cfg);
+  const at = new Date(w.clock()).toISOString();
+  saveRecord(w.cfg, { opId, action, state, acceptedAt: at, updatedAt: at, target: action === "funnel_enable" || action === "funnel_disable" ? funnelTarget() : hostTarget(), digest: "d".repeat(64), expiresAt: at, steps: [] } as SysRecord, w.env);
+};
+const ageFile = (w: World, path: string, ageMs: number) => {
+  const t = (w.clock() - ageMs) / 1000;
+  utimesSync(path, t, t);
+};
+// A retirement whose retirer died after creating the marker: the slot still holds `opId`, the marker exists, `ageMs` old.
+function orphan(w: World, opId: string, state: SysRecord["state"] | undefined, ageMs: number) {
+  if (state) mkRecord(w, opId, state);
+  assert.equal(tryAcquireSlot(w.cfg, opId), true);
+  mkdirSync(join(w.cfg.stateDir, "retired"), { recursive: true });
+  writeFileSync(markerPath(w.cfg, opId), "");
+  ageFile(w, markerPath(w.cfg, opId), ageMs);
+}
+const ls = (dir: string) => (existsSync(dir) ? readdirSync(dir).sort() : []);
+
+// ---- finding 1: the stale-slot race test must fail if retireSlot is read-then-unlink ----
+
+test("retireSlot race: a late contender whose read is interleaved with a retirement AND a takeover removes nothing (fails for read-then-unlink)", async () => {
+  const w = world();
+  assert.equal(tryAcquireSlot(w.cfg, OP), true);
+  await hooked(() => {
+    // Between the late contender's read of OP and whatever it does next: a rival retires OP and a new holder takes the slot.
+    onceAfterRead(OP, 1, () => {
+      assert.equal(retireSlot(w.cfg, OP), true, "the rival retires OP");
+      assert.equal(tryAcquireSlot(w.cfg, OP2), true, "and OP2 takes the slot");
+    });
+    assert.equal(retireSlot(w.cfg, OP), false, "the late contender is not entitled: the marker already exists");
+  });
+  assert.equal(readSlot(w.cfg), OP2, "the replacement holder's slot survives");
+  assert.deepEqual(ls(join(w.cfg.stateDir, "retired")), [OP], "exactly one marker: the rival's");
+});
+
+test("takeover race end to end: a contender paused between reading the dead holder and removing it cannot delete the replacement; it is refused, nothing of its own dispatched", async () => {
+  const w = world();
+  await accept(w, "funnel_enable");
+  const done = rec(w);
+  done.state = "verified"; // a finished holder that nobody released yet
+  saveRecord(w.cfg, done, w.env);
+  alive(w);
+  await hooked(async () => {
+    // reads of OP by the contender: (1) takeSlot reads the holder, (2) retireSlot's own read. After the second, the rival wins.
+    onceAfterRead(OP, 2, () => {
+      assert.equal(retireSlot(w.cfg, OP), true);
+      assert.equal(tryAcquireSlot(w.cfg, OP3), true);
+      mkRecord(w, OP3, "running");
+    });
+    w.execs.length = 0;
+    const late = await send(w, req(w, "funnel_enable", { opId: OP2 }));
+    assert.equal(late.error?.code, "busy");
+  });
+  assert.equal(readSlot(w.cfg), OP3, "the replacement is intact");
+  assert.equal(loadRecord(w.cfg, OP2), undefined, "the late contender recorded and dispatched nothing");
+  assert.equal(starts(w).length, 0);
+});
+
+// ---- finding 2: automatic recovery of an orphaned retirement marker ----
+
+test("orphaned marker: old enough AND terminal record -> slot and marker cleared; the next request is accepted", async () => {
+  const w = world();
+  orphan(w, FIN, "verified", w.cfg.orphanMarkerAfterMs + 1);
+  assert.equal(retireSlot(w.cfg, FIN), false, "the plain retirement cannot proceed: the marker exists");
+  assert.equal(readSlot(w.cfg), FIN);
+  const out = await send(w, req(w, "funnel_enable", { opId: OP2 }));
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal(readSlot(w.cfg), OP2, "the new holder took the cleared slot");
+  assert.equal(existsSync(markerPath(w.cfg, FIN)), false, "the orphaned marker was cleared");
+  assert.deepEqual(ls(recoveringDir(w.cfg)), [], "no claim left behind");
+  assert.equal(starts(w).length, 1);
+});
+
+test("orphaned marker: a young marker is left alone (a retirement may be in progress): busy, nothing removed", async () => {
+  const w = world();
+  orphan(w, FIN, "verified", w.cfg.orphanMarkerAfterMs - 1_000);
+  assert.equal(recoverOrphanedRetirement(w.cfg, FIN, w.clock()), "young");
+  const out = await send(w, req(w, "funnel_enable", { opId: OP2 }));
+  assert.equal(out.error?.code, "busy");
+  assert.equal(readSlot(w.cfg), FIN);
+  assert.equal(existsSync(markerPath(w.cfg, FIN)), true);
+  w.advance(2_000); // now it is old enough: the same request is accepted (a different id: OP2 was given back)
+  assert.equal((await send(w, req(w, "funnel_enable", { opId: OP3 }))).ok, true);
+});
+
+test("orphaned marker: a holder that is not terminal is never recovered, however old the marker", async () => {
+  for (const [state, id] of [["accepted", "a".repeat(40)], ["scheduled", "b".repeat(40)], ["running", "c".repeat(40)], ["rebooting", "e".repeat(40)]] as const) {
+    const w2 = world();
+    orphan(w2, id, state, w2.cfg.orphanMarkerAfterMs * 10);
+    assert.equal(recoverOrphanedRetirement(w2.cfg, id, w2.clock()), "nonterminal", state);
+    assert.equal(readSlot(w2.cfg), id, state);
+    assert.equal(existsSync(markerPath(w2.cfg, id)), true, state);
+  }
+});
+
+test("orphaned marker: missing or ambiguous state fails safe: no record, no marker, a marker that is not a file, a marker from the future, a foreign slot", async () => {
+  const w = world();
+  orphan(w, FIN, undefined, w.cfg.orphanMarkerAfterMs * 2); // old marker, NO record
+  assert.equal(recoverOrphanedRetirement(w.cfg, FIN, w.clock()), "no_record");
+  assert.equal(readSlot(w.cfg), FIN);
+  assert.equal((await send(w, req(w, "funnel_enable", { opId: OP2 }))).error?.code, "busy", "and a request is refused, not let through");
+  assert.equal(recoverOrphanedRetirement(w.cfg, OP4, w.clock()), "no_marker");
+  const w2 = world();
+  mkRecord(w2, FIN, "verified");
+  tryAcquireSlot(w2.cfg, FIN);
+  mkdirSync(markerPath(w2.cfg, FIN), { recursive: true }); // a directory where the marker should be
+  assert.equal(recoverOrphanedRetirement(w2.cfg, FIN, w2.clock() + 1e9), "ambiguous");
+  assert.equal(readSlot(w2.cfg), FIN);
+  const w3 = world();
+  orphan(w3, FIN, "verified", -60_000); // mtime in the future relative to the clock
+  assert.equal(recoverOrphanedRetirement(w3.cfg, FIN, w3.clock()), "ambiguous");
+  assert.equal(readSlot(w3.cfg), FIN);
+  assert.equal(recoverOrphanedRetirement(w3.cfg, "not-an-op-id", w3.clock()), "ambiguous");
+  const w4 = world();
+  writeFileSync(activePath(w4.cfg), "something else"); // a slot this helper did not write is never touched
+  assert.equal((await send(w4, req(w4, "funnel_enable"))).error?.code, "busy");
+  assert.equal(readFileSync(activePath(w4.cfg), "utf8"), "something else");
+});
+
+test("orphaned marker: a newer holder is never deleted (the slot no longer holds the old one), and two recoverers cannot both act", async () => {
+  const w = world();
+  // the old holder's slot was already removed and a newer holder took it; only a stale marker is left
+  mkRecord(w, FIN, "verified");
+  mkdirSync(join(w.cfg.stateDir, "retired"), { recursive: true });
+  writeFileSync(markerPath(w.cfg, FIN), "");
+  ageFile(w, markerPath(w.cfg, FIN), w.cfg.orphanMarkerAfterMs * 2);
+  assert.equal(tryAcquireSlot(w.cfg, OP2), true);
+  assert.equal(recoverOrphanedRetirement(w.cfg, FIN, w.clock()), "recovered");
+  assert.equal(readSlot(w.cfg), OP2, "the newer holder's slot is untouched");
+  // two recoverers racing for one orphan: the second one, run from inside the first one's critical section, is refused
+  const w2 = world();
+  orphan(w2, FIN, "verified", w2.cfg.orphanMarkerAfterMs * 2);
+  const inner: string[] = [];
+  await hooked(() => {
+    onceAfterRead(FIN, 1, () => {
+      inner.push(recoverOrphanedRetirement(w2.cfg, FIN, w2.clock())); // a second recoverer
+      inner.push(String(retireSlot(w2.cfg, FIN))); // the original retirer waking up
+      inner.push(String(tryAcquireSlot(w2.cfg, OP3))); // a takeover attempt: the slot still holds FIN
+    });
+    assert.equal(recoverOrphanedRetirement(w2.cfg, FIN, w2.clock()), "recovered");
+  });
+  assert.deepEqual(inner, ["claimed", "false", "false"]);
+  assert.equal(readSlot(w2.cfg), undefined);
+  assert.equal(tryAcquireSlot(w2.cfg, OP3), true, "the slot is free for the next holder afterwards");
+  // a late second recoverer after a takeover finds a different holder and removes nothing
+  assert.equal(recoverOrphanedRetirement(w2.cfg, FIN, w2.clock()), "no_marker");
+  assert.equal(readSlot(w2.cfg), OP3);
+});
+
+test("slot removal that fails leaves no orphaned marker and no claim; the slot stays held (fails closed) and the next caller can retire it", async () => {
+  const w = world();
+  assert.equal(tryAcquireSlot(w.cfg, OP), true);
+  await hooked(() => {
+    slotHooks.beforeRemove = () => {
+      delete slotHooks.beforeRemove;
+      throw new Error("injected: disk error");
+    };
+    assert.throws(() => retireSlot(w.cfg, OP), /injected/);
+  });
+  assert.equal(readSlot(w.cfg), OP);
+  assert.deepEqual(ls(join(w.cfg.stateDir, "retired")), []);
+  assert.deepEqual(ls(recoveringDir(w.cfg)), []);
+  assert.equal(retireSlot(w.cfg, OP), true);
+  assert.equal(readSlot(w.cfg), undefined);
+});
+
+// ---- finding 4: abandonSlot is on the marker protocol; any throw between takeSlot and saveRecord returns the slot ----
+
+// Throw from the n-th call to env.now() (counted from this call). For funnel_enable: 1 = accept's own clock, 2 = the record's
+// timestamp (after takeSlot), 3 = inside saveRecord.
+function failNowAt(w: World, n: number, before?: () => void) {
+  let i = 0;
+  const inner = w.env.now;
+  w.env.now = () => {
+    if (++i === n) {
+      before?.();
+      throw new Error("injected: clock failure");
+    }
+    return inner();
+  };
+}
+for (const [n, where] of [[2, "building the record"], [3, "inside saveRecord"]] as const) {
+  for (const action of ["funnel_enable", "install_os_updates", "reboot_host"] as const) {
+    test(`abandon: a throw ${where} (${action}) returns the slot at once, with no record and no orphaned marker or claim`, async () => {
+      const w = world();
+      failNowAt(w, n);
+      const out = await send(w, req(w, action));
+      assert.equal(out.error?.code, "internal_error");
+      assert.equal(readSlot(w.cfg), undefined, "the slot is free again immediately");
+      assert.equal(loadRecord(w.cfg, OP), undefined);
+      assert.equal(starts(w).length, 0);
+      assert.deepEqual(ls(recoveringDir(w.cfg)), [], "no claim left");
+      assert.deepEqual(ls(join(w.cfg.stateDir, "retired")), [OP], "the retirement is complete: the one marker belongs to a slot that is gone");
+      // the spent id is refused with a clear reason (not stuck), and a fresh id goes straight through
+      w.env.now = () => new Date(w.clock());
+      const again = await send(w, req(w, action));
+      assert.equal(again.error?.code, "bad_arguments");
+      assert.match(again.error!.message, /already used.*given back/);
+      assert.equal((await send(w, req(w, action, { opId: OP2 }))).ok, true);
+    });
+  }
+}
+
+test("abandon never deletes another holder: if the slot changed hands before the failing request gives it back, the new holder keeps it", async () => {
+  const w = world();
+  failNowAt(w, 2, () => {
+    // the slot passes to someone else (e.g. judged dead and taken over) before the failing request gets to give it back
+    assert.equal(retireSlot(w.cfg, OP), true);
+    assert.equal(tryAcquireSlot(w.cfg, OP2), true);
+  });
+  const out = await send(w, req(w, "funnel_enable"));
+  assert.equal(out.error?.code, "internal_error");
+  assert.equal(readSlot(w.cfg), OP2, "the other holder's slot is intact");
+  abandonSlot(w.cfg, OP); // and a repeated give-back is a no-op
+  assert.equal(readSlot(w.cfg), OP2);
+});
+
+test("abandon whose own removal fails: no orphaned marker, the slot (no record, so young = busy) ages out and is taken over normally", async () => {
+  const w = world();
+  failNowAt(w, 2);
+  await hooked(async () => {
+    slotHooks.beforeRemove = () => {
+      delete slotHooks.beforeRemove;
+      throw new Error("injected: removal failure");
+    };
+    const out = await send(w, req(w, "funnel_enable"));
+    assert.equal(out.error?.code, "internal_error");
+  });
+  assert.equal(readSlot(w.cfg), OP, "could not be removed: fails closed");
+  assert.deepEqual(ls(join(w.cfg.stateDir, "retired")), [], "and no marker was left behind");
+  assert.deepEqual(ls(recoveringDir(w.cfg)), []);
+  w.env.now = () => new Date(w.clock());
+  assert.equal((await send(w, req(w, "funnel_enable", { opId: OP2 }))).error?.code, "busy", "young: a request mid-accept");
+  utimesSync(activePath(w.cfg), new Date(Date.now() - 600_000), new Date(Date.now() - 600_000)); // slotAgeMs uses the real clock
+  assert.equal((await send(w, req(w, "funnel_enable", { opId: OP3 }))).ok, true);
+  assert.equal(readSlot(w.cfg), OP3);
+});
+
+test("a refusal (cool-down) goes through the same give-back: slot free, spent id refused cleanly, no leftovers", async () => {
+  const w = world();
+  writeFileSync(rebootStampPath(w.cfg), new Date(w.clock() - 60_000).toISOString());
+  assert.equal((await send(w, req(w, "reboot_host"))).error?.code, "cooldown");
+  assert.equal(readSlot(w.cfg), undefined);
+  assert.deepEqual(ls(recoveringDir(w.cfg)), []);
+  assert.equal((await send(w, req(w, "reboot_host"))).error?.code, "bad_arguments", "a spent id is not re-run");
+});
+
+// ---- finding 3: a waiting scheduled reboot does not block funnel_enable / funnel_disable / cancellation ----
+// The exclusivity matrix (docs/orbit-ops-sys.md): update, plan and reboot are exclusive with each other AND with a waiting
+// scheduled reboot; a Funnel change is exclusive with update, plan, a reboot that is running and another Funnel change, but not
+// with a reboot that is only waiting for its time; cancellation never needs a slot.
+
+const scheduled = async (w: World, minutes = 120, over: Record<string, unknown> = {}) => {
+  const r = sched(w, minutes, over);
+  const out = await send(w, r);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  w.execs.length = 0;
+  return r;
+};
+const finishOp = (w: World, opId: string, state: SysRecord["state"] = "verified") => {
+  const r = rec(w, opId);
+  r.state = state;
+  r.finishedAt = new Date(w.clock()).toISOString();
+  saveRecord(w.cfg, r, w.env);
+  releaseSlot(w.cfg, opId);
+};
+const code = async (w: World, r: object) => {
+  const out = await send(w, r);
+  return out.ok ? "ok" : out.error!.code;
+};
+
+test("a waiting scheduled reboot does not block funnel_enable or funnel_disable; the reboot stays scheduled and cancellable", async () => {
+  const w = world();
+  const r = await scheduled(w);
+  assert.equal(await code(w, req(w, "funnel_enable", { opId: OP2 })), "ok");
+  assert.equal(starts(w).length, 1, "the funnel runner was dispatched");
+  assert.equal(rec(w, OP).state, "scheduled", "the scheduled reboot is untouched");
+  // a second Funnel change while the first is still in flight is busy (funnel is exclusive with funnel)...
+  assert.equal(await code(w, req(w, "funnel_disable", { opId: OP3 })), "busy");
+  // ...and once it ended, funnel_disable goes through too, still beside the waiting reboot
+  finishOp(w, OP2);
+  assert.equal(await code(w, req(w, "funnel_disable", { opId: OP3 })), "ok");
+  assert.equal(rec(w, OP).state, "scheduled");
+  assert.equal(readSlot(w.cfg, "scheduled"), OP, "the waiting reboot still holds its own lane");
+  finishOp(w, OP3);
+  // and the reboot is cancelled normally afterwards
+  const c = await cancel(w);
+  assert.equal(c.ok, true, JSON.stringify(c));
+  assert.equal(rec(w, OP).state, "cancelled");
+  assert.equal(r.rebootAt.length > 0, true);
+  assert.equal(readSlot(w.cfg, "scheduled"), undefined);
+  assert.equal(readSlot(w.cfg), undefined);
+});
+
+test("cancellation is never blocked by a Funnel change in flight, and frees only the reboot's lane", async () => {
+  const w = world();
+  await scheduled(w);
+  assert.equal(await code(w, req(w, "funnel_enable", { opId: OP2 })), "ok");
+  const c = await cancel(w);
+  assert.equal(c.ok, true, JSON.stringify(c));
+  assert.equal(c.data.cancelled, true);
+  assert.equal(rec(w, OP).state, "cancelled");
+  assert.equal(readSlot(w.cfg, "scheduled"), undefined);
+  assert.equal(readSlot(w.cfg), OP2, "the Funnel change still owns the running slot");
+  assert.equal(rec(w, OP2).state, "accepted", "and is untouched");
+});
+
+test("a waiting scheduled reboot IS exclusive with update, plan, reboot now and another scheduled reboot: refused busy, nothing dispatched, no slot left behind", async () => {
+  const w = world();
+  await scheduled(w);
+  const attempts: [string, object][] = [
+    ["update", req(w, "install_os_updates", { opId: OP2 })],
+    ["plan", { action: "plan_os_updates", opId: OP3 }],
+    ["reboot now", req(w, "reboot_host", { opId: OP4 })],
+    ["second scheduled reboot", sched(w, 180, { opId: "5".repeat(40) })],
+  ];
+  for (const [name, r] of attempts) assert.equal(await code(w, r), "busy", name);
+  assert.equal(starts(w).length, 0);
+  assert.equal(readSlot(w.cfg), undefined, "nothing was left in the running slot");
+  assert.equal(readSlot(w.cfg, "scheduled"), OP);
+});
+
+test("prohibited and allowed combinations from the other side: a scheduled reboot is allowed beside a Funnel change, refused beside update, plan or reboot now", async () => {
+  // allowed: Funnel in flight
+  const f = world();
+  await accept(f, "funnel_enable");
+  assert.equal(await code(f, sched(f, 120, { opId: OP2 })), "ok");
+  assert.equal(readSlot(f.cfg), OP);
+  assert.equal(readSlot(f.cfg, "scheduled"), OP2);
+  // prohibited: each of the exclusive operations in flight
+  for (const [name, doIt] of [
+    ["update", (w: World) => accept(w, "install_os_updates")],
+    ["plan", async (w: World) => void (await send(w, { action: "plan_os_updates", opId: OP }))],
+    ["reboot now", (w: World) => accept(w, "reboot_host")],
+  ] as const) {
+    const w = world();
+    await doIt(w);
+    assert.equal(await code(w, sched(w, 120, { opId: OP2 })), "busy", name);
+    assert.equal(readSlot(w.cfg, "scheduled"), undefined, `${name}: the refused schedule left no lane held`);
+    assert.equal(loadRecord(w.cfg, OP2), undefined, name);
+  }
+  // and Funnel is refused beside each of those (exclusive with update, plan and a running reboot)
+  for (const [name, doIt] of [
+    ["update", (w: World) => accept(w, "install_os_updates")],
+    ["plan", async (w: World) => void (await send(w, { action: "plan_os_updates", opId: OP }))],
+    ["reboot now", (w: World) => accept(w, "reboot_host")],
+  ] as const) {
+    const w = world();
+    await doIt(w);
+    assert.equal(await code(w, req(w, "funnel_disable", { opId: OP2 })), "busy", name);
+  }
+});
+
+test("sys_status lists every open operation (a waiting reboot beside a Funnel change); openOperation stays the most recent one", async () => {
+  const w = world();
+  const r = await scheduled(w);
+  w.advance(1_000);
+  await accept(w, "funnel_enable", { opId: OP2 });
+  const st = (await send(w, { action: "sys_status" })).data;
+  assert.deepEqual(st.openOperations.map((o: { opId: string }) => o.opId).sort(), [OP, OP2]);
+  assert.equal(st.openOperation.opId, OP2);
+  assert.deepEqual(st.openOperations.find((o: { opId: string }) => o.opId === OP), { opId: OP, action: "reboot_host", state: "scheduled", scheduledFor: r.rebootAt });
+});
+
+// ---- execution time: what happens when the scheduled reboot fires ----
+
+// Sleep hook: after `n` sleeps (the clock advancing as usual) run `fn` once.
+function afterSleeps(w: World, n: number, fn: () => void | Promise<void>) {
+  let i = 0;
+  const inner = w.env.sleep;
+  w.env.sleep = async (ms) => {
+    await inner(ms);
+    if (++i === n) await fn();
+  };
+}
+const rebootCommands = (w: World) => calls(w).filter((c) => c === "systemctl reboot");
+
+test("fire time: a Funnel change still in flight is waited for, then the reboot takes the running slot, fires once and excludes Funnel from then on", async () => {
+  const w = world();
+  const r = await scheduled(w, 2);
+  await accept(w, "funnel_enable", { opId: OP2 }); // in flight beside the waiting reboot
+  alive(w);
+  w.advance(3 * 60_000); // the scheduled time has passed: it is due
+  afterSleeps(w, 3, () => finishOp(w, OP2)); // the Funnel change ends while the reboot waits for the slot
+  assert.equal(await awaitSchedule(w.env, w.cfg, OP, () => {}), "due");
+  assert.equal(readSlot(w.cfg), OP, "the reboot now holds the running slot");
+  assert.equal(readSlot(w.cfg, "scheduled"), undefined, "and has given the waiting lane back");
+  assert.equal(rec(w).state, "accepted");
+  assert.equal(await code(w, req(w, "funnel_disable", { opId: OP3 })), "busy", "no Funnel change can start once it holds the slot");
+  assert.equal(await cancel(w).then((x) => x.error?.code), "too_late");
+  w.script.exec = (f, a) => (a[0] === "is-active" ? ok("active\n") : undefined);
+  const done = await run(w, "reboot_host");
+  assert.equal(done.state, "rebooting");
+  assert.equal(rebootCommands(w).length, 1, "exactly one reboot command");
+  assert.ok(Date.parse(r.rebootAt) <= Date.parse(done.reboot!.issuedAt));
+});
+
+test("fire time: a Funnel change that does not end in time stops the reboot from firing: NOT rebooted, said so, nothing issued, slots consistent", async () => {
+  const w = world();
+  await scheduled(w, 2);
+  await accept(w, "funnel_enable", { opId: OP2 });
+  alive(w);
+  w.advance(3 * 60_000);
+  assert.equal(await awaitSchedule(w.env, w.cfg, OP, () => {}), "blocked");
+  const r = rec(w);
+  assert.equal(r.state, "failed");
+  assert.match(r.summary!, /NOT rebooted.*did not fire.*NO reboot was issued/);
+  assert.equal(rebootCommands(w).length, 0);
+  assert.equal(decisionOf(w.cfg, OP), undefined, "it never claimed fire");
+  assert.equal(readSlot(w.cfg), OP2, "the Funnel change still owns the running slot");
+  assert.equal(readSlot(w.cfg, "scheduled"), undefined);
+  assert.equal(await cancel(w).then((x) => x.error?.code), "not_cancellable", "it ended; nothing to cancel");
+  // waited about fireSlotWaitMs, not forever
+  assert.ok(w.clock() - Date.parse(r.schedule!.at) <= w.cfg.fireSlotWaitMs + 3 * 60_000);
+});
+
+test("fire time: a cancellation that arrives while the reboot waits for the slot wins; no reboot, and the Funnel change is untouched", async () => {
+  const w = world();
+  await scheduled(w, 2);
+  await accept(w, "funnel_enable", { opId: OP2 });
+  alive(w);
+  w.advance(3 * 60_000);
+  afterSleeps(w, 2, async () => assert.equal((await cancelNow(w)).already, false));
+  assert.equal(await awaitSchedule(w.env, w.cfg, OP, () => {}), "cancelled");
+  assert.equal(rec(w).state, "cancelled");
+  assert.equal(rebootCommands(w).length, 0);
+  assert.equal(readSlot(w.cfg), OP2);
+  assert.equal(readSlot(w.cfg, "scheduled"), undefined);
+});
+const cancelNow = async (w: World) => cancelReboot(w.env, w.cfg, OP, () => {});
+
+test("fire time: the slot is free at the due time -> it fires at once; a finished (terminal) holder or an orphaned retirement does not stop it", async () => {
+  const w = world();
+  await scheduled(w, 2);
+  mkRecord(w, FIN, "verified"); // a finished Funnel change nobody released
+  tryAcquireSlot(w.cfg, FIN);
+  w.advance(3 * 60_000);
+  assert.equal(await awaitSchedule(w.env, w.cfg, OP, () => {}), "due");
+  assert.equal(readSlot(w.cfg), OP);
+  const o = world();
+  await scheduled(o, 2);
+  orphan(o, FIN, "verified", o.cfg.orphanMarkerAfterMs + 1);
+  o.advance(3 * 60_000);
+  assert.equal(await awaitSchedule(o.env, o.cfg, OP, () => {}), "due");
+  assert.equal(readSlot(o.cfg), OP);
+});
+
+test("fire time: cancel versus fire is still one arbiter; a runner that lost to a cancel hands back the running slot it took", async () => {
+  const w = world();
+  await scheduled(w, 2);
+  w.advance(3 * 60_000);
+  // the cancel wins the decision after the runner took the slot but before it claimed fire
+  const real = decide;
+  assert.equal(real(w.cfg, OP, "cancel").won, true);
+  assert.equal(await awaitSchedule(w.env, w.cfg, OP, () => {}), "cancelled");
+  assert.equal(readSlot(w.cfg), undefined, "the runner did not keep the running slot");
+});
+
+// ---- finding 5, helper side: a plan frees its slot when it ends, and when its runner is found dead ----
+
+test("plan slot cleanup: a finished plan frees the running slot; a plan whose runner died is settled interrupted and frees it for the next request", async () => {
+  const w = world();
+  const p = await send(w, { action: "plan_os_updates", opId: OP });
+  assert.equal(p.ok, true, JSON.stringify(p));
+  assert.equal(readSlot(w.cfg), OP, "a plan holds the running slot while it runs");
+  const r = rec(w);
+  r.state = "running";
+  saveRecord(w.cfg, r, w.env);
+  w.advance(60_000); // quiet for longer than staleAfterMs
+  w.script.exec = (f, a) => (a[0] === "is-active" ? fail(3) : undefined); // its runner is gone
+  const next = await send(w, req(w, "funnel_enable", { opId: OP2 }));
+  assert.equal(next.ok, true, JSON.stringify(next));
+  assert.equal(rec(w).state, "interrupted");
+  assert.match(rec(w).summary!, /No package was installed or changed/);
+  assert.equal(readSlot(w.cfg), OP2);
+  // and the normal end of a plan
+  const w2 = world();
+  await send(w2, { action: "plan_os_updates", opId: OP });
+  finishOp(w2, OP);
+  assert.equal(readSlot(w2.cfg), undefined);
 });

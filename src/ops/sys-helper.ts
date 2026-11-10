@@ -6,7 +6,8 @@
 //   - expiry (a confirmation is honoured for at most 15 minutes, whatever the request claims),
 //   - the host name (a confirmation made for another host is refused),
 //   - for Funnel, that the orbit-jobs tailscaled socket exists (otherwise it fails closed and says what to install),
-//   - one operation at a time, durable across restarts and reboots (an exclusive slot file in the persistent state directory),
+//   - one operation at a time, durable across restarts and reboots (exclusive slot files in the persistent state directory: a running
+//     lane and a waiting-scheduled-reboot lane; see docs/orbit-ops-sys.md "Exclusivity matrix"),
 //   - replay protection (a repeated opId returns the existing record and never runs again),
 //   - a cool-down between reboots (anchored on when one was actually issued, checked while holding the slot),
 //   - a reboot may be scheduled up to 24 hours ahead and cancelled until it fires; cancel versus fire is decided by one exclusive
@@ -50,6 +51,10 @@ import {
   slotAgeMs,
   systemSysEnv,
   tryAcquireSlot,
+  recoverOrphanedRetirement,
+  LANES,
+  markerPath,
+  type Lane,
   type SysConfig,
   type SysEnv,
 } from "./sys-core.ts";
@@ -128,28 +133,73 @@ export async function settleIfDead(env: SysEnv, c: SysConfig, rec: SysRecord): P
 
 type Mutation = Extract<ReturnType<typeof parseSysRequest>, { action: "install_os_updates" | "reboot_host" | "funnel_enable" | "funnel_disable" | "plan_os_updates" }>;
 
-// Take the one-operation slot. A holder that is finished or dead is taken over atomically (see sys-core.ts: only the party that
-// retires that holder may remove its slot, so two requests can never both take over, and a replacement's slot is never removed).
-async function takeSlot(env: SysEnv, c: SysConfig, opId: string): Promise<void> {
+// Retire a holder that is finished or dead from `lane`. If the marker protocol says someone else already retired it, the slot is
+// normally gone a moment later; if that someone died, the orphaned marker is recovered once it is old enough (sys-core.ts).
+function retireOrRecover(env: SysEnv, c: SysConfig, holderId: string, lane: Lane): void {
+  if (retireSlot(c, holderId, lane)) return;
+  recoverOrphanedRetirement(c, holderId, env.now().getTime(), lane);
+}
+
+// Take a slot. A holder that is finished or dead is taken over atomically (see sys-core.ts: only the party that retires that
+// holder may remove its slot, so two requests can never both take over, and a replacement's slot is never removed).
+async function takeSlot(env: SysEnv, c: SysConfig, opId: string, lane: Lane = "main"): Promise<void> {
   for (let attempt = 0; attempt < 4; attempt++) {
-    if (tryAcquireSlot(c, opId)) return;
-    const holderId = readSlot(c);
+    if (tryAcquireSlot(c, opId, lane)) return;
+    const holderId = readSlot(c, lane);
     if (holderId === undefined) continue; // released between the two calls: try again
     if (!SYS_OP_ID.test(holderId)) throw new OpsReject("busy", "The tier 3 slot holds something this helper did not write. Nothing was done; an operator must inspect /var/lib/orbit-ops-sys/active (docs/orbit-ops-sys.md).");
     const holder = loadRecord(c, holderId);
     if (!holder) {
       // A slot with no record is either a request that is mid-way through being accepted (it records right after taking the slot)
       // or one that died there. Young: busy. Old: retire it like any other dead holder.
-      const age = slotAgeMs(c);
+      const age = slotAgeMs(c, lane);
       if (age === undefined || age < c.staleAfterMs) throw new OpsReject("busy", "Another tier 3 operation is being accepted. Wait for its result, then ask again.");
-      retireSlot(c, holderId);
+      retireOrRecover(env, c, holderId, lane);
       continue;
     }
     const settled = await settleIfDead(env, c, holder);
-    if (!isSysTerminal(settled.state)) throw new OpsReject("busy", "Another tier 3 operation is still running, scheduled or awaiting verification. Wait for its result (or cancel a scheduled reboot), then ask again.");
-    retireSlot(c, holderId); // a no-op if settleIfDead (or someone else) already did
+    if (!isSysTerminal(settled.state)) throw new OpsReject("busy", busyText(settled, lane));
+    retireOrRecover(env, c, holderId, lane); // a no-op if settleIfDead (or someone else) already did
   }
   throw new OpsReject("busy", "Another tier 3 operation holds the slot.");
+}
+
+const busyText = (open: SysRecord, lane: Lane) =>
+  lane === "scheduled" || (open.action === "reboot_host" && open.state === "scheduled")
+    ? "A reboot is already scheduled on this host. Cancel it (cancel_reboot) or wait for it, then ask again."
+    : "Another tier 3 operation is still running, scheduled or awaiting verification. Wait for its result (or cancel a scheduled reboot), then ask again.";
+
+// The other lane's holder, if it genuinely occupies it: a live (not finished, not dead) operation, one still being accepted, or
+// something unreadable (fails closed). A finished or long-dead holder does not.
+async function liveHolder(env: SysEnv, c: SysConfig, lane: Lane): Promise<{ rec?: SysRecord } | undefined> {
+  const id = readSlot(c, lane);
+  if (id === undefined) return undefined;
+  if (!SYS_OP_ID.test(id)) return {};
+  const rec = loadRecord(c, id);
+  if (!rec) {
+    const age = slotAgeMs(c, lane);
+    return age === undefined || age < c.staleAfterMs ? {} : undefined;
+  }
+  const settled = await settleIfDead(env, c, rec);
+  return isSysTerminal(settled.state) ? undefined : { rec: settled };
+}
+
+// The exclusivity matrix (docs/orbit-ops-sys.md), checked AFTER this request took its own lane and BEFORE it records anything, so
+// each side publishes its intent and then looks at the other: two requests racing across lanes may both be refused (busy), never
+// both proceed.
+//   update / plan / reboot now   take `main`; refused while a scheduled reboot waits (scheduled lane live)
+//   scheduled reboot             takes `scheduled`; refused while update / plan / reboot-now is live in `main`, allowed beside a Funnel op
+//   funnel_enable / funnel_disable take `main`; never look at the scheduled lane: a waiting scheduled reboot does not block them
+//                                 (a FIRED one holds `main`, which already refuses them)
+async function checkExclusive(env: SysEnv, c: SysConfig, action: Mutation["action"], lane: Lane): Promise<void> {
+  if (isFunnelAction(action)) return;
+  if (lane === "main") {
+    const other = await liveHolder(env, c, "scheduled");
+    if (other) throw new OpsReject("busy", "A reboot is scheduled on this host and is waiting for its time. Update, plan and reboot are exclusive with it: cancel it (cancel_reboot) or wait for it, then ask again.");
+    return;
+  }
+  const other = await liveHolder(env, c, "main");
+  if (other && other.rec?.action !== "funnel_enable" && other.rec?.action !== "funnel_disable") throw new OpsReject("busy", "Another tier 3 operation (update, plan or reboot) is running or being accepted. A reboot cannot be scheduled beside it; wait for its result, then ask again.");
 }
 
 async function accept(env: SysEnv, c: SysConfig, req: Mutation) {
@@ -183,33 +233,45 @@ async function accept(env: SysEnv, c: SysConfig, req: Mutation) {
     }
   }
 
-  await takeSlot(env, c, req.opId);
-  // From here this request owns the slot. Anything refused below gives it back.
-  if (req.action === "reboot_host") {
-    // Checked while holding the slot (not before it), so two requests cannot both pass a check that neither has recorded yet.
-    // For a scheduled reboot the cool-down is measured at the scheduled time, and checked again when it fires.
-    const wait = cooldownRemainingMs(c, rebootAt ? Date.parse(rebootAt) : nowMs);
-    if (wait > 0) {
+  const lane: Lane = rebootAt ? "scheduled" : "main";
+  // An id whose slot was already given back (refused or failed before it recorded anything) is spent: retirement markers are
+  // one-time, so it could not release a slot a second time. ORBIT never reuses an id (a confirmation is single-use); refuse cleanly.
+  if (LANES.some((l) => existsSync(markerPath(c, req.opId, l)))) throw new OpsReject("bad_arguments", "This operation id was already used and its slot given back without a result. Nothing was done; ask again so a new id is made.");
+  await takeSlot(env, c, req.opId, lane);
+  // From here this request owns the slot. ANY throw before the record is saved (a refusal, a failing disk, a clock error) gives it
+  // straight back through the marker protocol; afterwards the record owns it and the runner or the settle path releases it.
+  const rec: SysRecord = await (async () => {
+    try {
+      await checkExclusive(env, c, req.action, lane);
+      if (req.action === "reboot_host") {
+        // Checked while holding the slot (not before it), so two requests cannot both pass a check that neither has recorded yet.
+        // For a scheduled reboot the cool-down is measured at the scheduled time, and checked again when it fires.
+        const wait = cooldownRemainingMs(c, rebootAt ? Date.parse(rebootAt) : nowMs);
+        if (wait > 0) {
+          throw new OpsReject("cooldown", `A reboot was issued ${Math.round((nowMs - (lastRebootIssuedMs(c) ?? nowMs)) / 60000)} minutes ago; another will not be accepted for that time yet (cool-down ${Math.round(c.rebootCooldownMs / 60000)} minutes from the last ISSUED reboot). Check that operation's result first.`);
+        }
+      }
+      const at = env.now().toISOString();
+      const r: SysRecord = {
+        opId: req.opId,
+        action: req.action,
+        state: rebootAt ? "scheduled" : "accepted",
+        acceptedAt: at,
+        updatedAt: at,
+        target: req.action === "plan_os_updates" ? { host: env.hostname() } : req.target,
+        digest: req.action === "plan_os_updates" ? "" : req.digest,
+        expiresAt: req.action === "plan_os_updates" ? at : req.expiresAt,
+        ...(req.action === "install_os_updates" && req.planDigest ? { planDigest: req.planDigest } : {}),
+        ...(rebootAt ? { schedule: { at: rebootAt } } : {}),
+        steps: [{ at, step: rebootAt ? "scheduled" : "accepted", detail: rebootAt ? `Request validated and recorded. Nothing has been done yet; the reboot is scheduled for ${rebootAt} and can be cancelled until it fires.` : "Request validated and recorded. Nothing has been done yet." }],
+      };
+      saveRecord(c, r, env);
+      return r;
+    } catch (err) {
       abandonSlot(c, req.opId);
-      throw new OpsReject("cooldown", `A reboot was issued ${Math.round((nowMs - (lastRebootIssuedMs(c) ?? nowMs)) / 60000)} minutes ago; another will not be accepted for that time yet (cool-down ${Math.round(c.rebootCooldownMs / 60000)} minutes from the last ISSUED reboot). Check that operation's result first.`);
+      throw err;
     }
-  }
-
-  const at = env.now().toISOString();
-  const rec: SysRecord = {
-    opId: req.opId,
-    action: req.action,
-    state: rebootAt ? "scheduled" : "accepted",
-    acceptedAt: at,
-    updatedAt: at,
-    target: req.action === "plan_os_updates" ? { host: env.hostname() } : req.target,
-    digest: req.action === "plan_os_updates" ? "" : req.digest,
-    expiresAt: req.action === "plan_os_updates" ? at : req.expiresAt,
-    ...(req.action === "install_os_updates" && req.planDigest ? { planDigest: req.planDigest } : {}),
-    ...(rebootAt ? { schedule: { at: rebootAt } } : {}),
-    steps: [{ at, step: rebootAt ? "scheduled" : "accepted", detail: rebootAt ? `Request validated and recorded. Nothing has been done yet; the reboot is scheduled for ${rebootAt} and can be cancelled until it fires.` : "Request validated and recorded. Nothing has been done yet." }],
-  };
-  saveRecord(c, rec, env);
+  })();
   const started = await env.exec(SYSTEMCTL, ["start", "--no-block", `${runnerFor(c, req.action)}${req.opId}.service`], 8000);
   if (started.code !== 0 || started.timedOut) {
     end(c, env, rec, "failed", "The runner could not be started, so nothing was done.", "Nothing ran.");
@@ -258,7 +320,9 @@ export async function runSysAction(raw: string, env: SysEnv, c: SysConfig, journ
   if (req.action === "sys_status") {
     ensureDirs(c);
     const recs = allRecords(c).sort((a, b) => b.acceptedAt.localeCompare(a.acceptedAt));
-    const open = recs.find((r) => !isSysTerminal(r.state));
+    const openAll = recs.filter((r) => !isSysTerminal(r.state));
+    const open = openAll[0];
+    const brief = (r: SysRecord) => ({ opId: r.opId, action: r.action, state: r.state, ...(r.schedule ? { scheduledFor: r.schedule.at } : {}) });
     return {
       req,
       replayed: false,
@@ -270,7 +334,9 @@ export async function runSysAction(raw: string, env: SysEnv, c: SysConfig, journ
         rebootRequired: existsSync(c.rebootRequiredFile),
         // Present or absent only: this front has no tailscale access and says nothing about the node's state or reachability.
         orbitJobsSocketPresent: existsSync(c.jobsSocket),
-        openOperation: open ? { opId: open.opId, action: open.action, state: open.state, ...(open.schedule ? { scheduledFor: open.schedule.at } : {}) } : null,
+        openOperation: open ? brief(open) : null,
+        // Every open operation (a waiting scheduled reboot can be open beside a Funnel change): ORBIT applies the exclusivity matrix to it.
+        openOperations: openAll.map(brief),
         // When a reboot could next be accepted (null: now), from the last reboot actually ISSUED.
         rebootCooldownUntil: (() => {
           const last = lastRebootIssuedMs(c);
