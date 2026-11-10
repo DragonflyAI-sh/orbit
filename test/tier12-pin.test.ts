@@ -17,7 +17,7 @@ const PINNED: [string, string][] = [
   ["src/ops/protocol.ts", "3a1dea9c7c865639387531b173c5f6e93d3ba346f789a1b482db2d7cb338b1f1"],
   ["src/ops/admin-protocol.ts", "60fd390d9feba492ea131f8243644445de2b7fafadc21e2596ccb7e35e58ae1b"],
   ["src/ops/admin-core.ts", "4fbaa994ff3a5b71b404cdc5babcd1861017c3362c74a81fbf40b7a652537e46"],
-  ["src/ops/admin-helper.ts", "8937d4cbef84744e6370899f325262192078d54ec3f7d4716a36bc3300924cae"],
+  ["src/ops/admin-helper.ts", "28a6691caf6742e2eb7bc34551f123bcb2db2eb444d94e104f70d4fa442817e1"],
   ["src/ops/admin-run.ts", "e7e5358cacffed7fd214ef7a64caefaf4cfa862482711bc781fa7ad69dbcdc3d"],
   ["src/ops-client.ts", "e3a0190710bdf9648103810e8d9f9ca859e710bb8139830543dc08c747928d17"],
   ["src/ops-admin-client.ts", "e1ce686df6ccc744dcd1ac6c7caac21a25102952ae0e5a09f3d767cb004ff174"],
@@ -36,7 +36,7 @@ const PINNED: [string, string][] = [
   ["docs/orbit-ops-admin.md", "cd175ab463a5b4f26b24ca75996f237acea072a9eabf07b96b40e57c037ccf66"],
   ["test/ops.test.ts", "04005e1ca72fa5b4ac537aacedaaf0d648fee03942948757ee8caa89b1e4823f"],
   ["test/ops-admin.test.ts", "60bd30daa6bcfc04a06ad1435299b8b2457a2ae61ad5ec180785a813111599e8"],
-  ["test/ops-admin-helper.test.ts", "536b8f08d0eb783b9f4bb533e6d54c838940765761f62fda7c3c73cb1f0b30e5"],
+  ["test/ops-admin-helper.test.ts", "43e27bd683c1f32deef878bafb86056bc39989757e8379d05b5921ae4afcff00"],
   ["test/pull-deploy-admin.test.ts", "5d6f58f962876c982464996141e597b0110678231429972266b7e2d7158cc0ff"],
 ];
 

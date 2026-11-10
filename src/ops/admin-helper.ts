@@ -33,7 +33,10 @@ const runnerFor = (c: AdminConfig, action: MutatingAction) => `${action === "ref
 
 async function runnerActive(env: AdminEnv, c: AdminConfig, rec: OpRecord): Promise<boolean> {
   const r = await env.exec(SYSTEMCTL, ["is-active", `${runnerFor(c, rec.action)}${rec.opId}.service`], 4000);
-  return r.code === 0 && /^(active|activating)\s*$/.test(r.stdout);
+  // Liveness is the unit STATE on stdout, not the exit status: a running oneshot unit is "activating" with exit 3. Only a clean
+  // "inactive" or "failed" is dead; any other, empty or unparseable state, a timeout or a missing binary counts as alive.
+  if (r.timedOut || r.code === null) return true;
+  return !/^(inactive|failed)\s*$/.test(r.stdout);
 }
 
 // A record that says accepted/running but whose runner is gone (and which has been quiet for a while) did not finish.
