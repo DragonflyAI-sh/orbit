@@ -115,12 +115,50 @@ export const validPlanEntry = (e: unknown): e is PlanEntry =>
 export const sortPlan = (p: PlanEntry[]): PlanEntry[] => [...p].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 export const planDigestOf = (p: PlanEntry[]): string => createHash("sha256").update(JSON.stringify({ v: 1, upgrades: sortPlan(p) })).digest("hex");
 export const PLAN_FLAGS = [
-  ["kernel", /^linux-(image|modules|modules-extra|headers|generic|virtual|lowlatency|aws|azure|gcp|oracle|kvm|tools|cloud-tools)(-|$)/],
+  // Only the kernel image, its modules and its headers: linux-image-*, linux-modules-* (includes -extra), linux-headers-*. Other
+  // linux-* packages (linux-tools-common, linux-libc-dev, linux-firmware, the linux-generic metapackage) are not the kernel.
+  ["kernel", /^linux-(image|modules|headers)-/],
   ["libc", /^(libc6|libc-bin|libc-dev-bin|libc6-dev)(:|$)/],
   ["systemd", /^(systemd|libsystemd[0-9]*|udev|libudev[0-9]*)(-|:|$)/],
   ["openssh", /^openssh-(server|client|sftp-server)$/],
   ["tailscale", /^tailscale(d)?$/],
 ] as const;
+// ---- dpkg-query inventory. Tab-separated so no field can contain the separator (a version never has a tab or a space), and so the
+// parse does not depend on how wide ${db:Status-Abbrev} is (it is "ii " plus the separator: TWO spaces on a real host).
+export const DPKG_INVENTORY_FORMAT = "${db:Status-Status}\\t${binary:Package}\\t${Version}\\n";
+export type Inventory = { ok: true; versions: Map<string, Set<string>> } | { ok: false; problem: string };
+const baseName = (n: string) => n.replace(/:[a-z0-9-]+$/, "");
+// package (without :arch) -> versions with status "installed". Any malformed line, a missing final newline (truncated output) or no
+// installed package at all is a FAILURE, never an empty inventory: an empty map would make "nothing is missing" true.
+export function parseInventory(out: string): Inventory {
+  if (!out.trim()) return { ok: false, problem: "dpkg-query returned no output" };
+  if (!out.endsWith("\n")) return { ok: false, problem: "dpkg-query output is truncated (no final newline)" };
+  const versions = new Map<string, Set<string>>();
+  let installed = 0;
+  for (const line of out.slice(0, -1).split("\n")) {
+    const f = line.split("\t");
+    if (f.length !== 3 || !/^[a-z-]+$/.test(f[0]!) || !PKG.test(f[1]!) || !VER.test(f[2]!)) return { ok: false, problem: `unparseable dpkg-query line: ${JSON.stringify(line.slice(0, 80))}` };
+    if (f[0] !== "installed") continue; // config-files, not-installed, half-configured ...: not an installed package
+    installed++;
+    const k = baseName(f[1]!);
+    versions.set(k, (versions.get(k) ?? new Set()).add(f[2]!));
+  }
+  return installed ? { ok: true, versions } : { ok: false, problem: "dpkg-query lists no installed package" };
+}
+export type UpgradeCheck =
+  | { kind: "inventory_failed"; problem: string; missing: string[]; wrongVersion: string[] }
+  | { kind: "removed"; missing: string[]; wrongVersion: string[] }
+  | { kind: "wrong_version"; missing: string[]; wrongVersion: string[] }
+  | { kind: "ok"; missing: string[]; wrongVersion: string[] };
+// before/after inventories + the confirmed plan -> what is wrong. A failed inventory on either side is its own outcome and can
+// never read as "nothing missing, all at planned versions".
+export function checkUpgrade(before: Inventory, after: Inventory, plan: PlanEntry[]): UpgradeCheck {
+  if (!before.ok) return { kind: "inventory_failed", problem: `before: ${before.problem}`, missing: [], wrongVersion: [] };
+  if (!after.ok) return { kind: "inventory_failed", problem: `after: ${after.problem}`, missing: [], wrongVersion: [] };
+  const missing = [...before.versions.keys()].filter((n) => !after.versions.has(n));
+  const wrongVersion = plan.filter((e) => !after.versions.get(baseName(e[0]))?.has(e[2])).map((e) => e[0]);
+  return { kind: missing.length ? "removed" : wrongVersion.length ? "wrong_version" : "ok", missing, wrongVersion };
+}
 export type PlanFlags = Record<(typeof PLAN_FLAGS)[number][0], string[]>;
 export function flagPlan(p: PlanEntry[]): PlanFlags {
   const out = { kernel: [], libc: [], systemd: [], openssh: [], tailscale: [] } as PlanFlags;

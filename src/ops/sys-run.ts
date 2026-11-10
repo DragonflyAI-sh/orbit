@@ -32,6 +32,9 @@ import {
 import { fileURLToPath } from "node:url";
 import { validateConfigValue } from "./admin-protocol.ts";
 import {
+  DPKG_INVENTORY_FORMAT,
+  checkUpgrade,
+  parseInventory,
   FUNNEL_HTTPS_PORT,
   JOBS_NODE,
   SYS_OP_ID,
@@ -134,17 +137,7 @@ const APT_ENV = { DEBIAN_FRONTEND: "noninteractive", APT_LISTCHANGES_FRONTEND: "
 const LOCK_TEXT = /Could not get lock|Unable to acquire the dpkg|Unable to lock|is held by process|dpkg frontend lock|Waiting for cache lock/i;
 const APT_BASE = ["-o", "DPkg::Lock::Timeout=120"];
 
-const DPKG_FORMAT = "-f=${db:Status-Abbrev} ${binary:Package} ${Version}\\n";
-const bare = (n: string) => n.replace(/:[a-z0-9-]+$/, "");
-// package (without :arch) -> versions installed, from `dpkg-query` lines "ii name[:arch] version".
-const installedVersions = (out: string): Map<string, Set<string>> => {
-  const m = new Map<string, Set<string>>();
-  for (const l of out.split("\n")) {
-    const f = /^ii (\S+) (\S+)\s*$/.exec(l);
-    if (f) m.set(bare(f[1]!), (m.get(bare(f[1]!)) ?? new Set()).add(f[2]!));
-  }
-  return m;
-};
+const DPKG_ARGS = ["-W", `--showformat=${DPKG_INVENTORY_FORMAT}`];
 const names = (l: string[]) => `${l.slice(0, 12).join(", ")}${l.length > 12 ? ` and ${l.length - 12} more` : ""}`;
 const noKillOpts = { env: APT_ENV, noKill: true, maxBuffer: 2 * 1024 * 1024 };
 
@@ -217,16 +210,19 @@ async function installOsUpdates(x: Ctx): Promise<void> {
   const plan = p.plan;
   if (!plan.length) return finish(x, "no_change", "No package upgrades are pending; nothing was installed.", { checked: true, healthy: true, detail: "Simulation shows nothing to upgrade.", evidence: { upgraded: 0, rebootRequired: existsSync(c.rebootRequiredFile) } });
 
-  const before = installedVersions((await env.exec(DPKG_QUERY, ["-W", DPKG_FORMAT], 60_000, noKillOpts)).stdout);
+  const q0 = await env.exec(DPKG_QUERY, DPKG_ARGS, 60_000, noKillOpts);
+  const before = q0.code === 0 ? parseInventory(q0.stdout) : ({ ok: false, problem: `dpkg-query exited ${q0.code}` } as const);
+  if (!before.ok) return finish(x, "failed", `Nothing changed: the installed-package inventory could not be read before upgrading (${before.problem}), so the result could not be verified afterwards.`, { checked: false, detail: "Package inventory unreadable before upgrade." });
   step(x, "upgrade", `apt-get upgrade of ${plan.length} package(s): ${names(plan.map((e) => e[0]))}. No reboot. This tool restarts no service, but package maintainer scripts may.`);
   const up = await env.exec(APT_GET, ["-y", "-o", "Dpkg::Options::=--force-confold", "-o", "Dpkg::Options::=--force-confdef", ...APT_BASE, "upgrade"], 2 * 3600_000, noKillOpts);
   step(x, "upgrade-result", `exit ${up.code}${up.stderr ? `: ${lastLines(up.stderr, 1)}` : ""}`);
 
   const audit1 = await env.exec(DPKG, ["--audit"], 60_000);
   const clean = audit1.code === 0 && !audit1.stdout.trim();
-  const after = installedVersions((await env.exec(DPKG_QUERY, ["-W", DPKG_FORMAT], 60_000, noKillOpts)).stdout);
-  const missing = [...before.keys()].filter((n) => !after.has(n));
-  const wrongVersion = plan.filter((e) => !after.get(bare(e[0]))?.has(e[2])).map((e) => e[0]);
+  const q1 = await env.exec(DPKG_QUERY, DPKG_ARGS, 60_000, noKillOpts);
+  const after = q1.code === 0 ? parseInventory(q1.stdout) : ({ ok: false, problem: `dpkg-query exited ${q1.code}` } as const);
+  const chk = checkUpgrade(before, after, plan);
+  const { missing, wrongVersion } = chk;
   const rebootRequired = existsSync(c.rebootRequiredFile);
   const leftSim = parsePlan((await env.exec(APT_GET, [...APT_BASE, "-s", "upgrade"], 120_000, noKillOpts)).stdout);
   const left = leftSim.ok ? leftSim.upgrades.length : -1;
@@ -235,8 +231,11 @@ async function installOsUpdates(x: Ctx): Promise<void> {
   const tail = ` No reboot was performed${rebootRequired ? "; the host says a reboot is required (propose it separately)" : ""}. Package maintainer scripts may have restarted daemons (for example openssh or tailscale), and OpenClaw and other services on this shared host were not inspected by this tool: check them.`;
 
   if (up.code !== 0) {
-    const busy = LOCK_TEXT.test(up.stderr + up.stdout) && clean && !missing.length;
+    const busy = LOCK_TEXT.test(up.stderr + up.stdout) && clean && chk.kind !== "inventory_failed" && !missing.length;
     return finish(x, "failed", busy ? `The upgrade did not start: another package manager held the lock (nothing was interrupted or unlocked). Ask again later.` : `apt-get upgrade failed (exit ${up.code}); packages may be partly upgraded${clean ? "" : " and dpkg reports problems (try dpkg --configure -a by hand)"}. ${lastLines(up.stderr, 2)}${tail}`, { checked: true, healthy: false, detail: "apt-get upgrade failed.", evidence });
+  }
+  if (chk.kind === "inventory_failed") {
+    return finish(x, "failed", `apt-get upgrade exited ${up.code} but the installed packages could not be verified afterwards (${chk.problem}). Nothing is assumed: an operator must inspect the host.${tail}`, { checked: true, healthy: false, detail: "Post-upgrade inventory unreadable.", evidence });
   }
   if (missing.length || !clean) {
     return finish(x, "failed", `apt-get upgrade exited 0 but verification failed: ${missing.length ? `${missing.length} package(s) are no longer installed (${names(missing)})` : "dpkg --audit reports problems"}. An operator must inspect the host.${tail}`, { checked: true, healthy: false, detail: "Post-upgrade check failed.", evidence });
