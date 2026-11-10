@@ -16,6 +16,9 @@ import {
   planDigestOf,
   parsePlan,
   flagPlan,
+  parseInventory,
+  checkUpgrade,
+  DPKG_INVENTORY_FORMAT,
   type PlanEntry,
   bootKey,
   parseSysRequest,
@@ -301,8 +304,10 @@ test("sys_status reports presence facts only (never a Funnel or reachability cla
 const SUMMARY = (up: number, add = 0, rem = 0) => `${up} upgraded, ${add} newly installed, ${rem} to remove and 0 not upgraded.\n`;
 const PLAN2 = `Reading package lists...\nInst libfoo1 [1.0] (1.1 Ubuntu:24.04/noble-updates [amd64])\nInst bar [2.0] (2.1 Ubuntu:24.04/noble-security [amd64])\nConf libfoo1 (1.1 Ubuntu:24.04/noble-updates [amd64])\n${SUMMARY(2)}`;
 const EMPTY = SUMMARY(0);
-const PKGS_BEFORE = "ii libfoo1 1.0\nii bar:amd64 2.0\nii baz 1\nrc old 0\n";
-const PKGS_AFTER = "ii libfoo1 1.1\nii bar:amd64 2.1\nii baz 1\n";
+// Synthetic inventories (names are made up) in the REAL tab format; the genuine captured fixtures are used further down.
+const tab = (rows: [string, string, string][]) => rows.map((r) => r.join("\t") + "\n").join("");
+const PKGS_BEFORE = tab([["installed", "libfoo1", "1.0"], ["installed", "bar:amd64", "2.0"], ["installed", "baz", "1"], ["config-files", "old", "0"]]);
+const PKGS_AFTER = tab([["installed", "libfoo1", "1.1"], ["installed", "bar:amd64", "2.1"], ["installed", "baz", "1"]]);
 type Upd = { audit?: Exec[]; update?: Exec; sim?: Exec[]; upgrade?: Exec; before?: string; after?: string };
 function aptScript(w: World, u: Upd = {}) {
   let audits = 0;
@@ -348,9 +353,10 @@ test("plan_os_updates: apt-get update (metadata refresh) then apt-get -s upgrade
 });
 
 test("plan flags: kernel, libc, systemd, openssh and tailscale packages are identified", () => {
-  const names = ["linux-image-6.8.0-50-generic", "linux-modules-6.8.0-50-generic", "linux-generic", "libc6", "libc-bin", "libc6:i386", "systemd", "libsystemd0", "libudev1", "udev", "openssh-server", "openssh-client", "tailscale", "curl", "tailscale-archive-keyring", "libcurl4", "linux-firmware"];
+  const names = ["linux-image-6.8.0-50-generic", "linux-modules-6.8.0-50-generic", "linux-modules-extra-6.8.0-50-generic", "linux-headers-6.8.0-50-generic", "linux-headers-6.8.0-50", "linux-image-generic", "linux-tools-common", "linux-tools-6.8.0-50-generic", "linux-cloud-tools-common", "linux-libc-dev:amd64", "linux-generic", "linux-image", "libc6", "libc-bin", "libc6:i386", "systemd", "libsystemd0", "libudev1", "udev", "openssh-server", "openssh-client", "tailscale", "curl", "tailscale-archive-keyring", "libcurl4", "linux-firmware"];
   const f = flagPlan(names.map((n) => [n, "1", "2"] as PlanEntry));
-  assert.deepEqual(f.kernel, ["linux-image-6.8.0-50-generic", "linux-modules-6.8.0-50-generic", "linux-generic"]);
+  assert.deepEqual(f.kernel, ["linux-image-6.8.0-50-generic", "linux-modules-6.8.0-50-generic", "linux-modules-extra-6.8.0-50-generic", "linux-headers-6.8.0-50-generic", "linux-headers-6.8.0-50", "linux-image-generic"]);
+  for (const n of ["linux-tools-common", "linux-libc-dev:amd64", "linux-firmware", "linux-generic"]) assert.ok(!f.kernel.includes(n), `${n} is not a kernel package`);
   assert.deepEqual(f.libc, ["libc6", "libc-bin", "libc6:i386"]);
   assert.deepEqual(f.systemd, ["systemd", "libsystemd0", "libudev1", "udev"]);
   assert.deepEqual(f.openssh, ["openssh-server", "openssh-client"]);
@@ -561,7 +567,7 @@ test("OS updates: failures and unexpected side effects are reported, never as su
   assert.equal(r.state, "failed");
   assert.match(r.summary!, /dpkg --audit reports problems/);
   w = world();
-  aptScript(w, { after: "ii libfoo1 1.1\nii bar 2.1\n" });
+  aptScript(w, { after: tab([["installed", "libfoo1", "1.1"], ["installed", "bar", "2.1"]]) });
   await accept(w, "install_os_updates");
   r = await run(w, "install_os_updates");
   assert.equal(r.state, "failed");
@@ -569,7 +575,7 @@ test("OS updates: failures and unexpected side effects are reported, never as su
   assert.equal(r.verification?.healthy, false);
   // exit 0 and clean, but a package is not at the planned version (lists changed under the upgrade): unverified, never verified
   w = world();
-  aptScript(w, { after: "ii libfoo1 1.1\nii bar 2.9\nii baz 1\n" });
+  aptScript(w, { after: tab([["installed", "libfoo1", "1.1"], ["installed", "bar", "2.9"], ["installed", "baz", "1"]]) });
   await accept(w, "install_os_updates");
   r = await run(w, "install_os_updates");
   assert.equal(r.state, "unverified");
@@ -2038,4 +2044,123 @@ test("scheduled reboot interrupted text claims a restart only when the boot id a
   const u = (await statusOf(unknown)).summary as string;
   assert.match(u, /whether the host restarted is unknown/);
   assert.doesNotMatch(u, /host restarted after|has not restarted/);
+});
+
+// ---------------------------------------------------------------- dpkg-query inventory: genuine captured fixtures (see test/fixtures/README.md)
+const fx = (n: string) => readFileSync(new URL(`./fixtures/${n}`, import.meta.url), "utf8");
+const REAL_TAB = fx("dpkg-query-status-tab.ubuntu2404.txt");
+const REAL_ABBREV = fx("dpkg-query-abbrev.ubuntu2404.txt");
+// The confirmed plan upgrades two real packages TO the versions captured in the fixture. Only the "before" side (the older version)
+// is derived: it is the fixture with those two versions replaced, and is synthetic.
+const REAL_PLAN_TEXT = `Reading package lists...\nInst libc6 [2.39-0ubuntu8.8] (2.39-0ubuntu8.9 Ubuntu:24.04/noble-updates [amd64])\nInst bison [2:3.8.2+dfsg-1ubuntu0.24.04.0] (2:3.8.2+dfsg-1ubuntu0.24.04.1 Ubuntu:24.04/noble-updates [amd64])\nConf libc6 (2.39-0ubuntu8.9 Ubuntu:24.04/noble-updates [amd64])\n${SUMMARY(2)}`;
+const REAL_BEFORE = REAL_TAB.replace("\tlibc6:amd64\t2.39-0ubuntu8.9\n", "\tlibc6:amd64\t2.39-0ubuntu8.8\n").replace(/(\tbison\t)[^\n]*/, (_m, g) => `${g}2:3.8.2+dfsg-1ubuntu0.24.04.0`);
+const REAL_PLAN: PlanEntry[] = [["bison", "2:3.8.2+dfsg-1ubuntu0.24.04.0", "2:3.8.2+dfsg-1ubuntu0.24.04.1"], ["libc6", "2.39-0ubuntu8.8", "2.39-0ubuntu8.9"]];
+
+test("dpkg inventory fixtures are genuine-shaped: real Status-Abbrev lines have TWO spaces after ii, and the old regex parsed none of them", () => {
+  assert.ok(REAL_ABBREV.split("\n").filter(Boolean).every((l) => l.startsWith("ii  ")), "two spaces after ii");
+  const oldRegex = /^ii (\S+) (\S+)\s*$/; // the pre-fix parser
+  assert.equal(REAL_ABBREV.split("\n").filter((l) => oldRegex.test(l)).length, 0, "the old regex matches nothing (the live failure)");
+  assert.equal(DPKG_INVENTORY_FORMAT, "${db:Status-Status}\\t${binary:Package}\\t${Version}\\n");
+});
+
+test("parseInventory: real Ubuntu output, epochs and arch-qualified names", () => {
+  const inv = parseInventory(REAL_TAB);
+  assert.ok(inv.ok);
+  if (!inv.ok) return;
+  assert.equal(inv.versions.size, 13);
+  assert.deepEqual([...inv.versions.get("libc6")!], ["2.39-0ubuntu8.9"], "libc6:amd64 is keyed as libc6");
+  assert.deepEqual([...inv.versions.get("bison")!], ["2:3.8.2+dfsg-1ubuntu0.24.04.1"], "epoch kept");
+  assert.deepEqual([...inv.versions.get("zlib1g")!], ["1:1.3.dfsg-3.1ubuntu2.3"]);
+  assert.ok(inv.versions.has("libstdc++6"));
+  // a non-installed status is skipped (synthetic line built next to a genuine one)
+  const withRc = parseInventory(REAL_TAB + "config-files\toldpkg\t1.0\n");
+  assert.ok(withRc.ok && !withRc.versions.has("oldpkg"));
+});
+
+test("parseInventory: empty, truncated, malformed or not-installed-only output is a FAILURE, never an empty inventory", () => {
+  for (const [name, out] of [
+    ["empty", ""], ["whitespace", "\n\n"],
+    ["old Status-Abbrev format", REAL_ABBREV],
+    ["truncated (no final newline)", REAL_TAB.trimEnd()],
+    ["a space-separated line", REAL_TAB + "installed libc6 1\n"],
+    ["four fields", "installed\tfoo\t1\textra\n"],
+    ["two fields", "installed\tfoo\n"],
+    ["bad package name", "installed\tFoo Bar\t1\n"],
+    ["empty version", "installed\tfoo\t\n"],
+    ["garbage among good lines", REAL_TAB + "dpkg-query: error: something\n"],
+    ["no installed package", "config-files\tfoo\t1\nnot-installed\tbar\t2\n"],
+  ] as const) {
+    const r = parseInventory(out);
+    assert.equal(r.ok, false, name);
+  }
+});
+
+test("checkUpgrade: all at planned versions OK; removal -> removed; other version -> wrong_version; failed inventory never passes", () => {
+  const after = parseInventory(REAL_TAB);
+  const before = parseInventory(REAL_BEFORE);
+  assert.ok(before.ok && after.ok);
+  assert.deepEqual(checkUpgrade(before, after, REAL_PLAN), { kind: "ok", missing: [], wrongVersion: [] });
+  const gone = parseInventory(REAL_TAB.split("\n").filter((l) => !l.includes("\tzlib1g:amd64\t")).join("\n"));
+  assert.deepEqual(checkUpgrade(before, gone, REAL_PLAN), { kind: "removed", missing: ["zlib1g"], wrongVersion: [] });
+  const other = parseInventory(REAL_TAB.replace("\tlibc6:amd64\t2.39-0ubuntu8.9\n", "\tlibc6:amd64\t2.39-0ubuntu8.10\n"));
+  assert.ok(other.ok);
+  const c = checkUpgrade(before, other, REAL_PLAN);
+  assert.equal(c.kind, "wrong_version");
+  assert.deepEqual(c.wrongVersion, ["libc6"]);
+  const bad = parseInventory("");
+  for (const [b, a] of [[bad, after], [before, bad], [bad, bad]] as const) assert.equal(checkUpgrade(b, a, REAL_PLAN).kind, "inventory_failed");
+  assert.equal(checkUpgrade(bad, bad, []).kind, "inventory_failed", "even with an empty plan an empty inventory is not a pass");
+});
+
+async function realUpdate(w: World, o: { before?: string; after?: string; beforeExec?: Exec; afterExec?: Exec }) {
+  let q = 0;
+  aptScript(w, { sim: [ok(REAL_PLAN_TEXT), ok(EMPTY)] });
+  const base = w.script.exec;
+  w.script.exec = (f, a, ww) => {
+    if (f.endsWith("dpkg-query")) return q++ === 0 ? (o.beforeExec ?? ok(o.before ?? REAL_BEFORE)) : (o.afterExec ?? ok(o.after ?? REAL_TAB));
+    return base(f, a, ww);
+  };
+  await accept(w, "install_os_updates", { planDigest: planDigestOf(REAL_PLAN) });
+  return run(w, "install_os_updates");
+}
+
+test("OS updates with real dpkg-query output: all at planned versions continues to the ORBIT health check and verifies", async () => {
+  const w = world();
+  const r = await realUpdate(w, {});
+  assert.equal(r.state, "verified");
+  assert.equal(r.verification?.evidence?.packagesMissingAfter, 0);
+  assert.equal(r.verification?.evidence?.versionsNotAsPlanned, 0);
+  assert.equal(r.verification?.evidence?.orbitHealthy, true);
+  const q = w.execs.filter((e) => e.file.endsWith("dpkg-query"));
+  assert.equal(q.length, 2);
+  assert.deepEqual(q[0]!.args, ["-W", `--showformat=${DPKG_INVENTORY_FORMAT}`]);
+});
+
+test("OS updates with real dpkg-query output: removal -> failed; different version -> unverified; empty or malformed inventory -> failed (never verified)", async () => {
+  let r = await realUpdate(world(), { after: REAL_TAB.split("\n").filter((l) => !l.includes("\tzlib1g:amd64\t")).join("\n") });
+  assert.equal(r.state, "failed");
+  assert.match(r.summary!, /no longer installed \(zlib1g\)/);
+  r = await realUpdate(world(), { after: REAL_TAB.replace("\tlibc6:amd64\t2.39-0ubuntu8.9\n", "\tlibc6:amd64\t2.39-0ubuntu8.10\n") });
+  assert.equal(r.state, "unverified");
+  assert.match(r.summary!, /not at the version in the confirmed plan \(libc6\)/);
+  for (const [name, o] of [
+    ["empty after", { after: "" }],
+    ["malformed after", { after: REAL_ABBREV }],
+    ["after exits non-zero", { afterExec: { code: 1, stdout: REAL_TAB, stderr: "boom", timedOut: false } }],
+  ] as const) {
+    const res = await realUpdate(world(), o);
+    assert.equal(res.state, "failed", name);
+    assert.match(res.summary!, /could not be verified afterwards/, name);
+    assert.notEqual(res.verification?.healthy, true, name);
+  }
+});
+
+test("OS updates: an unreadable inventory BEFORE the upgrade refuses it; nothing is upgraded", async () => {
+  for (const [name, o] of [["empty", { before: "" }], ["malformed", { before: REAL_ABBREV }], ["non-zero", { beforeExec: { code: 2, stdout: "", stderr: "x", timedOut: false } }]] as const) {
+    const w = world();
+    const r = await realUpdate(w, o);
+    assert.equal(r.state, "failed", name);
+    assert.match(r.summary!, /Nothing changed: the installed-package inventory could not be read/, name);
+    assert.ok(!w.execs.some((e) => e.args.includes("upgrade") && !e.args.includes("-s")), `${name}: no real upgrade ran`);
+  }
 });
