@@ -2,14 +2,27 @@ import type { Proposal, Proposals } from "./agent.ts";
 import type { Jobs } from "./jobs.ts";
 import type { Notifier } from "./notify.ts";
 import type { SysClient } from "./ops-sys-client.ts";
+import { randomBytes } from "node:crypto";
 import {
   FUNNEL_HTTPS_PORT,
+  MAX_PLAN_PACKAGES,
+  REBOOT_PROPOSE_MIN_LEAD_MS,
   SYS_CONFIRM_TTL_MS,
   cap,
+  flagPlan,
   isFunnelAction,
   isSysTerminal,
+  planDigestOf,
+  planFlagged,
+  rebootAtProblem,
+  sortPlan,
   sysDigestOf,
   sysOpIdFor,
+  validateHostTarget,
+  validPlanEntry,
+  type DigestBind,
+  type PlanEntry,
+  type PlanFlags,
   type FunnelTarget,
   type SysEvidence,
   type SysMutatingAction,
@@ -40,6 +53,10 @@ export type SysLedgerEntry = {
   result?: string;
   verification?: { checked: boolean; healthy?: boolean; detail: string; evidence?: SysEvidence };
   finishedAt?: string;
+  // A reboot for later: when. cancelledAt: when the owner's cancellation was accepted by the helper (before it fired).
+  scheduledFor?: string;
+  cancelledAt?: string;
+  planDigest?: string;
   checkedAt?: string;
   reportedAt?: string;
   error?: string;
@@ -100,12 +117,16 @@ export type JobsTarget = () => { host: string; port: number } | undefined;
 export type SysOps = ReturnType<typeof sysOps>;
 export type SysProposal = Proposal & { kind: "ops_sys" };
 
-export function sysOps(deps: { client?: SysClient; store: Store<SysLedgerEntry[]>; notify: Notifier; proposals: Proposals; jobState: JobState; jobsTarget: JobsTarget; now?: () => Date }) {
+const PLAN_POLL_MS = 3_000;
+const PLAN_MAX_POLLS = 100; // about five minutes: apt-get update on a slow mirror can take a while
+
+export function sysOps(deps: { client?: SysClient; store: Store<SysLedgerEntry[]>; notify: Notifier; proposals: Proposals; jobState: JobState; jobsTarget: JobsTarget; now?: () => Date; sleep?: (ms: number) => Promise<void>; newId?: () => string }) {
   const { client, store, notify, proposals } = deps;
   const now = deps.now ?? (() => new Date());
   // Exact validated targets (and the job state the owner was shown) for open proposals, in memory only. A restart drops them
   // together with the proposals.
-  const pending = new Map<string, { action: SysMutatingAction; target: SysTarget; jobs: JobsSnapshot; expiresAt: string }>();
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const pending = new Map<string, { action: SysMutatingAction; target: SysTarget; jobs: JobsSnapshot; expiresAt: string; bind: DigestBind }>();
   let refreshing: Promise<void> | undefined;
 
   const save = (entries: SysLedgerEntry[]) => store.write(entries.slice(-LEDGER_MAX));
@@ -118,29 +139,49 @@ export function sysOps(deps: { client?: SysClient; store: Store<SysLedgerEntry[]
     }
   };
 
-  const text = (action: SysMutatingAction, target: SysTarget, jobs: JobsSnapshot): { summary: string; warnings: string[]; display: Record<string, string> } => {
+  type Extra = { plan?: { upgrades: PlanEntry[]; flags: PlanFlags; digest: string }; rebootAt?: string };
+  const flagLine = (f: PlanFlags) =>
+    (Object.entries(f) as [string, string[]][]).filter(([, l]) => l.length).map(([k, l]) => `${k}: ${l.slice(0, 6).join(", ")}${l.length > 6 ? ` +${l.length - 6}` : ""}`).join("; ");
+  const text = (action: SysMutatingAction, target: SysTarget, jobs: JobsSnapshot, extra: Extra = {}): { summary: string; warnings: string[]; display: Record<string, string> } => {
     const host = (target as { host: string }).host;
     switch (action) {
-      case "install_os_updates":
+      case "install_os_updates": {
+        const plan = extra.plan!;
+        const flagged = planFlagged(plan.flags);
         return {
-          summary: `Install pending OS package upgrades on host "${host}" with apt-get upgrade only (no distribution upgrade, no package removed or newly installed; refused if the simulation says otherwise). It NEVER reboots.`,
+          summary: `Install ${plan.upgrades.length} pending OS package upgrade(s) on host "${host}" with apt-get upgrade only (exactly the package plan listed on this card; no distribution upgrade, no package removed or newly installed; refused if the plan has changed). It NEVER reboots.`,
           warnings: [
+            ...(flagged ? [`FLAGGED PACKAGES - ${flagLine(plan.flags)}. These can restart daemons, drop SSH or Tailscale connections, or (kernel, libc) need a reboot to take full effect. Read the package list before confirming.`] : []),
             `This is a SHARED host: production OpenClaw runs on it as well as ORBIT. Upgraded libraries and daemons can briefly stall or break services there. ORBIT's own health is checked afterwards; OpenClaw is NOT checked by this tool.`,
+            `Services may restart even though this tool restarts none: needrestart is suspended, but package maintainer scripts (openssh, tailscale, libc, systemd and others) can restart daemons themselves, and this tool cannot prevent that.`,
+            `The plan was made by apt-get update (which refreshes apt metadata) and apt-get -s upgrade just now. It is recomputed before upgrading; if it differs the update is refused and you must ask again. A small window remains between that final check and apt's own run (apt-get resolves again).`,
             `Recovery limits: package upgrades cannot be rolled back by ORBIT. A failed or half-finished upgrade is left for an operator to repair (dpkg --configure -a). If the host then needs a reboot, that is a separate proposal.`,
             jobWarning(jobs, "service restarts or a stalled package upgrade"),
           ],
-          display: { action: "install_os_updates", host, policy: "apt-get upgrade only; no removals, no new packages, no reboot" },
+          display: {
+            action: "install_os_updates",
+            host,
+            policy: "apt-get upgrade only; exactly this plan; no removals, no new packages, no reboot",
+            packages: String(plan.upgrades.length),
+            ...(flagged ? { FLAGGED: flagLine(plan.flags) } : {}),
+            plan: plan.upgrades.map(([n, o, v]) => `${n} ${o} -> ${v}`).join("\n"),
+            planDigest: plan.digest.slice(0, 16),
+          },
         };
-      case "reboot_host":
+      }
+      case "reboot_host": {
+        const when = extra.rebootAt ? `at ${extra.rebootAt}` : "now";
         return {
-          summary: `REBOOT the whole host "${host}" now.`,
+          summary: extra.rebootAt ? `REBOOT the whole host "${host}" at ${extra.rebootAt} (UTC). It can be cancelled from chat until it fires.` : `REBOOT the whole host "${host}" now.`,
           warnings: [
-            `This is a SHARED host: ORBIT, production OpenClaw and the public job listener all go down for the length of the reboot (typically minutes).`,
+            `This is a SHARED host: ORBIT, production OpenClaw and the public job listener all go down for the length of the reboot (typically minutes), ${when}.`,
+            ...(extra.rebootAt ? [`Scheduled for later: job state is checked now and when you confirm, NOT at ${extra.rebootAt}; jobs that start in between can be cut off. Cancel with ops_sys_cancel_reboot before it fires; once it has fired it cannot be cancelled.`] : []),
             `Recovery limits: if the host does not come back, ORBIT cannot help (it is down too) and you need provider console access. After it returns, ORBIT verifies a changed boot id and its own health only; OpenClaw is NOT checked, and until then the result is "rebooting", never success.`,
             jobWarning(jobs, "the reboot"),
           ],
-          display: { action: "reboot_host", host },
+          display: { action: "reboot_host", host, when: extra.rebootAt ?? "now" },
         };
+      }
       case "funnel_enable":
       case "funnel_disable": {
         const t = target as FunnelTarget;
@@ -163,12 +204,48 @@ export function sysOps(deps: { client?: SysClient; store: Store<SysLedgerEntry[]
     }
   };
 
+  // Asks the helper for the package plan (apt-get update then apt-get -s upgrade, run by the helper's own runner; nothing is
+  // installed) and waits for it. Throws, creating nothing, unless a complete, self-consistent plan came back.
+  const obtainPlan = async (): Promise<{ upgrades: PlanEntry[]; flags: PlanFlags; digest: string }> => {
+    const planId = (deps.newId ?? (() => randomBytes(20).toString("hex")))();
+    const none = "No proposal was created.";
+    let r;
+    try {
+      r = await client!.call({ action: "plan_os_updates", opId: planId });
+    } catch (err) {
+      throw new Error(`${cap(err instanceof Error ? err.message : "error", 200)} ${none}`);
+    }
+    if (!r.ok) throw new Error(`The tier 3 helper refused to make an update plan: ${r.message} ${none}`);
+    for (let i = 0; ; i++) {
+      const op = r.ok ? ((r.data.operation ?? {}) as { state?: string; summary?: string; plan?: { upgrades?: unknown; digestKey?: unknown } }) : {};
+      if (op.state && isSysTerminal(op.state)) {
+        if (op.state === "no_change") throw new Error(`No OS package upgrades are pending (the helper refreshed apt metadata; nothing was installed). ${none}`);
+        if (op.state !== "verified") throw new Error(`The update plan could not be made: ${cap(op.summary ?? op.state, 300)} ${none}`);
+        const up = op.plan?.upgrades;
+        if (!Array.isArray(up) || !up.length || up.length > MAX_PLAN_PACKAGES || !up.every(validPlanEntry)) throw new Error(`The helper's update plan was malformed. ${none}`);
+        const upgrades = sortPlan(up as PlanEntry[]);
+        const digest = planDigestOf(upgrades);
+        if (typeof op.plan?.digestKey !== "string" || op.plan.digestKey !== digest.slice(0, 24)) throw new Error(`The helper's update plan does not match its own digest, so it cannot be bound to a confirmation. ${none}`);
+        return { upgrades, flags: flagPlan(upgrades), digest };
+      }
+      if (i >= PLAN_MAX_POLLS) throw new Error(`The update plan was not ready in time (the helper may still be refreshing apt). Nothing was installed. ${none}`);
+      await sleep(PLAN_POLL_MS);
+      try {
+        r = await client!.call({ action: "op_status", opId: planId });
+      } catch (err) {
+        throw new Error(`${cap(err instanceof Error ? err.message : "error", 200)} ${none}`);
+      }
+      if (!r.ok) throw new Error(`The tier 3 helper could not report the plan: ${r.message} ${none}`);
+    }
+  };
+
   return {
     available: Boolean(client),
 
     // Validates and checks the helper, then makes an owner-only proposal. Nothing is changed. If any check fails this THROWS and no
     // proposal exists: the caller (and the model) must not say otherwise.
-    async propose(action: SysMutatingAction): Promise<SysProposal> {
+    async propose(action: SysMutatingAction, opts: { rebootAt?: string } = {}): Promise<SysProposal> {
+      if (opts.rebootAt !== undefined && action !== "reboot_host") throw new Error("Only a reboot can be scheduled. No proposal was created.");
       if (!client) throw new Error("Tier 3 is not available: no helper client is configured. No proposal was created. See docs/orbit-ops-sys.md for installation.");
       let status;
       try {
@@ -177,8 +254,20 @@ export function sysOps(deps: { client?: SysClient; store: Store<SysLedgerEntry[]
         throw new Error(`${cap(err instanceof Error ? err.message : "error", 200)} No proposal was created. Manual installation steps are in docs/orbit-ops-sys.md.`);
       }
       if (!status.ok) throw new Error(`The tier 3 helper refused: ${status.message}. No proposal was created.`);
-      const d = status.data as { hostname?: unknown; orbitJobsSocketPresent?: unknown; openOperation?: { action?: string; state?: string } | null };
-      if (d.openOperation) throw new Error(`Another tier 3 operation (${String(d.openOperation.action)}, ${String(d.openOperation.state)}) is still open on the host. No proposal was created; wait for its result.`);
+      const d = status.data as { hostname?: unknown; orbitJobsSocketPresent?: unknown; rebootCooldownUntil?: unknown; openOperation?: { action?: string; state?: string } | null };
+      if (d.openOperation) {
+        const sched = d.openOperation.action === "reboot_host" && d.openOperation.state === "scheduled";
+        throw new Error(`Another tier 3 operation (${String(d.openOperation.action)}, ${String(d.openOperation.state)}) is still open on the host. No proposal was created; ${sched ? "cancel the scheduled reboot first (ops_sys_cancel_reboot) or wait for it" : "wait for its result"}.`);
+      }
+      let rebootAt: string | undefined;
+      if (opts.rebootAt !== undefined) {
+        const problem = rebootAtProblem(opts.rebootAt, now().getTime(), REBOOT_PROPOSE_MIN_LEAD_MS);
+        if (problem) throw new Error(`${problem} No proposal was created.`);
+        rebootAt = opts.rebootAt;
+      }
+      if (action === "reboot_host" && typeof d.rebootCooldownUntil === "string" && Date.parse(d.rebootCooldownUntil) > (rebootAt ? Date.parse(rebootAt) : now().getTime())) {
+        throw new Error(`A reboot was issued recently; the next one is not accepted before ${d.rebootCooldownUntil}${rebootAt ? " (and that is later than the time asked for)" : ""}. No proposal was created.`);
+      }
       let target: SysTarget;
       if (isFunnelAction(action)) {
         const t = deps.jobsTarget();
@@ -191,14 +280,23 @@ export function sysOps(deps: { client?: SysClient; store: Store<SysLedgerEntry[]
         target = { host: t.host, port: t.port };
       } else {
         if (typeof d.hostname !== "string" || !d.hostname) throw new Error("The helper did not report its host name. No proposal was created.");
-        target = { host: d.hostname };
+        // Validated here, before any proposal or plan exists: a name the helper would itself refuse (an FQDN, an underscore, upper
+        // case) can never be confirmed, so it must not reach the owner as a card.
+        try {
+          target = validateHostTarget({ host: d.hostname });
+        } catch {
+          throw new Error(`The helper reported a host name ORBIT cannot use (${cap(JSON.stringify(d.hostname), 80)}): tier 3 needs a plain name of lowercase letters, digits and dashes. No proposal was created.`);
+        }
       }
+      let plan: Awaited<ReturnType<typeof obtainPlan>> | undefined;
+      if (action === "install_os_updates") plan = await obtainPlan();
+      const bind: DigestBind = { ...(plan ? { planDigest: plan.digest } : {}), ...(rebootAt ? { rebootAt } : {}) };
       const jobs = deps.jobState();
-      const { summary, warnings, display } = text(action, target, jobs);
-      const digest = sysDigestOf(action, target);
+      const { summary, warnings, display } = text(action, target, jobs, { ...(plan ? { plan } : {}), ...(rebootAt ? { rebootAt } : {}) });
+      const digest = sysDigestOf(action, target, bind);
       const p = proposals.propose({ kind: "ops_sys", action, summary, display, warnings, digest }, SYS_PROPOSAL_TTL_MS) as SysProposal;
       for (const id of pending.keys()) if (!proposals.peek(id)) pending.delete(id);
-      pending.set(p.id, { action, target, jobs, expiresAt: p.expiresAt });
+      pending.set(p.id, { action, target, jobs, expiresAt: p.expiresAt, bind });
       return p;
     },
 
@@ -207,11 +305,15 @@ export function sysOps(deps: { client?: SysClient; store: Store<SysLedgerEntry[]
     async confirm(p: SysProposal): Promise<{ code: number; body: unknown }> {
       const held = pending.get(p.id);
       pending.delete(p.id);
-      if (!held || held.action !== p.action || sysDigestOf(held.action, held.target) !== p.digest) {
+      if (!held || held.action !== p.action || sysDigestOf(held.action, held.target, held.bind) !== p.digest) {
         return { code: 409, body: { error: "This proposal no longer matches what was validated (or ORBIT restarted since). Nothing was done; ask again." } };
       }
       if (!client) return { code: 503, body: { error: "The tier 3 helper is not configured. Nothing was done." } };
       if (Date.parse(held.expiresAt) <= now().getTime()) return { code: 410, body: { error: "This proposal expired. Nothing was done; ask again." } };
+      if (held.bind.rebootAt) {
+        const problem = rebootAtProblem(held.bind.rebootAt, now().getTime());
+        if (problem) return { code: 410, body: { error: `The scheduled time can no longer be honoured (${problem}) Nothing was done; ask again.` } };
+      }
       if (DISRUPTIVE.includes(held.action)) {
         const worse = jobsWorsened(held.jobs, deps.jobState());
         if (worse) return { code: 409, body: { error: `Not done: the job situation changed since this card was shown. ${worse} Nothing was done; ask again to see the current state.` } };
@@ -219,10 +321,10 @@ export function sysOps(deps: { client?: SysClient; store: Store<SysLedgerEntry[]
       const opId = sysOpIdFor(p.id);
       const all = store.read();
       if (all.some((e) => e.proposalId === p.id || e.opId === opId)) return { code: 409, body: { error: "This confirmation was already used. Nothing was done." } };
-      save([...all, { opId, proposalId: p.id, action: p.action, summary: p.summary, target: held.target, digest: p.digest, confirmedAt: now().toISOString(), expiresAt: held.expiresAt, state: "dispatching", jobsAtConfirm: deps.jobState() }]);
+      save([...all, { opId, proposalId: p.id, action: p.action, summary: p.summary, target: held.target, digest: p.digest, confirmedAt: now().toISOString(), expiresAt: held.expiresAt, state: "dispatching", ...(held.bind.rebootAt ? { scheduledFor: held.bind.rebootAt } : {}), ...(held.bind.planDigest ? { planDigest: held.bind.planDigest } : {}), jobsAtConfirm: deps.jobState() }]);
       let reply;
       try {
-        reply = await client.call({ action: p.action, opId, target: held.target, digest: p.digest, expiresAt: held.expiresAt });
+        reply = await client.call({ action: p.action, opId, target: held.target, digest: p.digest, expiresAt: held.expiresAt, ...held.bind });
       } catch (err) {
         // The call may or may not have reached the helper: leave it dispatching; refresh() will ask the helper and settle it.
         update(opId, { error: cap(err instanceof Error ? err.message : "error", 200) });
@@ -242,12 +344,37 @@ export function sysOps(deps: { client?: SysClient; store: Store<SysLedgerEntry[]
           verified: false,
           opId,
           action: p.action,
-          note: "Dispatched to the privileged helper's separate runner. Nothing is verified yet: ORBIT will report the verified result, and ops_sys_operations shows it.",
+          note: held.bind.rebootAt
+            ? `Scheduled: the helper's runner waits until ${held.bind.rebootAt}. Nothing has been done and nothing is verified; cancel with ops_sys_cancel_reboot until it fires.`
+            : "Dispatched to the privileged helper's separate runner. Nothing is verified yet: ORBIT will report the verified result, and ops_sys_operations shows it.",
         },
       };
     },
 
     list: (): SysLedgerEntry[] => store.read(),
+
+    // Cancel a reboot that has not fired. Reports success ONLY when the helper confirms it won the cancel-versus-fire decision; any
+    // other answer (too late, unreachable, unknown) throws, and the reboot must then be treated as still possible.
+    async cancelReboot(opId?: string): Promise<{ cancelled: true; opId: string; alreadyCancelled: boolean; note: string }> {
+      if (!client) throw new Error("Tier 3 is not available: no helper client is configured. Nothing was cancelled.");
+      const open = store.read().filter((e) => e.action === "reboot_host" && !ended(e.state));
+      const target = opId ? store.read().find((e) => e.opId === opId && e.action === "reboot_host") : open.length === 1 ? open[0] : undefined;
+      if (!target) throw new Error(opId ? "That is not a reboot ORBIT has on record. Nothing was cancelled." : open.length ? "More than one reboot is open: name the operation id. Nothing was cancelled." : "There is no reboot waiting to fire (none scheduled or in flight). Nothing was cancelled.");
+      let reply;
+      try {
+        reply = await client.call({ action: "cancel_reboot", opId: target.opId });
+      } catch (err) {
+        throw new Error(`NOT cancelled: the helper could not be reached (${cap(err instanceof Error ? err.message : "error", 160)}). The reboot may still fire at ${target.scheduledFor ?? "its time"}; try again.`);
+      }
+      if (!reply.ok) {
+        if (reply.code === "too_late" || reply.code === "not_cancellable") await this.refresh();
+        throw new Error(`NOT cancelled: ${reply.message}`);
+      }
+      const at = now().toISOString();
+      const already = reply.data.alreadyCancelled === true;
+      if (!already || target.state !== "cancelled") update(target.opId, { state: "cancelled", result: "Cancelled by the owner before it fired. No reboot was issued by this operation.", cancelledAt: at, finishedAt: at, checkedAt: at, reportedAt: at });
+      return { cancelled: true, opId: target.opId, alreadyCancelled: already, note: already ? "It was already cancelled." : "Cancelled before it fired: the helper confirms no reboot was issued." };
+    },
 
     // Asks the helper about every operation that has not ended and records what it observed. Reports each end once. An unreachable
     // helper changes nothing (for example while the host reboots): the last known state stays, marked with when it was checked.

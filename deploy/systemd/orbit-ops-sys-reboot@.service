@@ -2,11 +2,13 @@
 Description=ORBIT tier 3 host reboot %i
 
 [Service]
-# One accepted reboot_host operation. It saves the pre-reboot boot id and the deployed commit, then runs `systemctl reboot` once.
+# One accepted reboot_host operation. A scheduled one first waits (up to 24 hours) for its time, WITHOUT the deploy lock, and can be
+# cancelled until it claims "fire". It then saves the pre-reboot boot id and the deployed commit, and runs `systemctl reboot` once.
 # It cannot verify anything itself (it dies with the host); orbit-ops-sys-recover.service verifies after the boot. No network.
 Type=oneshot
 ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/sys-run.ts %i reboot
-TimeoutStartSec=900
+# up to 24 h scheduled wait + lock wait + the reboot itself
+TimeoutStartSec=26h
 MemoryMax=128M
 TasksMax=32
 StateDirectory=orbit-ops-sys

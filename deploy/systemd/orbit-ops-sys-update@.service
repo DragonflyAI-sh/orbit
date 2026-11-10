@@ -1,14 +1,16 @@
 [Unit]
-Description=ORBIT tier 3 OS update %i (apt-get upgrade only, never a reboot)
+Description=ORBIT tier 3 OS update %i (apt-get upgrade of the confirmed plan only, never a reboot)
 
 [Service]
 # One accepted install_os_updates operation, started by orbit-ops-sys@.service. This is the least confined unit in the design and
 # cannot be otherwise: dpkg must write /usr, /etc, /var and /boot, run maintainer scripts and reach the package mirrors. What
-# limits it is what it runs: sys-run.ts only ever executes `apt-get update`, `apt-get -s upgrade`, `apt-get upgrade`,
-# `dpkg --audit` and `dpkg-query`, with policy checks before and after, and never a reboot or a service restart.
+# limits it is what it runs: sys-run.ts only ever executes `apt-get -s upgrade`, `apt-get upgrade`, `dpkg --audit` and
+# `dpkg-query`, only for the exact package plan the owner confirmed (recomputed and compared first), with checks before and
+# after, and never a reboot. It restarts no service itself and needrestart is suspended, but package maintainer scripts (openssh,
+# tailscale, libc, systemd and others) may restart daemons, and nothing here can prevent that.
 Type=oneshot
 ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/sys-run.ts %i update
-# lock wait + update + upgrade (2 h) + checks. When this limit hits, systemd (not ORBIT) stops the unit with SIGTERM only.
+# lock wait + simulation + upgrade (2 h) + checks. When this limit hits, systemd (not ORBIT) stops the unit with SIGTERM only.
 TimeoutStartSec=8400
 # Never SIGKILL apt/dpkg: a hard-killed dpkg leaves a half-configured system.
 SendSIGKILL=no

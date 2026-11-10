@@ -26,7 +26,7 @@ install -m 644 -o root -g root \
   /usr/local/lib/orbit/ops/
 install -m 644 -o root -g root \
   "$src"/systemd/orbit-ops-sys.socket "$src"/systemd/orbit-ops-sys@.service "$src"/systemd/orbit-ops-sys-update@.service \
-  "$src"/systemd/orbit-ops-sys-reboot@.service "$src"/systemd/orbit-ops-sys-funnel@.service "$src"/systemd/orbit-ops-sys-recover.service \
+  "$src"/systemd/orbit-ops-sys-reboot@.service "$src"/systemd/orbit-ops-sys-funnel@.service "$src"/systemd/orbit-ops-sys-plan@.service "$src"/systemd/orbit-ops-sys-recover.service \
   /etc/systemd/system/
 
 systemctl daemon-reload

@@ -149,13 +149,14 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
   if (sys) {
     // Each of these only PROPOSES, and only if every check passed: when one fails the tool throws and NO proposal exists. Three
     // separate actions, three separate confirmations: nothing is bundled.
-    const proposeSys = (name: string, action: SysMutatingAction, description: string): ChatTool => ({
+    const proposeSys = (name: string, action: SysMutatingAction, description: string, schedulable = false): ChatTool => ({
       name,
-      description: `${description} This does NOT do it: it creates a proposal that Rai must confirm with a button on the page (a separate confirmation for each action), and a privileged helper then carries it out. If this tool returns an error, no proposal exists: say so, and never claim a proposal or an operation exists unless this tool returned a proposalId. Never say it happened until ops_sys_operations shows 'verified'; 'accepted', 'running' and 'rebooting' are not success.`,
-      parameters: obj({}, []),
+      description: `${description} This does NOT do it: it creates a proposal that Rai must confirm with a button on the page (a separate confirmation for each action), and a privileged helper then carries it out. If this tool returns an error, no proposal exists: say so, and never claim a proposal or an operation exists unless this tool returned a proposalId. Never say it happened until ops_sys_operations shows 'verified'; 'accepted', 'scheduled', 'running' and 'rebooting' are not success.`,
+      parameters: schedulable ? obj({ at: str("Optional. Reboot at this UTC time, YYYY-MM-DDTHH:MM:SS.sssZ, between 2 minutes and 24 hours ahead. Omit to reboot now (after confirmation).") }, []) : obj({}, []),
       run: async (a) => {
-        if (Object.keys(a).length) throw new Error("This tool takes no arguments.");
-        const p = await sys.propose(action);
+        if (Object.keys(a).some((k) => !(schedulable && k === "at"))) throw new Error(schedulable ? "This tool takes only an optional 'at' time." : "This tool takes no arguments.");
+        if (schedulable && a.at !== undefined && typeof a.at !== "string") throw new Error("'at' must be a UTC time string.");
+        const p = await sys.propose(action, schedulable && typeof a.at === "string" ? { rebootAt: a.at } : {});
         return {
           value: { status: "pending-confirmation", executed: false, proposalId: p.id, action, summary: p.summary, warnings: p.warnings, details: p.display, digest: p.digest, expiresAt: p.expiresAt, note: "Nothing has been done. Rai must click Confirm on the page, after reading the warnings." },
           provenance: "live",
@@ -164,13 +165,23 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
       },
     });
     tools.push(
-      proposeSys("ops_propose_os_updates", "install_os_updates", "Propose installing pending OS package upgrades on this shared host (apt-get upgrade only; never a distribution upgrade, removal or reboot). Affects production OpenClaw as well as ORBIT."),
-      proposeSys("ops_propose_reboot_host", "reboot_host", "Propose rebooting this whole shared host (ORBIT, production OpenClaw and the job listener all go down). Separate from OS updates."),
+      proposeSys("ops_propose_os_updates", "install_os_updates", "Propose installing pending OS package upgrades on this shared host (apt-get upgrade only; never a distribution upgrade, removal or reboot). First the helper refreshes apt metadata (apt-get update) and simulates the upgrade to get an exact package/version plan; the card lists it and flags kernel, libc, systemd, openssh and tailscale. Nothing is installed by proposing. Affects production OpenClaw as well as ORBIT."),
+      proposeSys("ops_propose_reboot_host", "reboot_host", "Propose rebooting this whole shared host (ORBIT, production OpenClaw and the job listener all go down), now or at an optional UTC time up to 24 hours ahead. A scheduled reboot can be cancelled with ops_sys_cancel_reboot until it fires. Separate from OS updates.", true),
       proposeSys("ops_propose_funnel_enable", "funnel_enable", "Propose enabling the existing public Tailscale Funnel of the orbit-jobs node. Never touches this host's own Tailscale; fails closed if the orbit-jobs node is not on this host."),
       proposeSys("ops_propose_funnel_disable", "funnel_disable", "Propose disabling the existing public Tailscale Funnel of the orbit-jobs node (cuts running jobs off from ORBIT; active jobs are listed in the warning). Never touches this host's own Tailscale."),
       {
+        name: "ops_sys_cancel_reboot",
+        description: "Cancel a confirmed reboot that has not fired yet (a scheduled one, or one still waiting to start). Succeeds ONLY if the helper confirms nothing was issued; if it says too late, the reboot was dispatched and was NOT cancelled: say exactly that. The cancellation is recorded and audited. Takes an optional opId when more than one is open.",
+        parameters: obj({ opId: str("Optional operation id of the reboot (from ops_sys_operations).") }, []),
+        run: async (a) => {
+          if (Object.keys(a).some((k) => k !== "opId")) throw new Error("This tool takes only an optional opId.");
+          const r = await sys.cancelReboot(typeof a.opId === "string" ? a.opId : undefined);
+          return { value: r, provenance: "live", source: "ops-sys/ledger" };
+        },
+      },
+      {
         name: "ops_sys_operations",
-        description: "Tier 3 operations Rai has confirmed (OS updates, reboot, Funnel), newest first, with what the helper actually observed: state, verification and evidence. Refreshes in-flight ones from the helper first. 'accepted', 'running' and 'rebooting' mean NOT verified yet; 'unverified' means a command ran but nothing could confirm the result.",
+        description: "Tier 3 operations Rai has confirmed (OS updates, reboot, Funnel), newest first, with what the helper actually observed: state, verification and evidence. Refreshes in-flight ones from the helper first. 'accepted', 'scheduled', 'running' and 'rebooting' mean NOT verified yet ('scheduled' = not yet fired, still cancellable); 'cancelled' means withdrawn before it fired; 'unverified' means a command ran but nothing could confirm the result.",
         parameters: obj({}, []),
         run: async (a) => {
           if (Object.keys(a).length) throw new Error("This tool takes no arguments.");

@@ -1,17 +1,22 @@
 // Tier 3 privileged side (src/ops/sys-*.ts). Everything runs against FAKES: a fake exec that records every command and answers from a
 // script, real temp directories for state, and a fake clock. No test executes apt, systemctl, tailscale or anything else on the host.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Exec, Probe } from "../src/ops/admin-core.ts";
 import { SYS_CONFIG, activePath, loadRecord, type SysConfig, type SysEnv } from "../src/ops/sys-core.ts";
+import { cancelReboot } from "../src/ops/sys-helper.ts";
 import { handle, settleIfDead, type SysAudit } from "../src/ops/sys-helper.ts";
 import {
   SYS_ACTIONS,
   SYS_MAX_TTL_MS,
   SYS_MUTATING_ACTIONS,
+  planDigestOf,
+  parsePlan,
+  flagPlan,
+  type PlanEntry,
   bootKey,
   parseSysRequest,
   sysDigestOf,
@@ -21,7 +26,7 @@ import {
   type SysRecord,
   type SysTarget,
 } from "../src/ops/sys-protocol.ts";
-import { parseSimulation, recoverAfterBoot, runOperation, viewFunnel, type RunKind } from "../src/ops/sys-run.ts";
+import { awaitSchedule, recoverAfterBoot, runOperation, viewFunnel, type RunKind } from "../src/ops/sys-run.ts";
 
 const SHA_A = "a".repeat(40);
 const HOST = "orbit-dedicated-8";
@@ -87,11 +92,14 @@ const calls = (w: World) => w.execs.map((e) => `${e.file.split("/").pop()} ${e.a
 const hostTarget = (): SysTarget => ({ host: HOST });
 const funnelTarget = (): FunnelTarget => ({ host: JOBS_HOST, port: PORT });
 const targetFor = (a: SysMutatingAction): SysTarget => (a === "funnel_enable" || a === "funnel_disable" ? funnelTarget() : hostTarget());
+const PLAN_ENTRIES: PlanEntry[] = [["bar", "2.0", "2.1"], ["libfoo1", "1.0", "1.1"]];
+const PLAN_DIGEST = planDigestOf(PLAN_ENTRIES);
 function req(w: World, action: SysMutatingAction, over: Record<string, unknown> = {}) {
   const target = targetFor(action);
-  return { action, opId: OP, target, digest: sysDigestOf(action, target), expiresAt: new Date(w.clock() + 10 * 60_000).toISOString(), ...over };
+  const bind = action === "install_os_updates" ? { planDigest: (over.planDigest as string | undefined) ?? PLAN_DIGEST } : action === "reboot_host" && over.rebootAt ? { rebootAt: over.rebootAt as string } : {};
+  return { action, opId: OP, target, digest: sysDigestOf(action, target, bind), expiresAt: new Date(w.clock() + 10 * 60_000).toISOString(), ...(action === "install_os_updates" ? { planDigest: PLAN_DIGEST } : {}), ...over };
 }
-const send = async (w: World, r: object) => JSON.parse(await handle(JSON.stringify(r), w.env, (a) => w.fronts.push(a), w.cfg)) as { ok: boolean; data?: any; error?: { code: string; message: string } };
+const send = async (w: World, r: object) => JSON.parse(await handle(JSON.stringify(r), w.env, (a) => w.fronts.push(a), w.cfg, (l) => w.audit.push(l))) as { ok: boolean; data?: any; error?: { code: string; message: string } };
 // The front accepts and dispatches; the runner is then driven directly (as the systemd unit would).
 async function accept(w: World, action: SysMutatingAction, over: Record<string, unknown> = {}) {
   const out = await send(w, req(w, action, over));
@@ -99,8 +107,8 @@ async function accept(w: World, action: SysMutatingAction, over: Record<string, 
   w.execs.length = 0;
   return out;
 }
-const kindOf = (a: SysMutatingAction): RunKind => (a === "install_os_updates" ? "update" : a === "reboot_host" ? "reboot" : "funnel");
-const run = async (w: World, action: SysMutatingAction, opId = OP) => (await runOperation(opId, kindOf(action), w.env, w.cfg, (l) => w.audit.push(l)))!;
+const kindOf = (a: SysMutatingAction | "plan_os_updates"): RunKind => (a === "install_os_updates" ? "update" : a === "plan_os_updates" ? "plan" : a === "reboot_host" ? "reboot" : "funnel");
+const run = async (w: World, action: SysMutatingAction | "plan_os_updates", opId = OP) => (await runOperation(opId, kindOf(action), w.env, w.cfg, (l) => w.audit.push(l)))!;
 const rec = (w: World, opId = OP) => loadRecord(w.cfg, opId)!;
 
 // ---------------------------------------------------------------- validation: strict, fixed, no room for injection
@@ -108,7 +116,7 @@ const rec = (w: World, opId = OP) => loadRecord(w.cfg, opId)!;
 test("requests are strict: fixed actions only, no extra keys, bad ids/targets/digests/expiries refused", async () => {
   const w = world();
   assert.deepEqual([...SYS_MUTATING_ACTIONS], ["install_os_updates", "reboot_host", "funnel_enable", "funnel_disable"]);
-  assert.deepEqual([...SYS_ACTIONS], ["install_os_updates", "reboot_host", "funnel_enable", "funnel_disable", "sys_status", "op_status"]);
+  assert.deepEqual([...SYS_ACTIONS], ["install_os_updates", "reboot_host", "funnel_enable", "funnel_disable", "plan_os_updates", "cancel_reboot", "sys_status", "op_status"]);
   const bad = (r: unknown, code: string) => assert.throws(() => parseSysRequest(typeof r === "string" ? r : JSON.stringify(r)), (e: { code?: string }) => e.code === code, JSON.stringify(r).slice(0, 80));
   bad("nope", "bad_request");
   bad("[]", "bad_request");
@@ -184,7 +192,7 @@ test("a confirmation for another host is refused (wrong target), for updates and
   const w = world();
   for (const action of ["install_os_updates", "reboot_host"] as const) {
     const target = { host: "some-other-host" };
-    const r = await send(w, { action, opId: OP, target, digest: sysDigestOf(action, target), expiresAt: new Date(w.clock() + 60_000).toISOString() });
+    const r = await send(w, { action, opId: OP, target, digest: sysDigestOf(action, target, action === "install_os_updates" ? { planDigest: PLAN_DIGEST } : {}), expiresAt: new Date(w.clock() + 60_000).toISOString(), ...(action === "install_os_updates" ? { planDigest: PLAN_DIGEST } : {}) });
     assert.equal(r.error?.code, "wrong_target", action);
   }
   assert.deepEqual(w.execs, []);
@@ -231,8 +239,7 @@ test("concurrency: one operation at a time; the slot survives a restart; a secon
   w.execs.length = 0;
   // a different operation (any action) while the first is open
   for (const action of SYS_MUTATING_ACTIONS) {
-    const target = targetFor(action);
-    const second = await send(w, { action, opId: OP2, target, digest: sysDigestOf(action, target), expiresAt: new Date(w.clock() + 60_000).toISOString() });
+    const second = await send(w, req(w, action, { opId: OP2 }));
     assert.equal(second.error?.code, "busy", action);
   }
   assert.equal(readFileSync(activePath(w.cfg), "utf8"), OP);
@@ -274,25 +281,11 @@ test("the front fails the operation honestly when the runner cannot be started",
   assert.equal(existsSync(activePath(w.cfg)), false, "the slot is free again");
 });
 
-test("reboots have a cool-down: a second reboot soon after one was accepted is refused", async () => {
-  const w = world();
-  await send(w, req(w, "reboot_host"));
-  const r = rec(w);
-  r.state = "failed"; // even a finished one: the cool-down is about reboot loops
-  writeFileSync(join(w.cfg.stateDir, "ops", `${OP}.json`), JSON.stringify(r));
-  rmSync(activePath(w.cfg), { force: true });
-  const again = await send(w, req(w, "reboot_host", { opId: OP2 }));
-  assert.equal(again.error?.code, "cooldown");
-  w.advance(w.cfg.rebootCooldownMs + 1000);
-  const later = await send(w, req(w, "reboot_host", { opId: OP2, expiresAt: new Date(w.clock() + 60_000).toISOString() }));
-  assert.equal(later.ok, true);
-});
-
 test("sys_status reports presence facts only (never a Funnel or reachability claim) and any open operation", async () => {
   const w = world();
   const s = await send(w, { action: "sys_status" });
   assert.equal(s.ok, true);
-  assert.deepEqual(Object.keys(s.data).sort(), ["bootKey", "hostname", "installed", "openOperation", "orbitJobsSocketPresent", "rebootRequired", "tier"]);
+  assert.deepEqual(Object.keys(s.data).sort(), ["bootKey", "hostname", "installed", "openOperation", "orbitJobsSocketPresent", "rebootCooldownUntil", "rebootRequired", "tier"]);
   assert.equal(s.data.hostname, HOST);
   assert.equal(s.data.orbitJobsSocketPresent, true);
   assert.equal(s.data.bootKey, bootKey(BOOT1));
@@ -303,30 +296,152 @@ test("sys_status reports presence facts only (never a Funnel or reachability cla
   assert.equal((await send(none, { action: "sys_status" })).data.orbitJobsSocketPresent, false);
 });
 
-// ---------------------------------------------------------------- OS updates
+// ---------------------------------------------------------------- OS updates: plan, then execute exactly that plan
 
-const PLAN2 = "Inst libfoo1 [1.0] (1.1 Ubuntu:24.04/noble-updates [amd64])\nInst bar [2.0] (2.1 Ubuntu:24.04/noble-security [amd64])\nConf libfoo1 (1.1)\n";
-const PKGS_BEFORE = "ii libfoo1\nii bar\nii baz\nrc old\n";
+const SUMMARY = (up: number, add = 0, rem = 0) => `${up} upgraded, ${add} newly installed, ${rem} to remove and 0 not upgraded.\n`;
+const PLAN2 = `Reading package lists...\nInst libfoo1 [1.0] (1.1 Ubuntu:24.04/noble-updates [amd64])\nInst bar [2.0] (2.1 Ubuntu:24.04/noble-security [amd64])\nConf libfoo1 (1.1 Ubuntu:24.04/noble-updates [amd64])\n${SUMMARY(2)}`;
+const EMPTY = SUMMARY(0);
+const PKGS_BEFORE = "ii libfoo1 1.0\nii bar:amd64 2.0\nii baz 1\nrc old 0\n";
+const PKGS_AFTER = "ii libfoo1 1.1\nii bar:amd64 2.1\nii baz 1\n";
 type Upd = { audit?: Exec[]; update?: Exec; sim?: Exec[]; upgrade?: Exec; before?: string; after?: string };
 function aptScript(w: World, u: Upd = {}) {
   let audits = 0;
   let sims = 0;
   let queries = 0;
+  const simList = u.sim ?? [ok(PLAN2), ok(EMPTY)];
   w.script.exec = (file, args) => {
     const name = file.split("/").pop();
     if (name === "dpkg") return (u.audit ?? [ok()])[Math.min(audits++, (u.audit ?? [ok()]).length - 1)];
-    if (name === "dpkg-query") return ok(queries++ === 0 ? (u.before ?? PKGS_BEFORE) : (u.after ?? PKGS_BEFORE));
+    if (name === "dpkg-query") return ok(queries++ === 0 ? (u.before ?? PKGS_BEFORE) : (u.after ?? PKGS_AFTER));
     if (name === "apt-get") {
       if (args.includes("update")) return u.update ?? ok();
-      if (args.includes("-s")) return (u.sim ?? [ok(PLAN2), ok("")])[Math.min(sims++, (u.sim ?? [ok(PLAN2), ok("")]).length - 1)];
+      if (args.includes("-s")) return simList[Math.min(sims++, simList.length - 1)];
       return u.upgrade ?? ok("done");
     }
     return undefined;
   };
 }
 const ALLOWED_UPDATE_BINARIES = new Set(["apt-get", "dpkg", "dpkg-query"]);
+const PLAN_ID = "3".repeat(40);
+const planReq = (opId = PLAN_ID) => ({ action: "plan_os_updates", opId });
 
-test("OS updates: apt-get upgrade only, verified from dpkg and ORBIT health, reboot-required reported but never acted on", async () => {
+test("plan_os_updates: apt-get update (metadata refresh) then apt-get -s upgrade; installs and upgrades NOTHING; the plan is canonical and flagged", async () => {
+  const w = world();
+  aptScript(w, { sim: [ok(`${PLAN2.replace("Conf", "Conf")}`)] });
+  const out = await send(w, planReq());
+  assert.equal(out.ok, true);
+  assert.deepEqual(calls(w), [`systemctl start --no-block orbit-ops-sys-plan@${PLAN_ID}.service`]);
+  w.execs.length = 0;
+  const r = await run(w, "plan_os_updates", PLAN_ID);
+  assert.equal(r.state, "verified");
+  assert.deepEqual(calls(w), ["dpkg --audit", "apt-get -o DPkg::Lock::Timeout=120 update", "apt-get -o DPkg::Lock::Timeout=120 -s upgrade"]);
+  assert.ok(!w.execs.some((e) => e.args.includes("upgrade") && !e.args.includes("-s")), "no upgrade, only the simulation");
+  assert.deepEqual(r.plan!.upgrades, PLAN_ENTRIES);
+  assert.equal(r.plan!.digest, PLAN_DIGEST);
+  assert.match(r.summary!, /Only apt metadata was refreshed; no package was installed or upgraded/);
+  assert.ok(r.steps.some((s) => /refreshes apt package-list metadata/.test(s.detail)));
+  // the plan travels back through op_status (bounded, redacted) with its digest
+  const st = await send(w, { action: "op_status", opId: PLAN_ID });
+  assert.equal(st.data.operation.plan.digestKey, PLAN_DIGEST.slice(0, 24));
+  assert.deepEqual(st.data.operation.plan.upgrades, PLAN_ENTRIES);
+  assert.equal(existsSync(activePath(w.cfg)), false, "the slot is free again");
+});
+
+test("plan flags: kernel, libc, systemd, openssh and tailscale packages are identified", () => {
+  const names = ["linux-image-6.8.0-50-generic", "linux-modules-6.8.0-50-generic", "linux-generic", "libc6", "libc-bin", "libc6:i386", "systemd", "libsystemd0", "libudev1", "udev", "openssh-server", "openssh-client", "tailscale", "curl", "tailscale-archive-keyring", "libcurl4", "linux-firmware"];
+  const f = flagPlan(names.map((n) => [n, "1", "2"] as PlanEntry));
+  assert.deepEqual(f.kernel, ["linux-image-6.8.0-50-generic", "linux-modules-6.8.0-50-generic", "linux-generic"]);
+  assert.deepEqual(f.libc, ["libc6", "libc-bin", "libc6:i386"]);
+  assert.deepEqual(f.systemd, ["systemd", "libsystemd0", "libudev1", "udev"]);
+  assert.deepEqual(f.openssh, ["openssh-server", "openssh-client"]);
+  assert.deepEqual(f.tailscale, ["tailscale"]);
+});
+
+test("plan parsing is strict: removals, new packages, malformed lines, missing or disagreeing summaries invalidate the plan", () => {
+  const ok2 = parsePlan(PLAN2);
+  assert.ok(ok2.ok && ok2.upgrades.length === 2 && ok2.upgrades[0]![0] === "bar", "sorted by package name");
+  const p = (s: string) => parsePlan(s);
+  assert.equal(p(`Remv oldlib [1]\n${SUMMARY(0, 0, 1)}`).ok, false);
+  const rem = p(`Inst a [1] (2 x [amd64])\nRemv oldlib [1]\n${SUMMARY(1, 0, 1)}`);
+  assert.equal(rem.ok, false);
+  assert.deepEqual(!rem.ok && rem.removals, ["oldlib"]);
+  const add = p(`Inst a [1] (2 x [amd64])\nInst brand-new (1 x [amd64])\n${SUMMARY(1, 1)}`);
+  assert.equal(add.ok, false);
+  assert.deepEqual(!add.ok && add.newInstalls, ["brand-new"]);
+  assert.equal(p(`Inst a [1] (2 x [amd64])\n`).ok, false, "no summary line");
+  assert.equal(p(`Inst a [1] (2 x [amd64])\n${SUMMARY(2)}`).ok, false, "summary disagrees with the lines");
+  assert.equal(p(`Inst weird line without version\n${SUMMARY(1)}`).ok, false, "unparseable Inst line");
+  assert.equal(p(`Inst a [1;rm -rf /] (2 x [amd64])\n${SUMMARY(1)}`).ok, false, "a version that is not a version");
+  assert.equal(p(`Inst A_B [1] (2 x [amd64])\n${SUMMARY(1)}`).ok, false, "a package name that is not a package name");
+  assert.equal(p(`Inst a [1] (2 x [amd64])\nInst a [1] (2 x [amd64])\n${SUMMARY(2)}`).ok, false, "duplicate package");
+  assert.equal(p(SUMMARY(0)).ok, true);
+  // the digest binds the full canonical plan: any package or version change is a different digest, order is irrelevant
+  const base: PlanEntry[] = [["a", "1", "2"], ["b", "1", "2"]];
+  assert.equal(planDigestOf(base), planDigestOf([base[1]!, base[0]!]));
+  assert.notEqual(planDigestOf(base), planDigestOf([["a", "1", "2"], ["b", "1", "3"]]), "a new target version");
+  assert.notEqual(planDigestOf(base), planDigestOf([["a", "1", "2"]]), "a missing package");
+  assert.notEqual(planDigestOf(base), planDigestOf([...base, ["c", "1", "2"]]), "an extra package");
+  assert.notEqual(planDigestOf(base), planDigestOf([["a", "0", "2"], ["b", "1", "2"]]), "another installed version");
+});
+
+test("plan_os_updates failures: busy package manager, failed refresh, malformed or policy-violating simulation: failed, never a plan, nothing killed", async () => {
+  const lock = "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 4242 (unattended-upgr)";
+  const cases: [string, Upd, RegExp][] = [
+    ["busy at the refresh", { update: fail(100, lock) }, /holds the package lock.*not interrupted and no lock was removed/],
+    ["refresh failed", { update: fail(100, "E: Failed to fetch") }, /refreshing the package lists failed/],
+    ["busy at the simulation", { sim: [fail(100, lock)] }, /package manager is busy/],
+    ["simulation failed", { sim: [fail(1, "E: boom")] }, /simulation failed \(exit 1\)/],
+    ["malformed output", { sim: [ok("Inst x [1] (2 y)\n")] }, /could not be trusted/],
+    ["removal", { sim: [ok(`Inst a [1] (2 x [amd64])\nRemv gone [1]\n${SUMMARY(1, 0, 1)}`)] }, /policy refuses.*remove gone/],
+    ["new package", { sim: [ok(`Inst fresh (1 x [amd64])\n${SUMMARY(0, 1)}`)] }, /policy refuses.*newly install fresh/],
+    ["dirty dpkg", { audit: [ok("half configured: foo")] }, /not in a clean state/],
+  ];
+  for (const [name, upd, re] of cases) {
+    const w = world();
+    aptScript(w, upd);
+    await send(w, planReq());
+    const r = await run(w, "plan_os_updates", PLAN_ID);
+    assert.equal(r.state, "failed", name);
+    assert.match(r.summary!, re, name);
+    assert.equal(r.plan, undefined, name);
+    assert.ok(!w.execs.some((e) => e.args.includes("upgrade") && !e.args.includes("-s")), name);
+    assert.ok(!/kill|fuser|rm |lsof|pkill/.test(calls(w).join("\n")), name);
+    for (const e of w.execs) assert.ok(ALLOWED_UPDATE_BINARIES.has(e.file.split("/").pop()!) || e.file.endsWith("systemctl"), name);
+  }
+  // a timeout at the refresh
+  const w = world();
+  aptScript(w);
+  const base = w.script.exec;
+  w.script.exec = (f, a, ww) => (f.endsWith("apt-get") && a.includes("update") ? { code: null, stdout: "", stderr: "", timedOut: true } : base(f, a, ww));
+  await send(w, planReq());
+  assert.equal((await run(w, "plan_os_updates", PLAN_ID)).state, "failed");
+  // nothing pending: no_change, and only a refresh
+  const n = world();
+  aptScript(n, { sim: [ok(EMPTY)] });
+  await send(n, planReq());
+  const nr = await run(n, "plan_os_updates", PLAN_ID);
+  assert.equal(nr.state, "no_change");
+  assert.match(nr.summary!, /no package was installed or upgraded/);
+  // too many packages: refused, never truncated
+  const big = world();
+  const lines = Array.from({ length: 151 }, (_, i) => `Inst pkg${i} [1] (2 x [amd64])\n`).join("");
+  aptScript(big, { sim: [ok(`${lines}${SUMMARY(151)}`)] });
+  await send(big, planReq());
+  const br = await run(big, "plan_os_updates", PLAN_ID);
+  assert.equal(br.state, "failed");
+  assert.match(br.summary!, /151 packages.*more than the 150/);
+});
+
+test("plan_os_updates shares the one-operation slot: while another operation is open it is busy, and a plan takes no digest or confirmation", async () => {
+  const w = world();
+  await send(w, req(w, "reboot_host"));
+  w.execs.length = 0;
+  assert.equal((await send(w, planReq())).error?.code, "busy");
+  assert.deepEqual(w.execs, []);
+  assert.equal((await send(world(), { ...planReq(), digest: "a".repeat(64) })).error?.code, "bad_arguments");
+});
+
+test("OS updates: the confirmed plan only; apt-get upgrade only, verified from dpkg, plan versions and ORBIT health; no apt-get update, no reboot", async () => {
   const w = world();
   aptScript(w);
   writeFileSync(w.cfg.rebootRequiredFile, "*** System restart required ***\n");
@@ -335,57 +450,78 @@ test("OS updates: apt-get upgrade only, verified from dpkg and ORBIT health, reb
   assert.equal(r.state, "verified");
   assert.equal(r.verification?.checked, true);
   assert.equal(r.verification?.healthy, true);
-  assert.deepEqual(r.verification?.evidence, { planned: 2, aptExit: 0, dpkgAuditClean: true, packagesMissingAfter: 0, upgradablesLeft: 0, rebootRequired: true, rebootPerformed: false, orbitHealthy: true });
+  assert.deepEqual(r.verification?.evidence, { planned: 2, aptExit: 0, dpkgAuditClean: true, packagesMissingAfter: 0, versionsNotAsPlanned: 0, upgradablesLeft: 0, rebootRequired: true, rebootPerformed: false, orbitHealthy: true });
   assert.match(r.summary!, /No reboot was performed; the host says a reboot is required \(propose it separately\)/);
   assert.match(r.summary!, /OpenClaw.*not inspected/);
-  // the only binaries ever run, and the exact upgrade command
+  assert.match(r.summary!, /maintainer scripts may have restarted daemons/);
+  assert.ok(!/never restart|no service restart/i.test(JSON.stringify(r)), "no claim that services are never restarted");
   for (const e of w.execs) assert.ok(ALLOWED_UPDATE_BINARIES.has(e.file.split("/").pop()!), e.file);
   const all = calls(w).join("\n");
   assert.ok(!/systemctl|reboot|shutdown|poweroff|needrestart|dist-upgrade|full-upgrade|autoremove|remove|purge|kill|fuser|rm /.test(all), all);
+  assert.ok(!w.execs.some((e) => e.args.includes("update")), "the refresh belongs to the plan step; execution never refreshes");
+  // the plan is recomputed BEFORE anything is upgraded
+  const cs = calls(w);
+  assert.ok(cs.findIndex((c) => c.includes(" -s upgrade")) < cs.findIndex((c) => c.includes(" upgrade") && !c.includes(" -s ")));
   const upgrade = w.execs.find((e) => e.args.includes("upgrade") && !e.args.includes("-s"))!;
   assert.deepEqual(upgrade.args, ["-y", "-o", "Dpkg::Options::=--force-confold", "-o", "Dpkg::Options::=--force-confdef", "-o", "DPkg::Lock::Timeout=120", "upgrade"]);
-  // package managers are never killed (no timeout kill), and services are not restarted by the package tooling
   for (const e of w.execs.filter((x) => x.file.endsWith("apt-get"))) assert.equal((e.opts as { noKill?: boolean }).noKill, true);
   assert.equal((upgrade.opts as { env: Record<string, string> }).env.NEEDRESTART_SUSPEND, "1");
   assert.equal((upgrade.opts as { env: Record<string, string> }).env.DEBIAN_FRONTEND, "noninteractive");
   assert.equal(existsSync(activePath(w.cfg)), false);
 });
 
-test("OS updates: nothing pending is no_change, not success", async () => {
+test("OS updates plan drift: a different package or version at execution is refused BEFORE installing, and a new proposal is required", async () => {
+  const drifts: [string, string][] = [
+    ["a new version", PLAN2.replace("(2.1 ", "(2.2 ")],
+    ["an extra package", `Inst extra [1] (2 x [amd64])\n${PLAN2.replace(SUMMARY(2), "")}${SUMMARY(3)}`],
+    ["a package gone", `Inst bar [2.0] (2.1 Ubuntu:24.04/noble-security [amd64])\n${SUMMARY(1)}`],
+    ["nothing pending any more", EMPTY],
+  ];
+  for (const [name, sim] of drifts) {
+    const w = world();
+    aptScript(w, { sim: [ok(sim)] });
+    await accept(w, "install_os_updates");
+    const r = await run(w, "install_os_updates");
+    assert.equal(r.state, "failed", name);
+    assert.match(r.summary!, /no longer the plan you confirmed.*Ask for a new plan/, name);
+    assert.equal(r.verification?.checked, true, name);
+    assert.ok(!w.execs.some((e) => e.args.includes("upgrade") && !e.args.includes("-s")), `${name}: nothing was upgraded`);
+    assert.ok(!w.execs.some((e) => e.file.endsWith("dpkg-query")), name);
+  }
+  // an install request whose plan digest is not the plan on the host is refused the same way, and a request with no plan is refused at the front
   const w = world();
-  aptScript(w, { sim: [ok("")] });
-  await accept(w, "install_os_updates");
-  const r = await run(w, "install_os_updates");
-  assert.equal(r.state, "no_change");
-  assert.ok(!calls(w).some((c) => c.includes(" upgrade") && !c.includes(" -s ")), "the real upgrade was never run");
+  aptScript(w);
+  await accept(w, "install_os_updates", { planDigest: "f".repeat(64) });
+  assert.equal((await run(w, "install_os_updates")).state, "failed");
+  const bare = req(w, "install_os_updates");
+  delete (bare as Record<string, unknown>).planDigest;
+  assert.equal((await send(w, { ...bare, opId: OP2 })).error?.code, "bad_arguments");
 });
 
-test("OS updates policy: a plan that removes or newly installs anything is refused before any change", async () => {
-  for (const [plan, what] of [["Inst a [1] (2 x)\nRemv oldlib [1]\n", /remove oldlib/], ["Inst a [1] (2 x)\nInst brand-new (1 x)\n", /newly install brand-new/]] as const) {
+test("OS updates: a policy-violating or malformed simulation at execution is refused before any change", async () => {
+  for (const [sim, re] of [
+    [`Inst a [1] (2 x [amd64])\nRemv oldlib [1]\n${SUMMARY(1, 0, 1)}`, /remove oldlib/],
+    [`Inst a [1] (2 x [amd64])\nInst brand-new (1 x [amd64])\n${SUMMARY(1, 1)}`, /newly install brand-new/],
+    ["garbage", /could not be trusted/],
+  ] as const) {
     const w = world();
-    aptScript(w, { sim: [ok(plan)] });
+    aptScript(w, { sim: [ok(sim)] });
     await accept(w, "install_os_updates");
     const r = await run(w, "install_os_updates");
     assert.equal(r.state, "failed");
-    assert.match(r.summary!, /policy refuses/);
-    assert.match(r.summary!, what);
+    assert.match(r.summary!, re);
     assert.ok(!w.execs.some((e) => e.args.includes("upgrade") && !e.args.includes("-s")), "no real upgrade ran");
   }
-  assert.deepEqual(parseSimulation(PLAN2), { upgrades: ["libfoo1", "bar"], removals: [], newInstalls: [] });
-  assert.deepEqual(parseSimulation("Remv x [1]\nInst y (2 z)\n"), { upgrades: [], removals: ["x"], newInstalls: ["y"] });
 });
 
-test("OS updates: package-manager contention fails safely, kills nothing and removes no lock", async () => {
+test("OS updates: package-manager contention at execution fails safely, kills nothing and removes no lock", async () => {
   const lock = "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 4242 (unattended-upgr)";
-  // contention at the refresh
   const w = world();
-  aptScript(w, { update: fail(100, lock) });
+  aptScript(w, { sim: [fail(100, lock)] });
   await accept(w, "install_os_updates");
   const r = await run(w, "install_os_updates");
   assert.equal(r.state, "failed");
-  assert.match(r.summary!, /holds the package lock/);
-  assert.match(r.summary!, /not interrupted and no lock was removed/);
-  assert.equal(r.verification?.checked, false);
+  assert.match(r.summary!, /package manager is busy.*not interrupted and no lock was removed/);
   // contention appearing only at the upgrade itself
   const w2 = world();
   aptScript(w2, { upgrade: fail(100, lock) });
@@ -398,8 +534,7 @@ test("OS updates: package-manager contention fails safely, kills nothing and rem
     assert.ok(!/kill|fuser|rm |lock-frontend|lsof|pkill/.test(all.replace(/DPkg::Lock::Timeout/g, "")), "no kill and no lock removal");
     for (const e of ww.execs) assert.ok(ALLOWED_UPDATE_BINARIES.has(e.file.split("/").pop()!));
   }
-  // the lock wait is bounded by apt itself, not by killing it
-  assert.ok(w.execs[1]!.args.includes("DPkg::Lock::Timeout=120"));
+  assert.ok(w2.execs.find((e) => e.args.includes("-s"))!.args.includes("DPkg::Lock::Timeout=120"), "the lock wait is bounded by apt itself, not by killing it");
 });
 
 test("OS updates: a dirty dpkg state before starting refuses to run apt at all", async () => {
@@ -413,37 +548,39 @@ test("OS updates: a dirty dpkg state before starting refuses to run apt at all",
 });
 
 test("OS updates: failures and unexpected side effects are reported, never as success", async () => {
-  // apt exits non-zero
   let w = world();
   aptScript(w, { upgrade: fail(100, "E: Sub-process /usr/bin/dpkg returned an error code (1)") });
   await accept(w, "install_os_updates");
   let r = await run(w, "install_os_updates");
   assert.equal(r.state, "failed");
   assert.match(r.summary!, /apt-get upgrade failed \(exit 100\); packages may be partly upgraded/);
-  // dpkg dirty afterwards
   w = world();
   aptScript(w, { audit: [ok(), ok("half configured: bar")] });
   await accept(w, "install_os_updates");
   r = await run(w, "install_os_updates");
   assert.equal(r.state, "failed");
   assert.match(r.summary!, /dpkg --audit reports problems/);
-  // a package disappeared although apt exited 0
   w = world();
-  aptScript(w, { after: "ii libfoo1\nii bar\n" });
+  aptScript(w, { after: "ii libfoo1 1.1\nii bar 2.1\n" });
   await accept(w, "install_os_updates");
   r = await run(w, "install_os_updates");
   assert.equal(r.state, "failed");
   assert.match(r.summary!, /no longer installed \(baz\)/);
   assert.equal(r.verification?.healthy, false);
-  // ORBIT unhealthy afterwards: packages upgraded but not "verified"
+  // exit 0 and clean, but a package is not at the planned version (lists changed under the upgrade): unverified, never verified
+  w = world();
+  aptScript(w, { after: "ii libfoo1 1.1\nii bar 2.9\nii baz 1\n" });
+  await accept(w, "install_os_updates");
+  r = await run(w, "install_os_updates");
+  assert.equal(r.state, "unverified");
+  assert.match(r.summary!, /not at the version in the confirmed plan \(bar\)/);
   w = world();
   aptScript(w);
   w.script.served = undefined;
   await accept(w, "install_os_updates");
   r = await run(w, "install_os_updates");
   assert.equal(r.state, "failed");
-  assert.match(r.summary!, /ORBIT is not healthy afterwards.*Nothing was restarted or rolled back/);
-  // ORBIT's commit unknown: cannot verify health -> unverified
+  assert.match(r.summary!, /ORBIT is not healthy afterwards.*Nothing was restarted or rolled back by this tool/);
   w = world();
   aptScript(w);
   rmSync(join(w.cfg.root, "current"));
@@ -452,11 +589,11 @@ test("OS updates: failures and unexpected side effects are reported, never as su
   assert.equal(r.state, "unverified");
 });
 
-test("OS updates: timeouts (a command that never answers) fail the operation and never claim success", async () => {
+test("OS updates: a timeout at the simulation fails the operation and never claims success", async () => {
   const w = world();
   aptScript(w);
   const base = w.script.exec;
-  w.script.exec = (f, a, ww) => (f.endsWith("apt-get") && a.includes("update") ? { code: null, stdout: "", stderr: "", timedOut: true } : base(f, a, ww));
+  w.script.exec = (f, a, ww) => (f.endsWith("apt-get") && a.includes("-s") ? { code: null, stdout: "", stderr: "", timedOut: true } : base(f, a, ww));
   await accept(w, "install_os_updates");
   const r = await run(w, "install_os_updates");
   assert.equal(r.state, "failed");
@@ -485,12 +622,10 @@ test("OS updates on the wrong host change nothing; a runner never runs the same 
   assert.equal(r.state, "failed");
   assert.match(r.summary!, /Nothing changed: this confirmation names host/);
   assert.deepEqual(w.execs, []);
-  // second run of the same record (a retry of the unit)
   const again = await run(w, "install_os_updates");
   assert.equal(again.state, "failed");
   assert.deepEqual(w.execs, []);
   assert.ok(w.audit.some((a) => /not run again/.test(JSON.stringify(a))));
-  // expired between accept and run
   const w2 = world();
   aptScript(w2);
   await accept(w2, "install_os_updates");
@@ -499,7 +634,6 @@ test("OS updates on the wrong host change nothing; a runner never runs the same 
   assert.equal(r2.state, "failed");
   assert.match(r2.summary!, /expired/);
   assert.deepEqual(w2.execs, []);
-  // wrong runner kind
   const w3 = world();
   await accept(w3, "reboot_host");
   const r3 = (await runOperation(OP, "update", w3.env, w3.cfg, () => {}))!;
@@ -862,3 +996,434 @@ test("audit lines and results are redacted and bounded; no request body is ever 
   assert.equal(opIdsLookLikeCommits(), true);
 });
 const opIdsLookLikeCommits = () => /^[0-9a-f]{40}$/.test(sysOpIdFor("proposal-1")) && sysOpIdFor("a") !== sysOpIdFor("b");
+
+// ================================================================= stale-slot takeover: atomic, deterministic races
+
+import { retireSlot, tryAcquireSlot, readSlot, releaseSlot, saveRecord, rebootStampPath, decide } from "../src/ops/sys-core.ts";
+import { utimesSync } from "node:fs";
+import { REBOOT_MAX_AHEAD_MS } from "../src/ops/sys-protocol.ts";
+
+const OP3 = "3".repeat(40);
+const OP4 = "4".repeat(40);
+const defer = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => (resolve = r));
+  return { promise, resolve };
+};
+const starts = (w: World) => calls(w).filter((c) => c.startsWith("systemctl start"));
+const settle = () => new Promise<void>((r) => setImmediate(r));
+const waitFor = async (cond: () => boolean) => {
+  for (let i = 0; i < 200 && !cond(); i++) await settle();
+  assert.ok(cond(), "condition never became true");
+};
+// A stale holder: a record that is running, quiet for longer than staleAfterMs, whose runner is gone (is-active fails).
+async function staleHolder(w: World) {
+  await accept(w, "funnel_enable");
+  const r = rec(w);
+  r.state = "running";
+  saveRecord(w.cfg, r, w.env);
+  w.advance(60_000);
+  w.script.exec = (f, a) => (a[0] === "is-active" ? fail(3) : undefined);
+}
+// Pause the first `n` is-active calls (the stale-holder check) at a gate.
+function gateIsActive(w: World, n: number) {
+  const gate = defer();
+  let arrived = 0;
+  const inner = w.env.exec;
+  w.env.exec = async (f, a, t, o) => {
+    if (a[0] === "is-active") {
+      arrived++;
+      if (arrived <= n) await gate.promise;
+    }
+    return inner(f, a, t, o);
+  };
+  return { gate, arrived: () => arrived };
+}
+
+test("stale slot: two simultaneous requests that both saw the stale holder cannot both take over: at most one dispatch", async () => {
+  const w = world();
+  await staleHolder(w);
+  const g = gateIsActive(w, 2);
+  w.execs.length = 0;
+  const a = send(w, req(w, "funnel_enable", { opId: OP2 }));
+  const b = send(w, req(w, "funnel_enable", { opId: OP3 }));
+  await waitFor(() => g.arrived() === 2); // both have read the stale holder and are inside the settle check
+  g.gate.resolve();
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.equal([ra, rb].filter((r) => r.ok).length, 1, JSON.stringify([ra, rb]));
+  assert.equal([ra, rb].filter((r) => r.error?.code === "busy").length, 1);
+  assert.equal(starts(w).length, 1, "exactly one runner was started");
+  const winner = ra.ok ? OP2 : OP3;
+  assert.equal(readSlot(w.cfg), winner, "the slot belongs to the one that was dispatched");
+  assert.equal(loadRecord(w.cfg, winner === OP2 ? OP3 : OP2), undefined, "the loser recorded nothing");
+});
+
+test("stale slot: a request that saw the stale holder must not delete the replacement holder's slot when it resumes late", async () => {
+  const w = world();
+  await staleHolder(w);
+  const g = gateIsActive(w, 1); // only the first contender is paused
+  w.execs.length = 0;
+  const slow = send(w, req(w, "funnel_enable", { opId: OP2 }));
+  await waitFor(() => g.arrived() === 1);
+  const fast = await send(w, req(w, "funnel_enable", { opId: OP3 })); // takes over completely while `slow` is paused
+  assert.equal(fast.ok, true);
+  assert.equal(readSlot(w.cfg), OP3);
+  g.gate.resolve();
+  const late = await slow;
+  assert.equal(late.error?.code, "busy");
+  assert.equal(readSlot(w.cfg), OP3, "the replacement holder's slot is intact");
+  assert.equal(starts(w).length, 1);
+  assert.equal(loadRecord(w.cfg, OP2), undefined);
+  // and the stale holder's own late release (its runner finishing after being replaced) cannot remove it either
+  releaseSlot(w.cfg, OP);
+  assert.equal(readSlot(w.cfg), OP3);
+});
+
+test("slot primitives: acquisition is all-or-nothing, retirement belongs to exactly one party, and nothing removes a slot it does not hold", async () => {
+  const w = world();
+  mkdirSync(w.cfg.stateDir, { recursive: true });
+  assert.equal(tryAcquireSlot(w.cfg, OP), true);
+  assert.equal(readFileSync(activePath(w.cfg), "utf8"), OP, "complete content as soon as it exists");
+  assert.equal(tryAcquireSlot(w.cfg, OP2), false);
+  assert.equal(readSlot(w.cfg), OP);
+  assert.equal(retireSlot(w.cfg, OP2), false, "not the holder: nothing happens");
+  assert.equal(readSlot(w.cfg), OP);
+  assert.equal(retireSlot(w.cfg, OP), true);
+  assert.equal(retireSlot(w.cfg, OP), false, "a holder is retired once");
+  assert.equal(readSlot(w.cfg), undefined);
+  assert.equal(tryAcquireSlot(w.cfg, OP2), true);
+  assert.equal(retireSlot(w.cfg, OP), false, "a second retirement of the OLD holder cannot touch the new slot");
+  assert.equal(readSlot(w.cfg), OP2);
+  assert.deepEqual(readdirSync(w.cfg.stateDir).filter((n) => n.endsWith(".tmp")), [], "no temp files are left behind");
+});
+
+test("slot with no record: a young one is busy (a request mid-accept), an old one is retired, an unreadable one fails closed", async () => {
+  const w = world();
+  mkdirSync(w.cfg.stateDir, { recursive: true });
+  writeFileSync(activePath(w.cfg), OP, { mode: 0o600 });
+  assert.equal((await send(w, req(w, "funnel_enable", { opId: OP2 }))).error?.code, "busy");
+  assert.equal(readSlot(w.cfg), OP, "the young slot was not removed");
+  const old = new Date(Date.now() - 10 * 60_000);
+  utimesSync(activePath(w.cfg), old, old);
+  const taken = await send(w, req(w, "funnel_enable", { opId: OP2 }));
+  assert.equal(taken.ok, true);
+  assert.equal(readSlot(w.cfg), OP2);
+  const w2 = world();
+  mkdirSync(w2.cfg.stateDir, { recursive: true });
+  writeFileSync(activePath(w2.cfg), "not an op id", { mode: 0o600 });
+  const e = await send(w2, req(w2, "funnel_enable"));
+  assert.equal(e.error?.code, "busy");
+  assert.match(e.error!.message, /did not write/);
+  assert.equal(readFileSync(activePath(w2.cfg), "utf8"), "not an op id");
+});
+
+// ================================================================= reboot cool-down
+
+test("cool-down counts reboots actually ISSUED: a request that never issued one (dispatch failed, wrong host, expired) starts none", async () => {
+  // runner could not be started
+  let w = world();
+  w.script.exec = () => fail(1, "Failed to start");
+  assert.equal((await send(w, req(w, "reboot_host"))).data.operation.state, "failed");
+  w.script.exec = () => undefined;
+  const again = await send(w, req(w, "reboot_host", { opId: OP2 }));
+  assert.equal(again.ok, true, "a retry right after a dispatch that did nothing is accepted");
+  // runner refused (wrong host)
+  w = world();
+  await accept(w, "reboot_host");
+  w.host.name = "imposter";
+  assert.equal((await run(w, "reboot_host")).state, "failed");
+  w.host.name = HOST;
+  assert.equal((await send(w, req(w, "reboot_host", { opId: OP2 }))).ok, true);
+  // reboot command itself refused by systemd: nothing was issued, so no cool-down
+  w = world();
+  await accept(w, "reboot_host");
+  w.script.exec = (f, a) => (f.endsWith("systemctl") && a[0] === "reboot" ? fail(1, "Access denied") : undefined);
+  const refused = await run(w, "reboot_host");
+  assert.equal(refused.state, "failed");
+  assert.equal(refused.reboot, undefined);
+  assert.equal(existsSync(rebootStampPath(w.cfg)), false);
+  assert.equal((await send(w, req(w, "reboot_host", { opId: OP2 }))).ok, true);
+});
+
+test("cool-down starts when the reboot is issued (not accepted), survives record pruning, and is checked while holding the slot", async () => {
+  const w = world();
+  await accept(w, "reboot_host");
+  w.advance(5 * 60_000); // e.g. a long wait for the deploy lock between acceptance and the command
+  await run(w, "reboot_host");
+  const issued = rec(w).reboot!.issuedAt;
+  assert.equal(readFileSync(rebootStampPath(w.cfg), "utf8"), issued);
+  // finish the reboot as the recovery would, so the slot is free
+  const r = rec(w);
+  r.state = "verified";
+  saveRecord(w.cfg, r, w.env);
+  rmSync(activePath(w.cfg), { force: true });
+  rmSync(join(w.cfg.stateDir, "retired"), { recursive: true, force: true });
+  w.advance(25 * 60_000); // 25 min after ISSUE (30 min after acceptance + ... still inside the issue-anchored window)
+  const soon = await send(w, req(w, "reboot_host", { opId: OP2 }));
+  assert.equal(soon.error?.code, "cooldown");
+  assert.equal(existsSync(activePath(w.cfg)), false, "a refused request gives the slot straight back");
+  assert.equal(loadRecord(w.cfg, OP2), undefined);
+  assert.equal((await send(w, { action: "sys_status" })).data.rebootCooldownUntil, new Date(Date.parse(issued) + w.cfg.rebootCooldownMs).toISOString());
+  // records may be pruned: the stamp still enforces it
+  rmSync(join(w.cfg.stateDir, "ops", `${OP}.json`));
+  assert.equal((await send(w, req(w, "reboot_host", { opId: OP2 }))).error?.code, "cooldown");
+  w.advance(6 * 60_000);
+  assert.equal((await send(w, req(w, "reboot_host", { opId: OP2 }))).ok, true);
+  assert.equal((await send(w, { action: "sys_status" })).data.rebootCooldownUntil, new Date(Date.parse(issued) + w.cfg.rebootCooldownMs).toISOString() > new Date(w.clock()).toISOString() ? (await send(w, { action: "sys_status" })).data.rebootCooldownUntil : null);
+});
+
+// ================================================================= scheduling and cancellation
+
+const inMin = (w: World, m: number) => new Date(w.clock() + m * 60_000).toISOString();
+const sched = (w: World, m: number, over: Record<string, unknown> = {}): ReturnType<typeof req> & { rebootAt: string } => {
+  const rebootAt = inMin(w, m);
+  return { ...req(w, "reboot_host", { rebootAt, ...over }), rebootAt };
+};
+const alive = (w: World) => void (w.script.exec = (f, a) => (a[0] === "is-active" ? ok("active\n") : undefined));
+const nonProbe = (w: World) => calls(w).filter((c) => !c.includes("is-active"));
+const cancel = (w: World, opId = OP) => send(w, { action: "cancel_reboot", opId });
+
+test("scheduled reboot: time validation is strict (canonical UTC, at least 60 s and at most 24 h ahead), enforced by the helper, nothing recorded when refused", async () => {
+  const w = world();
+  const bad = async (rebootAt: unknown, code = "bad_arguments") => {
+    const r = await send(w, { ...req(w, "reboot_host"), rebootAt });
+    assert.equal(r.error?.code, code, String(rebootAt));
+    assert.equal(loadRecord(w.cfg, OP), undefined);
+  };
+  await bad("2026-11-09T14:00:00Z"); // not canonical (no millis)
+  await bad("2026-11-09 14:00:00.000Z");
+  await bad("tomorrow");
+  await bad(12345);
+  await bad("2026-11-09T14:00:00.000+01:00");
+  // digest must bind the time: the "now" digest with a time attached, or a time with a different time's digest, is refused
+  const at = inMin(w, 120);
+  assert.equal((await send(w, { ...req(w, "reboot_host"), rebootAt: at })).error?.code, "digest_mismatch");
+  const other = inMin(w, 121);
+  assert.equal((await send(w, { ...req(w, "reboot_host", { rebootAt: at }), rebootAt: other })).error?.code, "digest_mismatch");
+  // too close, in the past, too far (helper-side rules, with a digest that matches)
+  const dig = (rebootAt: string) => ({ ...req(w, "reboot_host", { rebootAt }) });
+  for (const rebootAt of [new Date(w.clock() + 59_999).toISOString(), new Date(w.clock() - 1000).toISOString(), new Date(w.clock() + REBOOT_MAX_AHEAD_MS + 1).toISOString()]) {
+    const r = await send(w, dig(rebootAt));
+    assert.equal(r.error?.code, "bad_arguments", rebootAt);
+    assert.match(r.error!.message, /at least 60 seconds|no more than 24 hours/);
+  }
+  assert.deepEqual(w.execs, [], "nothing was started for any refused time");
+  // the edges are accepted
+  assert.equal((await send(w, dig(new Date(w.clock() + 60_000).toISOString()))).ok, true);
+  const w2 = world();
+  assert.equal((await send(w2, req(w2, "reboot_host", { rebootAt: new Date(w2.clock() + REBOOT_MAX_AHEAD_MS).toISOString() }))).ok, true);
+  // only a reboot may carry a time
+  assert.equal((await send(w, { ...req(w, "funnel_enable", { opId: OP2 }), rebootAt: inMin(w, 5) })).error?.code, "bad_arguments");
+});
+
+test("scheduled reboot: accepted as 'scheduled' (nothing done), runner started at once, state persisted for any later reader, duplicates busy or replayed", async () => {
+  const w = world();
+  const r = sched(w, 120);
+  const out = await send(w, r);
+  assert.equal(out.ok, true);
+  assert.equal(out.data.operation.state, "scheduled");
+  assert.equal(out.data.operation.schedule.at, r.rebootAt);
+  assert.match(out.data.note, /Nothing is verified yet/);
+  assert.deepEqual(calls(w), [`systemctl start --no-block orbit-ops-sys-reboot@${OP}.service`], "no reboot, only the runner that will wait");
+  assert.equal(readFileSync(activePath(w.cfg), "utf8"), OP, "the slot is held while it is scheduled");
+  // another process/reader sees it
+  const st = await send(w, { action: "sys_status" });
+  assert.deepEqual(st.data.openOperation, { opId: OP, action: "reboot_host", state: "scheduled", scheduledFor: r.rebootAt });
+  assert.equal((await send(w, { action: "op_status", opId: OP })).data.operation.state, "scheduled");
+  // a second reboot (or anything else) while one is scheduled is busy; the same operation id is a replay
+  w.execs.length = 0;
+  assert.equal((await send(w, sched(w, 180, { opId: OP2 }))).error?.code, "busy");
+  assert.equal((await send(w, req(w, "install_os_updates", { opId: OP3 }))).error?.code, "busy");
+  w.script.exec = (f, a) => (a[0] === "is-active" ? ok("active\n") : undefined);
+  const again = await send(w, r);
+  assert.equal(again.data.replayed, true);
+  assert.ok(!calls(w).some((c) => c.startsWith("systemctl start")), "never dispatched twice");
+  // an unfired scheduled record whose runner is alive is left alone for hours
+  w.advance(90 * 60_000);
+  assert.equal((await send(w, { action: "op_status", opId: OP })).data.operation.state, "scheduled");
+});
+
+test("scheduled reboot: waits without doing anything, fires only at its time, then issues exactly one reboot; the confirmation's expiry does not apply after acceptance", async () => {
+  const w = world();
+  const r = sched(w, 180);
+  await accept(w, "reboot_host", r);
+  const at = Date.parse(r.rebootAt as string);
+  assert.equal(await awaitSchedule(w.env, w.cfg, OP, (l) => w.audit.push(l)), "due");
+  assert.deepEqual(w.execs, [], "the wait runs no command (and in production holds no lock)");
+  assert.ok(w.clock() >= at && w.clock() < at + 20_000, "it did not fire early or late");
+  assert.equal(rec(w).state, "accepted");
+  assert.ok(rec(w).steps.some((s) => s.step === "due"));
+  const done = await run(w, "reboot_host");
+  assert.equal(done.state, "rebooting", "never success");
+  assert.deepEqual(calls(w).filter((c) => c.startsWith("systemctl reboot")), ["systemctl reboot"]);
+  assert.ok(Date.parse(done.reboot!.issuedAt) >= at, "issued at or after the scheduled time");
+  assert.equal(done.reboot!.preBootKey, bootKey(BOOT1));
+  // a second look at the same record never issues again
+  w.execs.length = 0;
+  assert.equal(await awaitSchedule(w.env, w.cfg, OP, () => {}), "not_scheduled");
+  await run(w, "reboot_host");
+  assert.deepEqual(w.execs, []);
+});
+
+test("scheduled reboot: the confirmation must still be valid when it is accepted", async () => {
+  const w = world();
+  const r = sched(w, 180, { expiresAt: new Date(w.clock() - 1000).toISOString() });
+  assert.equal((await send(w, r)).error?.code, "expired");
+  assert.equal(loadRecord(w.cfg, OP), undefined);
+});
+
+test("cancel before it fires: recorded, audited, slot freed, no reboot ever issued, repeated cancels are idempotent", async () => {
+  const w = world();
+  await accept(w, "reboot_host", sched(w, 120));
+  const out = await cancel(w);
+  assert.equal(out.ok, true);
+  assert.equal(out.data.cancelled, true);
+  assert.equal(out.data.operation.state, "cancelled");
+  assert.match(out.data.note, /no reboot was issued/);
+  const r = rec(w);
+  assert.equal(r.state, "cancelled");
+  assert.ok(r.finishedAt);
+  assert.ok(r.steps.some((s) => s.step === "cancelled"), "recorded in the operation's own history");
+  assert.ok(w.audit.some((a) => (a as { step?: string }).step === "cancelled" && (a as { opId?: string }).opId === OP.slice(0, 12)), "audited in the journal");
+  assert.ok(w.fronts.some((f) => f.action === "cancel_reboot" && f.outcome === "accepted"), "audited as a request");
+  assert.equal(existsSync(activePath(w.cfg)), false);
+  // the runner that wakes up later does nothing, and does not overwrite the cancelled record
+  assert.equal(await awaitSchedule(w.env, w.cfg, OP, () => {}), "not_scheduled");
+  assert.equal((await run(w, "reboot_host")).state, "cancelled");
+  assert.deepEqual(w.execs, []);
+  // duplicate cancel: still cancelled, nothing new
+  const stepsBefore = rec(w).steps.length;
+  const dup = await cancel(w);
+  assert.equal(dup.ok, true);
+  assert.equal(dup.data.alreadyCancelled, true);
+  assert.equal(rec(w).steps.length, stepsBefore);
+  // a new reboot can then be accepted: cancelling issued nothing, so no cool-down
+  assert.equal((await send(w, req(w, "reboot_host", { opId: OP2 }))).ok, true);
+});
+
+test("cancel while the runner is waiting: the wait ends as cancelled and never reboots", async () => {
+  const w = world();
+  const r = sched(w, 120);
+  await accept(w, "reboot_host", r);
+  alive(w);
+  let sleeps = 0;
+  const innerSleep = w.env.sleep;
+  w.env.sleep = async (ms) => {
+    await innerSleep(ms);
+    if (++sleeps === 3) assert.equal((await cancel(w)).ok, true);
+  };
+  assert.equal(await awaitSchedule(w.env, w.cfg, OP, () => {}), "cancelled");
+  assert.ok(w.clock() < Date.parse(r.rebootAt as string), "it stopped before the scheduled time");
+  assert.equal(rec(w).state, "cancelled");
+  assert.deepEqual(nonProbe(w), []);
+});
+
+test("cancel after it fired is REFUSED, not reported as success: the reboot is dispatched and stays so", async () => {
+  const w = world();
+  await accept(w, "reboot_host", sched(w, 60));
+  assert.equal(await awaitSchedule(w.env, w.cfg, OP, () => {}), "due");
+  const late = await cancel(w);
+  assert.equal(late.ok, false);
+  assert.equal(late.error?.code, "too_late");
+  assert.match(late.error!.message, /already been dispatched.*NOT cancelled/);
+  assert.notEqual(rec(w).state, "cancelled");
+  assert.equal((await run(w, "reboot_host")).state, "rebooting");
+  // and once it is running, rebooting, or finished, the answer is the same or "nothing to cancel"
+  const rebooting = await cancel(w);
+  assert.equal(rebooting.error?.code, "too_late");
+  const r = rec(w);
+  r.state = "verified";
+  saveRecord(w.cfg, r, w.env);
+  assert.equal((await cancel(w)).error?.code, "not_cancellable");
+  assert.equal((await send(w, { action: "cancel_reboot", opId: OP4 })).error?.code, "not_found");
+});
+
+test("cancel versus fire race: exactly one of them wins, whichever arrives first, and the outcome is consistent", async () => {
+  // fire first: the cancel is paused (settle check) while the runner claims; the cancel then loses
+  let w = world();
+  await accept(w, "reboot_host", sched(w, 60));
+  w.advance(5 * 60_000); // the record is quiet: cancel will consult the runner unit before deciding
+  w.script.exec = (f, a) => (a[0] === "is-active" ? ok("active\n") : undefined);
+  const g = gateIsActive(w, 1);
+  const cancelling = cancel(w);
+  await waitFor(() => g.arrived() === 1);
+  assert.equal(await awaitSchedule(w.env, w.cfg, OP, () => {}), "due", "the runner is past its time and claims first");
+  g.gate.resolve();
+  const lost = await cancelling;
+  assert.equal(lost.error?.code, "too_late");
+  assert.equal((await run(w, "reboot_host")).state, "rebooting");
+  // cancel first: the runner is paused right before it claims; the cancel wins; the runner stops
+  w = world();
+  const r = sched(w, 60);
+  await accept(w, "reboot_host", r);
+  alive(w);
+  const gate = defer();
+  let paused = false;
+  const innerSleep = w.env.sleep;
+  w.env.sleep = async (ms) => {
+    await innerSleep(ms);
+    if (!paused && w.clock() >= Date.parse(r.rebootAt as string)) {
+      paused = true;
+      await gate.promise; // due, but has not claimed yet
+    }
+  };
+  const waiting = awaitSchedule(w.env, w.cfg, OP, () => {});
+  await waitFor(() => paused);
+  assert.equal((await cancel(w)).ok, true);
+  gate.resolve();
+  assert.equal(await waiting, "cancelled");
+  assert.equal(rec(w).state, "cancelled");
+  assert.deepEqual(nonProbe(w), [], "no reboot after a successful cancel");
+  assert.deepEqual(decide(w.cfg, OP, "fire"), { won: false, decision: "cancel" });
+  // the arbiter itself: a decision is made once
+  assert.deepEqual(decide(world().cfg, OP, "cancel").won, true);
+});
+
+test("an immediate reboot can be cancelled until its runner claims it; a cancelled record is never overwritten by that runner", async () => {
+  const w = world();
+  await accept(w, "reboot_host");
+  assert.equal((await cancel(w)).ok, true);
+  const r = await run(w, "reboot_host");
+  assert.equal(r.state, "cancelled");
+  assert.equal(rec(w).state, "cancelled");
+  assert.ok(rec(w).steps.some((s) => s.step === "cancelled"));
+  assert.deepEqual(w.execs, []);
+  assert.ok(w.audit.some((a) => /already cancelled/.test(JSON.stringify(a))));
+});
+
+test("only a reboot can be cancelled; a dead scheduled runner is settled truthfully (no reboot was issued) and is no longer cancellable", async () => {
+  const w = world();
+  await accept(w, "funnel_enable");
+  assert.equal((await cancel(w)).error?.code, "not_cancellable");
+  assert.equal(rec(w).state, "accepted");
+  const w2 = world();
+  await accept(w2, "reboot_host", sched(w2, 120));
+  w2.advance(60_000); // the runner is gone (host restarted for another reason)
+  w2.script.exec = (f, a) => (a[0] === "is-active" ? fail(3) : undefined);
+  const st = await send(w2, { action: "op_status", opId: OP });
+  assert.equal(st.data.operation.state, "interrupted");
+  assert.match(st.data.operation.summary, /scheduled reboot's runner stopped.*NO reboot was issued.*will not fire later/);
+  assert.equal((await cancel(w2)).error?.code, "not_cancellable");
+  assert.equal(existsSync(activePath(w2.cfg)), false);
+});
+
+test("cool-down and schedules: a time inside the cool-down is refused at acceptance, a later one is accepted, and the cool-down is rechecked when it fires", async () => {
+  const w = world();
+  const last = new Date(w.clock() - 10 * 60_000).toISOString();
+  mkdirSync(w.cfg.stateDir, { recursive: true });
+  writeFileSync(rebootStampPath(w.cfg), last);
+  const early = await send(w, sched(w, 5)); // fires 15 min after the last one: too soon
+  assert.equal(early.error?.code, "cooldown");
+  assert.equal(loadRecord(w.cfg, OP), undefined);
+  assert.equal(existsSync(activePath(w.cfg)), false);
+  const okLater = await send(w, sched(w, 60)); // fires 70 min after: fine
+  assert.equal(okLater.ok, true);
+  // another reboot is issued (by hand, or by tier 3 before this was accepted elsewhere) before it fires
+  assert.equal(await awaitSchedule(w.env, w.cfg, OP, () => {}), "due");
+  writeFileSync(rebootStampPath(w.cfg), new Date(w.clock() - 60_000).toISOString());
+  w.execs.length = 0;
+  const r = await run(w, "reboot_host");
+  assert.equal(r.state, "failed");
+  assert.match(r.summary!, /cool-down.*Nothing was issued/);
+  assert.ok(!calls(w).some((c) => c.includes("reboot")), "no reboot command");
+});

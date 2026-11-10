@@ -1,0 +1,25 @@
+[Unit]
+Description=ORBIT tier 3 OS update plan %i (apt-get update + apt-get -s upgrade; installs nothing)
+
+[Service]
+# One accepted plan_os_updates operation, started by orbit-ops-sys@.service. It runs `dpkg --audit`, `apt-get update` (which
+# REFRESHES apt metadata under /var/lib/apt/lists: it is not literally read-only, and it needs the network and the apt lock) and
+# `apt-get -s upgrade` (a simulation). It installs and upgrades no package. Same sandbox as the update runner, which it must be:
+# apt-get update writes /var and reaches the package mirrors.
+Type=oneshot
+ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/sys-run.ts %i plan
+# apt-get update + simulation. When this limit hits, systemd (not ORBIT) stops the unit with SIGTERM only.
+TimeoutStartSec=1500
+# Never SIGKILL apt/dpkg: a hard-killed dpkg leaves a half-configured system.
+SendSIGKILL=no
+MemoryMax=2G
+TasksMax=512
+StateDirectory=orbit-ops-sys
+StateDirectoryMode=0700
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+LockPersonality=yes
+UMask=0022
