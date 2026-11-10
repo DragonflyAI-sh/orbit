@@ -76,9 +76,14 @@ const readBootKey = (c: SysConfig): string => {
   }
 };
 
+// Liveness comes from the unit STATE printed by `systemctl is-active`, never from its exit status: a running Type=oneshot unit
+// reports "activating" with exit 3, and the real exec resolves a nonzero exit with its stdout intact. Only a clean "inactive" or
+// "failed" is dead. Anything else (active, activating, deactivating, reloading, an unknown state, empty or unparseable output, a
+// timeout, a missing binary) counts as alive: a record is never ended on doubt.
 async function isActive(env: SysEnv, unit: string): Promise<boolean> {
   const r = await env.exec(SYSTEMCTL, ["is-active", unit], 4000);
-  return r.code === 0 && /^(active|activating)\s*$/.test(r.stdout);
+  if (r.timedOut || r.code === null) return true;
+  return !/^(inactive|failed)\s*$/.test(r.stdout);
 }
 
 function end(c: SysConfig, env: SysEnv, rec: SysRecord, state: SysRecord["state"], summary: string, detail: string): SysRecord {
@@ -89,6 +94,14 @@ function end(c: SysConfig, env: SysEnv, rec: SysRecord, state: SysRecord["state"
   saveRecord(c, rec, env);
   releaseSlot(c, rec.opId);
   return rec;
+}
+
+// What the boot id says about a scheduled reboot that lost its runner. It never claims a restart without evidence: the id recorded
+// when the reboot was scheduled must differ from the current one. Without both ids (an older record, an unreadable file) it says so.
+function scheduledBootNote(rec: SysRecord, now: string): string {
+  const then = rec.schedule?.bootKey;
+  if (!then || !now) return "the boot id could not be compared, so whether the host restarted is unknown";
+  return now === then ? "the boot id is unchanged: the host has not restarted since it was scheduled" : "the boot id changed: the host restarted after it was scheduled";
 }
 
 // A record that is not finished but whose runner is gone (and which has been quiet for a while) did not finish. Say so; never
@@ -122,7 +135,7 @@ export async function settleIfDead(env: SysEnv, c: SysConfig, rec: SysRecord): P
     rec.action === "plan_os_updates"
       ? "The planning runner stopped before it finished. No package was installed or changed (it only refreshes package lists). Ask for a new plan."
       : rec.action === "reboot_host" && rec.state === "scheduled"
-        ? "The scheduled reboot's runner stopped before the scheduled time (for example the host restarted for another reason). NO reboot was issued by this operation and it will not fire later: schedule it again if it is still wanted."
+        ? `The scheduled reboot's runner stopped before the scheduled time (${scheduledBootNote(rec, readBootKey(c))}). NO reboot was issued by this operation and it will not fire later: schedule it again if it is still wanted.`
         : rec.action === "install_os_updates"
       ? "The runner stopped before it finished. The package state is unknown: run `dpkg --audit` and `apt-get -s upgrade` on the host before assuming anything."
       : rec.action === "reboot_host"
@@ -262,7 +275,7 @@ async function accept(env: SysEnv, c: SysConfig, req: Mutation) {
         digest: req.action === "plan_os_updates" ? "" : req.digest,
         expiresAt: req.action === "plan_os_updates" ? at : req.expiresAt,
         ...(req.action === "install_os_updates" && req.planDigest ? { planDigest: req.planDigest } : {}),
-        ...(rebootAt ? { schedule: { at: rebootAt } } : {}),
+        ...(rebootAt ? { schedule: { at: rebootAt, ...(readBootKey(c) ? { bootKey: readBootKey(c) } : {}) } } : {}),
         steps: [{ at, step: rebootAt ? "scheduled" : "accepted", detail: rebootAt ? `Request validated and recorded. Nothing has been done yet; the reboot is scheduled for ${rebootAt} and can be cancelled until it fires.` : "Request validated and recorded. Nothing has been done yet." }],
       };
       saveRecord(c, r, env);

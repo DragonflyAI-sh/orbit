@@ -258,7 +258,7 @@ test("an operation that died is settled as interrupted (never guessed, never re-
   const r = rec(w);
   r.state = "running";
   w.advance(60_000); // quiet for longer than staleAfterMs
-  w.script.exec = (f, a) => (a[0] === "is-active" ? fail(3) : undefined);
+  w.script.exec = (f, a) => (a[0] === "is-active" ? ok("inactive\n", 3) : undefined);
   const settled = await settleIfDead(w.env, w.cfg, r);
   assert.equal(settled.state, "interrupted");
   assert.match(settled.summary!, /package state is unknown/);
@@ -741,7 +741,7 @@ test("reboot recovery never starts anything: an accepted record is not run after
   assert.equal(rec(w).state, "accepted");
   // settled as interrupted by the front (runner gone), never relaunched
   w.advance(60_000);
-  w.script.exec = (f, a) => (a[0] === "is-active" ? fail(3) : undefined);
+  w.script.exec = (f, a) => (a[0] === "is-active" ? ok("inactive\n", 3) : undefined);
   assert.equal((await settleIfDead(w.env, w.cfg, rec(w))).state, "interrupted");
   assert.ok(!calls(w).some((c) => c.includes("start")));
 });
@@ -750,7 +750,7 @@ test("reboot settling by the front: waits for the recovery, then reports unverif
   const w = world();
   await accept(w, "reboot_host");
   await run(w, "reboot_host");
-  w.script.exec = (f, a) => (a[0] === "is-active" ? fail(3) : undefined);
+  w.script.exec = (f, a) => (a[0] === "is-active" ? ok("inactive\n", 3) : undefined);
   // soon after: still waiting
   w.advance(5 * 60_000);
   assert.equal((await settleIfDead(w.env, w.cfg, rec(w))).state, "rebooting");
@@ -759,7 +759,7 @@ test("reboot settling by the front: waits for the recovery, then reports unverif
   w.script.exec = (f, a) => (a[0] === "is-active" ? ok("active\n") : undefined);
   assert.equal((await settleIfDead(w.env, w.cfg, rec(w))).state, "rebooting");
   // grace over, boot unchanged: no reboot observed
-  w.script.exec = (f, a) => (a[0] === "is-active" ? fail(3) : undefined);
+  w.script.exec = (f, a) => (a[0] === "is-active" ? ok("inactive\n", 3) : undefined);
   const same = await settleIfDead(w.env, w.cfg, rec(w));
   assert.equal(same.state, "unverified");
   assert.match(same.summary!, /no reboot was observed/);
@@ -770,7 +770,7 @@ test("reboot settling by the front: waits for the recovery, then reports unverif
   await run(w2, "reboot_host");
   w2.setBoot(BOOT2);
   w2.advance(20 * 60_000);
-  w2.script.exec = (f, a) => (a[0] === "is-active" ? fail(3) : undefined);
+  w2.script.exec = (f, a) => (a[0] === "is-active" ? ok("inactive\n", 3) : undefined);
   const changed = await settleIfDead(w2.env, w2.cfg, rec(w2));
   assert.equal(changed.state, "unverified");
   assert.match(changed.summary!, /post-boot verification never recorded a result/);
@@ -1023,7 +1023,7 @@ async function staleHolder(w: World) {
   r.state = "running";
   saveRecord(w.cfg, r, w.env);
   w.advance(60_000);
-  w.script.exec = (f, a) => (a[0] === "is-active" ? fail(3) : undefined);
+  w.script.exec = (f, a) => (a[0] === "is-active" ? ok("inactive\n", 3) : undefined);
 }
 // Pause the first `n` is-active calls (the stale-holder check) at a gate.
 function gateIsActive(w: World, n: number) {
@@ -1400,7 +1400,7 @@ test("only a reboot can be cancelled; a dead scheduled runner is settled truthfu
   const w2 = world();
   await accept(w2, "reboot_host", sched(w2, 120));
   w2.advance(60_000); // the runner is gone (host restarted for another reason)
-  w2.script.exec = (f, a) => (a[0] === "is-active" ? fail(3) : undefined);
+  w2.script.exec = (f, a) => (a[0] === "is-active" ? ok("inactive\n", 3) : undefined);
   const st = await send(w2, { action: "op_status", opId: OP });
   assert.equal(st.data.operation.state, "interrupted");
   assert.match(st.data.operation.summary, /scheduled reboot's runner stopped.*NO reboot was issued.*will not fire later/);
@@ -1924,7 +1924,7 @@ test("plan slot cleanup: a finished plan frees the running slot; a plan whose ru
   r.state = "running";
   saveRecord(w.cfg, r, w.env);
   w.advance(60_000); // quiet for longer than staleAfterMs
-  w.script.exec = (f, a) => (a[0] === "is-active" ? fail(3) : undefined); // its runner is gone
+  w.script.exec = (f, a) => (a[0] === "is-active" ? ok("inactive\n", 3) : undefined); // its runner is gone
   const next = await send(w, req(w, "funnel_enable", { opId: OP2 }));
   assert.equal(next.ok, true, JSON.stringify(next));
   assert.equal(rec(w).state, "interrupted");
@@ -1935,4 +1935,107 @@ test("plan slot cleanup: a finished plan frees the running slot; a plan whose ru
   await send(w2, { action: "plan_os_updates", opId: OP });
   finishOp(w2, OP);
   assert.equal(readSlot(w2.cfg), undefined);
+});
+
+// ---------------------------------------------------------------- dead-runner detection: unit STATE, never the exit status
+// A running Type=oneshot unit answers `systemctl is-active` with "activating" and exit 3, and the real exec resolves a nonzero exit
+// with its stdout intact. Only a clean inactive/failed is dead; every other or missing answer keeps the record open.
+const isActiveIs = (w: World, e: Exec) => void (w.script.exec = (_f, a) => (a[0] === "is-active" ? e : undefined));
+const statusOf = async (w: World) => (await send(w, { action: "op_status", opId: OP })).data.operation;
+
+for (const [label, make] of [
+  ["a long update", async (w: World) => void (await accept(w, "install_os_updates"))],
+  ["a long plan", async (w: World) => void (await accept(w, "plan_os_updates" as never))],
+  ["a scheduled reboot waiting beyond staleAfterMs", async (w: World) => void (await accept(w, "reboot_host", sched(w, 120)))],
+] as [string, (w: World) => Promise<void>][]) {
+  test(`dead runner: ${label} with unit state activating (exit 3) stays open, keeps its slot and is not interrupted`, async () => {
+    const w = world();
+    if (label === "a long plan") await send(w, { action: "plan_os_updates", opId: OP });
+    else await make(w);
+    w.execs.length = 0;
+    w.advance(10 * 60_000);
+    isActiveIs(w, ok("activating\n", 3));
+    const op = await statusOf(w);
+    assert.ok(["accepted", "scheduled", "running"].includes(op.state), op.state);
+    assert.notEqual(rec(w).state, "interrupted");
+    assert.equal(rec(w).finishedAt, undefined);
+    assert.ok(existsSync(activePath(w.cfg)) || existsSync(lanePath(w.cfg, "scheduled")), "the slot is retained");
+  });
+}
+
+test("dead runner: a quiet runner that is genuinely inactive or failed is still settled as interrupted and frees its slot", async () => {
+  for (const state of ["inactive", "failed"]) {
+    const w = await (async () => {
+      const x = world();
+      await accept(x, "install_os_updates");
+      x.advance(60_000);
+      isActiveIs(x, ok(`${state}\n`, 3));
+      return x;
+    })();
+    assert.equal((await statusOf(w)).state, "interrupted", state);
+    assert.equal(existsSync(activePath(w.cfg)), false, `${state}: slot freed`);
+    const s = world();
+    await accept(s, "reboot_host", sched(s, 120));
+    s.advance(60_000);
+    isActiveIs(s, ok(`${state}\n`, 3));
+    assert.equal((await statusOf(s)).state, "interrupted", state);
+    assert.equal(existsSync(lanePath(s.cfg, "scheduled")), false, `${state}: scheduled lane freed`);
+  }
+});
+
+test("dead runner: live states are alive; unknown, empty, garbled, timed-out and failed-to-run answers are alive too (never end a record on doubt)", async () => {
+  const answers: [string, Exec][] = [
+    ["active", ok("active\n")],
+    ["activating exit 3", ok("activating\n", 3)],
+    ["deactivating exit 3", ok("deactivating\n", 3)],
+    ["reloading", ok("reloading\n", 3)],
+    ["unknown state", ok("maintenance\n", 3)],
+    ["empty stdout, exit 3", fail(3)],
+    ["empty stdout, exit 0", ok("")],
+    ["garbled", ok("inactive but not really\n", 3)],
+    ["inactive text with extra lines", ok("inactive\nactive\n", 3)],
+    ["exec could not run (code null)", { code: null as never, stdout: "", stderr: "", timedOut: false }],
+    ["timed out", { code: null as never, stdout: "", stderr: "", timedOut: true }],
+    ["timed out with inactive text", { code: 3, stdout: "inactive\n", stderr: "", timedOut: true }],
+  ];
+  for (const [label, e] of answers) {
+    const w = world();
+    await accept(w, "install_os_updates");
+    w.advance(10 * 60_000);
+    isActiveIs(w, e);
+    assert.equal((await statusOf(w)).state, "accepted", label);
+    assert.ok(existsSync(activePath(w.cfg)), `${label}: slot kept`);
+  }
+});
+
+test("scheduled reboot interrupted text claims a restart only when the boot id actually changed", async () => {
+  const dead = (w: World) => isActiveIs(w, ok("inactive\n", 3));
+  const unchanged = world();
+  await accept(unchanged, "reboot_host", sched(unchanged, 120));
+  assert.equal(rec(unchanged).schedule?.bootKey, bootKey(BOOT1));
+  unchanged.advance(60_000);
+  dead(unchanged);
+  const a = (await statusOf(unchanged)).summary as string;
+  assert.match(a, /boot id is unchanged: the host has not restarted/);
+  assert.doesNotMatch(a, /host restarted/);
+  assert.match(a, /NO reboot was issued/);
+
+  const changed = world();
+  await accept(changed, "reboot_host", sched(changed, 120));
+  changed.advance(60_000);
+  changed.setBoot(BOOT2);
+  dead(changed);
+  assert.match((await statusOf(changed)).summary, /boot id changed: the host restarted after it was scheduled/);
+
+  const unknown = world();
+  await accept(unknown, "reboot_host", sched(unknown, 120));
+  const r = rec(unknown);
+  delete r.schedule!.bootKey; // an older record without evidence
+  saveRecord(unknown.cfg, r, unknown.env);
+  unknown.advance(60_000);
+  unknown.setBoot(BOOT2);
+  dead(unknown);
+  const u = (await statusOf(unknown)).summary as string;
+  assert.match(u, /whether the host restarted is unknown/);
+  assert.doesNotMatch(u, /host restarted after|has not restarted/);
 });

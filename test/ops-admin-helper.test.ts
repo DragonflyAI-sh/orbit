@@ -693,3 +693,46 @@ test("the record carries the type of every state and the action list is closed",
   const rec: OpRecord = { opId: OP, action: "restart_orbit", state: "accepted", acceptedAt: "", updatedAt: "", steps: [] };
   assert.equal(rec.state, "accepted");
 });
+
+// ---------------------------------------------------------------- dead-runner detection: unit STATE, never the exit status
+// A running Type=oneshot runner reports "activating" with exit 3. Only a clean inactive/failed settles a quiet record; any other,
+// empty, timed-out or failed-to-run answer keeps it open and keeps its slot.
+const isActiveIs = (w: World, e: Exec) => void (w.script.exec = (_f, a) => (a[0] === "is-active" ? e : undefined));
+const opStatus = async (w: World) => JSON.parse(await handle(JSON.stringify({ action: "op_status", opId: OP }), w.env, () => {}, w.cfg)).data.operation;
+const resp = (stdout: string, code: number | null = 3, timedOut = false): Exec => ({ code: code as never, stdout, stderr: "", timedOut });
+
+for (const action of ["restart_orbit", "deploy_now", "rollback_release"]) {
+  test(`dead runner: a long ${action} whose unit is activating (exit 3) stays open and keeps its slot`, async () => {
+    const w = world();
+    await accept(w, action);
+    w.advance(10 * 60_000);
+    isActiveIs(w, resp("activating\n"));
+    assert.equal((await opStatus(w)).state, "accepted");
+    assert.equal(existsSync(join(w.cfg.stateDir, "active")), true, "the slot is retained");
+    const busy = JSON.parse(await handle(JSON.stringify({ action: "deploy_now", opId: OP2 }), w.env, () => {}, w.cfg));
+    assert.equal(busy.error.code, "busy");
+  });
+}
+
+test("dead runner: inactive or failed settles a quiet record; unknown, empty, garbled and errored answers never do", async () => {
+  for (const s of ["inactive", "failed"]) {
+    const w = world();
+    await accept(w, "rollback_release");
+    w.advance(60_000);
+    isActiveIs(w, resp(`${s}\n`));
+    assert.equal((await opStatus(w)).state, "interrupted", s);
+    assert.equal(existsSync(join(w.cfg.stateDir, "active")), false, `${s}: slot freed`);
+  }
+  const live: [string, Exec][] = [
+    ["active", resp("active\n", 0)], ["deactivating", resp("deactivating\n")], ["reloading", resp("reloading\n")], ["unknown", resp("maintenance\n")],
+    ["empty", resp("")], ["garbled", resp("inactive-ish\n")], ["code null", resp("", null)], ["timed out", resp("", null, true)], ["timed out, inactive text", resp("inactive\n", 3, true)],
+  ];
+  for (const [label, e] of live) {
+    const w = world();
+    await accept(w, "restart_orbit");
+    w.advance(10 * 60_000);
+    isActiveIs(w, e);
+    assert.equal((await opStatus(w)).state, "accepted", label);
+    assert.equal(existsSync(join(w.cfg.stateDir, "active")), true, `${label}: slot kept`);
+  }
+});

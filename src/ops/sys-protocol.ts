@@ -247,7 +247,7 @@ export type SysRecord = {
   // Boot ids are kept as a short digest (bootKey), never raw: it is evidence for comparison, and a raw id looks like a secret to redaction.
   reboot?: { preBootKey: string; issuedAt: string; expectedCommit?: string; postBootKey?: string };
   // A reboot for later: the confirmed time. An OS update: the digest of the confirmed plan; a plan operation: the plan it obtained.
-  schedule?: { at: string };
+  schedule?: { at: string; bootKey?: string };
   planDigest?: string;
   plan?: { upgrades: PlanEntry[]; digest: string; flags: PlanFlags };
   steps: SysStep[];
