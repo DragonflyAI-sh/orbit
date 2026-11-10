@@ -33,7 +33,7 @@ test("the runner skill carries the secret-literal and gitleaks pre-push rules", 
   const skill = readFileSync(new URL("../tools/orbit-job/SKILL.md", import.meta.url), "utf8");
   assert.match(skill, /Never write secret-shaped literals in any file, tests included/);
   assert.match(skill, /every commit in a PR/);
-  assert.match(skill, /ghcr\.io\/gitleaks\/gitleaks:v8\.30\.1 git \/repo --redact -v --log-opts=HEAD \./);
+  assert.match(skill, /ghcr\.io\/gitleaks\/gitleaks:v8\.30\.1 git \/repo --redact -v --log-opts=HEAD`/);
   assert.match(skill, /report the actual failure/);
   assert.match(skill, /Do not weaken scanning or add exemptions/);
 });
