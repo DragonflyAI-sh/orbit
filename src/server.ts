@@ -12,10 +12,11 @@ import type { Message, ModelPort } from "./model.ts";
 import { proposals as newProposals, runChat } from "./agent.ts";
 import type { Proposals } from "./agent.ts";
 import { chatTools } from "./chat-tools.ts";
+import type { VaultEdits } from "./vault/tools.ts";
 import type { Nodes } from "./nodes.ts";
 import type { Notifier } from "./notify.ts";
 import { decide } from "./policy.ts";
-import type { Port, PortStatus } from "./ports.ts";
+import type { Port, PortStatus, Result } from "./ports.ts";
 import type { Runner } from "./runs.ts";
 import type { AdminOps } from "./ops-admin.ts";
 import type { SysOps } from "./ops-sys.ts";
@@ -52,6 +53,10 @@ export type Deps = {
   adminOps?: AdminOps;
   // Tier 3: owner-confirmed OS updates, reboot and orbit-jobs Funnel (src/ops-sys.ts). Absent means no tier 3 tools are offered.
   sysOps?: SysOps;
+  // Vault write tools and their confirmation path (src/vault/tools.ts). Absent means no vault write tools are offered.
+  vaultEdits?: VaultEdits;
+  // The read-only config view (src/config-view.ts). Absent means the tool is not offered.
+  configView?: (ports: PortStatus[]) => Promise<Result<unknown>>;
   nodes: Nodes;
   jobs?: Jobs;
   publicJobUrl?: string;
@@ -120,6 +125,8 @@ export function buildServer({
   ops,
   adminOps,
   sysOps,
+  vaultEdits,
+  configView,
   nodes,
   jobs,
   publicJobUrl,
@@ -146,7 +153,7 @@ export function buildServer({
   const statuses = (): PortStatus[] => {
     const now = new Date();
     return [
-      fixed("policy", "fail-closed", "Allows reads and chat replies; memory, notify, schedule, runs, tools, devices and jobs for the owner only; refuses everything else."),
+      fixed("policy", "fail-closed", "Allows reads and chat replies; memory, vault writes, the config view, notify, schedule, runs, tools, devices and jobs for the owner only; refuses everything else."),
       fixed("channel", "web", "Web chat at /. Discord and CLI are not built."),
       ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...(jobs ? [launcherStatus(jobs.status())] : []), ...ports.map((p) => p.status()), ...(watch ? [watch.status()] : [])].map((s) => withFreshness(s, now)),
     ];
@@ -205,7 +212,7 @@ export function buildServer({
     }
     const current = limits(isOwner);
     const offered = isOwner && model.step
-      ? withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))
+      ? withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))
       : [];
     if (!offered.length) {
       current.push(
@@ -219,7 +226,15 @@ export function buildServer({
   const allowAgent = (isOwner: boolean) => (tool: string) => {
     const decision = decide("agent", tool, isOwner);
     audit("agent", tool, decision);
-    return decision.allow ? undefined : decision.reason;
+    if (!decision.allow) return decision.reason;
+    // Vault writes and the config view have their own policy port entries, so the owner-only rule is stated for each.
+    const port = tool.startsWith("vault_") ? "vault" : tool === "orbit_config_view" ? "config" : undefined;
+    if (port) {
+      const second = decide(port, tool, isOwner);
+      audit(port, tool, second);
+      return second.allow ? undefined : second.reason;
+    }
+    return undefined;
   };
 
   return createServer(async (req, res) => {
@@ -452,7 +467,7 @@ export function buildServer({
     }
     // A chat proposal does nothing until Rai confirms it here; each proposal can be confirmed or cancelled once.
     const proposalMatch = url.pathname.match(/^\/chat\/proposals\/([0-9a-f-]+)\/(confirm|cancel)$/);
-    if ((jobs || adminOps || sysOps) && proposalMatch && req.method === "POST") {
+    if ((jobs || adminOps || sysOps || vaultEdits) && proposalMatch && req.method === "POST") {
       const confirming = proposalMatch[2] === "confirm";
       if (!(await owned("jobs", confirming ? "confirm" : "cancel"))) return;
       const gone = { error: "No open proposal with that id. It was already confirmed, cancelled or expired." };
@@ -496,6 +511,22 @@ export function buildServer({
         svc.settle(taken.id, result);
         return send(res, result.code, result.body);
       }
+      if (open?.kind === "vault_edit" && confirming) {
+        // A protected vault edit is confirmed against the digest of the exact edit and the reasons shown, then validated again
+        // (path rules, secret check, preconditions, policy) by the same pipeline a direct write uses. Owner only, via the policy port.
+        if (!(await owned("vault", "confirm"))) return;
+        const input = await body();
+        if (!input) return;
+        if (input.digest !== open.digest) return send(res, 409, { error: "The confirmation does not match this proposal's digest. Nothing was done." });
+        if (!vaultEdits) return send(res, 503, { error: "Vault writes are not enabled." });
+        const taken = proposals.take(open.id);
+        if (!taken || taken.kind !== "vault_edit") return send(res, 404, gone);
+        if (!claimed(taken.id, "confirmed")) return alreadyUsed();
+        audit("vault", `confirm:${taken.action}`, { allow: true, reason: `owner confirmed proposal ${taken.id} (digest ${taken.digest.slice(0, 12)})` });
+        const result = await vaultEdits.confirm(taken);
+        svc.settle(taken.id, result);
+        return send(res, result.code, result.body);
+      }
       const proposal = proposals.take(proposalMatch[1]);
       if (!proposal) return send(res, 404, gone);
       if (proposalMatch[2] === "cancel") {
@@ -503,6 +534,7 @@ export function buildServer({
         return send(res, 200, { cancelled: proposal.id });
       }
       if (proposal.kind === "ops_admin" || proposal.kind === "ops_sys") return send(res, 409, { error: "Not confirmed: server operations need their digest." });
+      if (proposal.kind === "vault_edit") return send(res, 409, { error: "Not confirmed: a vault edit needs its digest." });
       if (!jobs) return send(res, 503, { error: "Jobs are not enabled." });
       if (!claimed(proposal.id, "confirmed")) return alreadyUsed();
       if (proposal.kind === "job_steer") {

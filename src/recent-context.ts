@@ -1,12 +1,17 @@
+import type { MemoryPort } from "./memory.ts";
 import type { ModelPort } from "./model.ts";
 import type { Store } from "./store.ts";
+import type { VaultClone } from "./vault/clone.ts";
+import { applyEdit, bodyShaOf, setFrontmatter, splitFrontmatter, VaultError } from "./vault/edit.ts";
+import type { VaultEdit } from "./vault/edit.ts";
 import { dataBlock, neutralize } from "./thread-context.ts";
 import { maskText } from "./threads.ts";
 import type { Thread, Threads } from "./threads.ts";
 
 // Rolling recent context: a short, model-rewritten note about what Rai has been working on and what is still open, fed to
-// every thread. It lives behind RecentContextPort so it can move to the vault file Memory/recent-context.md once ORBIT may
-// write there; until then ORBIT's state directory holds it. Nothing here writes to the vault.
+// every thread. It lives behind RecentContextPort. With the vault write credential it is the vault file
+// Memory/recent-context.md, written through the same vault tools as everything else (policy, secret refusal, log line, git
+// push: no bypass). Without it the note is not saved anywhere new, and ORBIT says so (docs/vault-writes.md).
 
 export type RecentContext = {
   text: string;
@@ -22,6 +27,9 @@ export type RecentContextPort = {
   write(note: RecentContext): Promise<void>;
   // Where the note lives, for /status-style reporting and the docs.
   describe(): string;
+  // True when the port refuses secret-shaped text itself (the vault port does: a vault write never commits redacted text in
+  // place of what was asked). Other ports get the note masked before they store it.
+  refusesSecrets?: true;
 };
 
 export function stateRecentContext(store: Store<RecentContext | null>): RecentContextPort {
@@ -29,6 +37,80 @@ export function stateRecentContext(store: Store<RecentContext | null>): RecentCo
     read: async () => store.read() ?? undefined,
     write: async (note) => store.write(note),
     describe: () => (store.persisted ? "ORBIT state directory (recent-context.json)" : "memory only (no state directory)"),
+  };
+}
+
+export const RECENT_NOTE_PATH = "Memory/recent-context.md";
+
+const shortId = (id: string) => id.replace(/[^A-Za-z0-9]/g, "").slice(0, 8);
+function parseSources(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .replace(/^\[|\]$/g, "")
+    .split(",")
+    .map((x) => x.trim().replace(/^"|"$/g, ""))
+    .filter(Boolean);
+}
+
+// The rolling note as the vault file Memory/recent-context.md: front matter (updatedAt, sources) and the note as the body.
+// Reads come from the memory port (the writable clone when there is one). Writes go through the vault write pipeline as
+// ordinary edits, so a note that needs Rai's confirmation (a new sensitive category) or holds a secret-shaped value is NOT
+// saved, and write() throws so nothing implies it was. The old state-directory note is read as a fallback until the vault
+// has one, and is never written again.
+export function vaultRecentContext(d: {
+  memory: MemoryPort;
+  clone: VaultClone;
+  legacy?: Store<RecentContext | null>;
+  // Returns a refusal reason from the policy port, or undefined.
+  authorize?: () => string | undefined;
+  now?: () => Date;
+}): RecentContextPort {
+  const now = d.now ?? (() => new Date());
+  let saved: { at: string } | undefined;
+  let failed: { at: string; reason: string } | undefined;
+  return {
+    refusesSecrets: true,
+    read: async () => {
+      try {
+        const { fm, body } = splitFrontmatter(d.memory.read(RECENT_NOTE_PATH).value);
+        const get = (k: string) => fm?.find((l) => l.startsWith(`${k}:`))?.slice(k.length + 1).trim().replace(/^"|"$/g, "");
+        return { text: body.trim(), updatedAt: get("updatedAt") ?? "unknown", sources: parseSources(get("sources")) };
+      } catch {
+        return d.legacy?.read() ?? undefined;
+      }
+    },
+    write: async (note) => {
+      try {
+        const refused = d.authorize?.();
+        if (refused) throw new VaultError("policy_refused", refused);
+        if (!d.clone.credentialPresent()) throw new VaultError("auth_unavailable", "the vault write credential is not installed in this ORBIT process");
+        await d.clone.sync();
+        const sources = [...new Set(note.sources.map(shortId))].slice(0, 5);
+        const existing = d.clone.readNote(RECENT_NOTE_PATH);
+        // One commit: the body, and each front matter field that actually changes (an unchanged field is not an edit).
+        const edits: VaultEdit[] =
+          existing === undefined
+            ? [{ op: "create_note", path: RECENT_NOTE_PATH, content: `---\nupdatedAt: ${note.updatedAt}\nsources: [${sources.join(", ")}]\n---\n${note.text}` }]
+            : [{ op: "rewrite_body", path: RECENT_NOTE_PATH, expectBodySha: bodyShaOf(existing), text: note.text }];
+        if (existing !== undefined) {
+          const after = applyEdit(edits[0]!, (p) => (p === RECENT_NOTE_PATH ? existing : undefined)).after;
+          for (const [key, value] of [["updatedAt", note.updatedAt], ["sources", sources]] as const) {
+            if (setFrontmatter(after, key, value) !== after) edits.push({ op: "set_frontmatter", path: RECENT_NOTE_PATH, key, value });
+          }
+        }
+        await d.clone.write(edits, { kind: "direct" }, { actor: "recent-context", summary: `refreshed the rolling recent-work note (${RECENT_NOTE_PATH})` });
+        d.memory.invalidate?.();
+        saved = { at: now().toISOString() };
+        failed = undefined;
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        failed = { at: now().toISOString(), reason: reason.slice(0, 200) };
+        throw new Error(`the rolling note was NOT saved to the vault: ${reason}`);
+      }
+    },
+    describe: () =>
+      failed
+        ? `vault ${RECENT_NOTE_PATH}; the last save FAILED at ${failed.at} (${failed.reason}), so the note is not being updated`
+        : `vault ${RECENT_NOTE_PATH}${saved ? `, last saved ${saved.at}` : d.clone.credentialPresent() ? ", nothing saved yet" : "; NOT saving: the vault write credential is not installed"}`,
   };
 }
 
@@ -92,7 +174,8 @@ export function recentContext(deps: {
       const prior = await port.read();
       const out = (await model.reply([{ role: "user", content: prompt(prior?.text, t) }], [], undefined)).value.trim();
       if (!out) throw new Error("the model returned an empty note");
-      const text = maskText(out).slice(0, NOTE_MAX_CHARS);
+      // A port that refuses secrets gets the text as written, so it can refuse; every other port gets it masked.
+      const text = port.refusesSecrets ? out.slice(0, NOTE_MAX_CHARS) : maskText(out).slice(0, NOTE_MAX_CHARS);
       await port.write({ text, updatedAt: at, sources: [...new Set([id, ...(prior?.sources ?? [])])].slice(0, 5) });
       delete meta.lastError;
       saveMeta();

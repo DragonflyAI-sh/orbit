@@ -47,7 +47,7 @@ export type StoredCall = {
 export type DuplicateJob = { job: string; similarity: number; state: string; launchedAt?: string };
 
 export type CardState = "open" | "confirmed" | "cancelled" | "expired" | "refused";
-export type CardKind = "job_launch" | "job_steer" | "ops_admin" | "ops_sys";
+export type CardKind = "job_launch" | "job_steer" | "ops_admin" | "ops_sys" | "vault_edit";
 // A proposal shown in a thread. The id is the proposal id; the lifecycle lives here, the executed result lives in ORBIT's
 // own records (jobs, ops ledgers) and is only looked up when the card is shown.
 export type Card = {
@@ -70,7 +70,7 @@ export type Card = {
   digest?: string;
   duplicates?: DuplicateJob[];
   // What the confirmation produced: ids that point into the authoritative records, never a claim of success.
-  outcome?: { jobId?: string; opId?: string; steerN?: number; httpStatus?: number; error?: string };
+  outcome?: { jobId?: string; opId?: string; steerN?: number; commit?: string; httpStatus?: number; error?: string };
 };
 
 export type MessageStatus = "pending" | "done" | "error" | "interrupted";

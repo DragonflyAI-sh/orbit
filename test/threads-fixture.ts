@@ -61,7 +61,7 @@ after(() => {
 
 export const OWNER = "rai@example.com";
 
-export function rig(opts: { dir?: string; model?: ModelPort; admin?: boolean; now?: () => Date; vault?: Record<string, string> } = {}) {
+export function rig(opts: { dir?: string; model?: ModelPort; admin?: boolean; now?: () => Date; vault?: Record<string, string>; extra?: (ctx: { proposals: ReturnType<typeof newProposals>; memory: ReturnType<typeof vaultMemory> }) => Partial<Parameters<typeof buildServer>[0]> } = {}) {
   const dir = opts.dir ?? mkdtempSync(join(tmpdir(), "orbit-threads-"));
   const vault = mkdtempSync(join(tmpdir(), "orbit-threads-vault-"));
   writeFileSync(join(vault, "now.md"), "Top priority: money noodle PR.\n");
@@ -107,6 +107,7 @@ export function rig(opts: { dir?: string; model?: ModelPort; admin?: boolean; no
     threads,
     now: opts.now,
     recentContext: stateRecentContext(recentStore),
+    ...opts.extra?.({ proposals, memory }),
   });
   let base = "";
   const ready = new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)).then(() => {

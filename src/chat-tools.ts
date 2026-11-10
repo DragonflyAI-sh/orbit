@@ -9,7 +9,9 @@ import type { Ops } from "./ops-client.ts";
 import { CONFIG_KEYS, type MutatingAction } from "./ops/admin-protocol.ts";
 import type { SysMutatingAction } from "./ops/sys-protocol.ts";
 import { LOG_LINES_DEFAULT, LOG_LINES_MAX } from "./ops/protocol.ts";
+import type { Result } from "./ports.ts";
 import type { Toolbox } from "./tools.ts";
+import type { VaultEdits } from "./vault/tools.ts";
 
 const obj = (properties: Record<string, unknown>, required: string[]) => ({ type: "object", properties, required, additionalProperties: false });
 const str = (description: string) => ({ type: "string", description });
@@ -29,6 +31,10 @@ export type ChatToolDeps = {
   admin?: AdminOps;
   // Tier 3 (owner-confirmed OS updates, reboot, orbit-jobs Funnel). Absent means those proposal tools are not offered.
   sys?: SysOps;
+  // Vault write tools (src/vault/tools.ts). Absent means they are not offered.
+  vault?: VaultEdits;
+  // The read-only config view (src/config-view.ts). Absent means it is not offered.
+  config?: () => Promise<Result<unknown>>;
   notify: Notifier;
   proposals: Proposals;
   // Routine names that can be launched, and whether the brief can be written. Empty when launching is not possible.
@@ -41,15 +47,21 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
   const tools: ChatTool[] = [
     {
       name: "memory_search",
-      description: "Keyword search over Rai's vault. Returns matching note paths.",
+      description: "Keyword search over Rai's vault. Returns matching note paths. The result's source says whether the writable clone (fresh, includes ORBIT's own writes) or the read-only server copy (may lag) answered, and how fresh it is.",
       parameters: obj({ query: str("Keywords to search for") }, ["query"]),
-      run: async (a) => d.memory.search(need(a, "query")),
+      run: async (a) => {
+        await d.memory.refresh?.(30_000);
+        return d.memory.search(need(a, "query"));
+      },
     },
     {
       name: "memory_read",
       description: "Read one vault note by the path memory_search returned.",
       parameters: obj({ path: str("Note path") }, ["path"]),
-      run: async (a) => d.memory.read(need(a, "path")),
+      run: async (a) => {
+        await d.memory.refresh?.(30_000);
+        return d.memory.read(need(a, "path"));
+      },
     },
     {
       name: "github_repo_status",
@@ -64,6 +76,19 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
       run: async (a) => ({ value: d.notify.send(need(a, "text").slice(0, 2000), false), provenance: "live", source: "notify" }),
     },
   ];
+  if (d.vault) tools.push(...d.vault.tools);
+  const config = d.config;
+  if (config) {
+    tools.push({
+      name: "orbit_config_view",
+      description: "Read-only view of how ORBIT is configured right now: the allowlisted non-secret orbit.env settings as the running process has them (trigger ids masked), credential names and sizes (never contents), the deployed commit, the jobs Routine definition from the repo, and each port's state. Each section says where it came from or why it is unavailable. It cannot change anything: configuration changes are only ever ops_propose_config_change, confirmed by Rai.",
+      parameters: obj({}, []),
+      run: async (a) => {
+        if (Object.keys(a).length) throw new Error("This tool takes no arguments.");
+        return config();
+      },
+    });
+  }
   const ops = d.ops;
   if (ops) {
     const op = (name: string, action: Parameters<Ops["call"]>[0], description: string): ChatTool => ({
