@@ -15,6 +15,10 @@ Open `/` for web chat. Every reply is tagged `live` or `mock`, and the model is 
 
 For the owner, the model can call ORBIT's own actions during a reply (up to 5 rounds): `memory_search`, `memory_read`, `github_repo_status`, `jobs_list` (a compact row per job and the true total), `job_status` (last 20 events and how many were left out), `job_steer`, `notify` and `job_launch`, plus the `ops_*` server tools when the helper is installed. Each call is checked by `decide("agent", tool)`, and the reply lists every call with its provenance. `job_launch` only creates a proposal; the page shows it with Confirm and Cancel, and only a click calls the launcher (`POST /chat/proposals/:id/confirm`). Anyone else, or a model that cannot call tools (the mock), gets none and is told so.
 
+## Threads
+
+Chat is stored on the server as threads, shared by every device, owner only, kept until archived (nothing is deleted). The page lists, opens, creates, renames and archives threads, restores the selection after a refresh, and shows proposal cards with their final state and the job or operation id. The model's context is built from the stored thread, including earlier tool calls and results, with per-thread compaction and a rolling recent-work note. Storage, routes, concurrency, migration, budgets, the recent-context interface and the proposal lifecycle are in `docs/threads.md`.
+
 ## Server operations (`orbit-ops`)
 
 Seven read-only chat tools (`ops_orbit_status`, `ops_orbit_logs`, `ops_deploy_state`, `ops_host_health`, `ops_tailscale_status`, `ops_vault_sync`, `ops_credentials`) ask a small root helper behind `/run/orbit-ops.sock` (group `orbit-ops`, mode 0660). Fixed named actions only, bounded and redacted, credentials by name/size/date only, no per-read confirmation. It is installed by `deploy/install.sh`, not by a normal deploy: see `docs/orbit-ops.md` for the exact commands, protections and verification.

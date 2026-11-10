@@ -41,6 +41,9 @@ export async function runChat(options: {
   // Policy hook: returns an error string when the call is refused.
   allow?: (tool: string) => string | undefined;
   maxRounds?: number;
+  // Called after each tool call has run, with exactly what the model is about to see. A thread stores it here, call by call,
+  // so a later failure cannot lose the calls that already happened. A throw ends the turn.
+  onCall?: (done: { call_id: string; name: string; arguments: string; output: string; record: CallRecord }) => void | Promise<void>;
 }): Promise<ChatOutcome> {
   const { model, limits, notes, tools, allow } = options;
   const maxRounds = options.maxRounds ?? MAX_ROUNDS;
@@ -64,6 +67,7 @@ export async function runChat(options: {
       const { output, record } = await execute(call.name, call.arguments, byName, allow);
       calls.push(record);
       input.push({ type: "function_call_output", call_id: call.call_id, output });
+      await options.onCall?.({ call_id: call.call_id, name: call.name, arguments: call.arguments, output, record });
     }
   }
 }
@@ -108,7 +112,8 @@ async function execute(
 // shown (a summary, masked settings) and a digest of the exact validated action and arguments; the arguments themselves stay with
 // ORBIT's admin ledger (src/ops-admin.ts), so a proposal listing never holds a setting value in full.
 export type ProposalAction =
-  | { kind: "job_launch"; routine: string; brief: string }
+  // `duplicates`: recent jobs whose brief matches this one (src/duplicates.ts). A warning only.
+  | { kind: "job_launch"; routine: string; brief: string; duplicates?: { job: string; similarity: number; state: string; launchedAt?: string }[] }
   | { kind: "job_steer"; job: string; text: string }
   | { kind: "ops_admin"; action: MutatingAction; summary: string; display: Record<string, string> | null; digest: string }
   // Tier 3 (OS updates, reboot, orbit-jobs Funnel): same shape, plus the impact and recovery warnings the owner must see.

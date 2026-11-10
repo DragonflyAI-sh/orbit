@@ -24,6 +24,13 @@ import type { Toolbox } from "./tools.ts";
 import type { JobInput, Scheduler } from "./schedule.ts";
 import { parseJob } from "./schedule.ts";
 import type { Watch } from "./watch.ts";
+import { findDuplicates, withDuplicateWarning } from "./duplicates.ts";
+import { recentContext, stateRecentContext } from "./recent-context.ts";
+import type { RecentContextPort } from "./recent-context.ts";
+import { threadService } from "./thread-service.ts";
+import { MAX_MESSAGE_CHARS, isThreadId, threadStore, ThreadError } from "./threads.ts";
+import type { Threads } from "./threads.ts";
+import { jsonStore } from "./store.ts";
 
 export const STALE_AFTER_MS = 5 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -56,6 +63,12 @@ export type Deps = {
   deploy?: () => unknown;
   proposals?: Proposals;
   watch?: Watch;
+  // Server-side chat threads (src/threads.ts). Absent means an in-memory store, which a restart empties.
+  threads?: Threads;
+  // Where the rolling recent-context note is kept. Absent means memory only. Never the live vault.
+  recentContext?: RecentContextPort;
+  // The clock for thread cards and the recent-context note. Tests inject one; it must be the clock the proposals use.
+  now?: () => Date;
 };
 
 export function withStaleness(status: PortStatus, now: Date): PortStatus {
@@ -118,6 +131,9 @@ export function buildServer({
   deploy = () => ({ state: "unknown" }),
   proposals = newProposals(),
   watch,
+  threads = threadStore(undefined),
+  recentContext: recentPort = stateRecentContext(jsonStore(undefined, "recent-context", null)),
+  now,
 }: Deps): Server {
   const byName = new Map(ports.map((p) => [p.name, p]));
   const fixed = (port: string, impl: string, detail: string): PortStatus => ({
@@ -159,9 +175,52 @@ export function buildServer({
   // The one launch path: the /jobs/launch route and a confirmed chat proposal both end here (ORBIT's own review launches use jobLauncher directly).
   const launchJob = jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit });
 
+  // Threads: the store, the rolling recent-context note, and the service that runs a turn against a thread.
+  const recent = recentContext({ port: recentPort, threads, model, now, cardLines: (t) => svc.cardLines(t) });
+  const svc = threadService({ threads, model, proposals, jobs, admin: adminOps, sys: sysOps, recent, now });
+
   const isOwnerOf = async (req: IncomingMessage) => Boolean(owner) && (await identify(req)) === owner;
   const audit = (port: string, action: string, decision: { allow: boolean; reason: string }) =>
     console.log(JSON.stringify({ at: new Date().toISOString(), port, action, ...decision }));
+
+  // What a reply is given besides the conversation: memory excerpts and the device summary (owner only), the limits to
+  // disclose, and the tools offered. Shared by the legacy /chat route and the thread routes.
+  const prepare = async (isOwner: boolean, query: string) => {
+    let notes: string | undefined;
+    let used: string[] = [];
+    const memoryDecision = decide("memory", "search", isOwner);
+    if (memoryDecision.allow) {
+      audit("memory", "search", memoryDecision);
+      try {
+        const hits = memory.search(query).value;
+        used = hits.map((h) => h.path);
+        notes = hits.map((h) => `### ${h.path}\n${memory.read(h.path).value.slice(0, MAX_NOTE_CHARS)}`).join("\n\n") || undefined;
+      } catch {
+        // memory.status() reports the failure; the reply goes ahead without notes.
+      }
+    }
+    if (isOwner) {
+      const devices = `### Devices right now (from Tailscale)\n${nodes.summary()}`;
+      notes = notes ? `${devices}\n\n${notes}` : devices;
+    }
+    const current = limits(isOwner);
+    const offered = isOwner && model.step
+      ? withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))
+      : [];
+    if (!offered.length) {
+      current.push(
+        !isOwner
+          ? "chat tools are refused: this request is not from the owner, so you cannot call any tools or take any action"
+          : "chat tools are unavailable: the connected model cannot call tools, so you cannot take any action; do not claim to have launched, steered or sent anything",
+      );
+    }
+    return { notes, used, current, offered };
+  };
+  const allowAgent = (isOwner: boolean) => (tool: string) => {
+    const decision = decide("agent", tool, isOwner);
+    audit("agent", tool, decision);
+    return decision.allow ? undefined : decision.reason;
+  };
 
   return createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://orbit");
@@ -212,34 +271,7 @@ export function buildServer({
       if (!messages) return send(res, 400, { error: `Send 1-${MAX_MESSAGES} messages ending with a user message.` });
 
       const isOwner = await isOwnerOf(req);
-      let notes: string | undefined;
-      let used: string[] = [];
-      const memoryDecision = decide("memory", "search", isOwner);
-      if (memoryDecision.allow) {
-        audit("memory", "search", memoryDecision);
-        try {
-          const hits = memory.search(messages.at(-1)!.content).value;
-          used = hits.map((h) => h.path);
-          notes = hits.map((h) => `### ${h.path}\n${memory.read(h.path).value.slice(0, MAX_NOTE_CHARS)}`).join("\n\n") || undefined;
-        } catch {
-          // memory.status() reports the failure; the reply goes ahead without notes.
-        }
-      }
-      if (isOwner) {
-        const devices = `### Devices right now (from Tailscale)\n${nodes.summary()}`;
-        notes = notes ? `${devices}\n\n${notes}` : devices;
-      }
-      const current = limits(isOwner);
-      const offered = isOwner && model.step
-        ? chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, jobs, notify, proposals, launchable })
-        : [];
-      if (!offered.length) {
-        current.push(
-          !isOwner
-            ? "chat tools are refused: this request is not from the owner, so you cannot call any tools or take any action"
-            : "chat tools are unavailable: the connected model cannot call tools, so you cannot take any action; do not claim to have launched, steered or sent anything",
-        );
-      }
+      const { notes, used, current, offered } = await prepare(isOwner, messages.at(-1)!.content);
       try {
         if (!offered.length) return send(res, 200, { reply: await model.reply(messages, current, notes), memory: used, limits: current, calls: [], proposals: [] });
         const before = new Set(proposals.list().map((p) => p.id));
@@ -249,11 +281,7 @@ export function buildServer({
           limits: current,
           notes,
           tools: offered,
-          allow: (tool) => {
-            const decision = decide("agent", tool, isOwner);
-            audit("agent", tool, decision);
-            return decision.allow ? undefined : decision.reason;
-          },
+          allow: allowAgent(isOwner),
         });
         const reply = { value: outcome.text || "(the model returned no text)", provenance: "live" as const, source: `model/${model.status().impl}` };
         const fresh = proposals.list().filter((p) => !before.has(p.id));
@@ -278,6 +306,65 @@ export function buildServer({
         return undefined;
       }
     };
+
+    // ---- Threads (owner only, every route). A thread is stored on the server and shared by every device; the model's context is
+    // built from the stored thread, never from text the browser sends. docs/threads.md describes each route.
+    const threadFail = (err: unknown) =>
+      err instanceof ThreadError ? send(res, err.code, { error: err.message }) : send(res, 500, { error: "Could not save the thread. Nothing was changed." });
+    const threadMatch = url.pathname.match(/^\/threads\/([0-9a-f-]{36})(?:\/(rename|archive|messages))?$/);
+    if (url.pathname === "/threads" && req.method === "GET") {
+      if (!(await owned("threads", "list"))) return;
+      const all = url.searchParams.get("archived") === "1";
+      return send(res, 200, { threads: threads.list(all), notice: threads.notice() ?? null, persisted: threads.persisted, problems: threads.problems(), recentContext: recent.status() });
+    }
+    if (url.pathname === "/threads" && req.method === "POST") {
+      if (!(await owned("threads", "create"))) return;
+      const input = await body();
+      if (!input) return;
+      try {
+        return send(res, 201, { thread: svc.view(threads.create(input.title as string | undefined).id) });
+      } catch (err) {
+        return threadFail(err);
+      }
+    }
+    if (url.pathname === "/threads/notice/ack" && req.method === "POST") {
+      if (!(await owned("threads", "notice"))) return;
+      threads.ackNotice();
+      return send(res, 200, { notice: null });
+    }
+    if (threadMatch) {
+      const [, id, action] = threadMatch;
+      const method = action === undefined ? "GET" : "POST";
+      if (req.method !== method) return send(res, 405, { error: `Use ${method} for this route.` });
+      if (!(await owned("threads", action ?? "open"))) return;
+      if (!isThreadId(id) || !threads.get(id)) return send(res, 404, { error: "No thread with that id." });
+      try {
+        if (!action) return send(res, 200, { thread: svc.view(id) });
+        const input = await body();
+        if (!input) return;
+        if (action === "rename") {
+          threads.rename(id, input.title);
+          return send(res, 200, { thread: svc.view(id) });
+        }
+        if (action === "archive") {
+          const archived = input.archived !== false;
+          threads.archive(id, archived);
+          // Archiving a notable thread is a moment to refresh the rolling note.
+          if (archived) recent.consider(id, { force: true });
+          return send(res, 200, { thread: svc.view(id) });
+        }
+        const text = typeof input.text === "string" ? input.text.trim() : "";
+        if (!text || text.length > MAX_MESSAGE_CHARS) return send(res, 400, { error: `Send {text}: 1-${MAX_MESSAGE_CHARS} characters.` });
+        const decision = decide("channel", "chat", false);
+        audit("channel", "chat", decision);
+        if (!decision.allow) return send(res, 403, { error: decision.reason });
+        const prep = await prepare(true, text);
+        const out = await svc.turn(id, text, { notes: prep.notes, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(true) });
+        return send(res, out.error ? 502 : 200, { thread: out.thread, limits: prep.current, ...(out.error ? { error: out.error } : {}) });
+      } catch (err) {
+        return threadFail(err);
+      }
+    }
 
     if (url.pathname === "/notifications" && req.method === "GET") {
       if (!(await owned("notify", "inbox"))) return;
@@ -368,7 +455,17 @@ export function buildServer({
     if ((jobs || adminOps || sysOps) && proposalMatch && req.method === "POST") {
       const confirming = proposalMatch[2] === "confirm";
       if (!(await owned("jobs", confirming ? "confirm" : "cancel"))) return;
+      const gone = { error: "No open proposal with that id. It was already confirmed, cancelled or expired." };
       const open = proposals.peek(proposalMatch[1]);
+      if (!open) {
+        // A proposal shown in a thread keeps its card: it says what became of it instead of a bare 404.
+        const known = svc.missing(proposalMatch[1]);
+        if (known) return send(res, known.code, known.body);
+      }
+      // Single use has two guards that must agree: the proposal store's take() and the thread card's open -> confirmed/cancelled
+      // compare-and-set. Both are synchronous, so of any number of concurrent requests exactly one gets past them.
+      const claimed = (id: string, to: "confirmed" | "cancelled"): boolean => svc.claim(id, to);
+      const alreadyUsed = () => send(res, 409, { error: "This proposal was already used. Nothing was done again." });
       if (open?.kind === "ops_admin" && confirming) {
         // A server operation is confirmed against the digest of the exact action and settings shown on the card. A missing or
         // different digest changes nothing and leaves the proposal open.
@@ -377,9 +474,11 @@ export function buildServer({
         if (input.digest !== open.digest) return send(res, 409, { error: "The confirmation does not match this proposal's digest. Nothing was done." });
         if (!adminOps) return send(res, 503, { error: "Server operations are not enabled." });
         const taken = proposals.take(open.id);
-        if (!taken || taken.kind !== "ops_admin") return send(res, 404, { error: "No open proposal with that id. It was already confirmed, cancelled or expired." });
+        if (!taken || taken.kind !== "ops_admin") return send(res, 404, gone);
+        if (!claimed(taken.id, "confirmed")) return alreadyUsed();
         audit("ops", `confirm:${taken.action}`, { allow: true, reason: `owner confirmed proposal ${taken.id} (digest ${taken.digest.slice(0, 12)})` });
         const result = await adminOps.confirm(taken);
+        svc.settle(taken.id, result);
         return send(res, result.code, result.body);
       }
       if (open?.kind === "ops_sys" && confirming) {
@@ -390,21 +489,30 @@ export function buildServer({
         if (input.digest !== open.digest) return send(res, 409, { error: "The confirmation does not match this proposal's digest. Nothing was done." });
         if (!sysOps) return send(res, 503, { error: "Tier 3 server operations are not enabled." });
         const taken = proposals.take(open.id);
-        if (!taken || taken.kind !== "ops_sys") return send(res, 404, { error: "No open proposal with that id. It was already confirmed, cancelled or expired." });
+        if (!taken || taken.kind !== "ops_sys") return send(res, 404, gone);
+        if (!claimed(taken.id, "confirmed")) return alreadyUsed();
         audit("ops", `confirm:${taken.action}`, { allow: true, reason: `owner confirmed proposal ${taken.id} (digest ${taken.digest.slice(0, 12)})` });
         const result = await sysOps.confirm(taken);
+        svc.settle(taken.id, result);
         return send(res, result.code, result.body);
       }
       const proposal = proposals.take(proposalMatch[1]);
-      if (!proposal) return send(res, 404, { error: "No open proposal with that id. It was already confirmed, cancelled or expired." });
-      if (proposalMatch[2] === "cancel") return send(res, 200, { cancelled: proposal.id });
+      if (!proposal) return send(res, 404, gone);
+      if (proposalMatch[2] === "cancel") {
+        if (!claimed(proposal.id, "cancelled")) return alreadyUsed();
+        return send(res, 200, { cancelled: proposal.id });
+      }
       if (proposal.kind === "ops_admin" || proposal.kind === "ops_sys") return send(res, 409, { error: "Not confirmed: server operations need their digest." });
       if (!jobs) return send(res, 503, { error: "Jobs are not enabled." });
+      if (!claimed(proposal.id, "confirmed")) return alreadyUsed();
       if (proposal.kind === "job_steer") {
         const steer = jobs.steer(proposal.job, proposal.text);
-        return steer ? send(res, 201, { steered: proposal.job, steer }) : send(res, 404, { error: "That job no longer exists." });
+        const result = steer ? { code: 201, body: { steered: proposal.job, steer } } : { code: 404, body: { error: "That job no longer exists." } };
+        svc.settle(proposal.id, result);
+        return send(res, result.code, result.body);
       }
       const result = await launchJob(proposal.routine, proposal.brief);
+      svc.settle(proposal.id, result);
       return send(res, result.code, result.body);
     }
     if (jobs && url.pathname === "/jobs" && req.method === "POST") {

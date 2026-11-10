@@ -1,8 +1,8 @@
 export type Decision = { allow: boolean; reason: string };
 
-// Fails closed. Reads and chat replies pass; memory, notify, schedule, runs, tools, model sign-in, nodes, jobs, server operations and chat tool calls ("agent") need the owner; everything else waits for real approvals.
+// Fails closed. Reads and chat replies pass; memory, notify, schedule, runs, tools, model sign-in, nodes, jobs, server operations, chat threads and chat tool calls ("agent") need the owner; everything else waits for real approvals.
 const OPEN_ACTIONS = new Set(["describe", "chat"]);
-const OWNER_PORTS = new Set(["memory", "notify", "schedule", "runs", "tools", "model", "nodes", "jobs", "ops", "agent"]);
+const OWNER_PORTS = new Set(["memory", "notify", "schedule", "runs", "tools", "model", "nodes", "jobs", "ops", "agent", "threads"]);
 
 export function decide(port: string, action: string, isOwner: boolean): Decision {
   if (OWNER_PORTS.has(port) && action !== "describe") {
