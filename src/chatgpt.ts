@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { instructions, parseOutput, responsesTools } from "./model.ts";
 import type { Item, Message, ModelPort, Step, ToolDef } from "./model.ts";
+import { redact } from "./ops/protocol.ts";
 import type { PortStatus } from "./ports.ts";
 
 // "Sign in with ChatGPT" token sharing, the method OpenClaw's OpenAI plugin uses: ChatGPT authorizes eligible
@@ -187,10 +188,14 @@ export function textFromStream(raw: string): string {
 // How long ORBIT waits before trying again after a limit that came with no reset time.
 export const USAGE_PAUSE_MS = 15 * 60_000;
 export const RATE_PAUSE_MS = 60_000;
+// A provider reset further away than this is not believed: ORBIT uses its own pause instead of blocking for days.
+export const MAX_RESET_MS = 7 * 24 * 60 * 60_000;
+// One automatic retry after an overload that arrived before any output, after this delay plus up to a second of jitter.
+export const OVERLOAD_RETRY_MS = 2_000;
 // The code on a refusal ORBIT makes itself during a pause (no request was sent).
 export const PAUSED = "orbit_paused";
 
-export type ProviderErrorKind = "usage_limit" | "rate_limit" | "auth" | "incomplete" | "failed";
+export type ProviderErrorKind = "usage_limit" | "rate_limit" | "overloaded" | "auth" | "incomplete" | "failed";
 
 export class ProviderError extends Error {
   readonly kind: ProviderErrorKind;
@@ -217,21 +222,30 @@ type ProviderErrorBody = {
 const USAGE_LIMIT = /usage_limit|usage_not_included|insufficient_quota|quota_exceeded|plan_limit/i;
 const RATE_LIMIT = /rate_limit|too_many_requests/i;
 const AUTH = /invalid_api_key|unauthori[sz]ed|invalid_token|token_expired|forbidden|permission/i;
-const clean = (s: unknown, max = 200) =>
-  String(s ?? "")
+const OVERLOADED = /overloaded|server_busy|temporarily_unavailable|capacity/i;
+// Provider text as it may be shown: one line, ORBIT's full secret redaction (tokens, JWTs, keys, long opaque strings,
+// bearer and basic credentials, URL userinfo), an HTML error page reduced to a note, and a length cap.
+const clean = (s: unknown, max = 200) => {
+  const text = String(s ?? "").trim();
+  if (/^<(!doctype|html|head|body)\b/i.test(text)) return "(an HTML error page)";
+  return redact(text.replace(/Bearer\s+\S+/gi, "Bearer [redacted]"))
     .replace(/\s+/g, " ")
-    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
     .trim()
     .slice(0, max);
+};
 
 // A reset time from the provider: epoch seconds or an ISO date in resets_at, or seconds from now in resets_in_seconds.
+// Only a time in the future and within MAX_RESET_MS counts; anything else (past, zero, absurd, invalid) is treated as
+// no reset time, so ORBIT's own short pause applies.
 function resetFrom(body: ProviderErrorBody, now: number): string | undefined {
   const at = body.resets_at;
-  if (typeof at === "number" && Number.isFinite(at) && at > 0) return new Date(at < 1e12 ? at * 1000 : at).toISOString();
-  if (typeof at === "string" && !Number.isNaN(Date.parse(at))) return new Date(Date.parse(at)).toISOString();
   const inS = body.resets_in_seconds;
-  if (typeof inS === "number" && Number.isFinite(inS) && inS >= 0) return new Date(now + inS * 1000).toISOString();
-  return undefined;
+  let ms: number | undefined;
+  if (typeof at === "number" && Number.isFinite(at) && at > 0) ms = at < 1e12 ? at * 1000 : at;
+  else if (typeof at === "string") ms = Date.parse(at);
+  else if (typeof inS === "number" && Number.isFinite(inS) && inS > 0) ms = now + inS * 1000;
+  if (ms === undefined || !Number.isFinite(ms) || ms <= now || ms - now > MAX_RESET_MS) return undefined;
+  return new Date(ms).toISOString();
 }
 
 const inWords = (ms: number) => {
@@ -251,6 +265,9 @@ function classify(body: ProviderErrorBody, status: number | undefined, now: numb
   }
   if (RATE_LIMIT.test(tag) || status === 429) {
     return new ProviderError("rate_limit", `ChatGPT is rate limiting requests${said ? `: ${said}` : ""}.${when}`, resetsAt, code);
+  }
+  if (OVERLOADED.test(tag) || status === 503 || status === 529) {
+    return new ProviderError("overloaded", `ChatGPT's servers are overloaded${said ? `: ${said}` : ""}.`, undefined, code);
   }
   if (AUTH.test(tag) || status === 401 || status === 403) {
     return new ProviderError("auth", `ChatGPT refused the login${said ? `: ${said}` : ""}. Sign in again from the web page if this persists.`, undefined, code);
@@ -316,11 +333,12 @@ export type ChatGPTModel = ModelPort & {
   finishLogin(callbackUrl: string): Promise<Login>;
 };
 
-export type ChatGPTOptions = { fetcher?: Fetch; now?: () => number };
+export type ChatGPTOptions = { fetcher?: Fetch; now?: () => number; sleep?: (ms: number) => Promise<void> };
 
 export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOptions = {}): ChatGPTModel {
   const fetcher = options.fetcher ?? fetch;
   const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const saved = file.read();
   let login: Login = saved ? { state: "signed-in", email: saved.email, since: new Date(now()).toISOString() } : { state: "signed-out" };
   let pending: { state: string; nonce: string; verifier: string; deadline: number } | undefined;
@@ -437,16 +455,26 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
   // The most recent limit, kept after it passes so the port can say "not confirmed" until a call answers.
   let lastLimit: Limit | undefined;
 
-  const record = (started: string, err: unknown) => {
-    // A renewal failure is reported by the renewal state, not as an inference failure.
-    lastError = { at: started, detail: err instanceof Error ? err.message : String(err), renewal: err instanceof RenewalError };
-    // A refusal made by the pause itself does not start a new pause.
+  // Records a failed call when it ends. Times are when calls finished, so the port reflects the latest outcome.
+  const record = (err: unknown) => {
+    // A refusal made by the pause itself is not a call: it changes neither the last failure nor the pause.
     if (err instanceof ProviderError && err.code === PAUSED) return;
+    // A renewal failure is reported by the renewal state, not as an inference failure.
+    lastError = { at: at(), detail: err instanceof Error ? err.message : String(err), renewal: err instanceof RenewalError };
     if (err instanceof ProviderError && (err.kind === "usage_limit" || err.kind === "rate_limit")) {
       const pause = err.kind === "usage_limit" ? USAGE_PAUSE_MS : RATE_PAUSE_MS;
-      limited = { error: err, until: err.resetsAt ?? new Date(now() + pause).toISOString(), estimated: !err.resetsAt };
+      const next: Limit = { error: err, until: err.resetsAt ?? new Date(now() + pause).toISOString(), estimated: !err.resetsAt };
+      const current = activeLimit();
+      // A limit already in force is kept, so calls that were in flight when it began cannot push it later, except that
+      // better information wins without ever shortening it: a provider reset replaces ORBIT's own estimate, and a usage
+      // limit replaces a rate-limit pause.
+      if (current) {
+        const better = (current.estimated && !next.estimated) || (current.error.kind === "rate_limit" && next.error.kind === "usage_limit");
+        if (!better || Date.parse(next.until) <= Date.parse(current.until)) return;
+      }
+      limited = next;
       lastLimit = limited;
-    } else {
+    } else if (!activeLimit()) {
       lastLimit = undefined;
     }
   };
@@ -464,18 +492,55 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
       ? `The provider gave no reset time, so ORBIT pauses model calls until ${l.until} (in ${inWords(Date.parse(l.until) - now())}) and then tries again.`
       : `It resets at ${l.until} (in ${inWords(Date.parse(l.until) - now())}); ORBIT makes no model call until then.`;
 
-  // One model request: the stream text on success; a ProviderError for a known limit, an HTTP error or an error event.
-  const request = async (body: string): Promise<string> => {
-    const limit = activeLimit();
-    if (limit) throw new ProviderError(limit.error.kind, `${limitWhat(limit)}. No call was made. ${limitWhen(limit)}`, limit.estimated ? undefined : limit.until, PAUSED);
+  // An overload reported before the stream produced any output: nothing was answered, so asking again is safe.
+  const retryable = new WeakSet<ProviderError>();
+  const OUTPUT_EVENT = /"type"\s*:\s*"response\.(output_item|output_text|content_part|function_call)/;
+
+  // One HTTP request: the stream text on success; a ProviderError for an HTTP error or an error event.
+  const attempt = async (body: string): Promise<string> => {
     const used = await fresh();
     let res = await call(used, body);
     if (res.status === 401) res = await call(await afterRefusal(used), body);
-    if (!res.ok) throw httpProblem(res.status, await res.text().catch(() => ""), now());
+    if (!res.ok) {
+      const e = httpProblem(res.status, await res.text().catch(() => ""), now());
+      if (e.kind === "overloaded") retryable.add(e);
+      throw e;
+    }
     const raw = await res.text();
     const problem = streamProblem(raw, now());
-    if (problem) throw problem;
+    if (problem) {
+      if (problem.kind === "overloaded" && !OUTPUT_EVENT.test(raw)) retryable.add(problem);
+      throw problem;
+    }
     return raw;
+  };
+
+  // One model request. No call during a limit; one retry after an overload that came before any output.
+  // A refusal made without calling, while a limit is in force.
+  const refuseIfLimited = () => {
+    const limit = activeLimit();
+    if (limit) throw new ProviderError(limit.error.kind, `${limitWhat(limit)}. No call was made. ${limitWhen(limit)}`, limit.estimated ? undefined : limit.until, PAUSED);
+  };
+
+  const request = async (body: string): Promise<string> => {
+    refuseIfLimited();
+    try {
+      return await attempt(body);
+    } catch (err) {
+      if (!(err instanceof ProviderError && retryable.has(err))) throw err;
+      const wait = OVERLOAD_RETRY_MS + Math.floor(Math.random() * 1000);
+      await sleep(wait);
+      // Another call may have hit a limit during the wait: the retry obeys it.
+      refuseIfLimited();
+      try {
+        return await attempt(body);
+      } catch (again) {
+        if (again instanceof ProviderError && again.kind === "overloaded") {
+          throw new ProviderError("overloaded", `${again.message.replace(/\.$/, "")} (asked twice, ${Math.round(wait / 1000)} s apart).`, undefined, again.code);
+        }
+        throw again;
+      }
+    }
   };
 
   const call = (tokens: Tokens, body: string) =>
@@ -606,9 +671,10 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         const why = login.state === "failed" ? ` Last sign-in failed: ${login.detail}` : "";
         return { port: "model", state: "down", impl, detail: `Not signed in to ChatGPT. Sign in from the web page.${why}`, verifiedAt: at() };
       }
+      // A limit in force decides the state even if a call that was already in flight answered after it began.
+      const limit = activeLimit();
+      if (limit && lastError) return { port: "model", state: "down", impl, detail: `${limitWhat(limit)}. ${limitWhen(limit)}`, verifiedAt: lastError.at };
       if (lastError && !lastError.renewal && (!lastOk || lastError.at > lastOk)) {
-        const limit = activeLimit();
-        if (limit) return { port: "model", state: "down", impl, detail: `${limitWhat(limit)}. ${limitWhen(limit)}`, verifiedAt: lastError.at };
         if (lastLimit && Date.parse(lastLimit.until) <= now()) {
           const ended = lastLimit.estimated ? `ORBIT's pause after the limit ended at ${lastLimit.until}` : `The limit was due to reset at ${lastLimit.until}`;
           return { port: "model", state: "degraded", impl, detail: `${ended}. No model call since, so it is not confirmed that ChatGPT answers again.`, verifiedAt: lastError.at };
@@ -630,7 +696,6 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
     },
 
     async step(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<Step> {
-      const started = at();
       const body = JSON.stringify({
         model,
         instructions: instructions(limits, notes, tools.map((t) => `${t.name}: ${t.description}`)),
@@ -643,16 +708,15 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         const raw = await request(body);
         const step = stepFromStream(raw);
         if (!step.text && !step.calls.length) throw new Error(`response had no text and no tool call (stream events: ${streamShape(raw)})`);
-        lastOk = started;
+        lastOk = at();
         return step;
       } catch (err) {
-        record(started, err);
+        record(err);
         throw err;
       }
     },
 
     async reply(messages: Message[], limits: string[], notes?: string) {
-      const started = at();
       const body = JSON.stringify({
         model,
         instructions: instructions(limits, notes),
@@ -664,10 +728,10 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         const raw = await request(body);
         const text = textFromStream(raw);
         if (!text) throw new Error(`response had no text (stream events: ${streamShape(raw)})`);
-        lastOk = started;
+        lastOk = at();
         return { value: text, provenance: "live" as const, source: `model/${impl}` };
       } catch (err) {
-        record(started, err);
+        record(err);
         throw err;
       }
     },
