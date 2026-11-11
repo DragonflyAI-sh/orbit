@@ -348,3 +348,67 @@ test("an overload after output started, and other errors, are not retried; HTTP 
   assert.equal((await chat(r3.model)).value, "ok");
   assert.equal(r3.log.inference, 2);
 });
+
+// ---- follow-ups from ORBIT's review of #52 -----------------------------------------------------------------------------
+
+test("a limit that begins during the overload retry wait is obeyed: the retry is not sent", async () => {
+  const responses = [overloaded, failedStream({ code: "usage_limit_reached" })];
+  let t = START;
+  const file = tokenFile(undefined);
+  file.write({
+    access: "access-0",
+    refresh: "refresh-0",
+    expires: START + 600 * MIN,
+    idToken: `h.${Buffer.from(JSON.stringify({ sub: "user-1" })).toString("base64url")}.s`,
+    clientId: "oaiapp_x",
+    subject: "user-1",
+    scope: "openid resource.invoke chatgpt.tokens.use.direct offline_access",
+  });
+  let sent = 0;
+  const fetcher = (async () => new Response(responses[sent++] ?? textStream("should not be sent"))) as unknown as typeof fetch;
+  let model: ReturnType<typeof chatgptModel>;
+  // While the first call waits to retry, another call hits the usage limit.
+  const sleep = async () => {
+    await assert.rejects(chat(model), (err: unknown) => err instanceof ProviderError && err.kind === "usage_limit");
+  };
+  model = chatgptModel("gpt-x", file, { fetcher, now: () => t, sleep });
+  await assert.rejects(chat(model), /No call was made/);
+  assert.equal(sent, 2, "the retry was not sent during the pause");
+});
+
+test("a provider reset replaces ORBIT's own estimate, and a usage limit replaces a rate pause, but neither is shortened", async () => {
+  // Estimate first, then a real three-day reset from a call that was in flight.
+  const g = gatedRig();
+  const a = chat(g.model).catch((e) => e);
+  const b = chat(g.model).catch((e) => e);
+  await g.settle();
+  g.waiting[0]!(failedStream({ code: "usage_limit_reached" }));
+  await a;
+  assert.match(g.model.status().detail, /pauses model calls until .* \(in 15 min\)/);
+  g.waiting[1]!(failedStream({ code: "usage_limit_reached", resets_in_seconds: 3 * 24 * 3600 }));
+  await b;
+  assert.match(g.model.status().detail, /It resets at .* \(in 72 h 0 min\); ORBIT makes no model call until then/);
+
+  // A rate-limit pause, then a usage limit from a call in flight.
+  const h = gatedRig();
+  const c = chat(h.model).catch((e) => e);
+  const d = chat(h.model).catch((e) => e);
+  await h.settle();
+  h.waiting[0]!(event({ type: "error", error: { code: "rate_limit_exceeded" } }));
+  await c;
+  assert.match(h.model.status().detail, /rate limiting .* \(in 1 min\)/);
+  h.waiting[1]!(failedStream({ code: "usage_limit_reached" }));
+  await d;
+  assert.match(h.model.status().detail, /usage limit reached .* \(in 15 min\)/);
+
+  // A provider reset earlier than ORBIT's estimate does not shorten the pause.
+  const k = gatedRig();
+  const e1 = chat(k.model).catch((e) => e);
+  const e2 = chat(k.model).catch((e) => e);
+  await k.settle();
+  k.waiting[0]!(failedStream({ code: "usage_limit_reached" }));
+  await e1;
+  k.waiting[1]!(failedStream({ code: "usage_limit_reached", resets_in_seconds: 5 * 60 }));
+  await e2;
+  assert.match(k.model.status().detail, /pauses model calls until .* \(in 15 min\)/);
+});

@@ -462,10 +462,17 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
     // A renewal failure is reported by the renewal state, not as an inference failure.
     lastError = { at: at(), detail: err instanceof Error ? err.message : String(err), renewal: err instanceof RenewalError };
     if (err instanceof ProviderError && (err.kind === "usage_limit" || err.kind === "rate_limit")) {
-      // A limit already in force is kept: calls that were in flight when it began must not push it later.
-      if (activeLimit()) return;
       const pause = err.kind === "usage_limit" ? USAGE_PAUSE_MS : RATE_PAUSE_MS;
-      limited = { error: err, until: err.resetsAt ?? new Date(now() + pause).toISOString(), estimated: !err.resetsAt };
+      const next: Limit = { error: err, until: err.resetsAt ?? new Date(now() + pause).toISOString(), estimated: !err.resetsAt };
+      const current = activeLimit();
+      // A limit already in force is kept, so calls that were in flight when it began cannot push it later, except that
+      // better information wins without ever shortening it: a provider reset replaces ORBIT's own estimate, and a usage
+      // limit replaces a rate-limit pause.
+      if (current) {
+        const better = (current.estimated && !next.estimated) || (current.error.kind === "rate_limit" && next.error.kind === "usage_limit");
+        if (!better || Date.parse(next.until) <= Date.parse(current.until)) return;
+      }
+      limited = next;
       lastLimit = limited;
     } else if (!activeLimit()) {
       lastLimit = undefined;
@@ -509,15 +516,22 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
   };
 
   // One model request. No call during a limit; one retry after an overload that came before any output.
-  const request = async (body: string): Promise<string> => {
+  // A refusal made without calling, while a limit is in force.
+  const refuseIfLimited = () => {
     const limit = activeLimit();
     if (limit) throw new ProviderError(limit.error.kind, `${limitWhat(limit)}. No call was made. ${limitWhen(limit)}`, limit.estimated ? undefined : limit.until, PAUSED);
+  };
+
+  const request = async (body: string): Promise<string> => {
+    refuseIfLimited();
     try {
       return await attempt(body);
     } catch (err) {
       if (!(err instanceof ProviderError && retryable.has(err))) throw err;
       const wait = OVERLOAD_RETRY_MS + Math.floor(Math.random() * 1000);
       await sleep(wait);
+      // Another call may have hit a limit during the wait: the retry obeys it.
+      refuseIfLimited();
       try {
         return await attempt(body);
       } catch (again) {
