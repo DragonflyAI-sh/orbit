@@ -5,7 +5,7 @@ import type { ModelPort } from "./model.ts";
 import type { AdminOps } from "./ops-admin.ts";
 import type { SysOps } from "./ops-sys.ts";
 import type { RecentContextRefresher } from "./recent-context.ts";
-import { buildItems, buildMessages, compactThread, dataBlock, summaryNote } from "./thread-context.ts";
+import { buildItems, buildMessages, compactThread, dataBlock, summaryNote, summaryUnusable } from "./thread-context.ts";
 import { maskDeep, maskText, ThreadError } from "./threads.ts";
 import type { Card, CardState, StoredCall, Thread, ThreadMessage, Threads } from "./threads.ts";
 
@@ -26,7 +26,8 @@ export type TurnPrep = {
 export type Live = { source: "jobs" | "ops-admin" | "ops-sys"; found: boolean; state?: string; health?: string; detail?: string; url?: string; delivered?: boolean };
 export type CardView = Card & { live?: Live };
 export type MessageView = Omit<ThreadMessage, "calls"> & { calls?: (Omit<StoredCall, "output"> & { outputChars: number })[] };
-export type ThreadView = Omit<Thread, "messages" | "cards"> & { messages: MessageView[]; cards: CardView[]; busy: boolean };
+// summaryUnusable: a summary is stored but has no usable text, so it is not used and the full thread is sent instead.
+export type ThreadView = Omit<Thread, "messages" | "cards"> & { messages: MessageView[]; cards: CardView[]; busy: boolean; summaryUnusable?: true };
 
 export type ThreadService = ReturnType<typeof threadService>;
 
@@ -85,6 +86,7 @@ export function threadService(d: {
     return {
       ...t,
       busy: threads.isBusy(id),
+      ...(summaryUnusable(t) ? { summaryUnusable: true as const } : {}),
       messages: t.messages.map(({ calls, ...m }): MessageView => ({ ...m, ...(calls ? { calls: calls.map(({ output, ...c }) => ({ ...c, outputChars: output.length })) } : {}) })),
       cards: t.cards.map((c) => ({ ...c, live: liveOf(c) })),
     };

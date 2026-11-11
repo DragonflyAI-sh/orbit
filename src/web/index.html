@@ -240,11 +240,12 @@
     const byId = new Map(view.cards.map((c) => [c.id, c]));
     const nodes = [];
     if (pendingNotice) nodes.push(noticeBanner(pendingNotice));
+    if (view.summary && view.summaryUnusable) nodes.push(compactionNode(view, el));
     view.messages.forEach((m, i) => {
-      if (view.summary && i === view.summary.covers) nodes.push(compactionNode(view, el));
+      if (view.summary && !view.summaryUnusable && i === view.summary.covers) nodes.push(compactionNode(view, el));
       nodes.push(renderStoredMessage(m, el, (id) => { const c = byId.get(id); return c ? renderCard(c) : null; }));
     });
-    if (view.summary && view.summary.covers >= view.messages.length) nodes.push(compactionNode(view, el));
+    if (view.summary && !view.summaryUnusable && view.summary.covers >= view.messages.length) nodes.push(compactionNode(view, el));
     if (!view.messages.length) nodes.push(el("div", { className: "compact", textContent: "This thread is empty. Messages are saved on ORBIT's server and show on your other devices." }));
     log.replaceChildren(...nodes);
     if (!keepScroll || atBottom) log.scrollTop = log.scrollHeight;
@@ -639,9 +640,13 @@
   }
   function compactionNode(view, mk) {
     const s = view.summary;
+    if (view.summaryUnusable) {
+      // A stored summary with no text is not used: the model gets the whole thread instead. Say so rather than show an empty block.
+      return mk("div", { className: "compact" }, mk("div", { className: "warn", textContent: `A stored summary of ${s.covers} earlier message(s) is empty, so it is NOT used and nothing was hidden: the model is sent the full thread. ORBIT replaces it the next time the thread is compacted.` }));
+    }
     const kids = [`${s.covers} earlier message(s) are summarized for the model (${s.method === "model" ? "model-written" : "mechanical digest"}). All of them are kept and shown above.`];
     const node = mk("div", { className: "compact" }, ...kids);
-    if (s.degraded) node.append(mk("div", { className: "warn", textContent: s.degraded }));
+    if (s.degraded) node.append(mk("div", { className: "warn", textContent: `Degraded: ${s.degraded}` }));
     const det = mk("details", {}, mk("summary", { textContent: "Summary the model sees" }), mk("pre", { textContent: s.text }));
     node.append(det);
     return node;
