@@ -179,6 +179,128 @@ export function textFromStream(raw: string): string {
   return final || deltas;
 }
 
+// ---- Provider errors ----
+// The Responses stream reports failures as events (response.failed, response.incomplete, error), often with HTTP 200,
+// and an HTTP error carries a JSON body. Both are turned into a ProviderError that says what happened and, for a usage
+// limit, when it resets, instead of the bare "response had no text" that hid the reason before.
+
+export type ProviderErrorKind = "usage_limit" | "rate_limit" | "auth" | "incomplete" | "failed";
+
+export class ProviderError extends Error {
+  readonly kind: ProviderErrorKind;
+  readonly resetsAt?: string;
+  readonly code?: string;
+  constructor(kind: ProviderErrorKind, message: string, resetsAt?: string, code?: string) {
+    super(message);
+    this.name = "ProviderError";
+    this.kind = kind;
+    this.resetsAt = resetsAt;
+    this.code = code;
+  }
+}
+
+type ProviderErrorBody = {
+  type?: string;
+  code?: string | number;
+  message?: string;
+  resets_at?: number | string;
+  resets_in_seconds?: number;
+  reason?: string;
+};
+
+const USAGE_LIMIT = /usage_limit|usage_not_included|insufficient_quota|quota_exceeded|plan_limit/i;
+const RATE_LIMIT = /rate_limit|too_many_requests/i;
+const AUTH = /invalid_api_key|unauthori[sz]ed|invalid_token|token_expired|forbidden|permission/i;
+const clean = (s: unknown, max = 200) =>
+  String(s ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+    .trim()
+    .slice(0, max);
+
+// A reset time from the provider: epoch seconds or an ISO date in resets_at, or seconds from now in resets_in_seconds.
+function resetFrom(body: ProviderErrorBody, now: number): string | undefined {
+  const at = body.resets_at;
+  if (typeof at === "number" && Number.isFinite(at) && at > 0) return new Date(at < 1e12 ? at * 1000 : at).toISOString();
+  if (typeof at === "string" && !Number.isNaN(Date.parse(at))) return new Date(Date.parse(at)).toISOString();
+  const inS = body.resets_in_seconds;
+  if (typeof inS === "number" && Number.isFinite(inS) && inS >= 0) return new Date(now + inS * 1000).toISOString();
+  return undefined;
+}
+
+const inWords = (ms: number) => {
+  const m = Math.max(1, Math.round(ms / 60_000));
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+};
+
+function classify(body: ProviderErrorBody, status: number | undefined, now: number): ProviderError {
+  const tag = `${body.type ?? ""} ${body.code ?? ""}`;
+  const code = clean(body.code ?? body.type, 60) || undefined;
+  const said = clean(body.message);
+  const resetsAt = resetFrom(body, now);
+  const when = resetsAt ? ` It resets at ${resetsAt} (in ${inWords(Date.parse(resetsAt) - now)}).` : "";
+  if (USAGE_LIMIT.test(tag) || (status === 429 && /usage|limit|plan/i.test(said))) {
+    return new ProviderError("usage_limit", `ChatGPT usage limit reached for this plan${said ? `: ${said}` : ""}.${when}`, resetsAt, code);
+  }
+  if (RATE_LIMIT.test(tag) || status === 429) {
+    return new ProviderError("rate_limit", `ChatGPT is rate limiting requests${said ? `: ${said}` : ""}.${when}`, resetsAt, code);
+  }
+  if (AUTH.test(tag) || status === 401 || status === 403) {
+    return new ProviderError("auth", `ChatGPT refused the login${said ? `: ${said}` : ""}. Sign in again from the web page if this persists.`, undefined, code);
+  }
+  const what = [code, said].filter(Boolean).join(": ");
+  return new ProviderError("failed", `ChatGPT returned an error${what ? `: ${what}` : ""}.`, resetsAt, code);
+}
+
+// The error an HTTP failure describes. The body is JSON ({error:{...}} or {detail:{...}}) or text.
+export function httpProblem(status: number, text: string, now = Date.now()): ProviderError {
+  let body: ProviderErrorBody = {};
+  try {
+    const parsed = JSON.parse(text) as { error?: ProviderErrorBody | string; detail?: ProviderErrorBody | string; message?: string };
+    const inner = parsed.error ?? parsed.detail;
+    body = typeof inner === "object" && inner ? inner : { message: typeof inner === "string" ? inner : parsed.message };
+  } catch {
+    body = { message: text };
+  }
+  const e = classify(body, status, now);
+  return new ProviderError(e.kind, `HTTP ${status}: ${e.message}`, e.resetsAt, e.code);
+}
+
+// The failure a stream reports, if any. Undefined when the stream holds no error, failed or incomplete event.
+export function streamProblem(raw: string, now = Date.now()): ProviderError | undefined {
+  for (const line of raw.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    let event: { type?: string; error?: ProviderErrorBody; response?: { error?: ProviderErrorBody | null; incomplete_details?: { reason?: string } | null }; code?: string; message?: string };
+    try {
+      event = JSON.parse(line.slice(5).trim());
+    } catch {
+      continue;
+    }
+    if (event.type === "response.failed") return classify(event.response?.error ?? {}, undefined, now);
+    if (event.type === "error" || event.type === "response.error") return classify(event.error ?? { code: event.code, message: event.message }, undefined, now);
+    if (event.type === "response.incomplete") {
+      const reason = clean(event.response?.incomplete_details?.reason, 60) || "no reason given";
+      return new ProviderError("incomplete", `ChatGPT stopped before answering (incomplete: ${reason}).`, undefined, reason);
+    }
+  }
+  return undefined;
+}
+
+// What the stream contained when it had no text, no calls and no error event: the event types only, never content.
+export function streamShape(raw: string): string {
+  const types = new Set<string>();
+  for (const line of raw.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    try {
+      const t = (JSON.parse(line.slice(5).trim()) as { type?: unknown }).type;
+      if (typeof t === "string") types.add(clean(t, 60));
+    } catch {
+      // not JSON
+    }
+  }
+  return types.size ? [...types].slice(0, 12).join(", ") : "no events";
+}
+
 export type ChatGPTModel = ModelPort & {
   // Stops background renewal and waits for one already in flight, so shutdown cannot lose a rotated token.
   stop(): Promise<void>;
@@ -301,9 +423,43 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
     await renew(t).catch(() => {});
   };
 
+  // A usage or rate limit with a known reset: no call is made before then (it would only spend a request to be refused).
+  let limited: ProviderError | undefined;
+  // The reset time of the most recent limit, kept after it passes so the port can say "due to reset, not confirmed".
+  let lastLimitReset: string | undefined;
+
   const record = (started: string, err: unknown) => {
     // A renewal failure is reported by the renewal state, not as an inference failure.
     lastError = { at: started, detail: err instanceof Error ? err.message : String(err), renewal: err instanceof RenewalError };
+    if (err instanceof ProviderError && (err.kind === "usage_limit" || err.kind === "rate_limit") && err.resetsAt) {
+      limited = err;
+      lastLimitReset = err.resetsAt;
+    } else {
+      lastLimitReset = undefined;
+    }
+  };
+
+  // The limit still in force, if any. Once its reset time passes, calls are allowed again.
+  const activeLimit = (): ProviderError | undefined => {
+    if (limited?.resetsAt && Date.parse(limited.resetsAt) > now()) return limited;
+    limited = undefined;
+    return undefined;
+  };
+
+  // One model request: the stream text on success; a ProviderError for a known limit, an HTTP error or an error event.
+  const request = async (body: string): Promise<string> => {
+    const limit = activeLimit();
+    if (limit) {
+      throw new ProviderError(limit.kind, `${limit.message.replace(/ It resets at .*$/, "")} No call was made: it resets at ${limit.resetsAt}.`, limit.resetsAt, limit.code);
+    }
+    const used = await fresh();
+    let res = await call(used, body);
+    if (res.status === 401) res = await call(await afterRefusal(used), body);
+    if (!res.ok) throw httpProblem(res.status, await res.text().catch(() => ""), now());
+    const raw = await res.text();
+    const problem = streamProblem(raw, now());
+    if (problem) throw problem;
+    return raw;
   };
 
   const call = (tokens: Tokens, body: string) =>
@@ -435,6 +591,15 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         return { port: "model", state: "down", impl, detail: `Not signed in to ChatGPT. Sign in from the web page.${why}`, verifiedAt: at() };
       }
       if (lastError && !lastError.renewal && (!lastOk || lastError.at > lastOk)) {
+        const limit = activeLimit();
+        if (limit?.resetsAt) {
+          const what = limit.kind === "usage_limit" ? "ChatGPT usage limit reached for this plan" : "ChatGPT is rate limiting requests";
+          const left = inWords(Date.parse(limit.resetsAt) - now());
+          return { port: "model", state: "down", impl, detail: `${what}. It resets at ${limit.resetsAt} (in ${left}); ORBIT makes no model call until then.`, verifiedAt: lastError.at };
+        }
+        if (lastLimitReset && lastLimitReset >= lastError.at && Date.parse(lastLimitReset) <= now()) {
+          return { port: "model", state: "degraded", impl, detail: `The usage limit was due to reset at ${lastLimitReset}. No model call since, so it is not confirmed that ChatGPT answers again.`, verifiedAt: lastError.at };
+        }
         return { port: "model", state: "down", impl, detail: `Last call failed: ${lastError.detail}`, verifiedAt: lastError.at };
       }
       if (failure) return renewalFailed(current, failure);
@@ -462,15 +627,9 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         store: false,
       });
       try {
-        const used = await fresh();
-        let res = await call(used, body);
-        if (res.status === 401) res = await call(await afterRefusal(used), body);
-        if (!res.ok) {
-          const detail = await res.text().catch(() => "");
-          throw new Error(`HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
-        }
-        const step = stepFromStream(await res.text());
-        if (!step.text && !step.calls.length) throw new Error("response had no text");
+        const raw = await request(body);
+        const step = stepFromStream(raw);
+        if (!step.text && !step.calls.length) throw new Error(`response had no text and no tool call (stream events: ${streamShape(raw)})`);
         lastOk = started;
         return step;
       } catch (err) {
@@ -489,15 +648,9 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         store: false,
       });
       try {
-        const used = await fresh();
-        let res = await call(used, body);
-        if (res.status === 401) res = await call(await afterRefusal(used), body);
-        if (!res.ok) {
-          const detail = await res.text().catch(() => "");
-          throw new Error(`HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
-        }
-        const text = textFromStream(await res.text());
-        if (!text) throw new Error("response had no text");
+        const raw = await request(body);
+        const text = textFromStream(raw);
+        if (!text) throw new Error(`response had no text (stream events: ${streamShape(raw)})`);
         lastOk = started;
         return { value: text, provenance: "live" as const, source: `model/${impl}` };
       } catch (err) {
