@@ -16,6 +16,7 @@ import { jobStateOf, sysOps } from "./ops-sys.ts";
 import { sysClient } from "./ops-sys-client.ts";
 import { opsClient } from "./ops-client.ts";
 import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
+import { selectPrInspect } from "./pr-inspect.ts";
 import { parseRoutineRepos, pullRequestOpener, selectPulls } from "./pull-requests.ts";
 import { reviewer, selectComments } from "./review.ts";
 import { memoryReport, modelTask, runner, toolCall } from "./runs.ts";
@@ -159,6 +160,8 @@ buildServer({
   threads: threadStore(stateDir ? join(stateDir, "threads") : undefined),
   vaultEdits,
   configView: config,
+  // Read-only PR inspection (owner-only chat tools): the repositories are the ones ORBIT_ROUTINE_REPOS names, the token is orbit.github-orbit-prs.
+  prInspect: selectPrInspect(process.env, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS)),
   // The rolling note is the vault file Memory/recent-context.md when the clone exists (written through the vault tools, with the
   // same policy, secret refusal, log line and git pipeline); otherwise it stays in ORBIT's state directory.
   recentContext: vault

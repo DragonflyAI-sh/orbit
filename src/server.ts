@@ -10,8 +10,9 @@ import type { MemoryPort } from "./memory.ts";
 import type { Login } from "./chatgpt.ts";
 import type { Message, ModelPort } from "./model.ts";
 import { proposals as newProposals, runChat } from "./agent.ts";
-import type { Proposals } from "./agent.ts";
+import type { ChatTool, Proposals } from "./agent.ts";
 import { chatTools } from "./chat-tools.ts";
+import { PR_INSPECT_TOOL_NAMES } from "./pr-inspect.ts";
 import type { VaultEdits } from "./vault/tools.ts";
 import type { Nodes } from "./nodes.ts";
 import type { Notifier } from "./notify.ts";
@@ -57,6 +58,8 @@ export type Deps = {
   vaultEdits?: VaultEdits;
   // The read-only config view (src/config-view.ts). Absent means the tool is not offered.
   configView?: (ports: PortStatus[]) => Promise<Result<unknown>>;
+  // Read-only pull-request inspection tools (src/pr-inspect.ts). Offered to the owner only. Absent means they are not offered.
+  prInspect?: ChatTool[];
   nodes: Nodes;
   jobs?: Jobs;
   publicJobUrl?: string;
@@ -127,6 +130,7 @@ export function buildServer({
   sysOps,
   vaultEdits,
   configView,
+  prInspect,
   nodes,
   jobs,
   publicJobUrl,
@@ -212,7 +216,7 @@ export function buildServer({
     }
     const current = limits(isOwner);
     const offered = isOwner && model.step
-      ? withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))
+      ? [...withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : [])), ...(prInspect ?? [])]
       : [];
     if (!offered.length) {
       current.push(
@@ -227,8 +231,8 @@ export function buildServer({
     const decision = decide("agent", tool, isOwner);
     audit("agent", tool, decision);
     if (!decision.allow) return decision.reason;
-    // Vault writes and the config view have their own policy port entries, so the owner-only rule is stated for each.
-    const port = tool.startsWith("vault_") ? "vault" : tool === "orbit_config_view" ? "config" : undefined;
+    // Vault writes, the config view and pull-request inspection have their own policy port entries, so the owner-only rule is stated for each.
+    const port = tool.startsWith("vault_") ? "vault" : tool === "orbit_config_view" ? "config" : (PR_INSPECT_TOOL_NAMES as readonly string[]).includes(tool) ? "pulls" : undefined;
     if (port) {
       const second = decide(port, tool, isOwner);
       audit(port, tool, second);
