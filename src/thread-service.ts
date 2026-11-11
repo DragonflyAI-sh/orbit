@@ -172,7 +172,7 @@ export function threadService(d: {
         const detail = err instanceof Error ? err.message : String(err);
         // The user's message and every call that completed stay on record; the reply is marked as failed.
         threads.patchMessage(id, mid, { status: "error", error: `The model call failed: ${detail}` });
-        return { thread: view(id)!, error: `The model call failed: ${model.status().detail}` };
+        return { thread: view(id)!, error: `The model call failed: ${detail}` };
       }
     } finally {
       threads.end(id);

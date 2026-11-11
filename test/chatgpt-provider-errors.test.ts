@@ -131,6 +131,47 @@ test("a stream with no text and no error names its event types, never its conten
   assert.equal(streamShape(""), "no events");
 });
 
+test("a usage limit with no reset time pauses calls for 15 minutes, says the pause is ORBIT's, then tries again", async () => {
+  const r = rig();
+  // The message seen live on 2026-11-11, which came with no reset time.
+  r.next.body = failedStream({ code: "usage_limit_reached", message: "The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead." });
+  await assert.rejects(chat(r.model), (err: unknown) => {
+    assert.ok(err instanceof ProviderError);
+    assert.equal(err.resetsAt, undefined, "no reset time is invented");
+    assert.match(err.message, /use an API key instead\.$/);
+    assert.doesNotMatch(err.message, /\.\./, "no double period");
+    return true;
+  });
+  const down = r.model.status();
+  assert.equal(down.state, "down");
+  assert.match(down.detail, /The provider gave no reset time, so ORBIT pauses model calls until 2026-11-11T02:37:00.000Z \(in 15 min\)/);
+  assert.doesNotMatch(down.detail, /resets at/, "ORBIT's pause is never called a reset");
+
+  r.advance(5 * MIN);
+  await assert.rejects(chat(r.model), /No call was made\. The provider gave no reset time, so ORBIT pauses model calls until .* \(in 10 min\)/);
+  assert.equal(r.log.inference, 1, "no request during the pause");
+  assert.match(r.model.status().detail, /in 10 min/, "a refusal during the pause does not restart it");
+
+  r.advance(11 * MIN);
+  const after = r.model.status();
+  assert.equal(after.state, "degraded");
+  assert.match(after.detail, /ORBIT's pause after the limit ended at .* not confirmed/);
+  r.next.body = textStream("back");
+  assert.equal((await chat(r.model)).value, "back");
+  assert.equal(r.log.inference, 2);
+  assert.equal(r.model.status().state, "live");
+});
+
+test("a rate limit with no reset time pauses for one minute", async () => {
+  const r = rig();
+  r.next.body = event({ type: "error", error: { code: "rate_limit_exceeded", message: "Slow down." } });
+  await assert.rejects(chat(r.model), /rate limiting requests: Slow down\.$/);
+  assert.match(r.model.status().detail, /pauses model calls until 2026-11-11T02:23:00.000Z \(in 1 min\)/);
+  r.advance(61_000);
+  r.next.body = textStream("ok");
+  assert.equal((await chat(r.model)).value, "ok");
+});
+
 test("a bearer token echoed in a provider message is redacted", () => {
   const fake = ["Bear", "er ", "ab", "c".repeat(30)].join("");
   const e = httpProblem(401, JSON.stringify({ error: { code: "invalid_token", message: `rejected ${fake}` } }), START);

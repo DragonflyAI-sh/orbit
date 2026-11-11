@@ -184,6 +184,12 @@ export function textFromStream(raw: string): string {
 // and an HTTP error carries a JSON body. Both are turned into a ProviderError that says what happened and, for a usage
 // limit, when it resets, instead of the bare "response had no text" that hid the reason before.
 
+// How long ORBIT waits before trying again after a limit that came with no reset time.
+export const USAGE_PAUSE_MS = 15 * 60_000;
+export const RATE_PAUSE_MS = 60_000;
+// The code on a refusal ORBIT makes itself during a pause (no request was sent).
+export const PAUSED = "orbit_paused";
+
 export type ProviderErrorKind = "usage_limit" | "rate_limit" | "auth" | "incomplete" | "failed";
 
 export class ProviderError extends Error {
@@ -236,7 +242,8 @@ const inWords = (ms: number) => {
 function classify(body: ProviderErrorBody, status: number | undefined, now: number): ProviderError {
   const tag = `${body.type ?? ""} ${body.code ?? ""}`;
   const code = clean(body.code ?? body.type, 60) || undefined;
-  const said = clean(body.message);
+  // The provider's own sentence, without its closing punctuation: ours follows it.
+  const said = clean(body.message).replace(/[.!\s]+$/, "");
   const resetsAt = resetFrom(body, now);
   const when = resetsAt ? ` It resets at ${resetsAt} (in ${inWords(Date.parse(resetsAt) - now)}).` : "";
   if (USAGE_LIMIT.test(tag) || (status === 429 && /usage|limit|plan/i.test(said))) {
@@ -423,35 +430,44 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
     await renew(t).catch(() => {});
   };
 
-  // A usage or rate limit with a known reset: no call is made before then (it would only spend a request to be refused).
-  let limited: ProviderError | undefined;
-  // The reset time of the most recent limit, kept after it passes so the port can say "due to reset, not confirmed".
-  let lastLimitReset: string | undefined;
+  // A usage or rate limit: no call is made before `until` (it would only spend a request to be refused). `until` is the
+  // provider's reset time, or, when the provider gave none, ORBIT's own pause (estimated: true), never shown as a reset.
+  type Limit = { error: ProviderError; until: string; estimated: boolean };
+  let limited: Limit | undefined;
+  // The most recent limit, kept after it passes so the port can say "not confirmed" until a call answers.
+  let lastLimit: Limit | undefined;
 
   const record = (started: string, err: unknown) => {
     // A renewal failure is reported by the renewal state, not as an inference failure.
     lastError = { at: started, detail: err instanceof Error ? err.message : String(err), renewal: err instanceof RenewalError };
-    if (err instanceof ProviderError && (err.kind === "usage_limit" || err.kind === "rate_limit") && err.resetsAt) {
-      limited = err;
-      lastLimitReset = err.resetsAt;
+    // A refusal made by the pause itself does not start a new pause.
+    if (err instanceof ProviderError && err.code === PAUSED) return;
+    if (err instanceof ProviderError && (err.kind === "usage_limit" || err.kind === "rate_limit")) {
+      const pause = err.kind === "usage_limit" ? USAGE_PAUSE_MS : RATE_PAUSE_MS;
+      limited = { error: err, until: err.resetsAt ?? new Date(now() + pause).toISOString(), estimated: !err.resetsAt };
+      lastLimit = limited;
     } else {
-      lastLimitReset = undefined;
+      lastLimit = undefined;
     }
   };
 
-  // The limit still in force, if any. Once its reset time passes, calls are allowed again.
-  const activeLimit = (): ProviderError | undefined => {
-    if (limited?.resetsAt && Date.parse(limited.resetsAt) > now()) return limited;
+  // The limit still in force, if any. Once its time passes, calls are allowed again.
+  const activeLimit = (): Limit | undefined => {
+    if (limited && Date.parse(limited.until) > now()) return limited;
     limited = undefined;
     return undefined;
   };
 
+  const limitWhat = (l: Limit) => (l.error.kind === "usage_limit" ? "ChatGPT usage limit reached for this plan" : "ChatGPT is rate limiting requests");
+  const limitWhen = (l: Limit) =>
+    l.estimated
+      ? `The provider gave no reset time, so ORBIT pauses model calls until ${l.until} (in ${inWords(Date.parse(l.until) - now())}) and then tries again.`
+      : `It resets at ${l.until} (in ${inWords(Date.parse(l.until) - now())}); ORBIT makes no model call until then.`;
+
   // One model request: the stream text on success; a ProviderError for a known limit, an HTTP error or an error event.
   const request = async (body: string): Promise<string> => {
     const limit = activeLimit();
-    if (limit) {
-      throw new ProviderError(limit.kind, `${limit.message.replace(/ It resets at .*$/, "")} No call was made: it resets at ${limit.resetsAt}.`, limit.resetsAt, limit.code);
-    }
+    if (limit) throw new ProviderError(limit.error.kind, `${limitWhat(limit)}. No call was made. ${limitWhen(limit)}`, limit.estimated ? undefined : limit.until, PAUSED);
     const used = await fresh();
     let res = await call(used, body);
     if (res.status === 401) res = await call(await afterRefusal(used), body);
@@ -592,13 +608,10 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
       }
       if (lastError && !lastError.renewal && (!lastOk || lastError.at > lastOk)) {
         const limit = activeLimit();
-        if (limit?.resetsAt) {
-          const what = limit.kind === "usage_limit" ? "ChatGPT usage limit reached for this plan" : "ChatGPT is rate limiting requests";
-          const left = inWords(Date.parse(limit.resetsAt) - now());
-          return { port: "model", state: "down", impl, detail: `${what}. It resets at ${limit.resetsAt} (in ${left}); ORBIT makes no model call until then.`, verifiedAt: lastError.at };
-        }
-        if (lastLimitReset && lastLimitReset >= lastError.at && Date.parse(lastLimitReset) <= now()) {
-          return { port: "model", state: "degraded", impl, detail: `The usage limit was due to reset at ${lastLimitReset}. No model call since, so it is not confirmed that ChatGPT answers again.`, verifiedAt: lastError.at };
+        if (limit) return { port: "model", state: "down", impl, detail: `${limitWhat(limit)}. ${limitWhen(limit)}`, verifiedAt: lastError.at };
+        if (lastLimit && Date.parse(lastLimit.until) <= now()) {
+          const ended = lastLimit.estimated ? `ORBIT's pause after the limit ended at ${lastLimit.until}` : `The limit was due to reset at ${lastLimit.until}`;
+          return { port: "model", state: "degraded", impl, detail: `${ended}. No model call since, so it is not confirmed that ChatGPT answers again.`, verifiedAt: lastError.at };
         }
         return { port: "model", state: "down", impl, detail: `Last call failed: ${lastError.detail}`, verifiedAt: lastError.at };
       }
