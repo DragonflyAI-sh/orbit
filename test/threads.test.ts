@@ -148,6 +148,21 @@ test("a failed model call keeps the user message and the calls that already ran,
   x.close();
 });
 
+test("a failed model call reports the call's own error, not the model port's status line", async () => {
+  const model = scripted(() => {
+    throw new Error("ChatGPT usage limit reached for this plan: try later.");
+  });
+  model.status = () => ({ port: "model", state: "down", impl: "fake", detail: "Last call failed: something else", verifiedAt: new Date(0).toISOString() });
+  const x = rig({ model });
+  const t = await x.create();
+  const r = await x.send(t.id, "go");
+  assert.equal(r.status, 502);
+  assert.equal(r.data.error, "The model call failed: ChatGPT usage limit reached for this plan: try later.");
+  const stored = (await x.api(`/threads/${t.id}`)).data.thread;
+  assert.equal(stored.messages[1].error, "The model call failed: ChatGPT usage limit reached for this plan: try later.");
+  x.close();
+});
+
 // ---- the record-check instruction ------------------------------------------------------------------------------------
 
 test("the system prompt asks the model to check job and operation records before claiming an outcome (a request, not a guarantee)", async () => {
