@@ -531,3 +531,15 @@ test("concurrent messages in different threads do not mix: each proposal goes on
   x.close();
 });
 
+
+test("the legacy /chat route also reports the failing call's own error", async () => {
+  const model = scripted(() => {
+    throw new Error("ChatGPT's servers are overloaded: try later.");
+  });
+  model.status = () => ({ port: "model", state: "down", impl: "fake", detail: "Last call failed: something else", verifiedAt: new Date(0).toISOString() });
+  const x = rig({ model });
+  const r = await x.api("/chat", "POST", { messages: [{ role: "user", content: "hi" }] });
+  assert.equal(r.status, 502);
+  assert.equal(r.data.error, "The model call failed: ChatGPT's servers are overloaded: try later.");
+  x.close();
+});
