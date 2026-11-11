@@ -8,7 +8,7 @@ import type { Result } from "./ports.ts";
 // before it runs, and the reply lists every call with where its result came from.
 
 export const MAX_ROUNDS = 5;
-const MAX_OUTPUT_CHARS = 8000;
+export const MAX_OUTPUT_CHARS = 8000;
 
 export type ChatTool = {
   name: string;
