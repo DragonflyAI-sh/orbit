@@ -7,6 +7,8 @@ import type { ConfigChanges } from "./ops/admin-protocol.ts";
 import type { PortStatus, Result } from "./ports.ts";
 import { maskDeep, maskText } from "./threads.ts";
 import { CREDENTIAL_NAME } from "./vault/clone.ts";
+import type { PolicyCheck } from "./vault/policy-check.ts";
+import { hasUserinfo, maskRemote } from "./vault/remote.ts";
 
 // The read-only config view: how ORBIT is configured right now, for the owner, in one tool call. Nothing here changes anything
 // (configuration changes remain ops_propose_config_change, confirmed by Rai, applied by the tier 2 helper) and nothing here
@@ -30,6 +32,8 @@ export type ConfigViewDeps = {
   commit: string;
   // The repository root of the running release (where deploy/ lives).
   repoRoot?: string;
+  // How the vault's AGENTS.md compares with the baseline the coded write rules were written against. Absent without a vault clone.
+  vaultPolicy?: () => PolicyCheck;
   now?: () => Date;
 };
 
@@ -51,6 +55,9 @@ export function configView(deps: ConfigViewDeps): (ports: PortStatus[]) => Promi
         // Trigger ids masked as the tier 2 cards mask them (trig_…last4).
         routines.ORBIT_ROUTINES = v;
         out[key] = displayConfig(routines).ORBIT_ROUTINES ?? "(set)";
+      } else if (key === "ORBIT_VAULT_REMOTE" && hasUserinfo(v)) {
+        // A remote with a user name or password in it is shown without them (host and path only), and says so.
+        out[key] = `${maskRemote(v)} (userinfo in the URL is hidden)`;
       } else out[key] = v.length > 300 ? `${v.slice(0, 300)}…` : v;
     }
     return { state: "ok", source: "the running ORBIT process environment (allowlisted non-secret keys only; this is what is running, which can differ from /opt/orbit/orbit.env until the next restart)", value: maskDeep(out) };
@@ -87,6 +94,16 @@ export function configView(deps: ConfigViewDeps): (ports: PortStatus[]) => Promi
     }
   };
 
+  const vaultPolicy = (): Section<PolicyCheck> => {
+    const source = "the vault AGENTS.md hash in ORBIT's clone, compared with the baseline recorded in src/vault/policy-check.ts";
+    if (!deps.vaultPolicy) return { state: "unavailable", source, reason: "There is no writable vault clone in this process, so the vault write rules are not in use and AGENTS.md is not checked." };
+    try {
+      return { state: "ok", source, value: deps.vaultPolicy() };
+    } catch (err) {
+      return unavailable(source, err);
+    }
+  };
+
   const routine = (): Section<{ file: string; totalChars: number; sha256: string; truncated: boolean; text: string }> => {
     const source = `${ROUTINE_FILE} in the running release (${commit.slice(0, 7)})`;
     try {
@@ -108,6 +125,7 @@ export function configView(deps: ConfigViewDeps): (ports: PortStatus[]) => Promi
       credentials: { tier1: credentials, loadedByThisProcess: loadedCredentials() },
       deployedCommit: { runningProcess: commit, tier1DeployState: deployState },
       routine: routine(),
+      vaultPolicy: vaultPolicy(),
       ports: { state: "ok" as const, source: "each port's own status()", value: ports.map((p) => ({ port: p.port, state: p.state, impl: p.impl, detail: maskText(p.detail).slice(0, 300), verifiedAt: p.verifiedAt })) },
     };
     return { value: maskDeep(value), provenance: "live", source: "config-view (env: running process; credentials & deploy: tier 1 ops; routine: repo file; ports: live status)" };

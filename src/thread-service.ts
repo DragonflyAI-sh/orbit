@@ -19,6 +19,8 @@ export type TurnPrep = {
   limits: string[];
   tools: ChatTool[];
   allow?: (tool: string) => string | undefined;
+  // The verified owner check of the request that started this turn, carried to everything the turn triggers (the rolling note).
+  isOwner: boolean;
 };
 
 export type Live = { source: "jobs" | "ops-admin" | "ops-sys"; found: boolean; state?: string; health?: string; detail?: string; url?: string; delivered?: boolean };
@@ -164,7 +166,7 @@ export function threadService(d: {
           source = r.source;
         }
         threads.patchMessage(id, mid, { text: reply, status: "done", provenance, source, memory: prep.memory, ...(capped ? { capped } : {}) });
-        recent?.consider(id);
+        recent?.consider(id, { isOwner: prep.isOwner });
         return { thread: view(id)! };
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);

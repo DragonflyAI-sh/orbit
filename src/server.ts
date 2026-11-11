@@ -352,6 +352,8 @@ export function buildServer({
       const method = action === undefined ? "GET" : "POST";
       if (req.method !== method) return send(res, 405, { error: `Use ${method} for this route.` });
       if (!(await owned("threads", action ?? "open"))) return;
+      // The same verified identity the route check used, passed on to anything this request triggers.
+      const callerIsOwner = await isOwnerOf(req);
       if (!isThreadId(id) || !threads.get(id)) return send(res, 404, { error: "No thread with that id." });
       try {
         if (!action) return send(res, 200, { thread: svc.view(id) });
@@ -365,7 +367,7 @@ export function buildServer({
           const archived = input.archived !== false;
           threads.archive(id, archived);
           // Archiving a notable thread is a moment to refresh the rolling note.
-          if (archived) recent.consider(id, { force: true });
+          if (archived) recent.consider(id, { force: true, isOwner: callerIsOwner });
           return send(res, 200, { thread: svc.view(id) });
         }
         const text = typeof input.text === "string" ? input.text.trim() : "";
@@ -373,8 +375,8 @@ export function buildServer({
         const decision = decide("channel", "chat", false);
         audit("channel", "chat", decision);
         if (!decision.allow) return send(res, 403, { error: decision.reason });
-        const prep = await prepare(true, text);
-        const out = await svc.turn(id, text, { notes: prep.notes, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(true) });
+        const prep = await prepare(callerIsOwner, text);
+        const out = await svc.turn(id, text, { notes: prep.notes, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner), isOwner: callerIsOwner });
         return send(res, out.error ? 502 : 200, { thread: out.thread, limits: prep.current, ...(out.error ? { error: out.error } : {}) });
       } catch (err) {
         return threadFail(err);

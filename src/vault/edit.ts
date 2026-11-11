@@ -3,7 +3,8 @@ import { maskText } from "../threads.ts";
 
 // Pure parts of the vault write tools: the five edit operations, path validation and the write policy. Nothing here touches
 // the disk, git or the network; the clone (clone.ts) supplies the current text through `Read` and applies the result.
-// docs/vault-writes.md describes the policy; AGENTS.md in the vault stays the authority and is read at runtime by the clone.
+// docs/vault-writes.md describes the policy. The rules below are coded from AGENTS.md sections 3 and 4; they are NOT parsed from the
+// vault's AGENTS.md at run time (the clone only requires the file to exist and compares its hash with a baseline: policy-check.ts).
 
 export type VaultErrorCode =
   | "invalid_input"
@@ -88,6 +89,9 @@ export type Area = "direct" | "journal" | "protected" | "archive" | "outside";
 const DIRECT_DIRS = ["Projects", "Tasks", "Areas", "Resources", "Memory", "Inbox"];
 const PROTECTED_DIRS = ["System", ".obsidian", "scripts"];
 const LOG_FILE = /^Log\/\d{4}\/\d{4}-\d{2}-\d{2}-orbit\.md$/;
+export const isOrbitLog = (path: string): boolean => LOG_FILE.test(path);
+// Append-only: the whole existing text is still the start of the new text, and something was added.
+export const isAppendOnly = (before: string, after: string): boolean => after.length > before.length && after.startsWith(before);
 
 // Where a path sits, per AGENTS.md sections 3 and 4. Protected names are matched without regard to case, so Obsidian on a
 // case-insensitive disk cannot be used to slip past them; direct areas need the exact spelling.
@@ -409,6 +413,9 @@ export function classify(applied: Applied): Verdict {
 
   const where = areaOf(edit.path);
   if (where.area === "archive") return { kind: "refused", reason: "Archive/ is written only by archive_note." };
+  if (isOrbitLog(edit.path) && !isAppendOnly(applied.before, applied.after)) {
+    return { kind: "refused", reason: `${edit.path} is ORBIT's audit log and is append-only: an edit may add lines after the existing text but never change, replace or remove what is there.` };
+  }
   if (where.area === "outside") return { kind: "refused", reason: `${edit.path} is outside the areas ORBIT may write (Projects/, Tasks/, Areas/, Resources/, Memory/, Inbox/, now.md, Machines/orbit.md, its own Log/ file).` };
   const ext = where.area === "protected" ? CONFIG_EXT : TEXT_EXT;
   if (!ext.test(edit.path)) return { kind: "refused", reason: where.area === "protected" ? "Only text and config files can be edited here." : "Only .md notes can be edited." };
@@ -440,6 +447,46 @@ export function canonical(edit: VaultEdit): string {
 // SHA-256 over the exact edit and the reasons shown to Rai. A confirmation names this digest, so what runs is what was shown.
 export function digestOfEdit(edit: VaultEdit, reasons: string[]): string {
   return createHash("sha256").update(JSON.stringify({ edit: canonical(edit), reasons: [...reasons].sort() })).digest("hex");
+}
+
+// ---- what the confirmation card shows ---------------------------------------------------------------------------------------------
+
+// The most the card can show of one edit. A protected edit whose complete text is longer than this is refused when it is
+// proposed, never clipped: the digest covers the whole edit, so the card must show the whole edit.
+export const CARD_MAX_CHARS = 24_000;
+
+// Everything the digest covers, in full and labelled: path, operation, the reasons and every field of the edit. An edit with a
+// field that is not rendered here would be approved unseen, so cardChange has a case for every operation and a test checks that
+// each field of each operation appears in it.
+export function cardChange(edit: VaultEdit): string {
+  switch (edit.op) {
+    case "create_note":
+      return edit.content;
+    case "append_section":
+      return `heading: ${edit.heading}\nappend:\n${edit.text}`;
+    case "replace_text":
+      return `- ${edit.find}\n+ ${edit.replace}`;
+    case "set_frontmatter":
+      return `${edit.key}: ${JSON.stringify(edit.value)}`;
+    case "archive_note":
+      return `moves to ${archivePathOf(edit.path)}`;
+    case "rewrite_body":
+      return `body hash it expects: ${edit.expectBodySha}\nnew body:\n${edit.text}`;
+  }
+}
+
+// The card for a protected edit: complete or not at all. Throws policy_refused when the complete change is longer than
+// CARD_MAX_CHARS, or when the text would be altered by masking on its way to the page (a masked card would not show what runs).
+export function cardDisplay(edit: VaultEdit, reasons: string[]): Record<string, string> {
+  const change = cardChange(edit);
+  if (change.length > CARD_MAX_CHARS) {
+    throw new VaultError("policy_refused", `This protected change is ${change.length} characters, more than the ${CARD_MAX_CHARS} a confirmation card can show in full. ORBIT does not ask for approval of text Rai cannot see; split it into smaller edits. Nothing was written.`);
+  }
+  const display = { path: edit.path, operation: edit.op, why: reasons.join("; "), change };
+  if (Object.values(display).some((v) => maskText(v) !== v)) {
+    throw new VaultError("policy_refused", "This protected change contains text that would be masked on the confirmation card (it looks like a secret or credential), so the card could not show what would run. Nothing was written.");
+  }
+  return display;
 }
 
 export function summarize(edit: VaultEdit): string {

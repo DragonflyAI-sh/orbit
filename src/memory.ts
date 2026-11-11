@@ -3,6 +3,9 @@ import { join, relative, resolve, sep } from "node:path";
 import type { VaultClone } from "./vault/clone.ts";
 import type { PortState, PortStatus, Result } from "./ports.ts";
 
+// Thrown by search/read when no snapshot of the notes exists yet and none can be taken right now.
+export class SnapshotUnavailable extends Error {}
+
 export type Hit = { path: string; snippet: string; score: number };
 
 export type MemoryPort = {
@@ -62,6 +65,9 @@ function snippet(text: string, words: string[]): string {
 export type VaultMemoryOptions = {
   // The `source` of every answer. Defaults to memory/vault@<commit> from the sync record.
   source?: () => string;
+  // False while something is changing the files under `root`. The notes are then not re-read: the snapshot already taken is
+  // used, so a search never sees a half-updated tree and never waits.
+  stable?: () => boolean;
   // Replaces the status text and state (the clone reports its own freshness).
   describe?: (noteCount: number) => { state: PortState; detail: string };
 };
@@ -72,10 +78,16 @@ export function vaultMemory(root: string, syncFile?: string, now: () => Date = (
   let df = new Map<string, number>();
   let avgLength = 1;
   let loadedAt: Date | undefined;
+  let dirty = false;
   let error: string | undefined;
 
   const load = () => {
-    if (loadedAt && now().getTime() - loadedAt.getTime() < REFRESH_MS) return;
+    if (loadedAt && !dirty && now().getTime() - loadedAt.getTime() < REFRESH_MS) return;
+    if (options.stable && !options.stable()) {
+      // The files are being changed right now. Keep the snapshot we have; with none, say so rather than read a torn tree.
+      if (!loadedAt) error = "the vault clone is being updated and no earlier copy of the notes is held yet";
+      return;
+    }
     try {
       notes = collect(root);
       index = new Map();
@@ -89,10 +101,15 @@ export function vaultMemory(root: string, syncFile?: string, now: () => Date = (
       }
       avgLength = Math.max(1, [...index.values()].reduce((n, d) => n + d.length, 0) / Math.max(1, index.size));
       loadedAt = now();
+      dirty = false;
       error = undefined;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     }
+  };
+
+  const needSnapshot = () => {
+    if (!loadedAt) throw new SnapshotUnavailable(`Cannot read the vault copy: ${error ?? "no notes were loaded"}`);
   };
 
   const sync = (): { commit?: string; at?: string } => {
@@ -127,6 +144,7 @@ export function vaultMemory(root: string, syncFile?: string, now: () => Date = (
     },
     search: (query, limit = 5) => {
       load();
+      needSnapshot();
       const words = terms(query);
       const hits: Hit[] = [];
       for (const [path, doc] of index) {
@@ -146,11 +164,13 @@ export function vaultMemory(root: string, syncFile?: string, now: () => Date = (
       hits.sort((a, b) => b.score - a.score);
       return { value: hits.slice(0, limit), provenance: "live", source: source() };
     },
+    // The next read takes a fresh snapshot, as soon as the files are stable; until then the old one keeps answering.
     invalidate: () => {
-      loadedAt = undefined;
+      dirty = true;
     },
     read: (path) => {
       load();
+      needSnapshot();
       const full = resolve(root, path);
       if (!full.startsWith(resolve(root) + sep) || !full.endsWith(".md")) throw new Error("path is outside the vault");
       const text = notes.get(relative(root, full));
@@ -197,19 +217,27 @@ const CLONE_STALE_MS = 10 * 60 * 1000;
 // writes at once and other people's changes at the next fetch (at most a minute old while ORBIT runs).
 export function cloneMemory(clone: VaultClone, fallback: MemoryPort | undefined, now: () => Date = () => new Date()): MemoryPort {
   const fetchError = () => clone.state().syncError;
+  // "fetched <time> (<age> ago)", so every answer says how old the clone it came from is.
+  const ageOf = (iso: string | undefined): string => {
+    if (!iso) return "never";
+    const min = Math.max(0, Math.round((now().getTime() - new Date(iso).getTime()) / 60_000));
+    return `${iso} (${min < 1 ? "under a minute" : min < 90 ? `${min} min` : `${Math.round(min / 60)} h`} ago)`;
+  };
   const cloneLabel = (): string => {
     const st = clone.state();
     const err = st.syncError;
-    return `memory/vault-clone@${(st.head ?? "unknown").slice(0, 7)} (fetched ${st.fetchedAt ?? "never"}${err ? `; STALE: the last fetch failed at ${err.at}: ${err.message}` : ""})`;
+    const retry = st.nextSyncAt ? `; next fetch not before ${st.nextSyncAt}` : "";
+    return `memory/vault-clone@${(st.head ?? "unknown").slice(0, 7)} (last good fetch ${ageOf(st.fetchedAt)}${err ? `; STALE: this is the last good clone and the latest fetch failed at ${err.at}${st.syncFailures > 1 ? ` (${st.syncFailures} failures in a row)` : ""}: ${err.message}${retry}` : ""})`;
   };
   const inClone = vaultMemory(clone.dir, undefined, now, {
     source: cloneLabel,
+    stable: () => clone.stable(),
     describe: (n) => {
       const st = clone.state();
       const old = !st.fetchedAt || now().getTime() - new Date(st.fetchedAt).getTime() > CLONE_STALE_MS;
       return {
         state: st.syncError || old ? "degraded" : "live",
-        detail: `Keyword search over ${n} notes in ORBIT's writable vault clone, commit ${(st.head ?? "unknown").slice(0, 7)}, fetched ${st.fetchedAt ?? "never"}${st.syncError ? `; the last fetch failed (${st.syncError.message})` : ""}. Writes go to this clone and are pushed to GitHub. Owner only.`,
+        detail: `Keyword search over ${n} notes in ORBIT's writable vault clone, commit ${(st.head ?? "unknown").slice(0, 7)}, last good fetch ${ageOf(st.fetchedAt)}${st.syncError ? `; the latest fetch failed (${st.syncError.message}), so this is the last good clone` : ""}. Writes go to this clone and are pushed to GitHub. Owner only.`,
       };
     },
   });
@@ -222,7 +250,16 @@ export function cloneMemory(clone: VaultClone, fallback: MemoryPort | undefined,
   const label = (src: string, why: string | undefined) => (why === undefined ? src : `${src} (FALLBACK: ${why}; this is the read-only server copy and may lag GitHub)`);
   const answer = <T>(use: (m: MemoryPort) => Result<T>): Result<T> => {
     const i = info();
-    if (i.via === "clone") return use(inClone);
+    if (i.via === "clone") {
+      try {
+        return use(inClone);
+      } catch (err) {
+        // No snapshot yet and the clone is mid-update: the read-only copy answers, and says why.
+        if (!(err instanceof SnapshotUnavailable) || !fallback) throw err;
+        const r = use(fallback);
+        return { ...r, source: label(r.source, "the writable clone is being updated and has no earlier snapshot to read") };
+      }
+    }
     if (!fallback) throw new Error(`No vault is available: ${i.reason}, and no read-only copy is configured.`);
     const r = use(fallback);
     return { ...r, source: label(r.source, i.reason) };
@@ -234,11 +271,10 @@ export function cloneMemory(clone: VaultClone, fallback: MemoryPort | undefined,
       inClone.invalidate?.();
       fallback?.invalidate?.();
     },
+    // Never waits on a failing fetch: the clone starts one in the background (one at a time, with backoff) and reads use the last good clone.
     refresh: async (maxAgeMs = 60_000) => {
-      if (!clone.credentialPresent()) return;
-      const at = clone.state().fetchedAt;
-      if (at && now().getTime() - new Date(at).getTime() < maxAgeMs) return;
-      await clone.sync().catch(() => {});
+      await clone.refreshForRead(maxAgeMs);
+      // A fetch that finished in the background also invalidates through the clone's onChange; this covers one that finished here.
       inClone.invalidate?.();
     },
     status: () => {

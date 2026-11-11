@@ -1,8 +1,7 @@
 import type { ChatTool, Proposal, Proposals } from "../agent.ts";
 import type { MemoryPort } from "../memory.ts";
-import { maskText } from "../threads.ts";
 import type { VaultClone } from "./clone.ts";
-import { digestOfEdit, parseEdit, summarize, VaultError } from "./edit.ts";
+import { cardDisplay, digestOfEdit, parseEdit, summarize, VaultError } from "./edit.ts";
 import type { VaultEdit } from "./edit.ts";
 
 // The vault write tools offered to the owner in chat, and the confirmation path for the protected ones. Direct writes (AGENTS.md
@@ -18,7 +17,8 @@ const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s
 const failure = (err: unknown): Error => {
   if (err instanceof VaultError) {
     const files = err.code === "conflict" && err.details.length ? ` Conflicting files: ${err.details.join(", ")}.` : "";
-    return new Error(`NOT saved (${err.code}): ${err.message}${files}`);
+    const unverified = err.code === "unverified" ? " It may or may not be on GitHub: do not tell Rai it was saved." : "";
+    return new Error(`NOT saved (${err.code}): ${err.message}${files}${unverified}`);
   }
   return err instanceof Error ? err : new Error(String(err));
 };
@@ -30,15 +30,11 @@ export function vaultEdits(deps: { clone: VaultClone; memory: MemoryPort; propos
   // The exact validated edit behind each open proposal, in memory only (a restart drops it with the proposal).
   const pending = new Map<string, { edit: VaultEdit; reasons: string[] }>();
 
-  const display = (edit: VaultEdit, reasons: string[]): Record<string, string> => {
-    const change =
-      edit.op === "create_note" ? edit.content : edit.op === "append_section" ? edit.text : edit.op === "replace_text" ? `- ${edit.find}\n+ ${edit.replace}` : edit.op === "set_frontmatter" ? `${edit.key}: ${JSON.stringify(edit.value)}` : edit.op === "rewrite_body" ? edit.text : `moves to Archive/${edit.path}`;
-    return { path: edit.path, operation: edit.op, why: reasons.join("; "), change: clip(maskText(change), 700) };
-  };
-
   function propose(edit: VaultEdit, reasons: string[]) {
+    // The complete change, or a refusal (VaultError policy_refused) when it cannot be shown in full: nothing is ever clipped.
+    const display = cardDisplay(edit, reasons);
     const digest = digestOfEdit(edit, reasons);
-    const p = proposals.propose({ kind: "vault_edit", action: edit.op, summary: `${summarize(edit)} (needs your confirmation: ${reasons.join("; ")})`, display: display(edit, reasons), digest, reasons }, VAULT_PROPOSAL_TTL_MS) as Proposal & { kind: "vault_edit" };
+    const p = proposals.propose({ kind: "vault_edit", action: edit.op, summary: `${summarize(edit)} (needs your confirmation: ${reasons.join("; ")})`, display, digest, reasons }, VAULT_PROPOSAL_TTL_MS) as Proposal & { kind: "vault_edit" };
     pending.set(p.id, { edit, reasons });
     for (const id of pending.keys()) if (!proposals.peek(id)) pending.delete(id);
     return p;
@@ -68,7 +64,12 @@ export function vaultEdits(deps: { clone: VaultClone; memory: MemoryPort; propos
       };
     } catch (err) {
       if (err instanceof VaultError && err.code === "needs_confirmation") {
-        const p = propose(parseEdit(op, args), err.details);
+        let p: ReturnType<typeof propose>;
+        try {
+          p = propose(parseEdit(op, args), err.details);
+        } catch (refused) {
+          throw failure(refused);
+        }
         return {
           value: { status: "pending-confirmation", saved: false, executed: false, proposalId: p.id, summary: p.summary, reasons: err.details, digest: p.digest, expiresAt: p.expiresAt, note: "Nothing was written. Rai must click Confirm on the page; the change is checked again when it runs." },
           provenance: "live" as const,
@@ -123,6 +124,14 @@ export function vaultEdits(deps: { clone: VaultClone; memory: MemoryPort; propos
       pending.delete(proposal.id);
       if (!held) return { code: 410, body: { error: "The exact change for this proposal is no longer held (ORBIT restarted since it was made). Nothing was written; ask for it again." } };
       if (digestOfEdit(held.edit, held.reasons) !== proposal.digest) return { code: 409, body: { error: "The held change does not match this proposal's digest. Nothing was written." } };
+      // What the card shows must be, byte for byte, the complete change that is about to run.
+      let shown: Record<string, string>;
+      try {
+        shown = cardDisplay(held.edit, held.reasons);
+      } catch (err) {
+        return { code: 422, body: { error: `Not saved: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400), code: "policy_refused" } };
+      }
+      if (JSON.stringify(shown) !== JSON.stringify(proposal.display)) return { code: 409, body: { error: "The card does not show the complete change that would run. Nothing was written." } };
       try {
         const r = await clone.write([held.edit], { kind: "confirmed", reasons: held.reasons }, { actor: "confirmed-card" });
         memory.invalidate?.();

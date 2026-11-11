@@ -2,6 +2,8 @@ import type { MemoryPort } from "./memory.ts";
 import type { ModelPort } from "./model.ts";
 import type { Store } from "./store.ts";
 import type { VaultClone } from "./vault/clone.ts";
+import { decide } from "./policy.ts";
+import type { Decision } from "./policy.ts";
 import { applyEdit, bodyShaOf, setFrontmatter, splitFrontmatter, VaultError } from "./vault/edit.ts";
 import type { VaultEdit } from "./vault/edit.ts";
 import { dataBlock, neutralize } from "./thread-context.ts";
@@ -22,9 +24,13 @@ export type RecentContext = {
 
 // The storage contract. A vault implementation reads and writes Memory/recent-context.md (text as the body, updatedAt and
 // sources as front matter) and must never throw from read(): return undefined when the file is missing or unreadable.
+// Who the write is for: the verified identity of the request that led to it (the owner check done by the server for that request),
+// carried through, never assumed. A write for a caller who is not the owner is refused by the vault port.
+export type RecentCaller = { isOwner: boolean };
+
 export type RecentContextPort = {
   read(): Promise<RecentContext | undefined>;
-  write(note: RecentContext): Promise<void>;
+  write(note: RecentContext, caller: RecentCaller): Promise<void>;
   // Where the note lives, for /status-style reporting and the docs.
   describe(): string;
   // True when the port refuses secret-shaped text itself (the vault port does: a vault write never commits redacted text in
@@ -60,8 +66,8 @@ export function vaultRecentContext(d: {
   memory: MemoryPort;
   clone: VaultClone;
   legacy?: Store<RecentContext | null>;
-  // Returns a refusal reason from the policy port, or undefined.
-  authorize?: () => string | undefined;
+  // Sees every policy decision made for a write (main.ts logs it as an audit line).
+  audit?: (decision: Decision) => void;
   now?: () => Date;
 }): RecentContextPort {
   const now = d.now ?? (() => new Date());
@@ -78,14 +84,16 @@ export function vaultRecentContext(d: {
         return d.legacy?.read() ?? undefined;
       }
     },
-    write: async (note) => {
+    write: async (note, caller) => {
       try {
-        const refused = d.authorize?.();
-        if (refused) throw new VaultError("policy_refused", refused);
+        // The policy port decides with the real caller context: a non-owner is refused, and the decision is audited either way.
+        const decision = decide("vault", "recent-context", caller.isOwner === true);
+        d.audit?.(decision);
+        if (!decision.allow) throw new VaultError("policy_refused", decision.reason);
         if (!d.clone.credentialPresent()) throw new VaultError("auth_unavailable", "the vault write credential is not installed in this ORBIT process");
         await d.clone.sync();
         const sources = [...new Set(note.sources.map(shortId))].slice(0, 5);
-        const existing = d.clone.readNote(RECENT_NOTE_PATH);
+        const existing = await d.clone.readNoteQueued(RECENT_NOTE_PATH);
         // One commit: the body, and each front matter field that actually changes (an unchanged field is not an edit).
         const edits: VaultEdit[] =
           existing === undefined
@@ -165,7 +173,7 @@ export function recentContext(deps: {
       .filter(Boolean)
       .join("\n\n");
 
-  async function rewrite(id: string): Promise<boolean> {
+  async function rewrite(id: string, caller: RecentCaller): Promise<boolean> {
     const t = threads.get(id);
     if (!t) return false;
     const at = now().toISOString();
@@ -176,7 +184,7 @@ export function recentContext(deps: {
       if (!out) throw new Error("the model returned an empty note");
       // A port that refuses secrets gets the text as written, so it can refuse; every other port gets it masked.
       const text = port.refusesSecrets ? out.slice(0, NOTE_MAX_CHARS) : maskText(out).slice(0, NOTE_MAX_CHARS);
-      await port.write({ text, updatedAt: at, sources: [...new Set([id, ...(prior?.sources ?? [])])].slice(0, 5) });
+      await port.write({ text, updatedAt: at, sources: [...new Set([id, ...(prior?.sources ?? [])])].slice(0, 5) }, caller);
       delete meta.lastError;
       saveMeta();
       return true;
@@ -192,13 +200,13 @@ export function recentContext(deps: {
     // After a reply (or an archive): rewrite the note if the thread is notable and the gap has passed. Runs one rewrite at a
     // time, in the background; never throws. Returns whether a rewrite was queued. A mock model never rewrites: a note written
     // by a mock would only be an echo.
-    consider(id: string, { force = false }: { force?: boolean } = {}): boolean {
+    consider(id: string, { force = false, isOwner }: { force?: boolean; isOwner: boolean }): boolean {
       const t = threads.get(id);
       if (!t || model.status().state === "mock" || !isNotable(t)) return false;
       const last = meta.lastAttempt?.[id];
       if (last && last.rev === t.rev) return false;
       if (!force && last && now().getTime() - new Date(last.at).getTime() < REFRESH_MIN_GAP_MS) return false;
-      const run = chain.then(() => rewrite(id));
+      const run = chain.then(() => rewrite(id, { isOwner }));
       chain = run.catch(() => {});
       return true;
     },

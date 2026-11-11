@@ -64,7 +64,13 @@ const proposals = newProposals();
 const admin = adminOps({ client: adminClient(), store: jsonStore(stateDir, "ops-admin", []), notify, proposals });
 const owner = process.env.ORBIT_OWNER || undefined;
 const vaultEdits = vault ? newVaultEdits({ clone: vault, memory, proposals }) : undefined;
-const config = configView({ env: process.env, ops, commit });
+const config = configView({ env: process.env, ops, commit, vaultPolicy: vault ? () => vault.policyCheck() : undefined });
+// Startup: sync the vault clone once now (the tick's refresh shares this run) so the vault AGENTS.md is hashed and compared with the
+// baseline the coded rules were written against; drift or an unavailable AGENTS.md is logged here and shown in the config view.
+if (vault && vault.credentialPresent()) {
+  const report = () => console.log(JSON.stringify({ at: new Date().toISOString(), port: "vault", action: "policy-check", ...vault.policyCheck() }));
+  void vault.sync().then(report, report);
+}
 const nodes = devicePresence(tailscaleStatus(), owner);
 const jobs = jobRegistry(jsonStore(stateDir, "jobs-cloud", []), jobSecret(stateDir), notify);
 // Tier 3 (OS updates, reboot, orbit-jobs Funnel): separate socket, separate ledger, a separate confirmation for every action.
@@ -158,11 +164,8 @@ buildServer({
         memory,
         clone: vault,
         legacy: jsonStore(stateDir, "recent-context", null),
-        authorize: () => {
-          const d = decide("vault", "recent-context", true);
-          console.log(JSON.stringify({ at: new Date().toISOString(), port: "vault", action: "recent-context", ...d }));
-          return d.allow ? undefined : d.reason;
-        },
+        // Every policy decision for a rolling-note write is audited; the caller context comes from the request that caused it.
+        audit: (d) => console.log(JSON.stringify({ at: new Date().toISOString(), port: "vault", action: "recent-context", ...d })),
       })
     : stateRecentContext(jsonStore(stateDir, "recent-context", null)),
   nodes,
