@@ -442,7 +442,7 @@ export function buildServer({
     if (jobs && url.pathname === "/jobs" && req.method === "GET") {
       if (!(await owned("jobs", "list"))) return;
       if (url.searchParams.get("view") === "rows") return send(res, 200, { jobs: jobs.list().map((j) => jobRow(j, jobs.health(j), commit)) });
-      return send(res, 200, { jobs: jobs.list().map(withHealth) });
+      return send(res, 200, { jobs: jobs.list().map((j) => withHealth({ ...j, ...(j.summary ? { summary: { ...j.summary, text: "" } } : {}) })) });
     }
     if (jobs && url.pathname === "/jobs/launch" && req.method === "POST") {
       if (!(await owned("jobs", "launch"))) return;

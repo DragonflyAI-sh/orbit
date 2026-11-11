@@ -40,7 +40,9 @@ export function detailJob(job: Job, health: Health, running?: string) {
   const events = job.events.slice(-DETAIL_EVENTS);
   const omitted = job.events.length - events.length;
   const { briefWords: _words, ...launch } = job.launch ?? ({} as NonNullable<Job["launch"]>);
-  return { ...job, ...(job.launch ? { launch } : {}), ...toolCommitFields(job, running), health, events, eventsOmitted: omitted, eventsNote: omitted ? `${omitted} earlier events left out; ${events.length} of ${job.events.length} shown.` : undefined };
+  // The full summary is stored on the job and shown on the Jobs page; the model gets its size and state, not 200,000 characters.
+  const { summary, ...rest } = job;
+  return { ...rest, ...(summary ? { summary: { chars: summary.chars, state: summary.state, via: summary.via, at: summary.at } } : {}), ...(job.launch ? { launch } : {}), ...toolCommitFields(job, running), health, events, eventsOmitted: omitted, eventsNote: omitted ? `${omitted} earlier events left out; ${events.length} of ${job.events.length} shown.` : undefined };
 }
 
 // One row for the jobs page: no events or steers, and the latest check-in line with how it arrived.
@@ -63,6 +65,12 @@ export function jobRow(job: Job, health: Health, running?: string) {
     kind: job.kind ?? "work",
     reviewOf: job.review?.of,
     reviewVerdict: job.review?.verdict ?? job.reviewJob?.verdict,
+    reviewVerdictReason: job.review?.verdictReason ?? job.reviewJob?.verdictReason,
+    reviewDelivery: job.review?.comment?.total ? { total: job.review.comment.total, posted: job.review.comment.posted ?? 0 } : undefined,
+    prTitleSource: job.pr?.titleSource,
+    prDelivery: job.pr?.total ? { total: job.pr.total, posted: job.pr.posted ?? 1 } : undefined,
+    summaryState: job.summary?.state,
+    summaryChars: job.summary?.chars,
     reviewCommentUrl: job.review?.comment?.url ?? job.reviewJob?.commentUrl,
     reviewError: job.review?.comment?.error ?? job.reviewJob?.error,
     reviewJobId: job.reviewJob?.id,

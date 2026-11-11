@@ -114,7 +114,7 @@ test("the listener: tokens are per job and expire; unknown jobs look the same as
   const big = await fetch(`${api}/v1/jobs/b1/events`, {
     method: "POST",
     headers: { authorization: `Bearer ${t1}` },
-    body: JSON.stringify({ type: "checkin", status: "x".repeat(20000) }),
+    body: JSON.stringify({ type: "checkin", status: "x".repeat(700 * 1024) }),
   });
   assert.equal(big.status, 400);
   const bad = await fetch(`${api}/v1/jobs/b1/events`, { method: "POST", headers: { authorization: `Bearer ${t1}` }, body: JSON.stringify({ type: "delete" }) });
@@ -130,4 +130,34 @@ test("the listener: tokens are per job and expire; unknown jobs look the same as
 
 test("a job id is validated before registering", () => {
   assert.ok("error" in registry.register("../etc"));
+});
+
+test("a long summary reaches ORBIT whole over the API (the old tool cut it at 4000 bytes), with the late title and the final verdict line", async () => {
+  const { token } = registry.register("big1") as { token: string };
+  const { run, runner } = setup("big1");
+  await run("start", "--job", "big1", "--api", api, "--token", token);
+  const middle = Array.from({ length: 3000 }, (_, i) => `line ${i} ${"é".repeat(i % 9)}`).join("\n");
+  const text = `## Findings\n${middle}\n\n## PR title\nLate title after the old cutoff\n\n## PR body\n${middle.slice(0, 500)}\n\nVerdict: blocking issues\n`;
+  assert.ok(Buffer.byteLength(text) > 40_000);
+  writeFileSync(join(runner, "s.md"), text);
+  assert.match((await run("summary", "--status", "blocked", join(runner, "s.md"))).stdout, /api=sent/);
+  const job = registry.get("big1")!;
+  assert.equal(job.summary!.text, text.trim(), "complete, including the last line and the late title");
+  assert.equal(job.summary!.state, "complete");
+  assert.ok(job.summary!.text.endsWith("Verdict: blocking issues"));
+  assert.equal(job.events.at(-1)!.textClipped, true, "the display copy of the event says it is clipped");
+});
+
+test("a summary over the API size is sent in part and flagged, so ORBIT reads the rest from git instead of acting on the start", async () => {
+  const { token } = registry.register("big2") as { token: string };
+  const { run, runner, remoteFile } = setup("big2");
+  await run("start", "--job", "big2", "--api", api, "--token", token);
+  const text = `${"0123456789".repeat(40_000)}\nVerdict: blocking issues\n`;
+  writeFileSync(join(runner, "s.md"), text);
+  const out = await run("summary", "--status", "blocked", join(runner, "s.md"));
+  assert.equal(out.status, 0, out.stderr);
+  const job = registry.get("big2")!;
+  assert.equal(job.summary!.state, "partial", "ORBIT knows the API copy is only the start");
+  assert.ok(job.summary!.text.length <= 200_000);
+  assert.ok(remoteFile(".orbit/summary.md").endsWith("Verdict: blocking issues"), "git holds the whole file");
 });

@@ -8,17 +8,28 @@ import type { Store } from "./store.ts";
 // Jobs run by Claude cloud runners. ORBIT registers a job, hands the runner a token that works for that job only,
 // queues steers for it, and receives its events. The git record in orbit-work stays the source of truth.
 
-export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "summary"; sha?: string; toolCommit?: string; n?: number; status?: string; text?: string; via?: "api" | "git" };
+// `text` on an event is for display and is clipped at MAX_TEXT; `textChars` is the length received and `textClipped` says it was
+// clipped. The full final summary is kept on the job (Job.summary), not here.
+export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "summary"; sha?: string; toolCommit?: string; n?: number; status?: string; text?: string; textChars?: number; textClipped?: boolean; via?: "api" | "git";
+  // False when the sender says `text` is only the start of the real text (the runner's tool sends this when its summary is over the API size limit).
+  textComplete?: boolean };
+// The final summary as ORBIT holds it. complete: the whole text. partial: only the start arrived (API size limit); the full text is read from git and
+// the PR and review wait for it. oversize: longer than MAX_SUMMARY_CHARS; only the first MAX_TEXT characters are kept here, the full text is in git.
+export type SummaryRecord = { text: string; chars: number; state: "complete" | "partial" | "oversize"; via: "api" | "git"; at: string; sha?: string };
 export type Steer = { n: number; text: string; at: string; deliveredAt?: string };
 export type Launch = { routine: string; at: string; branch?: string; briefCommit?: string; sessionId?: string; sessionUrl?: string; failedAt?: string; error?: string;
   // Distinct words of the brief, for the duplicate-launch warning (src/duplicates.ts). Not the brief itself.
   briefWords?: string };
-export type PullRequest = { at: string; url?: string; error?: string };
+// Where the PR's title came from, so a fallback is never mistaken for the runner's own.
+export type TitleSource = "pr-title-section" | "summary-first-line" | "job-routine";
+// Delivery of text too long for one GitHub body: part 1 is the PR description, parts 2..total are ordered comments. posted counts parts delivered (the description is 1).
+export type PullRequest = { at: string; url?: string; error?: string; title?: string; titleSource?: TitleSource; total?: number; posted?: number; attempts?: number; lastAttemptAt?: string };
 // Set on a `work` job once ORBIT starts its one review job, and updated as the review finishes.
-export type ReviewOutcome = { id?: string; at: string; verdict?: Verdict; commentUrl?: string; error?: string };
-export type Verdict = "no blocking issues" | "blocking issues" | "no verdict";
+export type ReviewOutcome = { id?: string; at: string; verdict?: Verdict; verdictReason?: string; commentUrl?: string; error?: string };
+// "no verdict" (no Verdict line) and "ambiguous" (conflicting or unrecognised) are never approval.
+export type Verdict = "no blocking issues" | "blocking issues" | "no verdict" | "ambiguous";
 // Set on a `review` job: what it reviews, and what became of its findings.
-export type ReviewOf = { of: string; prUrl: string; repo: string; comment?: { at: string; url?: string; error?: string }; verdict?: Verdict };
+export type ReviewOf = { of: string; prUrl: string; repo: string; comment?: { at: string; url?: string; error?: string; urls?: string[]; total?: number; posted?: number; attempts?: number; lastAttemptAt?: string }; verdict?: Verdict; verdictReason?: string };
 export type Job = {
   id: string;
   // Absent means `work`. A review job never opens a PR and never starts a review.
@@ -30,6 +41,7 @@ export type Job = {
   toolCommit?: string;
   // Set when ORBIT starts opening the project PR; once set, ORBIT never opens another.
   pr?: PullRequest;
+  summary?: SummaryRecord;
   createdAt: string;
   expiresAt: string;
   state: "registered" | "running" | "done" | "blocked" | "failed";
@@ -46,6 +58,8 @@ export function normalizeToolCommit(value: unknown): string | undefined {
 export const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_TEXT = 4000;
+// The most of a final summary ORBIT keeps whole (about 3 GitHub comments). Longer is reported as oversize, never silently cut.
+export const MAX_SUMMARY_CHARS = 200_000;
 const KEEP_EVENTS = 200;
 const KEEP_JOBS = 200;
 
@@ -66,7 +80,8 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
   const find = (id: string) => list().find((j) => j.id === id);
   const update = (id: string, change: (j: Job) => Job) => save(list().map((j) => (j.id === id ? change(j) : j)));
   let lastEventAt: string | undefined;
-  type SummaryListener = (job: Job, fullText: string | undefined) => void;
+  // `complete` false means fullText is only the start of the summary (state partial) or absent: listeners must not act on it.
+  type SummaryListener = (job: Job, fullText: string | undefined, complete: boolean) => void;
   const listeners: SummaryListener[] = [];
 
   return {
@@ -96,27 +111,59 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
       if (!job) return undefined;
       const at = now().toISOString();
       const clean: JobEvent = { ...event, at, via: event.via ?? "api", text: event.text?.slice(0, MAX_TEXT), status: event.status?.slice(0, 200) };
+      if (event.text !== undefined && (event.text.length > MAX_TEXT || event.textComplete === false)) {
+        clean.textChars = event.text.length;
+        clean.textClipped = true;
+      }
+      let summary: SummaryRecord | undefined;
+      if (event.type === "summary" && event.text !== undefined) {
+        const chars = event.text.length;
+        const state: SummaryRecord["state"] = chars > MAX_SUMMARY_CHARS ? "oversize" : event.textComplete === false ? "partial" : "complete";
+        summary = { text: state === "oversize" ? event.text.slice(0, MAX_TEXT) : event.text, chars, state, via: clean.via!, at, ...(event.sha ? { sha: event.sha.slice(0, 64) } : {}) };
+      }
       const state: Job["state"] =
         event.type === "summary" && (event.status === "done" || event.status === "blocked" || event.status === "failed") ? event.status : "running";
       const reported = event.type === "started" ? normalizeToolCommit(event.toolCommit) : undefined;
       if (reported) clean.toolCommit = reported;
       else delete clean.toolCommit;
-      update(id, (j) => ({ ...j, ...(reported ? { toolCommit: reported } : {}), state, lastEventAt: at, events: [...j.events, clean].slice(-KEEP_EVENTS) }));
+      // A later summary never replaces a complete one with a partial one.
+      update(id, (j) => ({ ...j, ...(reported ? { toolCommit: reported } : {}), ...(summary && !(j.summary?.state === "complete" && summary.state !== "complete") ? { summary } : {}), state, lastEventAt: at, events: [...j.events, clean].slice(-KEEP_EVENTS) }));
       lastEventAt = at;
       if (event.type === "reply") notify.send(`Job ${id} replied to steer ${event.n}:\n\n${clean.text ?? "(see git)"}`, false);
       if (event.type === "summary") {
         const via = clean.via === "git" ? " (found in git; the API did not report it)" : "";
-        notify.send(`Job ${id} finished: ${event.status}${via}.\n\n${clean.text ?? "(see git)"}`, event.status !== "done");
-        // Listeners get the summary before the stored copy is clipped, and must not throw into the caller.
+        const note = summary?.state === "partial" ? "\n\n(Only the start of the summary reached ORBIT over the API; ORBIT reads the full text from git before it opens the PR or posts a review.)" : summary?.state === "oversize" ? `\n\n(The summary is ${summary.chars} characters, over ORBIT's ${MAX_SUMMARY_CHARS}-character limit; ORBIT will not open a PR or post a review from it. The full text is in git.)` : clean.textClipped ? "\n\n(Clipped here; the complete summary is stored on the job.)" : "";
+        notify.send(`Job ${id} finished: ${event.status}${via}.\n\n${clean.text ?? "(see git)"}${note}`, event.status !== "done");
+        // Listeners get the whole stored summary (never the clipped event text), and must not throw into the caller.
         for (const l of listeners) {
           try {
-            l(find(id)!, event.text);
+            const sum = find(id)!.summary;
+            l(find(id)!, sum?.state === "oversize" ? undefined : sum?.text, sum ? sum.state === "complete" : true);
           } catch {
             /* a listener's failure is its own to report */
           }
         }
       }
       return find(id);
+    },
+
+    // The full summary text read from git replaces a partial API one, and listeners are told. Never touches a complete summary.
+    completeSummary(id: string, text: string, sha?: string): boolean {
+      const job = find(id);
+      if (!job || job.summary?.state === "complete" || job.summary?.state === "oversize") return false;
+      const chars = text.length;
+      const state: SummaryRecord["state"] = chars > MAX_SUMMARY_CHARS ? "oversize" : "complete";
+      const summary: SummaryRecord = { text: state === "oversize" ? text.slice(0, MAX_TEXT) : text, chars, state, via: "git", at: now().toISOString(), ...(sha ? { sha: sha.slice(0, 64) } : {}) };
+      update(id, (j) => ({ ...j, summary }));
+      if (state === "oversize") notify.send(`Job ${id}: the summary in git is ${chars} characters, over ORBIT's ${MAX_SUMMARY_CHARS}-character limit; ORBIT will not open a PR or post a review from it.`, true);
+      for (const l of listeners) {
+        try {
+          l(find(id)!, state === "complete" ? text : undefined, state === "complete");
+        } catch {
+          /* a listener's failure is its own to report */
+        }
+      }
+      return true;
     },
 
     steer(id: string, text: string): Steer | undefined {

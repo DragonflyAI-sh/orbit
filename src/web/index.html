@@ -481,6 +481,18 @@
   }
   // </tool-commit-badge>
 
+  // The review verdict ORBIT recorded, as text. Blocking, missing and ambiguous verdicts are all flagged and none reads as approval.
+  // All text goes in through textContent.
+  // <verdict-label>
+  function verdictLabel(verdict, reason) {
+    const why = reason ? ` (${String(reason).slice(0, 200)})` : "";
+    if (verdict === "no blocking issues") return { text: "review verdict: no blocking issues", bad: false };
+    if (verdict === "blocking issues") return { text: "review verdict: BLOCKING ISSUES", bad: true };
+    if (verdict === "ambiguous") return { text: `review verdict: AMBIGUOUS, not approved${why}`, bad: true };
+    return { text: `review verdict: none recorded, not approved${why}`, bad: true };
+  }
+  // </verdict-label>
+
   function jobCard(r) {
     const bad = r.health === "launch-failed", warn = r.health === "not-started" || r.health === "quiet";
     const card = el("div", { className: `card${bad ? " bad" : warn ? " warn" : ""}` });
@@ -491,14 +503,23 @@
     row.append(toolCommitBadge(r));
     const pr = safeLink(r.prUrl, "pull request");
     if (pr) row.append(pr); else if (r.prOpening) row.append(el("span", { className: "meta", textContent: "opening pull request…" }));
+    if (r.kind === "review" && r.reviewVerdict) {
+      const v = verdictLabel(r.reviewVerdict, r.reviewVerdictReason);
+      row.append(el("span", { className: v.bad ? "health-launch-failed" : "meta", textContent: v.text }));
+    }
     if (r.kind !== "review" && r.reviewJobId) {
-      const text = r.reviewVerdict ? `review: ${r.reviewVerdict}` : r.reviewError ? "review did not complete" : "review running…";
-      row.append(el("span", { className: r.reviewVerdict === "blocking issues" || r.reviewError ? "health-launch-failed" : "meta", textContent: text }));
+      const v = r.reviewVerdict ? verdictLabel(r.reviewVerdict, r.reviewVerdictReason) : undefined;
+      const text = v ? v.text : r.reviewError ? "review did not complete" : "review running…";
+      row.append(el("span", { className: (v && v.bad) || (!v && r.reviewError) ? "health-launch-failed" : "meta", textContent: text }));
       const c = safeLink(r.reviewCommentUrl, "review comment");
       if (c) row.append(c);
     }
     card.append(row);
     if (r.reviewError) card.append(el("div", { className: "latest health-launch-failed", textContent: `Review: ${r.reviewError}` }));
+    if (r.prTitleSource && r.prTitleSource !== "pr-title-section") card.append(el("div", { className: "meta", textContent: `PR title: made by ORBIT from ${r.prTitleSource === "summary-first-line" ? "the summary's first line" : "the job id and routine"} (the runner gave no usable ## PR title)` }));
+    if (r.prDelivery && r.prDelivery.posted < r.prDelivery.total) card.append(el("div", { className: "latest health-launch-failed", textContent: `PR description: ${r.prDelivery.posted} of ${r.prDelivery.total} parts posted` }));
+    if (r.reviewDelivery && r.reviewDelivery.posted < r.reviewDelivery.total) card.append(el("div", { className: "latest health-launch-failed", textContent: `Review comments: ${r.reviewDelivery.posted} of ${r.reviewDelivery.total} parts posted` }));
+    if (r.summaryState === "partial" || r.summaryState === "oversize") card.append(el("div", { className: "latest health-launch-failed", textContent: r.summaryState === "partial" ? "Summary: only the start reached ORBIT over the API; waiting for the full text from git" : `Summary: ${r.summaryChars} characters, over ORBIT's limit; only git has the full text` }));
     if (r.prError) card.append(el("div", { className: "latest health-launch-failed", textContent: `Pull request not opened: ${r.prError}` }));
     if (r.launchError) card.append(el("div", { className: "latest health-launch-failed", textContent: r.launchError }));
     card.append(el("div", { className: "latest" }, ...linkify(r.latest?.text || (r.latest ? `${r.latest.type}${r.latest.status ? ": " + r.latest.status : ""}` : "No report yet"), el)));
@@ -526,6 +547,9 @@
     if (existing) steerDraft = existing.value;
     const events = el("div", { className: "card" }, ...(j.events.length ? [...j.events].reverse().slice(0, 100).map((ev) =>
       el("div", { className: "ev" }, ...linkify(`${ago(ev.at)} · ${ev.type}${ev.status ? " " + ev.status : ""} · ${ev.via === "git" ? "git" : "API"}${ev.text ? "\n" + ev.text : ""}`, el))) : [el("div", { className: "empty", textContent: "No events yet." })]));
+    const summaryBox = j.summary && j.summary.text
+      ? el("details", { className: "card" }, el("summary", { textContent: `Full summary (${j.summary.chars} characters, ${j.summary.state}, via ${j.summary.via})` }), el("pre", { textContent: j.summary.text }))
+      : null;
     const steers = el("div", { className: "card" }, ...(j.steers.length ? [...j.steers].reverse().map((s) =>
       el("div", { className: "ev" }, ...linkify(`#${s.n} · ${ago(s.at)} · ${s.deliveredAt ? "picked up " + ago(s.deliveredAt) : "waiting for the runner"}\n${s.text}`, el))) : [el("div", { className: "empty", textContent: "No steers yet." })]));
     const area = el("textarea", { className: "steer", rows: 3, placeholder: "Steer this job. It picks the message up at its next check-in." });
@@ -551,7 +575,7 @@
     jobsBox.replaceChildren(
       el("button", { type: "button", className: "back", textContent: "← All jobs", onclick: () => { openJob = null; refreshJobs(); } }),
       head, el("h2", { textContent: "Steer" }), el("div", { className: "card steerbox" }, area, send, status),
-      el("h2", { textContent: "Steers" }), steers, el("h2", { textContent: "Events (newest first)" }), events);
+      ...(summaryBox ? [el("h2", { textContent: "Final summary" }), summaryBox] : []), el("h2", { textContent: "Steers" }), steers, el("h2", { textContent: "Events (newest first)" }), events);
   }
 
   async function renderList() {

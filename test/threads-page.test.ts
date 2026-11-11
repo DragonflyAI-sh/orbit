@@ -97,6 +97,12 @@ test("the page says where messages were compacted, that all are kept, and when t
   assert.equal(node.all().filter((n) => n.tag === "b").length, 0);
 });
 
+test("a stored empty summary is shown as a warning that it is not used, not as an empty 'Summary the model sees' block", () => {
+  const node = lib.compactionNode({ summaryUnusable: true, summary: { covers: 40, method: "model", text: "" } }, mk);
+  assert.match(node.text(), /summary of 40 earlier message\(s\) is empty, so it is NOT used and nothing was hidden: the model is sent the full thread/);
+  assert.ok(!/Summary the model sees/.test(node.text()));
+});
+
 test("thread options show title, archived state, waiting cards and a reply in progress", () => {
   assert.equal(lib.threadOption({ title: "Plan", archived: false, openCards: 0, busy: false }), "Plan");
   assert.equal(lib.threadOption({ title: "Old", archived: true, openCards: 2, busy: true }), "Old (archived) · 2 waiting · replying…");

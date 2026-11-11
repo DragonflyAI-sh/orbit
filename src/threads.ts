@@ -24,7 +24,7 @@ export function maskText(text: string): string {
 // Whether a text carries anything a reader or the model could use: at least one letter or digit once whitespace, control and
 // invisible format characters (zero-width spaces, byte-order marks, blank braille and Hangul fillers) are ignored. A summary
 // that fails this is treated as empty everywhere: it is never stored, never counted as covering messages, never sent.
-export const hasContent = (text: string | undefined): boolean => typeof text === "string" && /[\p{L}\p{N}]/u.test(text);
+export const hasContent = (text: string | undefined): boolean => typeof text === "string" && /[\p{L}\p{N}]/u.test(text.replace(/[\u115f\u1160\u3164\uffa0]/g, ""));
 
 export function maskDeep<T>(value: T): T {
   if (typeof value === "string") return maskText(value) as T;

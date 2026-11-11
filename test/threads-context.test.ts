@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,7 +10,7 @@ import type { Job } from "../src/jobs.ts";
 import type { Item } from "../src/model.ts";
 import { NOTABLE_USER_MESSAGES, REFRESH_MIN_GAP_MS, isNotable, recentContext, stateRecentContext } from "../src/recent-context.ts";
 import type { RecentContext, RecentContextPort } from "../src/recent-context.ts";
-import { buildItems, compactThread, liveChars, neutralize } from "../src/thread-context.ts";
+import { buildItems, compactThread, liveChars, neutralize, summaryNote } from "../src/thread-context.ts";
 import { threadService } from "../src/thread-service.ts";
 import type { TurnPrep } from "../src/thread-service.ts";
 import { threadStore } from "../src/threads.ts";
@@ -281,4 +281,111 @@ test("every new thread is given the note, framed as possibly stale data with out
   assert.match(m2.replies.at(-1)!, /unverified/);
   assert.match(m2.replies.at(-1)!, /recorded-card-states/);
   assert.match(m2.replies.at(-1)!, /record now: running/);
+});
+
+// ---- empty summaries: a thread is never compacted to nothing ---------------------------------------------------------------
+
+test("an empty, blank, invisible-only or failing summary call never replaces messages with nothing: a degraded digest is stored, shown, and actually sent", async () => {
+  const replies: [string, (p: string) => string][] = [
+    ["empty", () => ""],
+    ["whitespace", () => "  \n\t  "],
+    ["zero-width and blank characters", () => "​⠀﻿ㅤ ­"],
+    ["error", () => { throw new Error("HTTP 529: overloaded"); }],
+  ];
+  for (const [name, reply] of replies) {
+    const threads = threadStore(undefined);
+    const model = scripted((s, n) => say(long(`answer ${n}`)), { reply });
+    const svc = threadService({ threads, model, proposals: newProposals(), budget: 2000 });
+    const t = threads.create();
+    await talk(svc, t.id, 8);
+    const s = threads.get(t.id)!;
+    assert.equal(s.messages.length, 16, `${name}: every original message is still stored`);
+    assert.ok(s.summary, `${name}: a fallback summary exists`);
+    assert.equal(s.summary!.method, "extractive", `${name}: it is not passed off as model-written`);
+    assert.ok(s.summary!.degraded, `${name}: the degradation is recorded`);
+    assert.match(s.summary!.text, /- user: question 0/, `${name}: the digest has real content`);
+    assert.ok(s.compaction?.lastError, `${name}: the failure is on record`);
+    // What the model actually received on the last turn: the (non-empty) digest in its notes.
+    const notes = model.seen.at(-1)!.notes ?? "";
+    assert.match(notes, /<orbit-data name="thread-summary">[\s\S]*mechanical digest[\s\S]*DEGRADED[\s\S]*- user: question 0/, name);
+    const view = svc.view(t.id)!;
+    assert.ok(view.summary!.degraded && !view.summaryUnusable, name);
+  }
+});
+
+test("a good model summary is stored non-empty, marked model-written, and is in the model's input on the next turn", async () => {
+  const threads = threadStore(undefined);
+  const model = scripted(() => say(long("a")), { reply: () => "  Decisions: use the REST API. Open: none.  " });
+  const svc = threadService({ threads, model, proposals: newProposals(), budget: 2000 });
+  const t = threads.create();
+  await talk(svc, t.id, 8);
+  const s = threads.get(t.id)!.summary!;
+  assert.equal(s.method, "model");
+  assert.equal(s.text, "Decisions: use the REST API. Open: none.");
+  assert.equal(s.degraded, undefined);
+  assert.match(model.seen.at(-1)!.notes ?? "", /model-written[\s\S]*Decisions: use the REST API/);
+});
+
+test("the store refuses an empty summary outright, so no caller can compact a thread to nothing", () => {
+  const threads = threadStore(undefined);
+  const t = threads.create();
+  threads.appendUser(t.id, "hello");
+  for (const text of ["", "   ", "​​", "\n"]) {
+    assert.throws(() => threads.setSummary(t.id, { text, covers: 1, at: "x", method: "model" }), /empty summary/);
+  }
+  assert.equal(threads.get(t.id)!.summary, undefined);
+});
+
+test("a digest that does not fit says what it omits, in the text and as degradation, and never passes for complete", async () => {
+  const threads = threadStore(undefined);
+  const model = scripted(() => say(long("a", 150)), { state: "mock" });
+  const svc = threadService({ threads, model, proposals: newProposals(), budget: 20_000 });
+  const t = threads.create();
+  await talk(svc, t.id, 80);
+  const s = threads.get(t.id)!.summary!;
+  assert.equal(s.method, "extractive");
+  assert.match(s.degraded!, /This digest is incomplete: .*the digest has no room for the \d+ oldest of \d+ newly summarized messages/);
+  assert.match(s.text, /^\[This digest is incomplete/);
+  assert.ok(s.text.length <= 6000);
+  assert.equal(threads.get(t.id)!.messages.length, 160, "all originals kept");
+});
+
+test("a legacy stored empty summary is ignored: the full thread is sent, the page says so, and nothing is hidden behind it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "orbit-threads-"));
+  const first = threadStore(dir);
+  const t = first.create("Legacy");
+  for (let i = 0; i < 6; i++) {
+    first.appendUser(t.id, `legacy question ${i}`);
+    const mid = first.beginAssistant(t.id);
+    first.patchMessage(t.id, mid, { text: `legacy answer ${i}`, status: "done", provenance: "live", source: "model/x" });
+  }
+  // What the bug left behind: a model-written summary covering 8 messages whose text is empty. Written the way an older version stored it.
+  first.setSummary(t.id, { text: "ok", covers: 8, at: "2026-11-11T00:00:00Z", method: "model" });
+  const file = join(dir, `${t.id}.json`);
+  const raw = JSON.parse(readFileSync(file, "utf8"));
+  raw.summary.text = "";
+  writeFileSync(file, JSON.stringify(raw));
+
+  const threads = threadStore(dir); // reload from disk
+  const loaded = threads.get(t.id)!;
+  assert.equal(loaded.summary!.text, "", "the empty summary survived the reload as stored");
+  assert.equal(liveChars(loaded), loaded.messages.reduce((n, m) => n + m.text.length, 0), "it covers nothing");
+  const sent = buildItems(loaded).filter((i) => "role" in i);
+  assert.equal(sent.length, 12, "all 12 messages are sent, none hidden by the empty summary");
+  assert.equal(summaryNote(loaded), undefined, "no empty summary block is given to the model");
+  const model = scripted(() => say("fresh"));
+  const svc = threadService({ threads, model, proposals: newProposals(), budget: 10_000 });
+  assert.equal(svc.view(t.id)!.summaryUnusable, true, "the page is told");
+  assert.equal(threads.list().find((m) => m.id === t.id)!.compactedMessages, 0);
+  await svc.turn(t.id, "one more", prep());
+  const seen = model.seen.at(-1)!;
+  assert.ok(seen.input.some((i) => "content" in i && i.content === "legacy question 0"), "the oldest message reached the model");
+  assert.equal(seen.notes?.includes("thread-summary") ?? false, false);
+  // Over budget, the next compaction replaces it with a real summary.
+  const svc2 = threadService({ threads, model: scripted(() => say("x"), { reply: () => "Real summary text." }), proposals: newProposals(), budget: 150 });
+  await svc2.turn(t.id, "and another", prep());
+  const after = threads.get(t.id)!;
+  assert.equal(after.summary!.text, "Real summary text.");
+  assert.equal(svc2.view(t.id)!.summaryUnusable, undefined);
+  assert.equal(after.messages.length, 16);
 });

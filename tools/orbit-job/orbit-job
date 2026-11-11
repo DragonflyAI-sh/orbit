@@ -23,6 +23,20 @@ json() {
   printf '"%s"' "$s"
 }
 
+# The "text" and "textComplete" fields of an API event for a file: the whole file when it is at most $2 bytes, otherwise its first
+# $2 bytes cut at a character boundary, with textComplete false so ORBIT knows to read the rest from git (the full file is always
+# committed). Nothing is cut without saying so.
+text_fields() {
+  local file=$1 max=$2 size
+  size=$(wc -c <"$file")
+  if [ "$size" -le "$max" ]; then
+    printf '"text":%s,"textComplete":true' "$(json "$(cat "$file")")"
+  else
+    printf '"text":%s,"textComplete":false' "$(json "$(head -c "$max" "$file" | { iconv -c -f UTF-8 -t UTF-8 2>/dev/null || cat; })")"
+  fi
+}
+SUMMARY_API_BYTES=200000
+
 valid_id() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; }
 
 load() {
@@ -197,7 +211,7 @@ cmd_reply() {
   [ -f "$CONTROL/.orbit/steer/$n.md" ] || die "there is no steer $n"
   mkdir -p "$CONTROL/.orbit/replies"
   cp "$file" "$CONTROL/.orbit/replies/$n.md"
-  record "orbit-job $JOB: reply $n" "{\"type\":\"reply\",\"n\":$n,\"text\":$(json "$(head -c 4000 "$file")")}" ".orbit/replies/$n.md" || exit 1
+  record "orbit-job $JOB: reply $n" "{\"type\":\"reply\",\"n\":$n,$(text_fields "$file" 4000)}" ".orbit/replies/$n.md" || exit 1
 }
 
 # Checkouts that might hold the job's code branch: --repo, ORBIT_JOB_REPOS (colon-separated), here, and every checkout
@@ -304,7 +318,7 @@ cmd_summary() {
     fi
   fi
   { printf -- '---\nstatus: %s\nat: %s\n---\n\n' "$status" "$(now)"; cat "$file"; } >"$CONTROL/.orbit/summary.md"
-  record "orbit-job $JOB: summary ($status)" "{\"type\":\"summary\",\"status\":\"$status\",\"text\":$(json "$(head -c 4000 "$file")")}" .orbit/summary.md || exit 1
+  record "orbit-job $JOB: summary ($status)" "{\"type\":\"summary\",\"status\":\"$status\",$(text_fields "$file" "$SUMMARY_API_BYTES")}" .orbit/summary.md || exit 1
 }
 
 usage() {
