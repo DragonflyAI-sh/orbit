@@ -46,8 +46,9 @@ const FINDINGS = "Looked.\n\n## Findings\n1. src/a.ts:3 off by one\n\nVerdict: b
 test("parseVerdict reads the last Verdict line and does not guess", () => {
   assert.equal(parseVerdict("## Findings\nnone\n\nVerdict: no blocking issues"), "no blocking issues");
   assert.equal(parseVerdict("x\n**Verdict: Blocking issues.**\n"), "blocking issues");
-  assert.equal(parseVerdict("Verdict: blocking issues\nlater\nVerdict: no blocking issues"), "no blocking issues");
-  assert.equal(parseVerdict("Verdict: maybe"), "no verdict");
+  // Conflicting lines and unknown values are ambiguous, never approval and never a guess.
+  assert.equal(parseVerdict("Verdict: blocking issues\nlater\nVerdict: no blocking issues"), "ambiguous");
+  assert.equal(parseVerdict("Verdict: maybe"), "ambiguous");
   assert.equal(parseVerdict("no line at all"), "no verdict");
 });
 
@@ -125,6 +126,7 @@ test("the findings are posted once as a PR comment with a footer, recorded on bo
   assert.equal(s.posted.length, 1);
   assert.deepEqual([s.posted[0].repo, s.posted[0].pull], ["DragonflyAI-sh/orbit", 7]);
   assert.match(s.posted[0].body, /^Looked\./);
+  assert.match(s.posted[0].body, /ORBIT-recorded verdict: \*\*blocking issues\*\*/);
   assert.match(s.posted[0].body, new RegExp(`Review by ORBIT job \`${id}\`. Session: https://claude.ai/code/s$`));
   const url = `${PR}#issuecomment-1`;
   assert.equal(s.jobs.get(id)!.review!.comment!.url, url);
@@ -145,6 +147,7 @@ test("a failed post is recorded and notified, and not retried", async () => {
   assert.equal(calls, 1);
   assert.match(s.jobs.get("w1")!.reviewJob!.error!, /HTTP 403/);
   assert.ok(s.texts().some((t) => t.includes("posting the findings failed") && t.includes("HTTP 403")));
+  assert.equal(s.jobs.get(id)!.review!.comment!.posted, 0, "nothing is claimed as posted");
 });
 
 test("without a credential the findings are not posted and Rai is told why", async () => {

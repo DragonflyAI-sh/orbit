@@ -35,12 +35,17 @@ test("title and body come from the PR sections; the body may have its own headin
   assert.deepEqual(prSections("no sections"), { title: undefined, body: undefined });
 });
 
-test("without sections the title is 'ORBIT job <id>' and the body is the whole summary; the footer links the session", () => {
+test("without sections the title is made from the summary (never 'ORBIT job <id>') and says so; the body is the whole summary; the footer links the session", () => {
   const job = { id: "orbit-1", launch: { routine: "orbit", at: "x", sessionUrl: "https://claude.ai/code/s1" } } as Job;
-  const { title, body } = prText(job, "Everything I did.");
-  assert.equal(title, "ORBIT job orbit-1");
-  assert.match(body, /^Everything I did\./);
-  assert.match(body, /Opened by ORBIT for job `orbit-1`\. Session: https:\/\/claude\.ai\/code\/s1$/);
+  const t = prText(job, "Everything I did.\n\nMore detail.");
+  assert.equal(t.title, "Everything I did.");
+  assert.equal(t.titleSource, "summary-first-line");
+  assert.match(t.body, /^Everything I did\./);
+  assert.match(t.body, /Opened by ORBIT for job `orbit-1`\. Session: https:\/\/claude\.ai\/code\/s1$/);
+  const bare = prText(job, "## PR body\n\n");
+  assert.equal(bare.titleSource, "job-routine");
+  assert.equal(bare.title, "orbit: changes from job orbit-1");
+  assert.equal(prText(job, "## PR title\nReal title here\n\n## PR body\nBody").titleSource, "pr-title-section");
 });
 
 test("a done summary opens one PR, records its URL, notifies, and never opens a second", async () => {

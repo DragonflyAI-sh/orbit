@@ -21,6 +21,11 @@ export function maskText(text: string): string {
   return redact(text.replace(TRIGGER, (m) => `trig_…${m.slice(-4)}`));
 }
 
+// Whether a text carries anything a reader or the model could use: at least one letter or digit once whitespace, control and
+// invisible format characters (zero-width spaces, byte-order marks, blank braille and Hangul fillers) are ignored. A summary
+// that fails this is treated as empty everywhere: it is never stored, never counted as covering messages, never sent.
+export const hasContent = (text: string | undefined): boolean => typeof text === "string" && /[\p{L}\p{N}]/u.test(text.replace(/[\u115f\u1160\u3164\uffa0]/g, ""));
+
 export function maskDeep<T>(value: T): T {
   if (typeof value === "string") return maskText(value) as T;
   if (Array.isArray(value)) return value.map(maskDeep) as T;
@@ -249,7 +254,7 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
     messageCount: t.messages.length,
     openCards: t.cards.filter((c) => c.state === "open").length,
     busy: busy.has(t.id),
-    compactedMessages: t.summary?.covers ?? 0,
+    compactedMessages: t.summary && hasContent(t.summary.text) ? t.summary.covers : 0,
   });
 
   return {
@@ -392,8 +397,11 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
     // ---- compaction ----
     // `error` records that the model summarizer failed and a mechanical digest was stored instead (summary.degraded says the same).
     setSummary(id: string, summary: Summary, error?: string): void {
+      // Never replace messages with nothing: an empty (or only-invisible) summary is refused here, whatever the caller did.
+      const text = maskText(summary.text);
+      if (!hasContent(text)) throw new ThreadError(500, "Refusing to store an empty summary: the messages it would replace stay as they are.");
       mutate(id, (t) => {
-        t.summary = { ...summary, text: maskText(summary.text) };
+        t.summary = { ...summary, text };
         t.compaction = error ? { lastError: { at: now().toISOString(), detail: maskText(error).slice(0, 300) } } : {};
       });
     },

@@ -6,7 +6,9 @@ import type { JobEvent, Jobs } from "./jobs.ts";
 // The only listener meant to face the internet. It knows the job registry and nothing else:
 // no memory, tools, model or owner routes. Every request needs the token for that one job.
 
-const MAX_BODY_BYTES = 16 * 1024;
+// Room for a full final summary (jobs.ts MAX_SUMMARY_CHARS is 200,000 characters; JSON escaping and multibyte text can double it).
+// Anything larger is refused, not cut: the runner then falls back to git, which holds the whole file.
+const MAX_BODY_BYTES = 640 * 1024;
 const RATE_PER_MINUTE = 60;
 const TYPES = new Set(["started", "checkin", "reply", "summary"]);
 
@@ -54,7 +56,7 @@ export function buildIngress(jobs: Jobs, now: () => number = Date.now): Server {
       try {
         body = await readJson(req);
       } catch {
-        return send(res, 400, { error: "Body must be JSON under 16 KB." });
+        return send(res, 400, { error: "Body must be JSON under 640 KB." });
       }
       if (typeof body.type !== "string" || !TYPES.has(body.type)) return send(res, 400, { error: "type must be started, checkin, reply or summary" });
       const event: Omit<JobEvent, "at"> = {
@@ -64,6 +66,7 @@ export function buildIngress(jobs: Jobs, now: () => number = Date.now): Server {
         ...(Number.isInteger(body.n) ? { n: body.n as number } : {}),
         ...(typeof body.status === "string" ? { status: body.status } : {}),
         ...(typeof body.text === "string" ? { text: body.text } : {}),
+        ...(body.textComplete === false ? { textComplete: false } : {}),
       };
       jobs.record(id, event);
       // Acknowledged steers are the ones the runner has now written into git.

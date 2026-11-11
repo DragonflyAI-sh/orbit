@@ -96,7 +96,7 @@ const routines = selectRoutines(process.env);
 const publicJobUrl = process.env.ORBIT_PUBLIC_JOB_URL || undefined;
 // ORBIT starts reviews itself, from a PR it just opened: not a chat tool call, so no confirmation is needed.
 const review = reviewer(jobs, jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit }), selectComments(process.env), notify);
-pullRequestOpener(jobs, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), selectPulls(process.env), notify, () => new Date(), (job, url) => void review.start(job, url));
+const prs = pullRequestOpener(jobs, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), selectPulls(process.env), notify, () => new Date(), (job, url) => void review.start(job, url), selectComments(process.env));
 const reconcile = control ? gitReconciler(jobs, control) : async () => {};
 
 // The job listener binds to localhost only; Tailscale Funnel is what publishes it.
@@ -128,6 +128,8 @@ const tick = () => {
     .then(() => runs.pump())
     .then(() => nodes.refresh())
     .then(() => reconcile())
+    .then(() => prs.retry())
+    .then(() => review.retry())
     .catch((err) => console.error(JSON.stringify({ at: new Date().toISOString(), tick: String(err) })))
     .finally(watchTick);
 };

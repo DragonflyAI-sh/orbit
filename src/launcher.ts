@@ -100,6 +100,19 @@ export function gitReconciler(jobs: import("./jobs.ts").Jobs, control: ControlRe
   return async (): Promise<void> => {
     if (!control.readJob) return;
     for (const job of jobs.list()) {
+      // A summary that reached ORBIT only in part (over the API size limit) is completed from git, whatever the job's state:
+      // the PR and the review wait for it. Retried every QUIET_MS until git answers.
+      if (job.summary?.state === "partial") {
+        if (now() - (lastRead.get(job.id) ?? 0) < QUIET_MS) continue;
+        lastRead.set(job.id, now());
+        try {
+          const rec = await control.readJob(job.id);
+          if (rec?.summary) jobs.completeSummary(job.id, rec.summary.text, rec.head);
+        } catch {
+          /* GitHub was unreachable; try again next round. */
+        }
+        continue;
+      }
       if (job.state !== "registered" && job.state !== "running") continue;
       if (job.launch?.failedAt) continue;
       const lastApi = job.lastEventAt ? new Date(job.lastEventAt).getTime() : new Date(job.launch?.at ?? job.createdAt).getTime();
