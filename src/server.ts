@@ -3,6 +3,8 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Identify } from "./identity.ts";
 import { jobLauncher } from "./job-launch.ts";
+import { withContextPaths } from "./job-context.ts";
+import type { ContextReader } from "./job-context.ts";
 import { jobRow, toolCommitStatus } from "./job-view.ts";
 import type { Job, Jobs } from "./jobs.ts";
 import type { ControlRepo, Routine } from "./launcher.ts";
@@ -65,6 +67,8 @@ export type Deps = {
   jobs?: Jobs;
   publicJobUrl?: string;
   control?: ControlRepo;
+  // ORBIT's authorized vault reader for launch-time context copies (src/job-context.ts). Absent: a launch that names vault context is refused.
+  contextReader?: ContextReader;
   routines?: Map<string, Routine>;
   commit: string;
   owner?: string;
@@ -136,6 +140,7 @@ export function buildServer({
   jobs,
   publicJobUrl,
   control,
+  contextReader,
   routines = new Map(),
   commit,
   owner,
@@ -185,7 +190,7 @@ export function buildServer({
   });
 
   // The one launch path: the /jobs/launch route and a confirmed chat proposal both end here (ORBIT's own review launches use jobLauncher directly).
-  const launchJob = jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit });
+  const launchJob = jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit, contextReader });
 
   // Threads: the store, the rolling recent-context note, and the service that runs a turn against a thread.
   const recent = recentContext({ port: recentPort, threads, model, now, cardLines: (t) => svc.cardLines(t) });
@@ -217,7 +222,7 @@ export function buildServer({
     }
     const current = limits(isOwner);
     const offered = isOwner && model.step
-      ? [...withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : [])), ...(prInspect ?? [])]
+      ? [...withContextPaths(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : [])), proposals), ...(prInspect ?? [])]
       : [];
     if (!offered.length) {
       current.push(
@@ -453,7 +458,7 @@ export function buildServer({
       if (!(await owned("jobs", "launch"))) return;
       const input = await body();
       if (!input) return;
-      const result = await launchJob(String(input.routine ?? ""), typeof input.brief === "string" ? input.brief : "");
+      const result = await launchJob(String(input.routine ?? ""), typeof input.brief === "string" ? input.brief : "", undefined, input.context as string[] | undefined);
       return send(res, result.code, result.body);
     }
     // Open proposals from chat, so they can be confirmed or cancelled after the reply has scrolled away.
@@ -550,7 +555,7 @@ export function buildServer({
         svc.settle(proposal.id, result);
         return send(res, result.code, result.body);
       }
-      const result = await launchJob(proposal.routine, proposal.brief);
+      const result = await launchJob(proposal.routine, proposal.brief, undefined, proposal.context);
       svc.settle(proposal.id, result);
       return send(res, result.code, result.body);
     }

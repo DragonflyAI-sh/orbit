@@ -119,7 +119,7 @@ async function execute(
 // ORBIT's admin ledger (src/ops-admin.ts), so a proposal listing never holds a setting value in full.
 export type ProposalAction =
   // `duplicates`: recent jobs whose brief matches this one (src/duplicates.ts). A warning only.
-  | { kind: "job_launch"; routine: string; brief: string; duplicates?: { job: string; similarity: number; state: string; launchedAt?: string }[] }
+  | { kind: "job_launch"; routine: string; brief: string; context?: string[]; duplicates?: { job: string; similarity: number; state: string; launchedAt?: string }[] }
   | { kind: "job_steer"; job: string; text: string }
   | { kind: "ops_admin"; action: MutatingAction; summary: string; display: Record<string, string> | null; digest: string }
   // Tier 3 (OS updates, reboot, orbit-jobs Funnel): same shape, plus the impact and recovery warnings the owner must see.
