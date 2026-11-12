@@ -22,8 +22,11 @@ export type FallbackInfo = {
 };
 // `accounting`: structured spend-accounting diagnostics (a ledger write that failed on a billed call). They are for the owner and are
 // never part of `text`, so they cannot reach a later model turn as if the model had said them.
-export type Step = { text: string; calls: ToolCall[]; fallback?: FallbackInfo; accounting?: string[] };
-export type Reply = Result<string> & { fallback?: FallbackInfo; accounting?: string[] };
+// `incomplete`: owner-visible notes that the reply is cut off or partly dropped (output limit, early finish, malformed tool calls not run).
+// Kept apart from `text`, tool arguments and `accounting`, so it never changes what a tool runs, never reaches a later model turn and
+// never hides or is hidden by a billing warning.
+export type Step = { text: string; calls: ToolCall[]; fallback?: FallbackInfo; accounting?: string[]; incomplete?: string[] };
+export type Reply = Result<string> & { fallback?: FallbackInfo; accounting?: string[]; incomplete?: string[] };
 
 // Options for a plain reply. `fallback: false` is for background callers (thread compaction, the rolling note, scheduled runs): while
 // the primary is limited they fail instead of spending the paid fallback, which only answers an interactive chat turn.

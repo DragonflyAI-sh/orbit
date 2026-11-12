@@ -17,6 +17,9 @@ export const HARD_MAX_OUTPUT_TOKENS = 8192;
 export const DEFAULT_TIMEOUT_MS = 60_000;
 export const MAX_REQUEST_BYTES = 300_000;
 export const MAX_RESPONSE_BYTES = 1_000_000;
+// Error bodies and the key/balance body are small by nature: they get a much smaller bound than a completion.
+export const MAX_ERROR_BODY_BYTES = 64_000;
+export const MAX_BALANCE_BODY_BYTES = 32_000;
 export const MAX_REPLY_CHARS = 32_000;
 export const MAX_TOOL_CALLS = 8;
 // Largest cap accepted: far above any sane value, far below the ledger's integer range (2^53 micro-USD is about 9.0e9 USD).
@@ -91,6 +94,58 @@ export function sanitize(text: string, key: string, max = 200): string {
   return out.length > max ? `${out.slice(0, max)}…` : out;
 }
 
+// Why a bounded read stopped before the whole body was in memory.
+export class ReadLimit extends Error {
+  readonly why: "size" | "time" | "stream";
+  constructor(why: "size" | "time" | "stream") {
+    super(`response read stopped: ${why}`);
+    this.why = why;
+  }
+}
+
+// Reads a response body into memory without ever holding more than `maxBytes` (+ one chunk) of it, and stops when `signal` aborts.
+// Content-Length is only a shortcut to refuse early: it can be absent or wrong, so the bytes actually received are counted. On any stop
+// the stream is cancelled, so the connection is released and nothing keeps downloading. Nothing from the body is put into the error.
+export async function readBounded(res: Response, maxBytes: number, signal: AbortSignal): Promise<string> {
+  const declared = Number(res.headers.get("content-length"));
+  const body = res.body;
+  if (res.headers.get("content-length") !== null && Number.isFinite(declared) && declared > maxBytes) {
+    void body?.cancel().catch(() => {});
+    throw new ReadLimit("size");
+  }
+  if (!body) return "";
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let onAbort: () => void = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new ReadLimit("time"));
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+  aborted.catch(() => {});
+  try {
+    for (;;) {
+      const { done, value } = await Promise.race([reader.read(), aborted]);
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) throw new ReadLimit("size");
+      chunks.push(value);
+    }
+  } catch (err) {
+    void reader.cancel().catch(() => {});
+    throw err instanceof ReadLimit ? err : new ReadLimit("stream");
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+
+// Finish reasons that mean the model ended normally. `length` (output limit), `content_filter` and `error` are known not to; any other
+// value is reported to the owner as unrecognised, never as a clean stop.
+const NORMAL_FINISH = new Set(["stop", "tool_calls", "function_call"]);
+const CUT_FINISH = new Set(["length", "content_filter", "error"]);
+
 type Fetch = typeof fetch;
 type ChatMessage =
   | { role: "system" | "user" | "assistant"; content: string }
@@ -123,8 +178,9 @@ export type OpenRouterClient = {
 
 export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready" }>, ledger: SpendLedger, fetcher: Fetch = fetch): OpenRouterClient {
   // `accounting` is carried on the error as data; the owner-visible message also names it, built here once from that data.
+  // ProviderError builds the owner-visible "Spend accounting" sentence itself, once, from this list.
   const fail = (message: string, kind: ConstructorParameters<typeof ProviderError>[0] = "failed", accounting: string[] = []) =>
-    new ProviderError(kind, `OpenRouter: ${sanitize(message, cfg.key)}${accounting.length ? ` Spend accounting: ${accounting.join("; ")}.` : ""}`, undefined, undefined, accounting);
+    new ProviderError(kind, `OpenRouter: ${sanitize(message, cfg.key)}`, undefined, undefined, accounting);
   const headers = { authorization: `Bearer ${cfg.key}`, "content-type": "application/json", "x-title": "ORBIT" };
 
   // Ledger writes on an error path must never hide the original problem. A failed write is returned as a diagnostic, never thrown.
@@ -138,10 +194,9 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
     }
   };
 
-  const readBody = async (res: Response): Promise<string> => {
-    const text = await res.text();
-    if (text.length > MAX_RESPONSE_BYTES) throw fail("the response was too large and was discarded");
-    return text;
+  const whyUnread = (err: unknown, what: string, ms: number): string => {
+    const why = err instanceof ReadLimit ? err.why : "stream";
+    return why === "size" ? `${what} was too large and was discarded` : why === "time" ? `${what} did not arrive within ${ms / 1000} s` : `${what} could not be read`;
   };
 
   return {
@@ -173,9 +228,11 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
         throw err instanceof SpendError ? err : fail("spend accounting failed");
       }
 
+      // One deadline covers the request and reading the whole body, so a provider that sends headers and then stalls cannot hold the turn.
+      const signal = AbortSignal.timeout(cfg.timeoutMs);
       let res: Response;
       try {
-        res = await fetcher(`${OPENROUTER_BASE}/chat/completions`, { method: "POST", headers, body, signal: AbortSignal.timeout(cfg.timeoutMs) });
+        res = await fetcher(`${OPENROUTER_BASE}/chat/completions`, { method: "POST", headers, body, signal });
       } catch (err) {
         // The request may have reached OpenRouter and been billed: its bound stays charged.
         const note = safely(() => ledger.settle(reservation.id, undefined, "no answer (timeout or network): the request may have been billed"));
@@ -183,12 +240,18 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
         throw fail(timedOut ? `no answer within ${cfg.timeoutMs / 1000} s` : "the request failed before an answer arrived", "failed", note);
       }
 
-      let text: string;
+      // Bounded before anything is buffered or parsed. A refusal (non-2xx) body is small; a completion body has its own larger bound.
+      let text = "";
+      let bodyProblem: string | undefined;
       try {
-        text = await readBody(res);
+        text = await readBounded(res, res.ok ? MAX_RESPONSE_BYTES : MAX_ERROR_BODY_BYTES, signal);
       } catch (err) {
-        const note = safely(() => ledger.settle(reservation.id, undefined, "response unreadable"));
-        throw fail(err instanceof ProviderError ? err.message.replace(/^OpenRouter: /, "") : "the response could not be read", "failed", note);
+        bodyProblem = whyUnread(err, res.ok ? "the response" : "the error body", cfg.timeoutMs);
+        if (res.ok) {
+          // A 2xx answer that cannot be read may have been billed: its bound stays charged and nothing is retried.
+          const note = safely(() => ledger.settle(reservation.id, undefined, "response unreadable"));
+          throw fail(bodyProblem, "failed", note);
+        }
       }
       let json: { error?: { message?: string; code?: unknown }; choices?: { finish_reason?: string; message?: { content?: unknown; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] } }[]; usage?: { cost?: unknown } } | undefined;
       try {
@@ -209,7 +272,7 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
           status === 401 || status === 402 || status === 403 || status === 400 || status === 404 || status === 429
             ? safely(() => ledger.release(reservation.id))
             : safely(() => ledger.settle(reservation.id, costOf() === undefined ? undefined : toMicro(costOf()!), `HTTP ${status}, cost unknown`));
-        throw fail(`HTTP ${status}${said ? `: ${said}` : ""}`, "failed", note);
+        throw fail(`HTTP ${status}${said ? `: ${said}` : ""}${bodyProblem ? ` (${bodyProblem})` : ""}`, "failed", note);
       }
 
       // A good response: charge what the provider says it cost. No cost reported means the bound stays charged.
@@ -220,27 +283,45 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
       const choice = json?.choices?.[0];
       const message = choice?.message;
       if (!message) throw fail("the response had no message", "failed", settleNote);
-      const calls: ToolCall[] = (message.tool_calls ?? [])
-        .filter((c) => c.id && c.function?.name)
+      const rawCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+      const calls: ToolCall[] = rawCalls
+        .filter((c) => c && c.id && c.function?.name)
         .map((c) => ({ call_id: String(c.id), name: String(c.function!.name), arguments: c.function!.arguments ?? "{}" }));
       if (calls.length > MAX_TOOL_CALLS) throw fail(`the model asked for ${calls.length} tool calls at once; the limit is ${MAX_TOOL_CALLS}`, "failed", settleNote);
-      // A reply cut off by the length limit may carry half a tool call: it is never run.
-      if (choice?.finish_reason === "length" && calls.length) throw fail("the reply hit the output limit in the middle of a tool call, so no tool was run", "failed", settleNote);
-      const content = typeof message.content === "string" ? message.content.slice(0, MAX_REPLY_CHARS) : "";
-      if (!content && !calls.length) throw fail(`the response had no text and no tool call${choice?.finish_reason ? ` (finish: ${sanitize(choice.finish_reason, cfg.key, 40)})` : ""}`, "failed", settleNote);
-      return { text: content, calls, costUsd: cost, model: cfg.model, ...(settleNote.length ? { accounting: settleNote } : {}) };
+      const finish = typeof choice?.finish_reason === "string" ? choice.finish_reason : undefined;
+      // A reply cut off (output limit, content filter, error) may carry half a tool call: it is never run, whatever its arguments look like.
+      if (finish !== undefined && CUT_FINISH.has(finish) && (calls.length || rawCalls.length)) {
+        throw fail(`the reply ended early (finish: ${sanitize(finish, cfg.key, 40)}) in the middle of a tool call, so no tool was run`, "failed", settleNote);
+      }
+      const full = typeof message.content === "string" ? message.content : "";
+      const content = full.slice(0, MAX_REPLY_CHARS);
+      if (!content && !calls.length) throw fail(`the response had no text and no tool call${finish ? ` (finish: ${sanitize(finish, cfg.key, 40)})` : ""}`, "failed", settleNote);
+      // Completeness notes are their own structured list, apart from spend accounting and never part of the text or of a tool argument,
+      // so they cannot reach a later model request or change what a tool runs. A normal stop adds nothing.
+      const incomplete: string[] = [];
+      if (finish !== undefined && CUT_FINISH.has(finish)) incomplete.push(finish === "length" ? "The reply was cut off at the output limit (finish: length); it may be incomplete." : `The provider ended the reply early (finish: ${sanitize(finish, cfg.key, 40)}); it may be incomplete.`);
+      else if (finish !== undefined && !NORMAL_FINISH.has(finish)) incomplete.push(`The provider gave an unrecognised finish reason (${sanitize(finish, cfg.key, 40)}), not a normal stop; the reply may be incomplete.`);
+      if (full.length > content.length) incomplete.push(`ORBIT shortened the reply to ${MAX_REPLY_CHARS} characters.`);
+      if (rawCalls.length > calls.length) incomplete.push(`${rawCalls.length - calls.length} tool call(s) from the model had no id or name and were dropped; nothing was run for them.`);
+      return { text: content, calls, costUsd: cost, model: cfg.model, ...(settleNote.length ? { accounting: settleNote } : {}), ...(incomplete.length ? { incomplete } : {}) };
     },
 
     async balance() {
-      const res = await fetcher(`${OPENROUTER_BASE}/key`, { headers, signal: AbortSignal.timeout(Math.min(cfg.timeoutMs, 15_000)) });
-      if (!res.ok) throw fail(`balance lookup returned HTTP ${res.status}`);
-      let parsed: { data?: { limit?: unknown; limit_remaining?: unknown; usage?: unknown } };
-      try {
-        parsed = JSON.parse(await readBody(res));
-      } catch (err) {
-        throw err instanceof ProviderError ? err : fail("balance lookup returned an unreadable body");
+      const timeoutMs = Math.min(cfg.timeoutMs, 15_000);
+      const signal = AbortSignal.timeout(timeoutMs);
+      const res = await fetcher(`${OPENROUTER_BASE}/key`, { headers, signal });
+      if (!res.ok) {
+        // The error body is not read at all: only the status is reported. Cancel it so the connection is released.
+        void res.body?.cancel().catch(() => {});
+        throw fail(`balance lookup returned HTTP ${res.status}`);
       }
-      const d = ((parsed as { data?: { limit?: unknown; limit_remaining?: unknown; usage?: unknown } }).data ?? {}) as Record<string, unknown>;
+      let parsed: { data?: Record<string, unknown> } | null;
+      try {
+        parsed = JSON.parse(await readBounded(res, MAX_BALANCE_BODY_BYTES, signal));
+      } catch (err) {
+        throw fail(err instanceof ReadLimit ? whyUnread(err, "the balance body", timeoutMs) : "balance lookup returned an unreadable body");
+      }
+      const d = (parsed && typeof parsed === "object" && parsed.data && typeof parsed.data === "object" ? parsed.data : {}) as Record<string, unknown>;
       const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
       return { limitUsd: n(d.limit), remainingUsd: n(d.limit_remaining), usedUsd: n(d.usage) };
     },

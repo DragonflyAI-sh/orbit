@@ -193,6 +193,8 @@
       t.textContent = tag;
       el.append(t);
     }
+    const inc = extra?.reply?.incomplete;
+    if (inc && inc.length) { const a = document.createElement("div"); a.className = "warn"; a.textContent = `Incomplete reply: ${inc.join("; ")}`; el.append(a); }
     const acct = extra?.reply?.accounting;
     if (acct && acct.length) { const a = document.createElement("div"); a.className = "warn"; a.textContent = `Spend accounting: ${acct.join("; ")}`; el.append(a); }
     if (extra) { showCalls(el, extra.calls); for (const p of extra.proposals ?? []) showProposal(el, p); }
@@ -685,6 +687,7 @@
     const mem = m.memory && m.memory.length ? ` · memory: ${m.memory.join(", ")}` : "";
     const tag = m.status === "error" || m.status === "interrupted" ? `${m.status}: ${m.error || ""}` : m.role === "assistant" && m.provenance ? `${m.provenance} · ${m.source}${mem}` : "";
     if (tag) node.append(mk("span", { className: `tag ${m.status === "error" || m.status === "interrupted" ? "down" : m.provenance || ""}`, textContent: m.fallback && m.status === "done" ? `⚠ Fallback model, not ChatGPT · ${tag}` : tag }));
+    if (m.incomplete && m.incomplete.length) node.append(mk("div", { className: "warn", textContent: `Incomplete reply: ${m.incomplete.join("; ")}` }));
     if (m.accounting && m.accounting.length) node.append(mk("div", { className: "warn", textContent: `Spend accounting: ${m.accounting.join("; ")}` }));
     if (m.calls && m.calls.length) {
       const box = mk("span", { className: "calls" }, `Tool calls (${m.calls.length}):`);

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ProviderError } from "./chatgpt.ts";
 import type { FallbackInfo, Item, ModelPort, ToolDef } from "./model.ts";
 import type { MutatingAction } from "./ops/admin-protocol.ts";
 import type { SysMutatingAction } from "./ops/sys-protocol.ts";
@@ -28,10 +29,31 @@ export type CallRecord = {
 };
 
 // `fallback` is set when any round was answered by the OpenRouter fallback; `mixed` when other rounds of the same reply came from the primary.
-// `accounting`: spend-accounting diagnostics from every round, for the owner. Never put into `input`, so no later model turn sees them as prose.
-export type ChatOutcome = { text: string; calls: CallRecord[]; rounds: number; capped: boolean; fallback?: FallbackInfo; mixed?: boolean; accounting?: string[] };
+// `accounting`: spend-accounting diagnostics from every round, for the owner. `incomplete`: notes that a reply was cut off or partly dropped.
+// Neither is ever put into `input`, so no later model turn sees them as prose.
+export type ChatOutcome = { text: string; calls: CallRecord[]; rounds: number; capped: boolean; fallback?: FallbackInfo; mixed?: boolean; accounting?: string[]; incomplete?: string[] };
 
 const def = (t: ChatTool): ToolDef => ({ name: t.name, description: t.description, parameters: t.parameters });
+
+const merge = (into: string[], more: readonly string[] | undefined) => {
+  for (const m of more ?? []) if (!into.includes(m)) into.push(m);
+};
+
+// A later round failed: the error that reaches the caller also carries the diagnostics of the rounds before it. Built as a NEW error,
+// never by editing the original's message: a ProviderError keeps its kind, reset time, code and (as `cause`) the original; its message is
+// composed once from the bare text and the deduplicated list, so a diagnostic that appears in both rounds is named once.
+export function withEarlierAccounting(err: unknown, earlier: readonly string[]): unknown {
+  if (!earlier.length || !(err instanceof Error)) return err;
+  if (err instanceof ProviderError) {
+    const all: string[] = [...earlier];
+    merge(all, err.accounting);
+    if (all.length === (err.accounting?.length ?? 0) && all.every((a) => err.accounting?.includes(a))) return err;
+    return new ProviderError(err.kind, err.base, err.resetsAt, err.code, all, err);
+  }
+  const wrapped = new Error(`${err.message} Spend accounting from earlier rounds: ${earlier.join("; ")}.`, { cause: err });
+  wrapped.name = err.name;
+  return wrapped;
+}
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}… (truncated)` : s);
 
 export async function runChat(options: {
@@ -58,7 +80,12 @@ export async function runChat(options: {
   let fallback: FallbackInfo | undefined;
   let primaryRounds = 0;
   const accounting: string[] = [];
-  const provenance = () => ({ ...(fallback ? { fallback, ...(primaryRounds ? { mixed: true } : {}) } : {}), ...(accounting.length ? { accounting: [...accounting] } : {}) });
+  const incomplete: string[] = [];
+  const provenance = () => ({
+    ...(fallback ? { fallback, ...(primaryRounds ? { mixed: true } : {}) } : {}),
+    ...(accounting.length ? { accounting: [...accounting] } : {}),
+    ...(incomplete.length ? { incomplete: [...incomplete] } : {}),
+  });
 
   for (let round = 0; ; round++) {
     const capped = round >= maxRounds;
@@ -68,10 +95,10 @@ export async function runChat(options: {
       step = await model.step(input, limits, notes, capped ? [] : tools.map(def), { fallback: options.fallback === true });
     } catch (err) {
       // Diagnostics from earlier rounds are not lost because a later round failed.
-      if (accounting.length && err instanceof Error) err.message = `${err.message} Spend accounting from earlier rounds: ${accounting.join("; ")}.`;
-      throw err;
+      throw withEarlierAccounting(err, accounting);
     }
-    for (const a of step.accounting ?? []) if (!accounting.includes(a)) accounting.push(a);
+    merge(accounting, step.accounting);
+    merge(incomplete, step.incomplete);
     if (step.fallback) fallback = step.fallback;
     else primaryRounds += 1;
     if (!step.calls.length || capped) {

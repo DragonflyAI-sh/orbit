@@ -55,6 +55,12 @@ export const toUsd = (micro: number): number => micro / 1_000_000;
 const isMicro = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
 const utcDay = (d: Date) => d.toISOString().slice(0, 10);
 
+// What a read-only look at the ledger found. Never a spend, never a write, never a repair.
+//  ok: the file (or the in-memory ledger) was read and validated just now.
+//  uninitialized: no ledger exists yet and this process has not written one; the first paid call would create it. NOT verified to work.
+//  failed: unreadable, corrupt, invalid or vanished; every paid call is refused until it is fixed by hand. `reason` carries no file path.
+export type SpendInspection = { state: "ok"; view: SpendView } | { state: "uninitialized" } | { state: "failed"; reason: string };
+
 export type SpendLedger = {
   reserve(maxMicro: number): { id: string; micro: number };
   // Replaces the reservation with the real cost. `actualMicro` undefined means the cost is unknown.
@@ -62,6 +68,9 @@ export type SpendLedger = {
   // The request was never sent (a failure before the network call): the reservation can be released safely.
   release(id: string): void;
   view(): SpendView;
+  // Read-only observation for status pages. Unlike view(), it never creates the file, never adopts orphaned reservations and never
+  // writes: polling it any number of times leaves the ledger byte for byte as it was. Reservations found on disk are shown as reserved.
+  inspect(): SpendInspection;
 };
 
 export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () => Date = () => new Date()): SpendLedger {
@@ -196,20 +205,47 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
     },
 
     view() {
-      const l = load();
-      const day = utcDay(now());
-      const today = l.days[day] ?? 0;
-      const reservedToday = outstanding(l, day);
-      return {
-        day,
-        caps: { dailyUsd: toUsd(caps.dailyMicro), totalUsd: toUsd(caps.totalMicro) },
-        spentTodayUsd: toUsd(today),
-        reservedUsd: toUsd(outstanding(l)),
-        lifetimeUsd: toUsd(l.lifetimeMicro),
-        remainingTodayUsd: toUsd(Math.max(0, Math.min(caps.dailyMicro - today - reservedToday, caps.totalMicro - l.lifetimeMicro - outstanding(l)))),
-        remainingTotalUsd: toUsd(Math.max(0, caps.totalMicro - l.lifetimeMicro - outstanding(l))),
-        uncertainRequests: l.uncertain.length,
-      };
+      return viewOf(load());
+    },
+
+    inspect() {
+      try {
+        if (!file) return memory ? { state: "ok", view: viewOf(memory) } : { state: "uninitialized" };
+        let raw: string;
+        try {
+          raw = readFileSync(file, "utf8");
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT") return { state: "failed", reason: "the spend ledger file cannot be read" };
+          return loaded ? { state: "failed", reason: "the spend ledger file disappeared after it was written" } : { state: "uninitialized" };
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          return { state: "failed", reason: "the spend ledger file is corrupt" };
+        }
+        return { state: "ok", view: viewOf(validate(parsed)) };
+      } catch (err) {
+        // validate() names the file in its text; the status never shows a path.
+        const text = err instanceof SpendError ? err.message.split(file ?? "\0").join("the ledger file").split(/ Fix or restore/)[0]! : "the spend ledger could not be checked";
+        return { state: "failed", reason: text.replace(/\.$/, "") };
+      }
     },
   };
+
+  function viewOf(l: Ledger): SpendView {
+    const day = utcDay(now());
+    const today = l.days[day] ?? 0;
+    const reservedToday = outstanding(l, day);
+    return {
+      day,
+      caps: { dailyUsd: toUsd(caps.dailyMicro), totalUsd: toUsd(caps.totalMicro) },
+      spentTodayUsd: toUsd(today),
+      reservedUsd: toUsd(outstanding(l)),
+      lifetimeUsd: toUsd(l.lifetimeMicro),
+      remainingTodayUsd: toUsd(Math.max(0, Math.min(caps.dailyMicro - today - reservedToday, caps.totalMicro - l.lifetimeMicro - outstanding(l)))),
+      remainingTotalUsd: toUsd(Math.max(0, caps.totalMicro - l.lifetimeMicro - outstanding(l))),
+      uncertainRequests: l.uncertain.length,
+    };
+  }
 }

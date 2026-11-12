@@ -70,6 +70,8 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   let recoveredAt: string | undefined;
   let lastUse: { at: string; costUsd?: number } | undefined;
   let lastFallbackError: string | undefined;
+  // Set when a paid call showed the ledger cannot be trusted (it refused, or could not record a billed answer); cleared by a clean one.
+  let ledgerFault: string | undefined;
   let balance: { at: string; text: string } | undefined;
   let balanceTried = 0;
 
@@ -98,8 +100,10 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
 
   // The original refusal, with what the fallback could not do, so the caller sees both and nothing is hidden.
   // `accounting` is the structured spend diagnostic of the failed paid call, kept as data on the error.
-  const augment = (err: ProviderError, detail: string, accounting?: string[]) =>
-    new ProviderError(err.kind, `${err.message.replace(/\s*$/, "")} The OpenRouter fallback did not answer: ${detail}`, err.resetsAt, err.code, accounting ?? err.accounting);
+  // `accounting` is passed explicitly by every caller (an empty list when the failed step had none): nothing is inherited implicitly.
+  // `detail` is the bare reason; ProviderError names the accounting once, so it is never part of the text built here.
+  const augment = (err: ProviderError, detail: string, accounting: readonly string[]) =>
+    new ProviderError(err.kind, `${err.base.replace(/\s*$/, "")} The OpenRouter fallback did not answer: ${detail}`, err.resetsAt, err.code, [...accounting], err);
 
   const viaFallback = async (cause: ProviderError | undefined, input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], paidOk = true): Promise<Step> => {
     const l = limit!;
@@ -107,7 +111,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     // Background callers never spend the paid fallback: they get the limit as it is.
     if (!paidOk) throw stand;
     const problem = unavailable();
-    if (problem) throw augment(stand, problem);
+    if (problem) throw augment(stand, problem, []);
     const allowed = tools.filter((t) => FALLBACK_TOOLS.has(t.name));
     const names = new Set(allowed.map((t) => t.name));
     const told = [
@@ -119,13 +123,19 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       paid = await client!.step(input, told, notes, allowed);
     } catch (err) {
       lastFallbackError = err instanceof Error ? err.message : String(err);
-      if (err instanceof SpendError) throw augment(stand, err.message);
-      throw augment(stand, lastFallbackError, err instanceof ProviderError ? err.accounting : undefined);
+      if (err instanceof SpendError) {
+        if (err.code === "ledger") ledgerFault = "the spend ledger refused a paid call";
+        throw augment(stand, err.message, []);
+      }
+      throw augment(stand, err instanceof ProviderError ? err.base : lastFallbackError, err instanceof ProviderError ? (err.accounting ?? []) : []);
     }
     lastFallbackError = undefined;
+    // A billed answer whose ledger write failed is returned (never discarded), but the ledger is then not trustworthy: status says so
+    // until a later paid call records cleanly.
+    ledgerFault = paid.accounting?.length ? "the ledger could not record a paid call" : undefined;
     const outside = paid.calls.find((c) => !names.has(c.name));
     if (outside) {
-      throw augment(stand, `it asked for the tool ${JSON.stringify(outside.name.slice(0, 60))}, which fallback mode does not allow. Nothing was run.`, paid.accounting);
+      throw augment(stand, `it asked for the tool ${JSON.stringify(outside.name.slice(0, 60))}, which fallback mode does not allow. Nothing was run.`, paid.accounting ?? []);
     }
     lastUse = { at: iso(now()), ...(paid.costUsd !== undefined ? { costUsd: paid.costUsd } : {}) };
     const info: FallbackInfo = {
@@ -135,7 +145,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       primaryLimit: { until: iso(l.until), estimated: l.estimated },
       ...(paid.costUsd !== undefined ? { costUsd: paid.costUsd } : {}),
     };
-    return { text: paid.text, calls: paid.calls, fallback: info, ...(paid.accounting?.length ? { accounting: paid.accounting } : {}) };
+    return { text: paid.text, calls: paid.calls, fallback: info, ...(paid.accounting?.length ? { accounting: paid.accounting } : {}), ...(paid.incomplete?.length ? { incomplete: paid.incomplete } : {}) };
   };
 
   // One model turn: the primary unless its limit is still in force.
@@ -163,14 +173,39 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     return turn(input, limits, notes, tools, () => primary.step!(input, limits, notes, tools), opts?.fallback === true);
   };
 
-  const spend = (): string => {
-    if (!ledger) return "";
+  // What status() may say about the paid fallback. READ-ONLY: it looks at the ledger file (never creates, repairs or writes it), at what
+  // this process has already seen, and at the clock. It sends no provider request, balance or otherwise, so polling it spends nothing.
+  // "armed" is claimed only when the config is complete AND the ledger was read and validated just now. The key, model and prices come
+  // from configuration; nothing here has been verified with OpenRouter.
+  // `usable` is whether a paid call could be attempted at all (false: config missing, or the ledger is known bad).
+  const paidState = (): { armed: boolean; usable: boolean; text: string } => {
+    if (config.state === "disabled") return { armed: false, usable: false, text: "" };
+    const off = unavailable();
+    if (off) return { armed: false, usable: false, text: ` OpenRouter fallback unavailable: ${off}` };
+    let seen: ReturnType<SpendLedger["inspect"]>;
     try {
-      const v = ledger.view();
-      return ` Local OpenRouter allowance (UTC ${v.day}): $${v.spentTodayUsd.toFixed(4)} spent today of $${v.caps.dailyUsd}, $${v.lifetimeUsd.toFixed(4)} of $${v.caps.totalUsd} lifetime, $${v.reservedUsd.toFixed(4)} reserved for calls in flight${v.uncertainRequests ? `, ${v.uncertainRequests} request(s) charged at their upper bound because the cost was unknown` : ""}.`;
-    } catch (err) {
-      return ` Spend ledger problem: ${err instanceof SpendError ? err.message : "unreadable"}`;
+      seen = ledger!.inspect();
+    } catch {
+      seen = { state: "failed", reason: "the spend ledger could not be checked" };
     }
+    if (seen.state === "failed") {
+      return { armed: false, usable: false, text: ` OpenRouter fallback NOT armed, no paid call will be made: ${seen.reason}. The ledger is never reset automatically; fix or restore it by hand.` };
+    }
+    if (ledgerFault) {
+      return { armed: false, usable: false, text: ` OpenRouter fallback NOT armed: ${ledgerFault}. Check the spend ledger before any further paid call; this clears only after a paid call is recorded cleanly.` };
+    }
+    const unverified = ` Model ${client!.model}, key and prices come from ORBIT's configuration; they have not been verified with OpenRouter.`;
+    const bal = !balance
+      ? " The OpenRouter key balance has not been read yet."
+      : now() - Date.parse(balance.at) > 2 * BALANCE_EVERY_MS
+        ? ` STALE (last read ${balance.at}): ${balance.text}`
+        : ` ${balance.text}`;
+    if (seen.state === "uninitialized") {
+      return { armed: false, usable: true, text: ` OpenRouter fallback configured but not verified: the spend ledger has not been created yet (the first paid call would create it, and nothing has checked that it can).${unverified}${bal}` };
+    }
+    const v = seen.view;
+    const allowance = ` Local OpenRouter allowance as last written (UTC ${v.day}): $${v.spentTodayUsd.toFixed(4)} spent today of $${v.caps.dailyUsd}, $${v.lifetimeUsd.toFixed(4)} of $${v.caps.totalUsd} lifetime, $${v.reservedUsd.toFixed(4)} reserved for calls in flight${v.uncertainRequests ? `, ${v.uncertainRequests} request(s) charged at their upper bound because the cost was unknown` : ""}. This is ORBIT's own count, not a hard spending ceiling.`;
+    return { armed: true, usable: true, text: ` OpenRouter fallback armed: ${client!.model}, used only while ChatGPT is limited.${allowance}${unverified}${bal}` };
   };
 
   const wrapper: FallbackModel = {
@@ -212,14 +247,17 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       if (primaryReply) return primaryReply;
       if (!s.text) throw new Error("response had no text");
       const used = s.fallback!;
-      return { value: s.text, provenance: "live" as const, source: replySource(primary.status().impl, used), fallback: used, ...(s.accounting?.length ? { accounting: s.accounting } : {}) };
+      return { value: s.text, provenance: "live" as const, source: replySource(primary.status().impl, used), fallback: used, ...(s.accounting?.length ? { accounting: s.accounting } : {}), ...(s.incomplete?.length ? { incomplete: s.incomplete } : {}) };
     },
 
     status(): PortStatus {
       const base = primary.status();
       const l = limit;
-      const off = unavailable();
-      const armed = config.state === "disabled" ? "" : off ? ` OpenRouter fallback unavailable: ${off}` : ` OpenRouter fallback armed: ${client?.model}, used only while ChatGPT is limited.${spend()}${balance ? ` ${balance.text}` : ""}`;
+      const paid = paidState();
+      const armed = paid.text;
+      // No replies can come from the fallback unless a paid call could be attempted. "Configured but not verified" (ledger not created
+      // yet) can; it is still never called armed.
+      const off = !paid.usable;
       if (l) {
         const passed = l.until <= now();
         const state = passed ? "degraded" : off ? "down" : "degraded";

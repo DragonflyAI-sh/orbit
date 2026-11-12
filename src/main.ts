@@ -64,6 +64,14 @@ let openrouterEffective = openrouter;
 if (openrouter.state === "ready" && stateDir) {
   try {
     openrouterLedger = spendLedger(stateDir, { dailyMicro: toMicro(openrouter.dailyCapUsd), totalMicro: toMicro(openrouter.totalCapUsd) });
+    // The one explicit, startup-time initialisation: creates a missing ledger and charges reservations left by a crashed process, exactly
+    // as the first paid call would, but before any call. /status only observes (src/fallback.ts) and never does either. A failure is not
+    // fatal and not hidden: /status reports the fallback as NOT armed while the ledger cannot be read.
+    try {
+      openrouterLedger.view();
+    } catch {
+      console.error(JSON.stringify({ at: new Date().toISOString(), openrouter: "the spend ledger could not be initialised at startup; no paid call will be made until it is fixed" }));
+    }
   } catch (err) {
     openrouterEffective = { state: "unavailable", reason: `The spend ledger could not be set up: ${err instanceof Error ? err.message : "unknown error"}` };
   }
