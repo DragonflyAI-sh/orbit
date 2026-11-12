@@ -54,6 +54,10 @@ export type WriteResult = {
   agentsMdSha: string;
 };
 
+// What a launch-time snapshot read finds for one path: the whole note, or a fixed reason it cannot be read (never the note's text).
+export type NoteRead = { content: string } | { error: "missing" | "unsafe" | "too_large" | "unreadable" };
+export type NoteSnapshot = { head?: string; fetchedAt?: string; syncError: boolean; notes: Map<string, NoteRead> };
+
 export type PolicyDocs = { agents: string; agentsSha: string; conventions?: string; memory?: string };
 
 export type CloneState = {
@@ -486,6 +490,23 @@ export function vaultClone(deps: VaultCloneDeps) {
     },
     // Reads a note once nothing is changing the tree (queued behind running writes and syncs).
     readNoteQueued: (path: string): Promise<string | undefined> => serial(async () => diskRead(path)),
+    // Reads several notes as one consistent snapshot: queued behind running writes and syncs, with the clone's head and fetch time
+    // taken at the same moment. Symlinks anywhere on a path, non-files and oversize notes are reported as fixed reasons and never
+    // read. Used for the job context snapshot (src/job-context.ts); it never touches the network.
+    snapshotNotes: (paths: string[]): Promise<NoteSnapshot> =>
+      serial(async () => {
+        const notes = new Map<string, NoteRead>();
+        for (const path of paths) {
+          try {
+            const content = diskRead(path);
+            notes.set(path, content === undefined ? { error: "missing" } : { content });
+          } catch (err) {
+            const code = err instanceof VaultError ? err.code : undefined;
+            notes.set(path, { error: code === "policy_refused" ? "unsafe" : code === "precondition_failed" ? "too_large" : "unreadable" });
+          }
+        }
+        return { head, fetchedAt, syncError: syncError !== undefined, notes };
+      }),
     state(): CloneState {
       return {
         credential: token() ? "present" : "missing",

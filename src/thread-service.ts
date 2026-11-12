@@ -108,7 +108,7 @@ export function threadService(d: {
     const base = { id: p.id, state: "open" as const, createdAt: p.createdAt, expiresAt: p.expiresAt };
     if (p.kind === "job_launch") {
       const brief = maskText(p.brief);
-      return { ...base, kind: p.kind, routine: p.routine, brief, ...(brief !== p.brief ? { briefMasked: true } : {}), ...(p.duplicates?.length ? { duplicates: p.duplicates } : {}) };
+      return { ...base, kind: p.kind, routine: p.routine, brief, ...(brief !== p.brief ? { briefMasked: true } : {}), ...(p.context?.length ? { context: p.context.map(maskText) } : {}), ...(p.duplicates?.length ? { duplicates: p.duplicates } : {}) };
     }
     if (p.kind === "job_steer") return { ...base, kind: p.kind, job: p.job, text: maskText(p.text) };
     return { ...base, kind: p.kind, action: p.action, summary: maskText(p.summary), display: maskDeep(p.display), digest: p.digest, ...(p.kind === "ops_sys" ? { warnings: p.warnings.map(maskText) } : {}) };

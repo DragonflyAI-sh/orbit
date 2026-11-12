@@ -8,7 +8,7 @@ The Claude Code scheduled task (formerly "routine") that runs ORBIT's coding job
 | --- | --- |
 | Name | `ORBIT jobs: orbit-work + orbit` |
 | Task id (current) | `trig_014eYpYTZa1Gviqjp2C92ZVd` (changes if recreated) |
-| Repositories (sources) | `https://github.com/DragonflyAI-sh/orbit-work` and `https://github.com/DragonflyAI-sh/orbit`, both writable |
+| Repositories (sources) | `https://github.com/DragonflyAI-sh/orbit-work` and `https://github.com/DragonflyAI-sh/orbit`, both writable; plus `https://github.com/phairow/orbit-vault` as a third source, read-only context only (see [Vault source](#vault-source-read-only-context)) |
 | Environment | `ORBIT jobs` (custom): network access **Limited** with allowed domain `orbit-jobs.tail5bde08.ts.net`, and package managers allowed |
 | Model | `claude-sonnet-5-5` |
 | Allowed tools | Bash, Read, Write, Edit, Glob, Grep |
@@ -50,18 +50,44 @@ If no job id was given, or any step fails or is refused, stop and say so plainly
 
 The prompt expects the fire text ORBIT sends (`src/job-launch.ts`): `Job id: …`, `API: …`, `Token: …` and `Tool commit: <ORBIT's running commit>`. `--tool-commit` needs `orbit-job` from PR #29 or later.
 
+## Vault source (read-only context)
+
+Added to the live task on 2026-11-12 (Rai approved the third source and chose the folder-style checkout below). This section is the source of truth for it; the live task was configured separately, and nothing in this file changes it.
+
+| Setting | Value |
+| --- | --- |
+| Source | `https://github.com/phairow/orbit-vault` |
+| Checkout location | `/home/user/orbit-vault` |
+| Sparse checkout paths | `["AGENTS.md","System/","Projects/orbit-next.md","Resources/orbit-next-*","Tasks/orbit-next-*"]`, exactly as written: no leading `/` (a leading `/` is rejected as invalid and fails every run), and the odd-looking file and wildcard entries are intentional, see below |
+| Role | **Read-only context.** The job's outcomes stay `orbit-work` and `orbit` only. A job never commits to or pushes the vault; ORBIT alone writes the vault (`docs/vault-writes.md`). The skill forbids it. Whether the source's token could push is not verified here, so the rule, not the permission, is what protects the vault |
+| Prompt | Unchanged. The vault rules reach the runner through the `orbit-job` skill it copies from the tool commit (`tools/orbit-job/SKILL.md`, "Vault context") |
+
+### What the sparse paths actually check out
+
+Checkout is git **cone mode**, whose patterns are directory names, not file patterns. Observed on the live task (2026-11-12) and reproduced with a synthetic repository in `test/sparse-checkout.test.ts` (git 2.43, `git sparse-checkout set --skip-checks <paths>`; plain `set` with these paths refuses them as "patterns"):
+
+- **Checked out:** every file in the repository root (`AGENTS.md`, `README.md`, `CLAUDE.md`, `home.md`, `now.md`, and so on); `System/` and everything below it; and the **top-level files only** of `Projects/`, `Resources/` and `Tasks/`.
+- **Not checked out:** any subfolder of `Projects/`, `Resources/` or `Tasks/`, and every other folder: `Journal/`, `Memory/`, `Log/`, `Inbox/`, `Machines/`, `Areas/`, `Archive/`, `Attachments/`, `Reviews/`, `scripts/`.
+- `Projects/orbit-next.md`, `Resources/orbit-next-*` and `Tasks/orbit-next-*` are taken as directory names that do not exist, so they select nothing by themselves; their effect is only that their parent folders appear at top level. The narrower reading the names suggest (only `orbit-next` notes) is **not** what is checked out: all top-level notes in those three folders are.
+- Why not a plain folder list: `["System/","Projects/","Resources/","Tasks/"]` is also valid, but in cone mode it checks out those folders **recursively**, including every `Resources/` subfolder (531 files in the vault when measured), so the odd list was kept to leave subfolders out.
+- Not what the paths read as: a non-cone checkout (`git sparse-checkout set --no-cone`) with the same paths would check out exactly the six `orbit-next`-style paths. That would be narrower than the configuration Rai chose; it is reported here as a discrepancy with the wording, not applied. Changing the live configuration is Rai's decision.
+
+Because the checkout lags the vault and leaves out most of it, a brief that relies on a note lists its exact path, and ORBIT copies that note into the job at launch (`docs/job-context.md`). A note named by a brief but absent from the checkout is therefore still available as `.orbit/context/<path>`.
+
 ## Recreate it
 
 1. On claude.ai/code, create or check the **ORBIT jobs** environment with the settings above.
 2. At claude.ai/code/routines, create a scheduled task with the settings and prompt above. The Claude GitHub App must be installed on `DragonflyAI-sh` with access to both repos.
 3. In the task's **Edit** dialog, under **Trigger**, click **+**, choose **API**, then **Generate token**. The token is shown once.
 4. On the host, as root: `umask 077 && cat > /etc/credstore/orbit.routine.orbit` (paste the token, Enter, Ctrl-D).
-5. If the task id changed, set `ORBIT_ROUTINES=orbit=<new trig_ id>` in `/opt/orbit/orbit.env`. Keep `ORBIT_ROUTINE_REPOS=orbit=DragonflyAI-sh/orbit`.
-6. Restart ORBIT (`systemctl restart orbit`) and check that `/status` says "Launches through Routines: orbit".
-7. Launch one small job and confirm it starts and its PR opens.
+5. Add the third source from [Vault source](#vault-source-read-only-context) with its sparse paths (no leading `/`).
+6. If the task id changed, set `ORBIT_ROUTINES=orbit=<new trig_ id>` in `/opt/orbit/orbit.env`. Keep `ORBIT_ROUTINE_REPOS=orbit=DragonflyAI-sh/orbit`.
+7. Restart ORBIT (`systemctl restart orbit`) and check that `/status` says "Launches through Routines: orbit".
+8. Launch one small job and confirm it starts, that `/home/user/orbit-vault` exists with only the checked-out set above, and that its PR opens.
 
 ## History
 - 2026-11-04 created; multi-repo sources tested.
 - 2026-11-06 moved to the ORBIT jobs environment; API trigger added; tool copied from the `orbit` source at a pinned commit.
 - 2026-11-08 pin replaced by `Tool commit` from the fire text (PR #28); connectors cleared; schedule removed; `--tool-commit` passed to `orbit-job start` (PR #29).
 - 2026-11-08 every step made self-contained for separate shells (commit re-read from `~/.orbit-tool-commit`, tool run by its home path).
+- 2026-11-12 `phairow/orbit-vault` added as a third, read-only source with sparse paths (cone-mode semantics observed and recorded above); launch-time vault context copies (`docs/job-context.md`).

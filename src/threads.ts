@@ -67,6 +67,8 @@ export type Card = {
   routine?: string;
   brief?: string;
   briefMasked?: boolean;
+  // Vault notes ORBIT will copy to the job at launch (job_launch cards).
+  context?: string[];
   job?: string;
   text?: string;
   action?: string;

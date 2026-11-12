@@ -19,7 +19,10 @@ export type SummaryRecord = { text: string; chars: number; state: "complete" | "
 export type Steer = { n: number; text: string; at: string; deliveredAt?: string };
 export type Launch = { routine: string; at: string; branch?: string; briefCommit?: string; sessionId?: string; sessionUrl?: string; failedAt?: string; error?: string;
   // Distinct words of the brief, for the duplicate-launch warning (src/duplicates.ts). Not the brief itself.
-  briefWords?: string };
+  briefWords?: string;
+  // Vault context copied to the control branch at launch (src/job-context.ts): the paths, the commit that holds the copies, the
+  // vault commit they were read at, and whether the vault fetch was fresh. Never the notes' text.
+  context?: { paths: string[]; commit?: string; vaultHead?: string; fresh: boolean } };
 // Where the PR's title came from, so a fallback is never mistaken for the runner's own.
 export type TitleSource = "pr-title-section" | "summary-first-line" | "job-routine";
 // Delivery of text too long for one GitHub body: part 1 is the PR description, parts 2..total are ordered comments. posted counts parts delivered (the description is 1).
