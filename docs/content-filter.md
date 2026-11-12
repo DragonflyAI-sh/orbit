@@ -8,14 +8,14 @@ Rai's priority for this heuristic is usability. So:
 
 - A shape the filter does not recognise **passes**. Unknown, weakly suspicious, long, random-looking, hex, base64 or "passphrase-looking" text is not blocked for being any of those things.
 - Known credential shapes stay blocked (writes, context export, cards) and masked (stored history, cards, display).
-- Passing is not permission. Whether an action is allowed is decided elsewhere and is unchanged: owner-only confirmation, digest-bound cards, the `#rai` and protected-area rules, path rules, size limits, the sensitive-personal-detail confirmation, the job-context privacy checks, and every downstream scanner (CI gitleaks, the tier-1 redaction of ops output). This filter never loosens those, and no switch turns the filter off.
+- Passing is not permission. Whether an action is allowed is decided elsewhere and is unchanged: owner-only confirmation, digest-bound cards, the `#rai` and protected-area rules, path rules, size limits, the sensitive-personal-detail confirmation (its semantics were restored by the PR #66 follow-up; see that section), the job-context privacy checks, and every downstream scanner (CI gitleaks, the tier-1 redaction of ops output). This filter never loosens those, and no switch turns the filter off.
 
 ## Four separate concerns
 
 | Concern | Where | What it decides |
 | --- | --- | --- |
 | Credential **recognition** | `src/vault/filter.ts` (`vaultFindings`, `hasVaultFindings`) | Which spans of a text are a known credential shape, as a rule id and line. |
-| **Masking** | `src/vault/filter.ts` (`maskVaultText`, `maskVaultDeep`, `maskJsonStrings`), `src/threads.ts` (`maskContent`, `maskCall`) | Replaces the matched value only. Names, paths, prose, layout and line endings are kept. |
+| **Masking** | `src/vault/filter.ts` (`maskVaultText`, `maskVaultDeep`, `maskJsonStrings`, `maskStoredText`), `src/threads.ts` (`maskContent`, `maskCall`) | Replaces the matched value only. Names, paths, prose, layout and line endings are kept. |
 | Sensitive **personal detail** policy | `src/vault/sensitive.ts` (`sensitiveCategories`) | Whether inserted text looks like a new category of personal detail that Rai must approve (health, money, ...). Routes a write to a confirmation card; never blocks or masks. |
 | Action **authorization** | `src/vault/edit.ts` (`classify`, `cardDisplay`, `digestOfEdit`), `src/vault/tools.ts`, `src/vault/clone.ts`, `src/job-context.ts` | Whether a write, proposal or launch may run: direct vs protected, owner-only confirmation, digest, re-validation at run time. |
 
@@ -36,8 +36,9 @@ Reproduced before fixing: on the vault corpus the previous filter flagged 70 of 
 - Provider prefixes grew (Stripe, GitLab, npm, Hugging Face, SendGrid, Docker, AWS `ASIA`) and each needs a body long enough that ordinary words cannot match.
 - `secret.url-credentials` needs `user:password@` with a real password (or a long token as the user of an http(s) URL); `ssh://git@host` passes. `secret.bearer-token` needs a credential-shaped value, not a word.
 - Masking replaces **the value only**, in place; a private key without an END marker hides the header and its base64 body, not the rest of the note; CRLF is preserved everywhere.
-- Conversation content (messages, titles, summaries, brief and steer cards, recent-context notes) and the results of vault, memory, job and PR tools are masked with `maskContent` / `maskCall`. Tool arguments and outputs are masked per JSON string (decoded, masked as the real text, re-encoded only if changed), so multiline and CRLF rules apply and a clipped final string is handled. `ops_*` and `orbit_*` tool results keep the tier-1 masker.
-- The sensitive-detail policy moved to `sensitive.ts` and its ambiguous tier now needs a person frame (see below).
+- Conversation content (messages, titles, summaries, brief and steer cards, recent-context notes) and the results of vault, memory, job and PR tools are masked with `maskContent` / `maskCall`. Tool arguments, outputs and summaries go through `maskStoredText`: valid JSON is masked per string literal (decoded, masked as the real text, re-encoded only if changed, so multiline and CRLF rules apply); anything else (a plain-text failure summary such as an error message, a clipped JSON prefix, an error that quotes JSON) gets that pass and then the plain-text pass over the whole text, so a known credential value does not survive in either shape. `ops_*` and `orbit_*` tool results keep the tier-1 masker.
+- The sensitive-detail policy moved to `sensitive.ts`. The first version of that move loosened it (a person frame was required, and generic words such as `notes` and `vault` counted as technical); the PR #66 follow-up restored the confirm-by-default semantics (see below).
+- Path and file-name exemptions are structural: a slash, a leading `/` or `~/`, or a file extension never exempts a value that is a 40-character base64 run with upper, lower and digits (the AWS secret access key shape) or that holds an opaque random segment.
 - Refusals say the rule and where, and what to change: write refusals and card refusals say to remove or replace the matched value (`<token>` is fine) and that headings, names and paths are not the cause; a context-export refusal still offers the separately confirmed launch that leaves the note out and tells the runner to read it from its own vault checkout. Nothing is ever silently omitted.
 
 ## Rules
@@ -60,11 +61,31 @@ Not a name: a name that ends in a file extension (`some-token-note.md:`), a bare
 
 ## Sensitive-personal-detail policy (`sensitive.ts`)
 
-Unchanged in what it does (a new category in inserted text routes the write to a confirmation card), narrower in what it guesses for health:
+A new category in inserted text routes the write to a confirmation card (AGENTS.md section 4 of the vault: recording a new category of sensitive personal detail needs Rai's approval). The PR #66 first pass loosened this: it required a person frame, treated `note`, `notes`, `vault`, `orbit`, `tool(s)` and others as technical cues, and dropped `diagnosis of` from the always list, so `Sam's diagnosis notes: pending` and `He has a condition` were written without confirmation. That is corrected; the actual behaviour is:
 
-- **Always:** condition, treatment and drug words (`cancer`, `therapy`, `insulin`, `sertraline`, `prescription`, `diagnosed with`, `chronic pain`, `anxiety disorder`, ...), wherever they appear.
-- **Ambiguous** (`diagnosis`, `symptom(s)`, `prescribe`, `chronic`, `disorder`, `has a ... condition`): ask only with a **person frame** in the same clause: a medical-setting word (doctor, clinic, patient, ...) always; otherwise a pronoun, a capitalised name's possessive or a named person mid-sentence **and** no technical cue (service, build, queue, log, vault, ...). Clauses are split at sentence ends, line breaks, `;` and dashes, so a technical clause does not launder a personal one next to it. `diagnostics`, `diagnose the failing job`, `symptoms: timeouts`, `chronic CI failures`, `a race condition` pass.
-- Limits: the lists are finite; a bare `diagnosis: pending` with no frame passes; slang, misspellings and other languages are not caught. This is a routing convenience, never a privacy control.
+- **Always:** condition, treatment and drug words (`cancer`, `therapy`, `insulin`, `sertraline`, `prescription`, `diagnosed with`, `diagnosis of`, `chronic pain`, `anxiety disorder`, ...), wherever they appear.
+- **Ambiguous** (`diagnosis`, `symptom(s)`, `prescribe`, `chronic`, `disorder`, `has a ... condition`): a sentence holding one **asks by default**. It passes only when it has a technical cue (service, server, build, queue, log, pipeline, ci, cache, race condition, ...) **and** no person frame (a pronoun such as I, he, she, they, my, his, her, them; a capitalised possessive such as `Sam's`; a `was diagnosed/prescribed` passive; a capitalised name mid-sentence) **and** no medical-setting word (doctor, clinic, patient, ...). The generic words `note`, `notes`, `vault`, `orbit`, `runner`, `tool(s)`, `check(s)`, `filter` and `detector` are not technical cues. Sentences are split at sentence ends and line breaks only, so a mixed sentence (`Sam's diagnosis; the queue stalled`) asks.
+- Still usable: `diagnostics`, `diagnose the failing job in the pipeline`, `the build symptoms: timeouts`, `chronic failures in CI`, `a race condition`.
+- Residual limitations: the lists are finite; slang, misspellings and other languages are not caught; the screen over-matches (a technical sentence that also holds a person frame, and `diagnosis of <anything>`, ask) and an unframed sentence with only a generic technical word still asks; a disclosure with none of the listed words passes. It is a routing convenience, never a privacy control. Credential-preflight permissiveness does not extend to this policy.
+
+## Supported and intentionally unsupported shapes
+
+Reproduced with generated probes (`test/vault-pr66-followup.test.ts` pins every line below):
+
+| Shape | Behaviour |
+| --- | --- |
+| `authorization: bearer <credential-shaped value>` (lowercase scheme) | **Supported**: the scheme match is case-insensitive. A short or word-like value after it passes. |
+| `https://user:abc@host` (password of 3+ characters) | Supported. A password of 1-2 characters passes (intentional). |
+| `AWS_SECRET_ACCESS_KEY=<40 base64 chars>` including `/` and `+`, exported or quoted | Supported; a slash or a file-like ending does not make it a path. |
+| `password = correct horse battery staple` (multi-word value) | **Not detected**, intentionally: an unquoted multi-word value is prose. |
+| `the password is <value>` (no colon or equals) | **Not detected**, intentionally. |
+| a bare unprefixed opaque API key or any long opaque run on its own | **Not detected**, intentionally. The corpus holds 164 such runs; passing them is a design limit, not a claim of safety and not by itself an open defect. |
+
+This is not universal secret detection and is not expanded here. Coverage claims are limited to the known shapes in the rules table.
+
+## Preexisting stored summaries
+
+`maskCall` previously ran the JSON-string masker over a call's `summary`, so a plain-text failure summary containing a known credential (for example a clone error quoting a token or `user:password@` URL) could have been persisted unmasked in thread files on disk, and shown on the thread page or replayed into digests. The fix applies to new writes only. Remediation of already stored threads is **not** done by this change: it needs a separately authorized, non-destructive scan of the stored thread files (counts only) and, if anything is found, a decision by Rai on masking in place. No production access was used and no history was rewritten or migrated.
 
 ## Surfaces
 
@@ -109,9 +130,19 @@ Private classification of the matches (by shape):
 - `secret.jwt` (1): a structurally valid token (decodable header with `alg`/`typ`, decodable payload): **known sensitive shape**, kept.
 - `secret.routine-trigger` (6 in 4 notes): trigger ids, masked `trig_…last4` by project policy: **known sensitive**, kept.
 
-Fabricated blocked cases (current / baseline): `secret.provider-token` 33/33 (24/33), `secret.credential-assignment` 21/21 (21/21), `secret.jwt` 3/3 (3/3), `secret.private-key` 6/6 (6/6), `secret.bearer-token` 6/6 (6/6), `secret.url-credentials` 3/3 (3/3), `secret.routine-trigger` 3/3 (3/3). Ordinary-text precision cases wrongly flagged: 0/5 (baseline 1/5). Sensitive-detail policy on the corpus: sentences asked about as health 137 in 41 notes before, 15 in 12 notes now (the remainder are condition, treatment or drug words, which still ask).
+Fabricated blocked cases (current / baseline): `secret.provider-token` 33/33 (24/33), `secret.credential-assignment` 21/21 (21/21), `secret.jwt` 3/3 (3/3), `secret.private-key` 6/6 (6/6), `secret.bearer-token` 6/6 (6/6), `secret.url-credentials` 3/3 (3/3), `secret.routine-trigger` 3/3 (3/3). Ordinary-text precision cases wrongly flagged: 0/5 (baseline 1/5). Sensitive-detail policy on the corpus: see the follow-up report below.
 
 Real PR text: the text (body, comments, reviews) of this repository's PRs #46, #58 and #60-#65 (8 texts, 49,257 bytes), read through the authorized GitHub tools and scanned locally: baseline flagged 3 texts (11 `secret.credential-assignment` findings, prose values), the new filter flags 0. ORBIT service logs were not available to the job runner, so **service logs were not scanned**; run the tool with `--extra` on a saved log in the environment that has them.
+
+### Follow-up validation (PR #66 review, run 2026-11-12)
+
+Corpus: the authorized vault checkout, revision `160ff4fae20f` (a different revision from the first report), 188 Markdown notes found by walking the working tree, 2,807,605 bytes, 0 with CRLF. It is **sparse**: the repository tracks 879 files, so about 690 (Journal, Memory, Log, Inbox, Machines, Attachments, nested folders) were not scanned; coverage of the full vault is partial. Nothing was written to the vault and no note text, name or value is reported.
+
+Credential rules (baseline = PR #66 merged filter, new = this change; texts / findings): `secret.credential-assignment` 2 / 3 and 2 / 3, `secret.jwt` 1 / 1 and 1 / 1, `secret.routine-trigger` 4 / 6 and 4 / 6; all 7 of 188 texts, 10 findings, identical; 0 notes changed either way. Fabricated blocked cases are unchanged (current = baseline): provider-token 33/33, credential-assignment 21/21, jwt 3/3, private-key 6/6, bearer-token 6/6, url-credentials 3/3, routine-trigger 3/3; ordinary texts wrongly flagged 0/5. The remaining 3 assignment findings stay **unresolved** by the private classification (digit-heavy or symbol-bearing values of 23-54 characters); no note-specific exception was added.
+
+Sensitive-detail policy (health), whole-note and per-sentence, same splitting for both, merged #66 screen versus this change: notes flagged 9 versus 24 (15 newly asked, 0 newly passed); sentences flagged 12 versus 43. The increase is the restored confirm-by-default semantics. It was classified by counts only; no text was read into a report. Whether the 15 newly flagged notes are true disclosures was **not** classified and is left to Rai's local review (the validation command above, plus a local script over `sensitiveCategories`, shows counts only).
+
+The earlier statements in the first report (5 of 6 matrix tests failing on the old baseline, the 70 / 1,643 counts, the CI gitleaks result) were not re-verified here.
 
 ## Known limitations (stated, not hidden)
 
@@ -121,12 +152,12 @@ Real PR text: the text (body, comments, reviews) of this repository's PRs #46, #
 - A value inside a table cell or code block is judged like any other text; a continuation across three or more blank lines is not seen.
 - Over-matching that remains: any `trig_` id is refused on write (project policy), and a digit-heavy single token under a credential name (an id after `token:`) asks.
 - The brief on a `job_launch` card is masked for display, but the brief itself is launched as written; the launch is owner-confirmed and the brief goes to the private control repository. (Unchanged.)
-- The sensitive-detail policy is finite and can miss disclosures; it is a routing convenience.
+- The sensitive-detail policy is finite and can miss disclosures; it is a routing convenience. See its section for what it over-matches.
 - Findings are for the text checked: lines count from 1 in that text.
 
 ## Closeout checklist (what this job did, and what is left)
 
-Done by this job:
+Done by the PR #66 follow-up job (implementation only):
 
 - [x] Root cause explained (above), existing failures reproduced before the fix (corpus run; the matrix fails 5 of 6 on the previous commit).
 - [x] Implementation: known-pattern filter, value-only layout-preserving masking, content masking of history and tool output, sensitive-detail policy separated and narrowed, refusals with rule, location and recovery.
@@ -144,4 +175,4 @@ Not done, and not authorized by this job (remaining gates for closing the issue)
 
 ## Tests
 
-`test/vault-filter-matrix.test.ts` (the matrix across surfaces), `test/vault-filter.test.ts` (recognition, permissive-unknown, masking, CRLF, continuation, JSON strings, refusals, cards), `test/vault-filter-regressions.test.ts` and `test/vault-pr61-followup.test.ts` (sensitive-detail policy and approval routing), `test/vault-filter-corpus-tool.test.ts` (the tool leaks nothing), plus the write path in `test/vault-write.test.ts` and `test/vault-edit.test.ts` and context export in `test/job-context.test.ts`.
+`test/vault-filter-matrix.test.ts` (the matrix across surfaces), `test/vault-filter.test.ts` (recognition, permissive-unknown, masking, CRLF, continuation, JSON strings, refusals, cards), `test/vault-pr66-followup.test.ts` (the PR #66 review blockers: stored-summary masking end to end, health confirmation semantics, AWS-secret vs path, the supported and unsupported table), `test/vault-filter-regressions.test.ts` and `test/vault-pr61-followup.test.ts` (sensitive-detail policy and approval routing), `test/vault-filter-corpus-tool.test.ts` (the tool leaks nothing), plus the write path in `test/vault-write.test.ts` and `test/vault-edit.test.ts` and context export in `test/job-context.test.ts`.

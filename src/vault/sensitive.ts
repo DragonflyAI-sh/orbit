@@ -27,32 +27,37 @@ const HEALTH_ALWAYS = new RegExp(
     "crohn['’]?s(?: disease)?|lupus|multiple sclerosis|chemo(?:therapy)?|rehab(?:ilitation)?",
     // MS and MS-style acronyms are matched only with a clear personal/medical frame, never bare (MS Office, MS SQL, ms for milliseconds).
     "(?:has|have|had|diagnosed with|living with|suffers? from|suffering from) (?:an? |the )?ms\\b",
-    "diagnosed (?:with|me|him|her|them)",
+    "diagnosed (?:with|me|him|her|them)|diagnosis of",
     "(?:was|were|been|got|being|is|are) (?:\\w+ )?prescribed|prescribed (?:me|him|her|them|\\d+\\w*|an?|some|medication|medicine|drugs?|pills?)",
     "chronic (?:pain|illness|fatigue|condition|disease|migraines?|headaches?|insomnia|asthma|back|stress)",
     "(?:anxiety|bipolar|eating|sleep|mood|personality|panic|autism|attention|mental|seizure|stress) disorders?",
   ].join("|").replace(/^/, "\\b(?:").concat(")\\b"),
   "i",
 );
-// Ambiguous tier: words that are everyday technical vocabulary. They count only with a personal frame: a first/second/third-person
-// pronoun or a capitalised name's possessive, or a medical-setting word, in the same sentence, and (for the pronoun/name frames)
-// no technical cue. "diagnostics", "the build's symptoms", "chronic CI failures", "disorder of event ordering" and "has a race
-// condition" are technical prose and pass; "my symptoms got worse" and "Sam's diagnosis" ask. A bare "diagnosis: pending" with
-// no frame at all is a weak signal and passes (stated limit): this screen is a convenience, not a privacy control.
+// Ambiguous tier: words that are also everyday technical vocabulary. A sentence holding one is asked about (confirmation card)
+// unless it is demonstrably technical: it has a technical cue word (service, build, queue, ...) and no person frame (a pronoun,
+// a capitalised possessive such as "Sam's", a was/is diagnosed passive, a capitalised name mid-sentence) and no medical-setting word.
+// The default is to confirm, so "Sam's diagnosis notes: pending", "He has a condition" and a bare "diagnosis: pending" all ask.
+// Generic words such as note, notes, vault, orbit and tool are NOT technical cues: they appear in personal notes too and must not
+// suppress a disclosure. "diagnostics", "the build's symptoms", "chronic CI failures" and "has a race condition" remain usable.
+// Limits: a technical sentence that also holds a person frame is asked about (over-matching, accepted); a disclosure that uses
+// none of the listed words, or hides a condition behind slang or a misspelling, is not caught. This is a convenience screen.
 const HEALTH_AMBIGUOUS = /\b(?:diagnos(?:is|es|ed|e|ing)|prescri(?:be|bed|bes|bing|ption|ptions)|symptoms?|chronic|disorders?|(?:has|have|had|living with|suffers? from|suffering from|struggles? with) (?:an? |the )?(?:\w+ ){0,2}(?:condition|disease|syndrome))\b/i;
-const TECHNICAL_CUE = /\b(?:services?|servers?|systems?|build|builds|tests?|ci|cd|pipelines?|jobs?|queues?|logs?|errors?|failures?|failing|fails|timeouts?|retr(?:y|ies)|locks?|endpoints?|apis?|deploy\w*|latency|cpu|memory|disk|network|dns|databases?|db|cache|crash\w*|bugs?|incidents?|outages?|monitor\w*|metrics?|daemons?|process(?:es)?|runtime|kernel|https?|tls|ssl|containers?|hosts?|clusters?|events?|format|schema|config\w*|scripts?|code|stack|traces?|debug\w*|health checks?|dashboards?|race condition|regression|filter|detector|vault|note|notes|orbit|runner|checks?|tools?)\b/i;
+const TECHNICAL_CUE = /\b(?:services?|servers?|systems?|build|builds|tests?|ci|cd|pipelines?|jobs?|queues?|logs?|errors?|failures?|failing|fails|timeouts?|retr(?:y|ies)|locks?|endpoints?|apis?|deploy\w*|latency|cpu|memory|disk|network|dns|databases?|db|cache|crash\w*|bugs?|incidents?|outages?|monitor\w*|metrics?|daemons?|process(?:es)?|runtime|kernel|https?|tls|ssl|containers?|hosts?|clusters?|events?|format|schema|config\w*|scripts?|code|stack|traces?|debug\w*|health checks?|dashboards?|race condition|regression)\b/i;
 // Words that put the sentence in a medical setting: these frame it as personal whatever else it says.
 const MEDICAL_SETTING = /\b(?:patients?|doctors?|dr|nurses?|hospital|clinic\w*|medical|medicine|pharmac\w+|physician|gp)\b/i;
 // A person frame: a pronoun or possessive for a person, a was/is diagnosed/prescribed passive, or a capitalised name that does not start the sentence.
-const PERSON_CUE = /\b(?:my|me|mine|his|her|hers|him|their|them|your|yours)\b|\b[A-Z][a-z]+['’]s\b|\b(?:was|were|been|got|being|is|are) (?:\w+ )?(?:diagnosed|prescribed)\b|\bdiagnosed with\b/;
+const PERSON_CUE = /\b(?:my|me|mine|his|her|hers|him|their|them|your|yours|he|she|they)\b|\bI\b|\b[A-Z][a-z]+['’]s\b|\b(?:was|were|been|got|being|is|are) (?:\w+ )?(?:diagnosed|prescribed)\b|\bdiagnosed with\b/;
 const NAME_CUE = /(?<=[a-z,;:)] )[A-Z][a-z]+\b/;
 
 function healthScreen(text: string): boolean {
   if (HEALTH_ALWAYS.test(text)) return true;
-  for (const sentence of text.split(/(?<=[.!?])\s+|\n+|\s*[;—–]\s*/)) {
+  for (const sentence of text.split(/(?<=[.!?])\s+|\n+/)) {
     if (!HEALTH_AMBIGUOUS.test(sentence)) continue;
     if (MEDICAL_SETTING.test(sentence)) return true;
-    if ((PERSON_CUE.test(sentence) || NAME_CUE.test(sentence)) && !TECHNICAL_CUE.test(sentence)) return true;
+    // Technical only when a technical cue is present AND no person frame is. A sentence with neither (a bare "diagnosis: pending",
+    // "He has a condition" is caught by the pronoun) is asked about, as it was before: the default is to confirm.
+    if (!TECHNICAL_CUE.test(sentence) || PERSON_CUE.test(sentence) || NAME_CUE.test(sentence)) return true;
   }
   return false;
 }
