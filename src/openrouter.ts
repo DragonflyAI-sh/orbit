@@ -122,16 +122,19 @@ export type OpenRouterClient = {
 };
 
 export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready" }>, ledger: SpendLedger, fetcher: Fetch = fetch): OpenRouterClient {
-  const fail = (message: string, kind: ConstructorParameters<typeof ProviderError>[0] = "failed") => new ProviderError(kind, `OpenRouter: ${sanitize(message, cfg.key)}`);
+  // `accounting` is carried on the error as data; the owner-visible message also names it, built here once from that data.
+  const fail = (message: string, kind: ConstructorParameters<typeof ProviderError>[0] = "failed", accounting: string[] = []) =>
+    new ProviderError(kind, `OpenRouter: ${sanitize(message, cfg.key)}${accounting.length ? ` Spend accounting: ${accounting.join("; ")}.` : ""}`, undefined, undefined, accounting);
   const headers = { authorization: `Bearer ${cfg.key}`, "content-type": "application/json", "x-title": "ORBIT" };
 
-  // Ledger writes on an error path must never hide the original problem. A failed write is reported next to it.
-  const safely = (fn: () => void): string => {
+  // Ledger writes on an error path must never hide the original problem. A failed write is returned as a diagnostic, never thrown.
+  const ACCOUNTING_FAILED = "the ledger could not record this call; it stays reserved until ORBIT restarts, then is charged at its upper bound";
+  const safely = (fn: () => void): string[] => {
     try {
       fn();
-      return "";
+      return [];
     } catch {
-      return " (spend accounting also failed to record this call; it stays reserved until ORBIT restarts, then is charged at its upper bound)";
+      return [ACCOUNTING_FAILED];
     }
   };
 
@@ -177,7 +180,7 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
         // The request may have reached OpenRouter and been billed: its bound stays charged.
         const note = safely(() => ledger.settle(reservation.id, undefined, "no answer (timeout or network): the request may have been billed"));
         const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-        throw fail(`${timedOut ? `no answer within ${cfg.timeoutMs / 1000} s` : "the request failed before an answer arrived"}${note}`);
+        throw fail(timedOut ? `no answer within ${cfg.timeoutMs / 1000} s` : "the request failed before an answer arrived", "failed", note);
       }
 
       let text: string;
@@ -185,7 +188,7 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
         text = await readBody(res);
       } catch (err) {
         const note = safely(() => ledger.settle(reservation.id, undefined, "response unreadable"));
-        throw fail(`${err instanceof ProviderError ? err.message.replace(/^OpenRouter: /, "") : "the response could not be read"}${note}`);
+        throw fail(err instanceof ProviderError ? err.message.replace(/^OpenRouter: /, "") : "the response could not be read", "failed", note);
       }
       let json: { error?: { message?: string; code?: unknown }; choices?: { finish_reason?: string; message?: { content?: unknown; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] } }[]; usage?: { cost?: unknown } } | undefined;
       try {
@@ -206,26 +209,26 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
           status === 401 || status === 402 || status === 403 || status === 400 || status === 404 || status === 429
             ? safely(() => ledger.release(reservation.id))
             : safely(() => ledger.settle(reservation.id, costOf() === undefined ? undefined : toMicro(costOf()!), `HTTP ${status}, cost unknown`));
-        throw fail(`HTTP ${status}${said ? `: ${said}` : ""}${note}`);
+        throw fail(`HTTP ${status}${said ? `: ${said}` : ""}`, "failed", note);
       }
 
       // A good response: charge what the provider says it cost. No cost reported means the bound stays charged.
       const cost = costOf();
-      // A billed answer is not thrown away because the ledger write failed: it is returned with the failure noted in the text's place
-      // of silence, and the reservation stays outstanding (charged at its bound after a restart).
+      // A billed answer is not thrown away because the ledger write failed: it is returned with the failure as structured `accounting`
+      // (also when the answer is only tool calls), and the reservation stays outstanding (charged at its bound after a restart).
       const settleNote = safely(() => ledger.settle(reservation.id, cost === undefined ? undefined : toMicro(cost), "provider reported no cost"));
       const choice = json?.choices?.[0];
       const message = choice?.message;
-      if (!message) throw fail("the response had no message");
+      if (!message) throw fail("the response had no message", "failed", settleNote);
       const calls: ToolCall[] = (message.tool_calls ?? [])
         .filter((c) => c.id && c.function?.name)
         .map((c) => ({ call_id: String(c.id), name: String(c.function!.name), arguments: c.function!.arguments ?? "{}" }));
-      if (calls.length > MAX_TOOL_CALLS) throw fail(`the model asked for ${calls.length} tool calls at once; the limit is ${MAX_TOOL_CALLS}`);
+      if (calls.length > MAX_TOOL_CALLS) throw fail(`the model asked for ${calls.length} tool calls at once; the limit is ${MAX_TOOL_CALLS}`, "failed", settleNote);
       // A reply cut off by the length limit may carry half a tool call: it is never run.
-      if (choice?.finish_reason === "length" && calls.length) throw fail("the reply hit the output limit in the middle of a tool call, so no tool was run");
+      if (choice?.finish_reason === "length" && calls.length) throw fail("the reply hit the output limit in the middle of a tool call, so no tool was run", "failed", settleNote);
       const content = typeof message.content === "string" ? message.content.slice(0, MAX_REPLY_CHARS) : "";
-      if (!content && !calls.length) throw fail(`the response had no text and no tool call${choice?.finish_reason ? ` (finish: ${sanitize(choice.finish_reason, cfg.key, 40)})` : ""}`);
-      return { text: settleNote && content ? `${content}\n\n[Spend accounting note:${settleNote.slice(1, -1)}]` : content, calls, costUsd: cost, model: cfg.model };
+      if (!content && !calls.length) throw fail(`the response had no text and no tool call${choice?.finish_reason ? ` (finish: ${sanitize(choice.finish_reason, cfg.key, 40)})` : ""}`, "failed", settleNote);
+      return { text: content, calls, costUsd: cost, model: cfg.model, ...(settleNote.length ? { accounting: settleNote } : {}) };
     },
 
     async balance() {

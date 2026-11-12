@@ -20,11 +20,16 @@ export type FallbackInfo = {
   primaryLimit: { until: string; estimated: boolean };
   costUsd?: number;
 };
-export type Step = { text: string; calls: ToolCall[]; fallback?: FallbackInfo };
-export type Reply = Result<string> & { fallback?: FallbackInfo };
+// `accounting`: structured spend-accounting diagnostics (a ledger write that failed on a billed call). They are for the owner and are
+// never part of `text`, so they cannot reach a later model turn as if the model had said them.
+export type Step = { text: string; calls: ToolCall[]; fallback?: FallbackInfo; accounting?: string[] };
+export type Reply = Result<string> & { fallback?: FallbackInfo; accounting?: string[] };
 
 // Options for a plain reply. `fallback: false` is for background callers (thread compaction, the rolling note, scheduled runs): while
 // the primary is limited they fail instead of spending the paid fallback, which only answers an interactive chat turn.
+// reply() allows the paid fallback unless `fallback: false`. step() (tool-using turns) is the other way round: it never spends the paid
+// fallback unless `fallback: true`, so a new tool-using caller is safe by default. The only callers today are runChat's two interactive
+// owner-chat users (server.ts /chat, thread-service.ts turn), which opt in.
 export type ReplyOptions = { fallback?: boolean };
 
 export type ModelPort = {
@@ -33,7 +38,7 @@ export type ModelPort = {
   maintain?(): Promise<void>;
   reply(messages: Message[], limits: string[], notes?: string, opts?: ReplyOptions): Promise<Reply>;
   // One model turn with tools offered. Absent when the model cannot call tools (the mock).
-  step?(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<Step>;
+  step?(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], opts?: ReplyOptions): Promise<Step>;
 };
 
 // The tools that read ORBIT's own records of what happened (jobs, server operations).

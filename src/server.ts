@@ -307,8 +307,10 @@ export function buildServer({
           notes,
           tools: offered,
           allow: allowAgent(isOwner),
+          // The owner's interactive chat is the one place a tool-using turn may use the paid fallback.
+          fallback: true,
         });
-        const reply = { value: outcome.text || "(the model returned no text)", provenance: "live" as const, source: replySource(model.status().impl, outcome.fallback, outcome.mixed), ...(outcome.fallback ? { fallback: outcome.fallback } : {}) };
+        const reply = { value: outcome.text || "(the model returned no text)", provenance: "live" as const, source: replySource(model.status().impl, outcome.fallback, outcome.mixed), ...(outcome.fallback ? { fallback: outcome.fallback } : {}), ...(outcome.accounting?.length ? { accounting: outcome.accounting } : {}) };
         const fresh = proposals.list().filter((p) => !before.has(p.id));
         return send(res, 200, { reply, memory: used, limits: current, calls: outcome.calls, proposals: fresh, capped: outcome.capped });
       } catch (err) {

@@ -201,8 +201,11 @@ export class ProviderError extends Error {
   readonly kind: ProviderErrorKind;
   readonly resetsAt?: string;
   readonly code?: string;
-  constructor(kind: ProviderErrorKind, message: string, resetsAt?: string, code?: string) {
+  // Structured spend-accounting diagnostics (src/openrouter.ts): kept apart from `message`, so callers never edit the text to add or remove them.
+  readonly accounting?: string[];
+  constructor(kind: ProviderErrorKind, message: string, resetsAt?: string, code?: string, accounting?: string[]) {
     super(message);
+    if (accounting?.length) this.accounting = accounting;
     this.name = "ProviderError";
     this.kind = kind;
     this.resetsAt = resetsAt;
