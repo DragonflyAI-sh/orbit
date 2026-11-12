@@ -205,3 +205,25 @@ test("githubComments posts to the issue-comments API with the bearer token and r
   const bad = (async () => new Response(JSON.stringify({ message: "Forbidden" }), { status: 403 })) as unknown as typeof fetch;
   await assert.rejects(githubComments("SECRET", bad).post("o/r", 3, "x"), (e: Error) => /HTTP 403: Forbidden/.test(e.message) && !e.message.includes("SECRET"));
 });
+
+test("the PR head ORBIT saw when it opened the PR is recorded on the review job as reviewedSha; anything but a full SHA is not", async () => {
+  const sha = "cd".repeat(20);
+  for (const [given, want] of [[sha, sha], ["main", undefined], [undefined, undefined]] as const) {
+    const notify = notifier(jsonStore<Notification[]>(undefined, "n", []));
+    const jobs = jobRegistry(jsonStore<Job[]>(undefined, "j", []), Buffer.alloc(32, 1), notify);
+    const control = { pushBrief: async (id: string) => ({ branch: `orbit/${id}`, commit: "c1" }) } as unknown as ControlRepo;
+    const routine = { name: "orbit", fire: async () => ({ sessionId: "s", sessionUrl: "https://claude.ai/code/s" }) };
+    const launch = jobLauncher({ jobs, control, routines: new Map([["orbit", routine]]), notify, publicJobUrl: "https://api.example", commit: "9991f4adb81fc41b8fe2f55ff923484303f2bf6b" });
+    const review = reviewer(jobs, launch, undefined, notify);
+    const pulls: PullPort = { open: async () => ({ status: "opened", url: PR, ...(given ? { headSha: given } : {}) }) };
+    pullRequestOpener(jobs, parseRoutineRepos("orbit=DragonflyAI-sh/orbit"), pulls, notify, () => new Date(), (job, url, headSha) => void review.start(job, url, headSha));
+    jobs.register("w1");
+    jobs.setLaunch("w1", { routine: "orbit", at: new Date().toISOString() });
+    jobs.record("w1", { type: "summary", status: "done", text: "## PR title\nT\n\n## PR body\nB" });
+    await tick();
+    await tick();
+    const reviewJob = jobs.get(jobs.get("w1")!.reviewJob!.id!)!;
+    assert.equal(reviewJob.review!.reviewedSha, want, String(given));
+    assert.equal(reviewJob.review!.prUrl, PR);
+  }
+});

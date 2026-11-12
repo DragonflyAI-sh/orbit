@@ -154,3 +154,13 @@ test("githubPulls: an API error says what failed, and never contains the token",
   const g = fakeGithub({ [REF]: { status: 200 }, "GET /repos/o/r/pulls": { status: 200, json: [] }, "POST /repos/o/r/pulls": { status: 403, json: { message: "Resource not accessible by personal access token" } } });
   await assert.rejects(githubPulls("SECRET-TOKEN", g.fetcher).open("o/r", "j", "T", "B"), (e: Error) => /HTTP 403: Resource not accessible/.test(e.message) && !e.message.includes("SECRET-TOKEN"));
 });
+
+test("githubPulls: the head commit GitHub reports is returned for opened and existing PRs, and only when it is a full SHA", async () => {
+  const sha = "ab".repeat(20);
+  const opened = fakeGithub({ [REF]: { status: 200 }, "GET /repos/o/r/pulls": { status: 200, json: [] }, "POST /repos/o/r/pulls": { status: 201, json: { html_url: "https://github.com/o/r/pull/3", head: { sha } } } });
+  assert.deepEqual(await githubPulls("TOK", opened.fetcher).open("o/r", "j", "T", "B"), { status: "opened", url: "https://github.com/o/r/pull/3", headSha: sha });
+  const existing = fakeGithub({ [REF]: { status: 200 }, "GET /repos/o/r/pulls": { status: 200, json: [{ html_url: "https://github.com/o/r/pull/2", head: { ref: "orbit/j", sha, repo: { full_name: "o/r" } } }] } });
+  assert.equal(((await githubPulls("TOK", existing.fetcher).open("o/r", "j", "T", "B")) as { headSha?: string }).headSha, sha);
+  const odd = fakeGithub({ [REF]: { status: 200 }, "GET /repos/o/r/pulls": { status: 200, json: [] }, "POST /repos/o/r/pulls": { status: 201, json: { html_url: "https://github.com/o/r/pull/3", head: { sha: "ABC" } } } });
+  assert.equal("headSha" in ((await githubPulls("TOK", odd.fetcher).open("o/r", "j", "T", "B")) as object), false);
+});
