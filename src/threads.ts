@@ -99,6 +99,8 @@ export type ThreadMessage = {
   fallback?: FallbackInfo;
   // Spend-accounting diagnostics for the owner (a ledger write failed on a billed call). Not part of `text`, so never sent back to the model.
   accounting?: string[];
+  // Notes that the reply is cut off or partly dropped (output limit, early finish, malformed tool calls not run). Not part of `text`, so never sent back to the model.
+  incomplete?: string[];
 };
 
 export type Summary = {
@@ -354,6 +356,7 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
         if (typeof safe.text === "string") safe.text = maskText(safe.text).slice(0, MAX_MESSAGE_CHARS);
         if (typeof safe.error === "string") safe.error = maskText(safe.error).slice(0, 1000);
         if (Array.isArray(safe.accounting)) safe.accounting = safe.accounting.slice(0, 5).map((a) => maskText(String(a)).slice(0, 300));
+        if (Array.isArray(safe.incomplete)) safe.incomplete = safe.incomplete.slice(0, 5).map((a) => maskText(String(a)).slice(0, 300));
         Object.assign(m, safe);
       });
     },

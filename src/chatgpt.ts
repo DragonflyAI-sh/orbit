@@ -201,11 +201,16 @@ export class ProviderError extends Error {
   readonly kind: ProviderErrorKind;
   readonly resetsAt?: string;
   readonly code?: string;
-  // Structured spend-accounting diagnostics (src/openrouter.ts): kept apart from `message`, so callers never edit the text to add or remove them.
+  // The message without the spend-accounting sentence. `message` is built from this and `accounting` exactly once, here, so no caller
+  // edits message text to add, merge or remove diagnostics: it builds a new error from `base` and a merged list instead.
+  readonly base: string;
+  // Structured spend-accounting diagnostics (src/openrouter.ts). Owner-visible (named once in `message`); never part of any model request.
   readonly accounting?: string[];
-  constructor(kind: ProviderErrorKind, message: string, resetsAt?: string, code?: string, accounting?: string[]) {
-    super(message);
-    if (accounting?.length) this.accounting = accounting;
+  constructor(kind: ProviderErrorKind, message: string, resetsAt?: string, code?: string, accounting?: string[], cause?: unknown) {
+    const list = [...new Set(accounting ?? [])];
+    super(list.length ? `${message} Spend accounting: ${list.join("; ")}.` : message, cause === undefined ? undefined : { cause });
+    this.base = message;
+    if (list.length) this.accounting = list;
     this.name = "ProviderError";
     this.kind = kind;
     this.resetsAt = resetsAt;

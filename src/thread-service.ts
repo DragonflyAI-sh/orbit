@@ -149,6 +149,7 @@ export function threadService(d: {
         let capped = false;
         let fallback: FallbackInfo | undefined;
         let accounting: string[] | undefined;
+        let incomplete: string[] | undefined;
         if (prep.tools.length && model.step) {
           const outcome = await runChat({
             model,
@@ -172,6 +173,7 @@ export function threadService(d: {
           source = replySource(model.status().impl, fallback, outcome.mixed);
           capped = outcome.capped;
           accounting = outcome.accounting;
+          incomplete = outcome.incomplete;
         } else {
           const r = await model.reply(buildMessages(t), prep.limits, notes);
           reply = r.value;
@@ -179,8 +181,9 @@ export function threadService(d: {
           source = r.source;
           fallback = r.fallback;
           accounting = r.accounting;
+          incomplete = r.incomplete;
         }
-        threads.patchMessage(id, mid, { text: reply, status: "done", provenance, source, memory: prep.memory, ...(capped ? { capped } : {}), ...(fallback ? { fallback } : {}), ...(accounting?.length ? { accounting } : {}) });
+        threads.patchMessage(id, mid, { text: reply, status: "done", provenance, source, memory: prep.memory, ...(capped ? { capped } : {}), ...(fallback ? { fallback } : {}), ...(accounting?.length ? { accounting } : {}), ...(incomplete?.length ? { incomplete } : {}) });
         recent?.consider(id, { isOwner: prep.isOwner });
         return { thread: view(id)! };
       } catch (err) {

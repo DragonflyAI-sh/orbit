@@ -505,6 +505,8 @@ test("the fallback's own spend never leaks a secret into status or errors", asyn
 test("balance: the OpenRouter key view is labeled as the account side, separate from the local allowance", async () => {
   const w = world({ script: [say("x")], replies: (n, b) => (b === undefined ? { body: { data: { limit: 20, limit_remaining: 12.5, usage: 7.5 } } } : answer("x")) });
   await w.model.maintain!();
+  // status() is read-only and no longer creates the ledger as a side effect (see openrouter-hardening.test.ts); a paid call would.
+  w.ledger.view();
   assert.match(w.model.status().detail, /OpenRouter key \(account side, not the local allowance\): limit \$20\.00, remaining \$12\.50, used \$7\.50/);
   assert.match(w.model.status().detail, /Local OpenRouter allowance/);
   const w2 = world({ script: [say("x")], replies: [{ status: 403, body: {} }] });

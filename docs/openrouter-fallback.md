@@ -50,6 +50,12 @@ Money is integer micro-USD. `<state>/openrouter-spend.json` (0600 file, fsynced,
 
 The OpenRouter key balance (`GET /api/v1/key`, read at most every 10 minutes, no spend) is shown only if the call works and is always labeled account side, separate from the local allowance. The endpoint's field names were not verifiable from this environment; if it fails, status says "balance unavailable".
 
+**Status is observation only.** `/status` never spends, never asks OpenRouter for anything (the balance is read by the periodic maintenance tick, not by status), and never writes the ledger: it reads the ledger file and reports what it finds. It says "armed" only when the configuration is complete and the ledger was read and validated on that very call. A ledger that is corrupt, unreadable, invalid or deleted after it was written, or a billed call whose ledger write failed, shows "NOT armed" (and, while ChatGPT is limited, the model port is "down" because no fallback can answer); a ledger not created yet shows "configured but not verified". ORBIT creates a missing ledger once, at startup, before any call (`src/main.ts`), never from a status poll. The model id, key and prices shown come from ORBIT's configuration: **nothing in `/status` means OpenRouter verified them.** The balance carries its read time and is marked STALE after 20 minutes. The local allowance is ORBIT's own count as last written, not a hard spending ceiling.
+
+**Bounded responses.** Every provider body is read as a stream and counted in bytes as it arrives: completions up to 1,000,000 bytes, error bodies up to 64,000, the balance body up to 32,000. `Content-Length` is only used to refuse early; a missing or false one changes nothing. One deadline (the configured timeout) covers the request and the whole body. On a size or time limit the stream is cancelled, the call fails with a fixed message (no provider text), a possibly billed request stays charged at its bound, and nothing is retried. An error body that cannot be read is still classified by its HTTP status: a 400/401/402/403/404/429 releases the reservation, anything else stays charged.
+
+**Incomplete replies.** `incomplete` (on the `/chat` reply and the stored thread message, rendered by the page as "Incomplete reply: ...") says a reply was cut off at the output limit, ended early (`content_filter`, `error`), had an unrecognised finish reason, was shortened by ORBIT's 32,000-character limit, or had tool calls without an id or name dropped. It is separate from `text`, from tool arguments and from `accounting`, so it is never sent back to the model and never hides or replaces a billing warning. A reply that ended early in the middle of a tool call is refused and no tool runs.
+
 ## Model recommendation (research, not activation)
 
 openrouter.ai and its API were not reachable from the job environment, so the ID and price below are **unverified**; ORBIT defaults to none. A web search (not OpenRouter's own API) pointed to `deepseek/deepseek-v4-flash` ([OpenRouter page](https://openrouter.ai/models/deepseek/deepseek-v4-flash)), reported as supporting `tools`/`tool_choice`, 1,048,576-token context, about $0.068/M input and $0.168/M output on one snapshot. Other pages listed different numbers ($0.10/$0.20, $0.14/$0.28), and dated variants (`-20260423`, `-0731`, `v4.1-flash`) exist with different prices. Before activating, Rai or a runner with access must read the model's page or `https://openrouter.ai/api/v1/models`, confirm the exact id, that `tools` is in `supported_parameters`, and the prompt/completion prices, then set those prices in `orbit.env`. Prefer a pinned dated id over an alias.
@@ -59,7 +65,7 @@ openrouter.ai and its API were not reachable from the job environment, so the ID
 1. Confirm the model id, tool support and prices; approve the tool scope and the data flow above.
 2. Fund the OpenRouter account minimally; set a credit limit on a new key.
 3. As root: `install -m 0600` the key to `/etc/credstore/orbit.openrouter`.
-4. Edit `/opt/orbit/orbit.env` with the settings above, then restart ORBIT. `/status` should say "OpenRouter fallback armed".
+4. Edit `/opt/orbit/orbit.env` with the settings above, then restart ORBIT. `/status` should say "OpenRouter fallback armed" (this means the configuration is complete and the local ledger reads cleanly; it does not mean OpenRouter has verified the key, model or prices).
 
 ## Rollback
 
@@ -67,4 +73,4 @@ Set `ORBIT_OPENROUTER_ENABLED=0` (or remove it) and restart: the primary model i
 
 ## Tests
 
-`test/openrouter-fallback.test.ts` uses a fake provider and fake time; no paid call is possible.
+`test/openrouter-fallback.test.ts` and `test/openrouter-hardening.test.ts` use a fake provider (streamed, stalled and oversized bodies included) and fake time; no paid call is possible.
