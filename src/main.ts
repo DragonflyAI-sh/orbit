@@ -7,7 +7,10 @@ import { gitReconciler, selectControl, selectRoutines } from "./launcher.ts";
 import { selectMemory } from "./memory.ts";
 import { chatgptModel, tokenFile } from "./chatgpt.ts";
 import { proposals as newProposals } from "./agent.ts";
+import { fallbackModel } from "./fallback.ts";
 import { selectModel } from "./model.ts";
+import { openrouterConfig } from "./openrouter.ts";
+import { spendLedger, toMicro } from "./spend-ledger.ts";
 import { nodes as devicePresence, tailscaleStatus } from "./nodes.ts";
 import { notifier, selectDiscord } from "./notify.ts";
 import { adminOps } from "./ops-admin.ts";
@@ -50,7 +53,18 @@ function readDeploy(): unknown {
 // systemd sets STATE_DIRECTORY from StateDirectory=orbit. Without it, state is in memory and /status says so.
 const stateDir = process.env.STATE_DIRECTORY;
 const chatgpt: { current?: ReturnType<typeof chatgptModel> } = {};
-const model = selectModel(process.env, (name) => (chatgpt.current = chatgptModel(name, tokenFile(stateDir))));
+const primaryModel = selectModel(process.env, (name) => (chatgpt.current = chatgptModel(name, tokenFile(stateDir))));
+// The OpenRouter fallback is off unless ORBIT_OPENROUTER_ENABLED=1 and its model, prices and orbit.openrouter credential are all set.
+// Disabled, the primary model is used as it is, untouched.
+const openrouter = openrouterConfig(process.env);
+const model =
+  openrouter.state === "disabled"
+    ? primaryModel
+    : fallbackModel({
+        primary: primaryModel,
+        config: openrouter,
+        ledger: openrouter.state === "ready" && stateDir ? spendLedger(stateDir, { dailyMicro: toMicro(openrouter.dailyCapUsd), totalMicro: toMicro(openrouter.totalCapUsd) }) : undefined,
+      });
 // The writable vault clone needs a state directory and the orbit.github-vault credential (read when used, never cached). Without
 // either, memory reads the read-only server copy and no vault write tool is offered; /status and the tool results say so.
 const vault = stateDir

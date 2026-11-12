@@ -362,7 +362,7 @@
       if (!res.ok) { add("orbit", body.error, "error", "down"); history.pop(); return; }
       history.push({ role: "assistant", content: body.reply.value });
       const mem = body.memory?.length ? ` · memory: ${body.memory.join(", ")}` : "";
-      add("orbit", body.reply.value, `${body.reply.provenance} · ${body.reply.source}${mem}`, body.reply.provenance, body);
+      add("orbit", body.reply.value, `${body.reply.fallback ? "⚠ Fallback model, not ChatGPT · " : ""}${body.reply.provenance} · ${body.reply.source}${mem}`, body.reply.provenance, body);
     } catch { add("orbit", "ORBIT did not answer.", "error", "down"); history.pop(); }
     refreshStatus();
   });
@@ -681,7 +681,7 @@
     node.append(...linkify(text, mk));
     const mem = m.memory && m.memory.length ? ` · memory: ${m.memory.join(", ")}` : "";
     const tag = m.status === "error" || m.status === "interrupted" ? `${m.status}: ${m.error || ""}` : m.role === "assistant" && m.provenance ? `${m.provenance} · ${m.source}${mem}` : "";
-    if (tag) node.append(mk("span", { className: `tag ${m.status === "error" || m.status === "interrupted" ? "down" : m.provenance || ""}`, textContent: tag }));
+    if (tag) node.append(mk("span", { className: `tag ${m.status === "error" || m.status === "interrupted" ? "down" : m.provenance || ""}`, textContent: m.fallback && m.status === "done" ? `⚠ Fallback model, not ChatGPT · ${tag}` : tag }));
     if (m.calls && m.calls.length) {
       const box = mk("span", { className: "calls" }, `Tool calls (${m.calls.length}):`);
       for (const c of m.calls) box.append(mk("div", { textContent: `${c.ok ? "✓" : "✗"} ${c.name}(${String(c.arguments).slice(0, 120)}) [${c.ok ? `${c.provenance} · ${c.source}` : "failed"}] ${String(c.summary).slice(0, 160)}` }));

@@ -1,7 +1,8 @@
 import { runChat } from "./agent.ts";
 import type { ChatTool, Proposal, Proposals } from "./agent.ts";
 import type { Jobs } from "./jobs.ts";
-import type { ModelPort } from "./model.ts";
+import { replySource } from "./model.ts";
+import type { FallbackInfo, ModelPort } from "./model.ts";
 import type { AdminOps } from "./ops-admin.ts";
 import type { SysOps } from "./ops-sys.ts";
 import type { RecentContextRefresher } from "./recent-context.ts";
@@ -142,6 +143,7 @@ export function threadService(d: {
         let provenance: "live" | "mock";
         let source: string;
         let capped = false;
+        let fallback: FallbackInfo | undefined;
         if (prep.tools.length && model.step) {
           const outcome = await runChat({
             model,
@@ -159,15 +161,17 @@ export function threadService(d: {
           });
           reply = outcome.text || "(the model returned no text)";
           provenance = "live";
-          source = `model/${model.status().impl}`;
+          fallback = outcome.fallback;
+          source = replySource(model.status().impl, fallback, outcome.mixed);
           capped = outcome.capped;
         } else {
           const r = await model.reply(buildMessages(t), prep.limits, notes);
           reply = r.value;
           provenance = r.provenance;
           source = r.source;
+          fallback = r.fallback;
         }
-        threads.patchMessage(id, mid, { text: reply, status: "done", provenance, source, memory: prep.memory, ...(capped ? { capped } : {}) });
+        threads.patchMessage(id, mid, { text: reply, status: "done", provenance, source, memory: prep.memory, ...(capped ? { capped } : {}), ...(fallback ? { fallback } : {}) });
         recent?.consider(id, { isOwner: prep.isOwner });
         return { thread: view(id)! };
       } catch (err) {

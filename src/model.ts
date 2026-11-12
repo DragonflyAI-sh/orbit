@@ -11,18 +11,36 @@ export type Item =
   | Message
   | { type: "function_call"; call_id: string; name: string; arguments: string }
   | { type: "function_call_output"; call_id: string; output: string };
-export type Step = { text: string; calls: ToolCall[] };
+// Set when the paid OpenRouter fallback produced an answer instead of ChatGPT (src/fallback.ts).
+export type FallbackInfo = {
+  provider: "openrouter";
+  model: string;
+  reason: "usage_limit" | "rate_limit";
+  // When the primary's limit ends: the provider's reset time, or ORBIT's own pause when the provider gave none (estimated).
+  primaryLimit: { until: string; estimated: boolean };
+  costUsd?: number;
+};
+export type Step = { text: string; calls: ToolCall[]; fallback?: FallbackInfo };
+export type Reply = Result<string> & { fallback?: FallbackInfo };
 
 export type ModelPort = {
   status(): PortStatus;
   // Periodic upkeep (renewing a login before it expires). Never throws; absent when there is nothing to maintain.
   maintain?(): Promise<void>;
-  reply(messages: Message[], limits: string[], notes?: string): Promise<Result<string>>;
+  reply(messages: Message[], limits: string[], notes?: string): Promise<Reply>;
   // One model turn with tools offered. Absent when the model cannot call tools (the mock).
   step?(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<Step>;
 };
 
 // The tools that read ORBIT's own records of what happened (jobs, server operations).
+// The provenance line shown with every reply. A fallback answer says so, names the model, and says when the primary's limit ends.
+export function replySource(impl: string, fallback?: FallbackInfo, mixed?: boolean): string {
+  if (!fallback) return `model/${impl}`;
+  const l = fallback.primaryLimit;
+  const limit = fallback.reason === "usage_limit" ? "usage limit" : "rate limit";
+  return `model/openrouter/${fallback.model} (FALLBACK, paid: ChatGPT ${limit}, ${l.estimated ? `ORBIT's estimated pause until ${l.until}` : `resets ${l.until}`}${mixed ? `; earlier rounds of this reply came from ${impl}` : ""})`;
+}
+
 export const RECORD_TOOLS = ["jobs_list", "job_status", "ops_admin_operations", "ops_sys_operations"];
 
 // The instruction that asks the model to check records before claiming an outcome. This is a request, not a guarantee: ORBIT
