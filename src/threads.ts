@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { redact } from "./ops/protocol.ts";
+import type { FallbackInfo } from "./model.ts";
 
 // Server-owned chat threads. One JSON file per thread in <state>/threads/, written atomically; the in-memory copy is
 // the single source while ORBIT runs. docs/threads.md describes the schema, concurrency and migration.
@@ -92,6 +93,8 @@ export type ThreadMessage = {
   provenance?: "live" | "mock";
   source?: string;
   capped?: boolean;
+  // Set when the OpenRouter fallback answered: provider, model, why, and when the primary limit ends.
+  fallback?: FallbackInfo;
 };
 
 export type Summary = {

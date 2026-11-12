@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Item, ModelPort, ToolDef } from "./model.ts";
+import type { FallbackInfo, Item, ModelPort, ToolDef } from "./model.ts";
 import type { MutatingAction } from "./ops/admin-protocol.ts";
 import type { SysMutatingAction } from "./ops/sys-protocol.ts";
 import type { Result } from "./ports.ts";
@@ -27,7 +27,8 @@ export type CallRecord = {
   summary: string;
 };
 
-export type ChatOutcome = { text: string; calls: CallRecord[]; rounds: number; capped: boolean };
+// `fallback` is set when any round was answered by the OpenRouter fallback; `mixed` when other rounds of the same reply came from the primary.
+export type ChatOutcome = { text: string; calls: CallRecord[]; rounds: number; capped: boolean; fallback?: FallbackInfo; mixed?: boolean };
 
 const def = (t: ChatTool): ToolDef => ({ name: t.name, description: t.description, parameters: t.parameters });
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}… (truncated)` : s);
@@ -51,16 +52,21 @@ export async function runChat(options: {
   const byName = new Map(tools.map((t) => [t.name, t]));
   const input: Item[] = [...options.messages];
   const calls: CallRecord[] = [];
+  let fallback: FallbackInfo | undefined;
+  let primaryRounds = 0;
+  const provenance = () => (fallback ? { fallback, ...(primaryRounds ? { mixed: true } : {}) } : {});
 
   for (let round = 0; ; round++) {
     const capped = round >= maxRounds;
     // At the cap the model gets no tools, so it has to answer with what it has.
     const step = await model.step(input, limits, notes, capped ? [] : tools.map(def));
+    if (step.fallback) fallback = step.fallback;
+    else primaryRounds += 1;
     if (!step.calls.length || capped) {
       const text =
         step.text ||
         (capped ? `I stopped after ${maxRounds} rounds of tool calls without reaching an answer. Calls made are listed below.` : "");
-      return { text, calls, rounds: round, capped: capped && step.calls.length > 0 };
+      return { text, calls, rounds: round, capped: capped && step.calls.length > 0, ...provenance() };
     }
     for (const call of step.calls) {
       input.push({ type: "function_call", call_id: call.call_id, name: call.name, arguments: call.arguments });

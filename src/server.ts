@@ -8,6 +8,7 @@ import type { Job, Jobs } from "./jobs.ts";
 import type { ControlRepo, Routine } from "./launcher.ts";
 import type { MemoryPort } from "./memory.ts";
 import type { Login } from "./chatgpt.ts";
+import { replySource } from "./model.ts";
 import type { Message, ModelPort } from "./model.ts";
 import { proposals as newProposals, runChat } from "./agent.ts";
 import type { ChatTool, Proposals } from "./agent.ts";
@@ -302,7 +303,7 @@ export function buildServer({
           tools: offered,
           allow: allowAgent(isOwner),
         });
-        const reply = { value: outcome.text || "(the model returned no text)", provenance: "live" as const, source: `model/${model.status().impl}` };
+        const reply = { value: outcome.text || "(the model returned no text)", provenance: "live" as const, source: replySource(model.status().impl, outcome.fallback, outcome.mixed), ...(outcome.fallback ? { fallback: outcome.fallback } : {}) };
         const fresh = proposals.list().filter((p) => !before.has(p.id));
         return send(res, 200, { reply, memory: used, limits: current, calls: outcome.calls, proposals: fresh, capped: outcome.capped });
       } catch (err) {
