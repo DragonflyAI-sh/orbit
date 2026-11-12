@@ -206,7 +206,7 @@ test("secrets: a note with secret-shaped text is refused and neither the error, 
   const note = `# Setup\nthe key is ${FAKE_SECRET} keep it\n`;
   const { d, body } = await refused({ notes: { "Tasks/leaky.md": { content: note } } }, ["Tasks/leaky.md"], 422, /looks like it contains a secret/);
   // The refusal names the stable rule and the line, never the matched text.
-  assert.deepEqual(body.context.problems, [{ path: "Tasks/leaky.md", code: "secret_detected", findings: [{ rule: "secret.long-opaque", line: 2 }, { rule: "secret.provider-token", line: 2 }] }]);
+  assert.deepEqual(body.context.problems, [{ path: "Tasks/leaky.md", code: "secret_detected", findings: [{ rule: "secret.provider-token", line: 2 }] }]);
   assert.match(body.error, /secret\.provider-token at line 2/);
   const everything = JSON.stringify([body, d.jobs.all(), d.events]);
   assert.ok(!everything.includes(FAKE_SECRET) && !everything.includes("the key is"));

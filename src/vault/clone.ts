@@ -317,7 +317,7 @@ export function vaultClone(deps: VaultCloneDeps) {
     for (const edit of edits) {
       const applied: Applied = applyEdit(edit, read);
       if (secretFindings(applied.inserted)) {
-        fail("secret_refused", `The text for ${edit.path} contains something shaped like a secret, token, key or credential (${secretFindingsDetail(applied.inserted)}; the text itself is not shown). Nothing was written, and nothing was redacted in its place: remove it and try again.`);
+        fail("secret_refused", `The text for ${edit.path} contains something shaped like a secret, token, key or credential (${secretFindingsDetail(applied.inserted)}; the text itself is not shown). Nothing was written, and nothing was redacted in its place: remove the matched value or replace it with a placeholder such as <token>, and try again. Only the matched value needs to change; headings, note names and paths are not the cause.`);
       }
       const verdict = classify(applied);
       if (verdict.kind === "refused") fail("policy_refused", verdict.reason);

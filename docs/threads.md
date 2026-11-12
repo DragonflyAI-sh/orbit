@@ -84,4 +84,4 @@ Nothing is imported: the old history existed only in browsers, so ORBIT cannot s
 
 ## Limits
 
-One process only. A viewer who is not the owner gets the old stateless chat, with no tools and no stored history. Stored tool results lose long opaque ids to masking. Duplicate matching is word-overlap, not meaning. The live state on a card is the last known ledger state; it is not refreshed from the root helper on every page load (the Jobs tab and `ops_*_operations` do that).
+One process only. A viewer who is not the owner gets the old stateless chat, with no tools and no stored history. Stored conversation text and the results of vault, memory, job and pull-request tools are masked by known credential shape only (`docs/content-filter.md`), so note names, paths and ids are kept; the results of `ops_*` and `orbit_*` tools keep the tier-1 masking, which still hides long opaque ids. Duplicate matching is word-overlap, not meaning. The live state on a card is the last known ledger state; it is not refreshed from the root helper on every page load (the Jobs tab and `ops_*_operations` do that).
