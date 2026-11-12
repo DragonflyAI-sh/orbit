@@ -180,7 +180,7 @@ export function recentContext(deps: {
     meta.lastAttempt = { ...meta.lastAttempt, [id]: { at, rev: t.rev } };
     try {
       const prior = await port.read();
-      const out = (await model.reply([{ role: "user", content: prompt(prior?.text, t) }], [], undefined)).value.trim();
+      const out = (await model.reply([{ role: "user", content: prompt(prior?.text, t) }], [], undefined, { fallback: false })).value.trim();
       if (!out) throw new Error("the model returned an empty note");
       // A port that refuses secrets gets the text as written, so it can refuse; every other port gets it masked.
       const text = port.refusesSecrets ? out.slice(0, NOTE_MAX_CHARS) : maskText(out).slice(0, NOTE_MAX_CHARS);

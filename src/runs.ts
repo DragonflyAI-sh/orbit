@@ -61,7 +61,7 @@ export function modelTask(model: ModelPort): Worker {
     timeoutMs: 10 * 60_000,
     validate: (input) => (typeof input.prompt === "string" && input.prompt.trim() ? undefined : "model-task needs {prompt}."),
     run: async (input) => {
-      const reply = await model.reply([{ role: "user", content: String(input.prompt) }], []);
+      const reply = await model.reply([{ role: "user", content: String(input.prompt) }], [], undefined, { fallback: false });
       return { text: reply.value, provenance: reply.provenance };
     },
     review: (output) =>

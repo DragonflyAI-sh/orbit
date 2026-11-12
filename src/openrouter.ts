@@ -19,6 +19,8 @@ export const MAX_REQUEST_BYTES = 300_000;
 export const MAX_RESPONSE_BYTES = 1_000_000;
 export const MAX_REPLY_CHARS = 32_000;
 export const MAX_TOOL_CALLS = 8;
+// Largest cap accepted: far above any sane value, far below the ledger's integer range (2^53 micro-USD is about 9.0e9 USD).
+export const MAX_CAP_USD = 10_000;
 export const BALANCE_EVERY_MS = 10 * 60_000;
 
 const MODEL_ID = /^[a-z0-9][a-z0-9_.-]*\/[a-z0-9][a-z0-9_.-]*(:[a-z0-9_-]+)?$/;
@@ -66,6 +68,7 @@ export function openrouterConfig(env: NodeJS.ProcessEnv, readKey: (dir: string) 
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) return bad("ORBIT_OPENROUTER_TIMEOUT_MS must be a whole number from 1000 to 120000.");
   const dailyCapUsd = num(env.ORBIT_OPENROUTER_DAILY_CAP_USD) ?? DEFAULT_DAILY_CAP_USD;
   const totalCapUsd = num(env.ORBIT_OPENROUTER_TOTAL_CAP_USD) ?? DEFAULT_TOTAL_CAP_USD;
+  if (dailyCapUsd > MAX_CAP_USD || totalCapUsd > MAX_CAP_USD) return bad(`The spend caps must be at most ${MAX_CAP_USD} USD.`);
   if (!(dailyCapUsd > 0) || !(totalCapUsd > 0) || dailyCapUsd > totalCapUsd) return bad("The spend caps must be positive and the daily cap cannot exceed the lifetime cap.");
   const dir = env.CREDENTIALS_DIRECTORY;
   if (!dir) return bad("No credential directory: the orbit.openrouter credential cannot be read.");
@@ -122,6 +125,16 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
   const fail = (message: string, kind: ConstructorParameters<typeof ProviderError>[0] = "failed") => new ProviderError(kind, `OpenRouter: ${sanitize(message, cfg.key)}`);
   const headers = { authorization: `Bearer ${cfg.key}`, "content-type": "application/json", "x-title": "ORBIT" };
 
+  // Ledger writes on an error path must never hide the original problem. A failed write is reported next to it.
+  const safely = (fn: () => void): string => {
+    try {
+      fn();
+      return "";
+    } catch {
+      return " (spend accounting also failed to record this call; it stays reserved until ORBIT restarts, then is charged at its upper bound)";
+    }
+  };
+
   const readBody = async (res: Response): Promise<string> => {
     const text = await res.text();
     if (text.length > MAX_RESPONSE_BYTES) throw fail("the response was too large and was discarded");
@@ -162,17 +175,17 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
         res = await fetcher(`${OPENROUTER_BASE}/chat/completions`, { method: "POST", headers, body, signal: AbortSignal.timeout(cfg.timeoutMs) });
       } catch (err) {
         // The request may have reached OpenRouter and been billed: its bound stays charged.
-        ledger.settle(reservation.id, undefined, "no answer (timeout or network): the request may have been billed");
+        const note = safely(() => ledger.settle(reservation.id, undefined, "no answer (timeout or network): the request may have been billed"));
         const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-        throw fail(timedOut ? `no answer within ${cfg.timeoutMs / 1000} s` : "the request failed before an answer arrived");
+        throw fail(`${timedOut ? `no answer within ${cfg.timeoutMs / 1000} s` : "the request failed before an answer arrived"}${note}`);
       }
 
       let text: string;
       try {
         text = await readBody(res);
       } catch (err) {
-        ledger.settle(reservation.id, undefined, "response unreadable");
-        throw err;
+        const note = safely(() => ledger.settle(reservation.id, undefined, "response unreadable"));
+        throw fail(`${err instanceof ProviderError ? err.message.replace(/^OpenRouter: /, "") : "the response could not be read"}${note}`);
       }
       let json: { error?: { message?: string; code?: unknown }; choices?: { finish_reason?: string; message?: { content?: unknown; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] } }[]; usage?: { cost?: unknown } } | undefined;
       try {
@@ -189,14 +202,18 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
         const status = res.status;
         const said = sanitize(json?.error?.message ?? "", cfg.key);
         // A refusal before any work (auth, bad request, rate limit) is not billed; a server error is unknown.
-        if (status === 401 || status === 402 || status === 403 || status === 400 || status === 404 || status === 429) ledger.release(reservation.id);
-        else ledger.settle(reservation.id, costOf() === undefined ? undefined : toMicro(costOf()!), `HTTP ${status}, cost unknown`);
-        throw fail(`HTTP ${status}${said ? `: ${said}` : ""}`);
+        const note =
+          status === 401 || status === 402 || status === 403 || status === 400 || status === 404 || status === 429
+            ? safely(() => ledger.release(reservation.id))
+            : safely(() => ledger.settle(reservation.id, costOf() === undefined ? undefined : toMicro(costOf()!), `HTTP ${status}, cost unknown`));
+        throw fail(`HTTP ${status}${said ? `: ${said}` : ""}${note}`);
       }
 
       // A good response: charge what the provider says it cost. No cost reported means the bound stays charged.
       const cost = costOf();
-      ledger.settle(reservation.id, cost === undefined ? undefined : toMicro(cost), "provider reported no cost");
+      // A billed answer is not thrown away because the ledger write failed: it is returned with the failure noted in the text's place
+      // of silence, and the reservation stays outstanding (charged at its bound after a restart).
+      const settleNote = safely(() => ledger.settle(reservation.id, cost === undefined ? undefined : toMicro(cost), "provider reported no cost"));
       const choice = json?.choices?.[0];
       const message = choice?.message;
       if (!message) throw fail("the response had no message");
@@ -208,13 +225,19 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
       if (choice?.finish_reason === "length" && calls.length) throw fail("the reply hit the output limit in the middle of a tool call, so no tool was run");
       const content = typeof message.content === "string" ? message.content.slice(0, MAX_REPLY_CHARS) : "";
       if (!content && !calls.length) throw fail(`the response had no text and no tool call${choice?.finish_reason ? ` (finish: ${sanitize(choice.finish_reason, cfg.key, 40)})` : ""}`);
-      return { text: content, calls, costUsd: cost, model: cfg.model };
+      return { text: settleNote && content ? `${content}\n\n[Spend accounting note:${settleNote.slice(1, -1)}]` : content, calls, costUsd: cost, model: cfg.model };
     },
 
     async balance() {
       const res = await fetcher(`${OPENROUTER_BASE}/key`, { headers, signal: AbortSignal.timeout(Math.min(cfg.timeoutMs, 15_000)) });
       if (!res.ok) throw fail(`balance lookup returned HTTP ${res.status}`);
-      const d = ((JSON.parse(await readBody(res)) as { data?: { limit?: unknown; limit_remaining?: unknown; usage?: unknown } }).data ?? {}) as Record<string, unknown>;
+      let parsed: { data?: { limit?: unknown; limit_remaining?: unknown; usage?: unknown } };
+      try {
+        parsed = JSON.parse(await readBody(res));
+      } catch (err) {
+        throw err instanceof ProviderError ? err : fail("balance lookup returned an unreadable body");
+      }
+      const d = ((parsed as { data?: { limit?: unknown; limit_remaining?: unknown; usage?: unknown } }).data ?? {}) as Record<string, unknown>;
       const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
       return { limitUsd: n(d.limit), remainingUsd: n(d.limit_remaining), usedUsd: n(d.usage) };
     },

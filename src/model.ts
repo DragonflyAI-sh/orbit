@@ -23,11 +23,15 @@ export type FallbackInfo = {
 export type Step = { text: string; calls: ToolCall[]; fallback?: FallbackInfo };
 export type Reply = Result<string> & { fallback?: FallbackInfo };
 
+// Options for a plain reply. `fallback: false` is for background callers (thread compaction, the rolling note, scheduled runs): while
+// the primary is limited they fail instead of spending the paid fallback, which only answers an interactive chat turn.
+export type ReplyOptions = { fallback?: boolean };
+
 export type ModelPort = {
   status(): PortStatus;
   // Periodic upkeep (renewing a login before it expires). Never throws; absent when there is nothing to maintain.
   maintain?(): Promise<void>;
-  reply(messages: Message[], limits: string[], notes?: string): Promise<Reply>;
+  reply(messages: Message[], limits: string[], notes?: string, opts?: ReplyOptions): Promise<Reply>;
   // One model turn with tools offered. Absent when the model cannot call tools (the mock).
   step?(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<Step>;
 };
