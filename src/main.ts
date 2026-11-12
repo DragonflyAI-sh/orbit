@@ -97,7 +97,7 @@ const routines = selectRoutines(process.env);
 const publicJobUrl = process.env.ORBIT_PUBLIC_JOB_URL || undefined;
 // ORBIT starts reviews itself, from a PR it just opened: not a chat tool call, so no confirmation is needed.
 const review = reviewer(jobs, jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit }), selectComments(process.env), notify);
-const prs = pullRequestOpener(jobs, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), selectPulls(process.env), notify, () => new Date(), (job, url) => void review.start(job, url), selectComments(process.env));
+const prs = pullRequestOpener(jobs, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), selectPulls(process.env), notify, () => new Date(), (job, url, headSha) => void review.start(job, url, headSha), selectComments(process.env));
 const reconcile = control ? gitReconciler(jobs, control) : async () => {};
 
 // The job listener binds to localhost only; Tailscale Funnel is what publishes it.
@@ -161,7 +161,7 @@ buildServer({
   vaultEdits,
   configView: config,
   // Read-only PR inspection (owner-only chat tools): the repositories are the ones ORBIT_ROUTINE_REPOS names, the token is orbit.github-orbit-prs.
-  prInspect: selectPrInspect(process.env, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS)),
+  prInspect: selectPrInspect(process.env, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), () => jobs.all()),
   // The rolling note is the vault file Memory/recent-context.md when the clone exists (written through the vault tools, with the
   // same policy, secret refusal, log line and git pipeline); otherwise it stays in ORBIT's state directory.
   recentContext: vault

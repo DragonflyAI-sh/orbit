@@ -29,7 +29,9 @@ export type ReviewOutcome = { id?: string; at: string; verdict?: Verdict; verdic
 // "no verdict" (no Verdict line) and "ambiguous" (conflicting or unrecognised) are never approval.
 export type Verdict = "no blocking issues" | "blocking issues" | "no verdict" | "ambiguous";
 // Set on a `review` job: what it reviews, and what became of its findings.
-export type ReviewOf = { of: string; prUrl: string; repo: string; comment?: { at: string; url?: string; error?: string; urls?: string[]; total?: number; posted?: number; attempts?: number; lastAttemptAt?: string }; verdict?: Verdict; verdictReason?: string };
+// reviewedSha: the PR head commit when ORBIT launched the review (set from GitHub's own answer when ORBIT opened or found the PR; absent on
+// older jobs, which means unknown). It is where the review started, not a confirmation from the reviewer of the commit it read.
+export type ReviewOf = { of: string; prUrl: string; repo: string; reviewedSha?: string; comment?: { at: string; url?: string; error?: string; urls?: string[]; total?: number; posted?: number; attempts?: number; lastAttemptAt?: string }; verdict?: Verdict; verdictReason?: string };
 export type Job = {
   id: string;
   // Absent means `work`. A review job never opens a PR and never starts a review.

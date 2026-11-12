@@ -108,7 +108,7 @@ export function reviewer(jobs: Jobs, launch: JobLauncher, comments: CommentPort 
   };
 
   // Called once a PR was opened (not found) for a job. Starts at most one review per work job.
-  const start = async (work: Job, prUrl: string): Promise<void> => {
+  const start = async (work: Job, prUrl: string, headSha?: string): Promise<void> => {
     if (work.kind === "review" || work.reviewJob) return;
     const match = PR_URL.exec(prUrl);
     const routine = work.launch?.routine;
@@ -116,7 +116,7 @@ export function reviewer(jobs: Jobs, launch: JobLauncher, comments: CommentPort 
     const at = now().toISOString();
     jobs.setReviewJob(work.id, { at }); // claims the review synchronously, before any await
     try {
-      const result = await launch(routine, reviewBrief(work.id, match[1], prUrl), { of: work.id, prUrl, repo: match[1] });
+      const result = await launch(routine, reviewBrief(work.id, match[1], prUrl), { of: work.id, prUrl, repo: match[1], ...(headSha && /^[0-9a-f]{40}$/.test(headSha) ? { reviewedSha: headSha } : {}) });
       const id = (result.body as { id?: string; job?: { id?: string } }).id ?? (result.body as { job?: { id?: string } }).job?.id;
       if (result.code >= 300) {
         const error = (result.body as { error?: string }).error ?? `HTTP ${result.code}`;

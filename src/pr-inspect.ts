@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { MAX_OUTPUT_CHARS } from "./agent.ts";
 import type { ChatTool } from "./agent.ts";
 import { credential } from "./launcher.ts";
+import type { Job } from "./jobs.ts";
 import { redact } from "./ops/protocol.ts";
+import { ORBIT_REVIEW_RULE, orbitReviewOf, unverified } from "./orbit-review-provenance.ts";
+import type { OrbitReview, PostingIdentity } from "./orbit-review-provenance.ts";
 import type { Result } from "./ports.ts";
 
 // Owner-only, read-only inspection of a pull request in a repository ORBIT already works with (ORBIT_ROUTINE_REPOS), through the
@@ -11,7 +14,7 @@ import type { Result } from "./ports.ts";
 //
 // Rules this file keeps (docs/pr-inspection.md has the long form):
 //  - Only GET requests, only to https://api.github.com. The token goes nowhere else. Redirects are never followed with the token; the
-//    one redirect GitHub makes (job logs, to its blob storage) is followed without the token, to an allowlisted host.
+//    one redirect GitHub makes (job logs, to its log storage) is followed once, without the token, only to the narrow hosts in LOG_HOSTS.
 //  - Every result carries the PR identity, base and head SHA, when it was read, and whether it is stale. A call can name the head it
 //    expects (expectedHead); a different head, or a head that moved while the call was reading, returns `stale: true` with no data.
 //  - Every result fits the chat transport (MAX_OUTPUT_CHARS) whole. Anything longer is paged by an explicit offset or start index and
@@ -26,8 +29,26 @@ const API = "https://api.github.com";
 const TIMEOUT_MS = 15_000;
 const REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
 const SHA = /^[0-9a-f]{40}$/;
-// Where GitHub's job-log redirect may lead. No credential is ever sent there.
-const LOG_HOSTS = /(^|\.)(githubusercontent\.com|blob\.core\.windows\.net)$/i;
+// Where GitHub's job-log redirect may lead. No credential is ever sent there. These two shapes are GitHub's Actions log and results
+// storage hosts as ORBIT understands GitHub's published Actions network hosts; they were NOT observed live by ORBIT, so if GitHub serves
+// logs from anywhere else the log is reported unavailable (it fails closed) rather than fetched. Deliberately not allowed: other
+// *.githubusercontent.com hosts (user content), any other Azure storage account, deeper subdomains, other ports, plain http, a second hop.
+export const LOG_HOST_PATTERNS: readonly RegExp[] = [/^[a-z0-9-]+\.actions\.githubusercontent\.com$/, /^productionresultssa\d{1,2}\.blob\.core\.windows\.net$/];
+export const LOG_HOSTS_TEXT = "*.actions.githubusercontent.com (one label) and productionresultssa<N>.blob.core.windows.net";
+// Why a redirect target is refused, or undefined when it may be fetched (without credentials).
+export function logRedirectRefusal(location: string | null): string | undefined {
+  let to: URL;
+  try {
+    to = new URL(location ?? "");
+  } catch {
+    return "GitHub's redirect had no usable absolute address";
+  }
+  if (to.protocol !== "https:") return `the redirect is not https (${to.protocol.replace(":", "")})`;
+  if (to.username || to.password) return "the redirect address carries credentials";
+  if (to.port) return `the redirect uses a non-default port (${to.port})`;
+  if (!LOG_HOST_PATTERNS.some((re) => re.test(to.hostname))) return `the redirect host ${JSON.stringify(to.hostname.slice(0, 80))} is not one of GitHub's Actions log hosts (${LOG_HOSTS_TEXT})`;
+  return undefined;
+}
 const MAX_ITEM = 10_000_000;
 export const LIST_PAGES_MAX = 10; // 100 items a page: lists that need all pages stop here and say so
 export const FILE_PAGES_MAX = 30; // GitHub lists at most 3,000 files of a PR
@@ -118,20 +139,29 @@ export function githubReader(token: () => string | undefined, fetcher: Fetch = f
       }
       return { data, next: /rel="next"/.test(res.headers.get("link") ?? "") };
     },
+    // The account the token authenticates as (GET /user): what ORBIT compares a comment's author with to know a comment is ORBIT's own.
+    async identity(): Promise<PostingIdentity> {
+      try {
+        const res = await send(`${API}/user`, authed());
+        note(res);
+        if (!res.ok) await refuse(res, "the account ORBIT's pull-request token belongs to");
+        const data = (await res.json()) as { login?: unknown; id?: unknown };
+        if (typeof data.login !== "string" || !data.login || typeof data.id !== "number" || !Number.isSafeInteger(data.id)) return { error: "GitHub's answer had no account login and id" };
+        return { login: data.login, id: data.id };
+      } catch (err) {
+        return { error: err instanceof Error ? err.message.slice(0, 200) : "unknown error" };
+      }
+    },
     // A job log: the last LOG_TAIL_BYTES of it, and whether that is all of it.
     async log(path: string, what: string): Promise<{ text: string; wholeLog: boolean; bytes: number; bytesExact: boolean }> {
       if (!/^\/repos\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/actions\/jobs\/\d+\/logs$/.test(path)) fail("Internal: refused to build a log path from that input.");
       let res = await send(`${API}${path}`, authed());
       note(res);
       if (res.status === 301 || res.status === 302 || res.status === 303 || res.status === 307 || res.status === 308) {
-        let to: URL | undefined;
-        try {
-          to = new URL(res.headers.get("location") ?? "");
-        } catch {
-          /* handled below */
-        }
-        if (!to || to.protocol !== "https:" || to.username || to.password || !LOG_HOSTS.test(to.hostname)) return fail(`GitHub sent the log for ${what} to an address ORBIT does not trust, so it was not fetched.`);
-        res = await send(to.toString(), { "user-agent": "orbit (github.com/DragonflyAI-sh/orbit)" }); // no credential
+        const refusal = logRedirectRefusal(res.headers.get("location"));
+        if (refusal) return fail(`GitHub sent the log for ${what} to an address ORBIT does not trust, so it was not fetched: ${refusal}.`);
+        res = await send(new URL(res.headers.get("location")!).toString(), { "user-agent": "orbit (github.com/DragonflyAI-sh/orbit)" }); // no credential
+        if (res.status >= 300 && res.status < 400) return fail(`The log storage for ${what} redirected again; ORBIT follows one redirect only, so the log was not fetched.`);
       }
       if (!res.ok) await refuse(res, what);
       return readTail(res);
@@ -297,6 +327,8 @@ type Ctx = {
   json(path: string, what: string): Promise<{ data: J; next: boolean }>;
   // Every page of a list (up to `pages`), and whether that was all of it.
   all(path: string, what: string, pages?: number): Promise<{ items: J[]; complete: boolean; pages: number }>;
+  // Whether a conversation comment is ORBIT's own recorded review (see orbit-review-provenance.ts); asks GitHub who the token is at most once.
+  orbitReview(comment: { id: unknown; body: string; authorLogin: unknown; authorId: unknown }): Promise<OrbitReview>;
   // The whole result for these tool-specific fields: the header plus `data`.
   frame(data: Record<string, unknown>): Record<string, unknown>;
 };
@@ -306,6 +338,8 @@ export type PrInspectDeps = {
   repos: () => string[];
   fetcher?: Fetch;
   now?: () => Date;
+  // ORBIT's own job records (read only). Without them no comment can be verified as an ORBIT review.
+  jobs?: () => Job[];
 };
 
 export function prInspectTools(d: PrInspectDeps): ChatTool[] {
@@ -355,7 +389,20 @@ export function prInspectTools(d: PrInspectDeps): ChatTool[] {
     });
     if (expectedHead && before.head.sha !== expectedHead) return stale(`The PR head is ${before.head.sha}, not the ${expectedHead} this call expected: the earlier evidence is about an older head.`, before.head.sha);
 
+    let who: Promise<PostingIdentity> | undefined;
     const ctx: Ctx = {
+      orbitReview: (comment) =>
+        orbitReviewOf({
+          repo,
+          pull,
+          head: before.head.sha,
+          comment,
+          jobs: d.jobs ? d.jobs() : [],
+          identity: () => {
+            if (!endpoints.includes("GET /user")) endpoints.push("GET /user");
+            return (who ??= reader.identity());
+          },
+        }).catch((err) => unverified(`ORBIT could not check this comment against its records: ${err instanceof Error ? err.message.slice(0, 150) : "error"}.`)),
       repo,
       pull,
       head: before.head.sha,
@@ -491,6 +538,7 @@ export function prInspectTools(d: PrInspectDeps): ChatTool[] {
 
   // ---- pr_checks ----
   const failing = new Set(["failure", "startup_failure"]);
+  const SUPERSEDING_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
   const outcomeOf = (c: J): string => {
     if (c.status && c.status !== "completed") return c.status === "queued" ? "queued" : c.status === "in_progress" ? "running" : "pending";
     const k = c.conclusion;
@@ -522,31 +570,54 @@ export function prInspectTools(d: PrInspectDeps): ChatTool[] {
       if (!r.next || list.length === 0) break;
       if (page === 5) statusComplete = false;
     }
-    // Later runs of the same check (same name from the same app) supersede earlier ones.
-    const latest = new Map<string, J>();
+    // A run is superseded only when it is demonstrably a rerun of the same logical check: same app, same name AND the same check suite.
+    // A run with any of those missing is never superseded, and two runs with the same name in different suites (for example two
+    // workflows that each have a job called "build") are both current: a failure is never hidden by an ambiguous guess.
+    const groupKey = (r: J): string | undefined => (typeof r.app?.slug === "string" && r.app.slug && typeof r.name === "string" && Number.isSafeInteger(r.check_suite?.id) ? `${r.app.slug}\u0000${r.check_suite.id}\u0000${r.name}` : undefined);
+    const groups = new Map<string, J[]>();
     for (const r of runs) {
-      const key = `${r.app?.slug ?? ""}\u0000${r.name}`;
-      const cur = latest.get(key);
-      if (!cur || (r.started_at ?? "") > (cur.started_at ?? "") || ((r.started_at ?? "") === (cur.started_at ?? "") && r.id > cur.id)) latest.set(key, r);
+      const key = groupKey(r);
+      if (key !== undefined) groups.set(key, [...(groups.get(key) ?? []), r]);
     }
+    const newest = new Map<string, J>();
+    for (const [key, list] of groups) {
+      const byTime = list.every((r) => typeof r.started_at === "string" && r.started_at);
+      newest.set(key, list.reduce((a, b) => ((byTime ? (b.started_at > a.started_at || (b.started_at === a.started_at && b.id > a.id)) : b.id > a.id) ? b : a)));
+    }
+    const isSuperseded = (r: J): boolean => {
+      const key = groupKey(r);
+      return key !== undefined && newest.get(key) !== r;
+    };
+    // Same name and app in different suites: shown as separate current runs; this only tells the reader they may be reruns.
+    const nameSuites = new Map<string, Set<unknown>>();
+    for (const r of runs) {
+      const k = `${r.app?.slug ?? ""}\u0000${r.name}`;
+      nameSuites.set(k, (nameSuites.get(k) ?? new Set()).add(r.check_suite?.id ?? `run:${r.id}`));
+    }
+    const sameNameElsewhere = (r: J): boolean => (nameSuites.get(`${r.app?.slug ?? ""}\u0000${r.name}`)?.size ?? 0) > 1;
     const entries = [
       ...runs.map((r) => {
         const out = clip(String(r.output?.title ?? ""), 120);
         const sum = typeof r.output?.summary === "string" ? r.output.summary : "";
         const o = outcomeOf(r);
-        return { kind: "check_run", id: r.id, name: clip(String(r.name ?? ""), 120).text, app: r.app?.slug ?? null, status: r.status, conclusion: r.conclusion ?? null, outcome: o, superseded: latest.get(`${r.app?.slug ?? ""}\u0000${r.name}`) !== r, startedAt: r.started_at ?? null, completedAt: r.completed_at ?? null, url: r.html_url ?? null, outputTitle: out.text, outputSummaryChars: sum.length, ...(o === "failed" || o === "timed_out" ? { log: r.app?.slug === "github-actions" ? "pr_check_log {checkId: id}" : "no Actions log for this app; pr_check_log returns the check's own output text" } : {}) };
+        return { kind: "check_run", id: r.id, name: clip(String(r.name ?? ""), 120).text, app: r.app?.slug ?? null, status: r.status, conclusion: r.conclusion ?? null, outcome: o, superseded: isSuperseded(r), checkSuiteId: Number.isSafeInteger(r.check_suite?.id) ? r.check_suite.id : null, ...(!isSuperseded(r) && sameNameElsewhere(r) ? { sameNameInOtherSuite: true } : {}), startedAt: r.started_at ?? null, completedAt: r.completed_at ?? null, url: r.html_url ?? null, outputTitle: out.text, outputSummaryChars: sum.length, ...(o === "failed" || o === "timed_out" ? { log: r.app?.slug === "github-actions" ? "pr_check_log {checkId: id}" : "no Actions log for this app; pr_check_log returns the check's own output text" } : {}) };
       }),
       ...statuses.map((s) => ({ kind: "status", id: s.id, name: clip(String(s.context ?? ""), 120).text, app: null, status: s.state, conclusion: null, outcome: statusOutcome(String(s.state)), superseded: false, startedAt: s.created_at ?? null, completedAt: s.updated_at ?? null, url: s.target_url ? clip(String(s.target_url), 200).text : null, outputTitle: clip(String(s.description ?? ""), 120).text, outputSummaryChars: 0 })),
     ];
     const tally = (list: { outcome: string }[]) => list.reduce<Record<string, number>>((m, e) => ((m[e.outcome] = (m[e.outcome] ?? 0) + 1), m), {});
     const current = entries.filter((e) => !e.superseded);
+    const hidden = entries.filter((e) => e.superseded);
+    const ambiguous = new Set(runs.filter((r) => !isSuperseded(r) && sameNameElsewhere(r)).map((r) => String(r.name))).size;
     const summary = {
       checkRunsReportedByGitHub: reported,
       checkRunsListed: runs.length,
       statusContextsListed: statuses.length,
       combinedStatusState: statusState,
       latestEntriesByOutcome: tally(current),
-      supersededEntries: entries.length - current.length,
+      supersededEntries: hidden.length,
+      supersededByOutcome: tally(hidden),
+      supersededRule: "A run is superseded only by a later run with the same app, name and check suite (a rerun of that same check). Same-named runs in different suites, and runs missing any of those, are all current.",
+      ...(ambiguous ? { sameNameInDifferentSuites: `${ambiguous} check name(s) appear in more than one check suite; all of those runs count as current (a failure from an earlier attempt that a later full re-run replaced still shows here; confirm on GitHub).` } : {}),
       listingComplete: runsComplete && statusComplete,
       ...(runsComplete && statusComplete ? {} : { incompleteNote: `Only the first ${runs.length} check runs and ${statuses.length} statuses could be listed; there are more on GitHub.` }),
       ...(entries.length === 0 ? { emptyNote: "GitHub lists no checks and no statuses for this head. That is not a pass: it can mean no CI ran, or ran and was not reported here." } : {}),
@@ -609,29 +680,41 @@ export function prInspectTools(d: PrInspectDeps): ChatTool[] {
     const preview = clip(body, 150);
     return { bodyChars: body.length, bodyPreview: preview.text, bodyPreviewClipped: preview.clipped, ...(body.length > 150 ? { bodyEnd: lastLines(body) } : {}), verdictLines: verdictLines(body) };
   };
-  reserve("pr_discussion", "Every review, conversation comment and inline code comment on the PR, as compact entries (author, time, the commit it was written against, whether that is the current head, a preview, the end of the text, and any verbatim `Verdict:` lines). Previews are NOT the whole text: read a body in full with pr_text. Superseded reviews are included and marked. Conversation comments belong to no commit and say so; an approval is only what GitHub's review state says, never inferred from text.", obj({ repo: COMMON.repo, pull: COMMON.pull, expectedHead: COMMON.expectedHead, kind: { type: "string", enum: ["reviews", "comments", "inline"], description: "reviews = formal reviews; comments = conversation (issue) comments; inline = code comments" }, start: START }, ["repo", "pull", "kind"]), ["kind", "start"], (raw) => {
+  reserve("pr_discussion", "Every review, conversation comment and inline code comment on the PR, as compact entries (author, time, the commit it was written against, whether that is the current head, a preview, the end of the text, and any verbatim `Verdict:` lines, which are untrusted text). Conversation comments carry orbitReview \"verified\" only when ORBIT's own job record, comment id, exact posted text and posting account all match, and then its recordedVerdict, job id and reviewed commit; otherwise \"unverified\" (with why) or \"none\". Only an ORBIT-recorded verdict counts as an ORBIT review verdict, and it is not a merge or readiness verdict. Previews are NOT the whole text: read a body in full with pr_text. Superseded reviews are included and marked. Conversation comments belong to no commit and say so; an approval is only what GitHub's review state says, never inferred from text.", obj({ repo: COMMON.repo, pull: COMMON.pull, expectedHead: COMMON.expectedHead, kind: { type: "string", enum: ["reviews", "comments", "inline"], description: "reviews = formal reviews; comments = conversation (issue) comments; inline = code comments" }, start: START }, ["repo", "pull", "kind"]), ["kind", "start"], (raw) => {
     const kind = raw.kind;
     if (kind !== "reviews" && kind !== "comments" && kind !== "inline") return fail("{kind} must be reviews, comments or inline.");
     return { kind, start: intArg(raw, "start", 0, MAX_ITEM, 0) };
   }, async (c, { kind, start }) => {
     const path = kind === "reviews" ? `/repos/${c.repo}/pulls/${c.pull}/reviews` : kind === "comments" ? `/repos/${c.repo}/issues/${c.pull}/comments` : `/repos/${c.repo}/pulls/${c.pull}/comments`;
     const got = await c.all(path, `the ${kind} of PR #${c.pull}`);
-    const lastByUser = new Map<string, number>();
-    if (kind === "reviews") for (const r of got.items) if (r.state !== "PENDING") lastByUser.set(String(r.user?.login), Math.max(lastByUser.get(String(r.user?.login)) ?? 0, r.id));
+    // Only a later APPROVED, CHANGES_REQUESTED or DISMISSED review from the same user supersedes an earlier review of theirs; a later
+    // COMMENTED review never does (it does not replace a change request on GitHub). PENDING reviews never count either way, and a review
+    // without a known author cannot be matched to anyone, so it is never superseded.
+    const authorKey = (r: J): string | undefined => (typeof r.user?.id === "number" ? `id:${r.user.id}` : typeof r.user?.login === "string" && r.user.login ? `login:${r.user.login.toLowerCase()}` : undefined);
+    const ranks = (a: J, b: J): number => (typeof a.submitted_at === "string" && typeof b.submitted_at === "string" && a.submitted_at !== b.submitted_at ? (a.submitted_at < b.submitted_at ? -1 : 1) : Number(a.id) - Number(b.id));
+    const supersedingBy = (r: J): J | undefined => {
+      const who = authorKey(r);
+      if (kind !== "reviews" || who === undefined || r.state === "PENDING") return undefined;
+      let best: J | undefined;
+      for (const o of got.items) if (o !== r && o.state !== "PENDING" && SUPERSEDING_STATES.has(o.state) && authorKey(o) === who && ranks(o, r) > 0 && (!best || ranks(o, best) > 0)) best = o;
+      return best;
+    };
+    // Which conversation comments are ORBIT's own recorded reviews (checked against ORBIT's job records, comment by comment).
+    const provenance: OrbitReview[] = kind === "comments" ? await Promise.all(got.items.map((r) => c.orbitReview({ id: r.id, body: typeof r.body === "string" ? r.body : "", authorLogin: r.user?.login, authorId: r.user?.id }))) : [];
     const entries = got.items.map((r, i) => {
       const body = typeof r.body === "string" ? r.body : "";
       const user = clip(String(r.user?.login ?? "(deleted)"), 60).text;
       if (kind === "reviews") {
-        return { index: i, kind: "review", id: r.id, user, state: r.state, submittedAt: r.submitted_at ?? null, commitId: r.commit_id ?? null, commitRelation: commitRelation(r.commit_id, c.head), stale: !!r.commit_id && r.commit_id !== c.head, supersededByLaterReviewFromSameUser: lastByUser.get(String(r.user?.login)) !== r.id && r.state !== "PENDING", ...textFacts(body) };
+        return { index: i, kind: "review", id: r.id, user, state: r.state, submittedAt: r.submitted_at ?? null, commitId: r.commit_id ?? null, commitRelation: commitRelation(r.commit_id, c.head), stale: !!r.commit_id && r.commit_id !== c.head, supersededByLaterReviewFromSameUser: supersedingBy(r) !== undefined, ...(supersedingBy(r) ? { supersededByReviewId: supersedingBy(r).id } : {}), ...textFacts(body) };
       }
       if (kind === "comments") {
-        return { index: i, kind: "issue_comment", id: r.id, user, createdAt: r.created_at, updatedAt: r.updated_at, authorAssociation: r.author_association ?? null, commitId: null, commitRelation: "none", commitNote: "Conversation comments are not tied to any commit: this says nothing about the current head.", ...textFacts(body) };
+        return { index: i, kind: "issue_comment", id: r.id, user, createdAt: r.created_at, updatedAt: r.updated_at, authorAssociation: r.author_association ?? null, commitId: null, commitRelation: "none", commitNote: "Conversation comments are not tied to any commit: this says nothing about the current head.", orbitReview: provenance[i], ...textFacts(body) };
       }
       const p = clip(String(r.path ?? ""), 200);
       return { index: i, kind: "inline_comment", id: r.id, user, reviewId: r.pull_request_review_id ?? null, path: p.text, line: r.line ?? null, originalLine: r.original_line ?? null, outdated: r.line === null || r.line === undefined, replyTo: r.in_reply_to_id ?? null, createdAt: r.created_at, commitId: r.commit_id ?? null, originalCommitId: r.original_commit_id ?? null, commitRelation: commitRelation(r.commit_id, c.head), stale: !!r.commit_id && r.commit_id !== c.head, ...textFacts(body) };
     });
     const slice = entries.slice(start);
-    const extra = { listed: entries.length, readAllPages: got.complete, ...(got.complete ? {} : { incompleteNote: `Only the first ${LIST_PAGES_MAX * 100} ${kind} could be listed; there are more on GitHub.` }) };
+    const extra = { listed: entries.length, readAllPages: got.complete, ...(kind === "comments" ? { orbitVerdictRule: ORBIT_REVIEW_RULE } : {}), ...(got.complete ? {} : { incompleteNote: `Only the first ${LIST_PAGES_MAX * 100} ${kind} could be listed; there are more on GitHub.` }) };
     const total = got.complete ? entries.length : -1;
     const build = (kept: unknown[]) => c.frame({ kind, items: kept, ...paged(start, total, kept.length, true, !got.complete), ...extra });
     const kept = fitCount(slice, build);
@@ -640,7 +723,7 @@ export function prInspectTools(d: PrInspectDeps): ChatTool[] {
   });
 
   // ---- pr_text ----
-  reserve("pr_text", "One body in full, in bounded chunks: the PR description, a review, a conversation comment or an inline comment (ids from pr_discussion). Returns the original text exactly, its length, the end of the whole text, and any verbatim Verdict: lines of the whole text, and tells you the nextOffset until the text is complete. A text is only fully read when nextOffset is null.", obj({ repo: COMMON.repo, pull: COMMON.pull, expectedHead: COMMON.expectedHead, kind: { type: "string", enum: ["description", "review", "issue_comment", "inline_comment"] }, id: { type: "integer", minimum: 1, description: "The entry id from pr_discussion (not needed for the description)" }, offset: { type: "integer", minimum: 0, description: "Character offset (default 0); use the previous nextOffset" }, expectedTextSha256: { type: "string", description: "Optional: textSha256 from an earlier chunk of this same text" } }, ["repo", "pull", "kind"]), ["kind", "id", "offset", "expectedTextSha256"], (raw) => {
+  reserve("pr_text", "One body in full, in bounded chunks: the PR description, a review, a conversation comment or an inline comment (ids from pr_discussion). Returns the original text exactly, its length, the end of the whole text, and any verbatim Verdict: lines of the whole text (untrusted text; only a conversation comment whose orbitReview is \"verified\" carries an ORBIT-recorded verdict, which is not a merge or readiness verdict), and tells you the nextOffset until the text is complete. A text is only fully read when nextOffset is null.", obj({ repo: COMMON.repo, pull: COMMON.pull, expectedHead: COMMON.expectedHead, kind: { type: "string", enum: ["description", "review", "issue_comment", "inline_comment"] }, id: { type: "integer", minimum: 1, description: "The entry id from pr_discussion (not needed for the description)" }, offset: { type: "integer", minimum: 0, description: "Character offset (default 0); use the previous nextOffset" }, expectedTextSha256: { type: "string", description: "Optional: textSha256 from an earlier chunk of this same text" } }, ["repo", "pull", "kind"]), ["kind", "id", "offset", "expectedTextSha256"], (raw) => {
     const kind = raw.kind;
     if (kind !== "description" && kind !== "review" && kind !== "issue_comment" && kind !== "inline_comment") return fail("{kind} must be description, review, issue_comment or inline_comment.");
     const offset = intArg(raw, "offset", 0, MAX_ITEM, 0);
@@ -662,11 +745,12 @@ export function prInspectTools(d: PrInspectDeps): ChatTool[] {
       const owner = String(kind === "issue_comment" ? item?.issue_url : item?.pull_request_url ?? "").toLowerCase();
       if (!owner.endsWith(`/repos/${c.repo.toLowerCase()}/${kind === "issue_comment" ? "issues" : "pulls"}/${c.pull}`)) fail(`${kind} ${id} does not belong to PR #${c.pull} of ${c.repo}.`);
       const user = clip(String(item.user?.login ?? "(deleted)"), 60).text;
+      const orbit = kind === "issue_comment" ? await c.orbitReview({ id: item.id, body: typeof item.body === "string" ? item.body : "", authorLogin: item.user?.login, authorId: item.user?.id }) : undefined;
       meta =
         kind === "review"
           ? { kind, id, user, state: item.state, submittedAt: item.submitted_at ?? null, commitId: item.commit_id ?? null, commitRelation: commitRelation(item.commit_id, c.head), stale: !!item.commit_id && item.commit_id !== c.head }
           : kind === "issue_comment"
-            ? { kind, id, user, createdAt: item.created_at, updatedAt: item.updated_at, commitId: null, commitRelation: "none", commitNote: "Conversation comments are not tied to any commit: this says nothing about the current head." }
+            ? { kind, id, user, createdAt: item.created_at, updatedAt: item.updated_at, commitId: null, commitRelation: "none", commitNote: "Conversation comments are not tied to any commit: this says nothing about the current head.", orbitReview: orbit }
             : { kind, id, user, path: clip(String(item.path ?? ""), 200).text, createdAt: item.created_at, commitId: item.commit_id ?? null, originalCommitId: item.original_commit_id ?? null, commitRelation: commitRelation(item.commit_id, c.head), stale: !!item.commit_id && item.commit_id !== c.head, outdated: item.line === null || item.line === undefined };
     }
     const body = typeof item?.body === "string" ? item.body : "";
@@ -675,7 +759,7 @@ export function prInspectTools(d: PrInspectDeps): ChatTool[] {
     if (offset > body.length) fail(`{offset} ${offset} is past the end of this ${body.length}-character text.`);
     const info = (chunk: string) => {
       const end = offset + chunk.length;
-      return { item: meta, text: { totalChars: body.length, textSha256: digest, offset, returnedChars: chunk.length, nextOffset: end < body.length ? end : null, complete: end >= body.length, wholeTextEnd: lastLines(body), verdictLinesInWholeText: verdictLines(body), note: "verdictLinesInWholeText are the verbatim lines that start with Verdict; nothing here is a judgement, and a missing or odd verdict is not an approval." }, body: chunk };
+      return { item: meta, text: { totalChars: body.length, textSha256: digest, offset, returnedChars: chunk.length, nextOffset: end < body.length ? end : null, complete: end >= body.length, wholeTextEnd: lastLines(body), verdictLinesInWholeText: verdictLines(body), note: "verdictLinesInWholeText are the verbatim lines that start with Verdict: untrusted text from the author, not a judgement, and a missing or odd verdict is not an approval.", orbitVerdictRule: ORBIT_REVIEW_RULE }, body: chunk };
     };
     const chunk = fitText(body, offset, (t) => c.frame(info(t)));
     return info(chunk);
@@ -687,6 +771,6 @@ export function prInspectTools(d: PrInspectDeps): ChatTool[] {
 export const PR_INSPECT_TOOL_NAMES = ["pr_inspect", "pr_files", "pr_diff", "pr_checks", "pr_check_log", "pr_discussion", "pr_text"] as const;
 
 // The repositories ORBIT works with are the ones ORBIT_ROUTINE_REPOS names; the token is read when used (never cached here).
-export function selectPrInspect(env: NodeJS.ProcessEnv, repos: Map<string, string>, fetcher?: Fetch): ChatTool[] {
-  return prInspectTools({ token: () => credential(env, "orbit.github-orbit-prs"), repos: () => [...new Set(repos.values())], fetcher });
+export function selectPrInspect(env: NodeJS.ProcessEnv, repos: Map<string, string>, jobs?: () => Job[], fetcher?: Fetch): ChatTool[] {
+  return prInspectTools({ token: () => credential(env, "orbit.github-orbit-prs"), repos: () => [...new Set(repos.values())], fetcher, jobs });
 }

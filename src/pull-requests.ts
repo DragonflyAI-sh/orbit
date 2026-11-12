@@ -107,7 +107,7 @@ export async function postParts(comments: CommentPort, repo: string, pull: numbe
 
 export type PullPort = {
   // "no-branch" when orbit/<job> does not exist in the repo; otherwise the PR, new or already there.
-  open(repo: string, job: string, title: string, body: string): Promise<{ status: "no-branch" } | { status: "opened" | "exists"; url: string; head?: { ref: string; repo: string } }>;
+  open(repo: string, job: string, title: string, body: string): Promise<{ status: "no-branch" } | { status: "opened" | "exists"; url: string; head?: { ref: string; repo: string }; headSha?: string }>;
 };
 
 export async function httpFailure(what: string, res: Response): Promise<never> {
@@ -138,6 +138,9 @@ export function githubCaller(token: string, fetcher: Fetch = fetch) {
   };
 }
 
+// A full lowercase commit id, or nothing: anything else is not recorded as a SHA.
+const commitSha = (v: unknown): string | undefined => (typeof v === "string" && /^[0-9a-f]{40}$/.test(v) ? v : undefined);
+
 export function githubPulls(token: string, fetcher: Fetch = fetch): PullPort {
   const call = githubCaller(token, fetcher);
   const fail = httpFailure;
@@ -150,16 +153,16 @@ export function githubPulls(token: string, fetcher: Fetch = fetch): PullPort {
       const owner = repo.split("/")[0];
       const existing = await call("GET", `/repos/${repo}/pulls?state=all&head=${encodeURIComponent(`${owner}:${branch}`)}`);
       if (!existing.ok) return fail("Looking for an existing pull request", existing);
-      const found = (await existing.json()) as { html_url?: string; head?: { ref?: string; repo?: { full_name?: string } | null } }[];
+      const found = (await existing.json()) as { html_url?: string; head?: { ref?: string; sha?: string; repo?: { full_name?: string } | null } }[];
       if (found[0]?.html_url) {
         const head = found[0].head;
-        return { status: "exists", url: found[0].html_url, head: head?.ref && head.repo?.full_name ? { ref: head.ref, repo: head.repo.full_name } : undefined };
+        return { status: "exists", url: found[0].html_url, head: head?.ref && head.repo?.full_name ? { ref: head.ref, repo: head.repo.full_name } : undefined, ...(commitSha(head?.sha) ? { headSha: commitSha(head?.sha) } : {}) };
       }
       const made = await call("POST", `/repos/${repo}/pulls`, { title, head: branch, base: "main", body });
       if (!made.ok) return fail("Opening the pull request", made);
-      const pr = (await made.json()) as { html_url?: string };
+      const pr = (await made.json()) as { html_url?: string; head?: { sha?: string } };
       if (!pr.html_url) throw new Error("GitHub opened the pull request but returned no URL");
-      return { status: "opened", url: pr.html_url };
+      return { status: "opened", url: pr.html_url, ...(commitSha(pr.head?.sha) ? { headSha: commitSha(pr.head?.sha) } : {}) };
     },
   };
 }
@@ -171,7 +174,7 @@ export function selectPulls(env: NodeJS.ProcessEnv): PullPort | undefined {
 
 // Registers on the job registry: a complete `done` summary, from the API or from git, opens at most one PR per job. A summary that
 // arrived only in part waits for the rest from git; one over the size limit is reported and not turned into a PR.
-export function pullRequestOpener(jobs: Jobs, repos: Map<string, string>, pulls: PullPort | undefined, notify: Notifier, now: () => Date = () => new Date(), onOpened?: (job: Job, url: string) => void, comments?: CommentPort) {
+export function pullRequestOpener(jobs: Jobs, repos: Map<string, string>, pulls: PullPort | undefined, notify: Notifier, now: () => Date = () => new Date(), onOpened?: (job: Job, url: string, headSha?: string) => void, comments?: CommentPort) {
   const inFlight = new Set<string>();
   const PR_URL = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/;
 
@@ -240,7 +243,7 @@ export function pullRequestOpener(jobs: Jobs, repos: Map<string, string>, pulls:
       if (runnerOpened) notify.send(`PR ${result.url} for job ${job.id} was opened by the runner, not by ORBIT. ORBIT is reviewing it anyway.`, false);
       if (opened || runnerOpened) {
         try {
-          onOpened?.(jobs.get(job.id) ?? job, result.url);
+          onOpened?.(jobs.get(job.id) ?? job, result.url, result.headSha);
         } catch (err) {
           console.error(JSON.stringify({ at: new Date().toISOString(), review: String(err) }));
         }
