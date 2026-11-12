@@ -81,7 +81,7 @@ export type SpendView = {
   uncertainRequests: number;
 };
 
-export const toMicro = (usd: number): number => Math.ceil(usd * 1_000_000 - 1e-9);
+export const toMicro = (usd: number): number => Math.ceil(usd * 1_000_000 - 1e-9) + 0; // + 0: never -0
 export const toUsd = (micro: number): number => micro / 1_000_000;
 const isMicro = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
 const utcDay = (d: Date) => d.toISOString().slice(0, 10);
@@ -119,7 +119,7 @@ export type SpendLedger = {
 
 // Test seams. Production passes none of them.
 export type SpendOptions = {
-  // How long one call waits for the lock before it is refused (never before it takes it). Default 3000 ms.
+  // How long one call waits for the lock before it is refused (never before it takes it). Default 250 ms: the wait is synchronous and blocks ORBIT's event loop for at most this long.
   lockWaitMs?: number;
   // Called at named points inside a critical section ("locked", "loaded", "tmp-written", "renamed", "written", "marker-tmp-written", "marker-written",
   // "breaking"); it may throw or kill the process to simulate a fault there.
@@ -188,7 +188,7 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
   }
   const at = (name: string) => join(dir!, name);
   const file = dir ? at(LEDGER_FILE) : undefined;
-  const lockWaitMs = opts.lockWaitMs ?? 3000;
+  const lockWaitMs = opts.lockWaitMs ?? 250;
   const fault = opts.fault ?? (() => {});
   const me: ProcId = { ...selfIdentity(), ...opts.identity, inst: randomUUID() };
   let memory: Ledger | undefined;
@@ -196,6 +196,8 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
   let seen = { seq: 0, lifetime: 0 };
   // Set when the lock was found taken over while we held it: nothing more is written by this instance.
   let poisoned: string | undefined;
+  // Set once this process has read a valid ledger. A ledger and marker that are BOTH gone after that are a loss, never a first run.
+  let known = false;
 
   const bad = (m: string): never => {
     throw new SpendError("ledger", `The spend ledger is not usable (${m}), so no paid call is made. Fix or restore the ledger file; it is never reset automatically.`);
@@ -367,11 +369,32 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
     }
   };
 
-  // Removes a lock whose owner is proven dead. The check and the delete happen under a momentary guard so two breakers cannot both
-  // act, and the guard is only ever created while the lock is held by that dead owner: the file cannot change hands under us.
+  // Removes a lock whose owner is proven dead. Breakers are serialised by a momentary guard that is scoped to THAT dead lock (its token is
+  // in the guard's name) and numbered: `openrouter-spend.lock.break.<lock token>.<n>`. A guard is only ever created while that dead
+  // owner's lock is in place, so nobody else can change the lock in the meantime. A breaker that dies holding guard n leaves it behind;
+  // the next breaker supersedes it by creating n+1 (exclusive, so only one wins) but ONLY when guard n's owner is proven dead by the same
+  // proof as for locks. A guard whose owner is alive or cannot be proven gone is waited for (fail closed, busy), never removed.
+  const TOKEN = /^[A-Za-z0-9-]{1,64}$/;
+  const guardNumbers = (prefix: string): number[] => {
+    try {
+      return readdirSync(dir!)
+        .filter((f) => f.startsWith(prefix) && /^\d{1,9}$/.test(f.slice(prefix.length)))
+        .map((f) => Number(f.slice(prefix.length)));
+    } catch {
+      return [];
+    }
+  };
   const breakDead = (dead: LockRec) => {
+    if (!TOKEN.test(dead.tok)) return; // a forged or odd token never becomes part of a file name; the lock stays (busy)
+    const prefix = `${LOCK_FILE}.break.${dead.tok}.`;
+    const top = Math.max(0, ...guardNumbers(prefix));
+    if (top > 0) {
+      const g = readLock(`${prefix.slice(0)}${top}`);
+      if (g === undefined) return; // just removed by its owner: look again on the next turn
+      if (g === "garbled" || livenessOf(g, me) !== "dead") return; // held, or not provably gone: wait
+    }
     const rec: LockRec = { ...me, tok: randomUUID(), at: now().toISOString() };
-    if (!tryLink(`${LOCK_FILE}.break`, rec)) return;
+    if (!tryLink(`${prefix}${top + 1}`, rec)) return;
     try {
       const cur = readLock(LOCK_FILE);
       if (cur && cur !== "garbled" && cur.tok === dead.tok && livenessOf(cur, me) === "dead") {
@@ -379,10 +402,13 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
         unlinkSync(at(LOCK_FILE));
       }
     } finally {
-      try {
-        unlinkSync(at(`${LOCK_FILE}.break`));
-      } catch {
-        // already gone
+      // The dead lock is gone (or was never ours to break): every guard for it, ours and any dead predecessor's, is now meaningless.
+      for (const n of guardNumbers(prefix)) {
+        try {
+          unlinkSync(at(`${prefix}${n}`));
+        } catch {
+          // already gone
+        }
       }
     }
   };
@@ -444,9 +470,14 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
     if (life === undefined || today === undefined || today > life) return bad("the provision file's opening amounts are not valid (today cannot exceed lifetime)");
     const note = typeof p.note === "string" ? p.note.replace(/\s+/g, " ").trim().slice(0, 200) : "no note";
     if (marker) {
-      if (p.acknowledgeLoss !== true || p.openingLifetimeUsd === undefined || p.openingTodayUsd === undefined) {
+      if (p.acknowledgeLoss !== true) {
         return bad("a history marker exists, so this is a recovery: the provision file must set acknowledgeLoss true and state openingLifetimeUsd and openingTodayUsd");
       }
+    }
+    // No silent fresh budget: even the first provisioning states the spend so far (0 is a statement, not a default), because after a total
+    // loss of the state directory a first provisioning cannot be told from a recovery.
+    if (p.openingLifetimeUsd === undefined || p.openingTodayUsd === undefined) {
+      return bad("the provision file must state openingLifetimeUsd and openingTodayUsd (0 only if the key has really spent nothing); a ledger is never created with an assumed empty history");
     }
     return { lifetimeMicro: life, todayMicro: today, note: note || "no note", recover: Boolean(marker) };
   };
@@ -460,10 +491,16 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
     }
   };
 
-  // Ledger stray temp files can only come from a writer that died or failed; under the lock no writer is active.
+  // Stray temp files can only come from a writer that died or failed; under the lock no ledger writer is active. Lock and guard files
+  // (`openrouter-spend.lock.*`: token temp files, break guards, the pre-guard-numbering `.break`) are removed only when over a minute old: a
+  // live process holds one for milliseconds, and one that stalls longer merely fails its own link, it can never gain a lock by it. This
+  // process holds the lock itself, so the lock file (a different name) is never touched.
   const sweepTmp = () => {
     try {
-      for (const f of readdirSync(dir!)) if (f.startsWith(`${LEDGER_FILE}.new.`) || f.startsWith(`${MARKER_FILE}.new.`)) unlinkSync(at(f));
+      for (const f of readdirSync(dir!)) {
+        if (f.startsWith(`${LEDGER_FILE}.new.`) || f.startsWith(`${MARKER_FILE}.new.`)) unlinkSync(at(f));
+        else if (f.startsWith(`${LOCK_FILE}.`) && Date.now() - statSync(at(f)).mtimeMs > 60_000) unlinkSync(at(f));
+      }
     } catch {
       // best effort
     }
@@ -477,11 +514,15 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
     }
     const l = readLedgerFile();
     const m = readMarker();
+    // Both files gone after this process read the ledger is a loss, not a first run. Only the explicit startup step with a recovery request
+    // (which must acknowledge the loss and state the spend) may proceed.
+    if (!l && !m && known && !provision) return bad("the ledger file and its history marker have both disappeared since this process last read it: spend since then is unknown");
+    if (l) known = true;
     if (!l) {
       if (!provision) {
         throw new SpendError("ledger", m ? "The spend ledger file is missing although a history marker shows one existed, so spend since then is unknown and no paid call is made. It is never recreated automatically." : "The spend ledger has not been provisioned, so no paid call is made. It is never created automatically.");
       }
-      const open = readProvision(m);
+      const open = readProvision(m ?? (known ? ({ schema: 1, epoch: "lost", createdAt: "" } as Marker) : undefined));
       if (!open) {
         throw new SpendError("ledger", m ? "The spend ledger file is missing although a history marker shows one existed, so spend since then is unknown and no paid call is made. See the recovery steps in docs/openrouter-ledger-integrity.md." : "The spend ledger has not been provisioned, so no paid call is made. See docs/openrouter-ledger-integrity.md.");
       }
@@ -604,6 +645,8 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
         if (!dir) return memory ? { state: "ok", view: viewOf(memory) } : { state: "unprovisioned", requested: false };
         const l = readLedgerFile();
         const m = readMarker();
+        if (!l && known) return { state: "failed", reason: "the spend ledger file and its history marker have both disappeared since this process last read it (loss; spend since then is unknown)" };
+        if (l) known = true;
         if (!l) {
           if (m) return { state: "failed", reason: "the spend ledger file is missing although a history marker shows one existed (possible loss; spend since then is unknown)" };
           return { state: "unprovisioned", requested: readText(at(PROVISION_FILE)) !== undefined };

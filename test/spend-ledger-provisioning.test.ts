@@ -8,6 +8,7 @@ import { LEDGER_FILE, MARKER_FILE, PROVISION_FILE, SpendError, spendLedger } fro
 // B8: a missing ledger is never a fresh budget. Local markers are the narrow design here; they detect deletion of the ledger file
 // alone, not loss of the whole state directory (documented in docs/openrouter-ledger-integrity.md).
 
+const FIRST = JSON.stringify({ openingLifetimeUsd: 0, openingTodayUsd: 0, note: "test" });
 const NOW = () => new Date("2026-11-12T10:00:00Z");
 const caps = { dailyMicro: 5_000_000, totalMicro: 150_000_000 };
 const dir = () => mkdtempSync(join(tmpdir(), "orbit-prov-"));
@@ -27,7 +28,7 @@ test("no ledger and no provision request: startup, view, reserve and status all 
 
 test("a provision request is applied ONLY by the explicit startup step, once, and is retired as used", () => {
   const d = dir();
-  writeFileSync(join(d, PROVISION_FILE), "{}");
+  writeFileSync(join(d, PROVISION_FILE), FIRST);
   const l = L(d);
   // Polling status and an ordinary call do not apply it.
   assert.deepEqual(l.inspect(), { state: "unprovisioned", requested: true });
@@ -49,7 +50,7 @@ test("a provision request is applied ONLY by the explicit startup step, once, an
 
 test("ledger deleted after provisioning: every path refuses, nothing is recreated, even with a stale provision file left over", () => {
   const d = dir();
-  writeFileSync(join(d, PROVISION_FILE), "{}");
+  writeFileSync(join(d, PROVISION_FILE), FIRST);
   const l = L(d);
   l.open();
   l.settle(l.reserve(1000).id, 800);
@@ -65,13 +66,13 @@ test("ledger deleted after provisioning: every path refuses, nothing is recreate
   writeFileSync(join(d, PROVISION_FILE), "{}");
   refuses(() => L(d).open(), /history marker exists, so this is a recovery/);
   writeFileSync(join(d, PROVISION_FILE), JSON.stringify({ acknowledgeLoss: true }));
-  refuses(() => L(d).open(), /must set acknowledgeLoss true and state openingLifetimeUsd and openingTodayUsd/);
+  refuses(() => L(d).open(), /must state openingLifetimeUsd and openingTodayUsd/);
   assert.ok(!existsSync(join(d, LEDGER_FILE)));
 });
 
 test("recovery after a loss is deliberate and states the spend: the opening balance is charged and recorded, the old identity is not reused", () => {
   const d = dir();
-  writeFileSync(join(d, PROVISION_FILE), "{}");
+  writeFileSync(join(d, PROVISION_FILE), FIRST);
   L(d).open();
   const oldEpoch = JSON.parse(readFileSync(join(d, MARKER_FILE), "utf8")).epoch;
   rmSync(join(d, LEDGER_FILE));
@@ -101,7 +102,7 @@ test("a provision request with invalid amounts or text is refused and consumed b
 
 test("a provision request never overwrites or resets an existing ledger, and an existing ledger is never replaced", () => {
   const d = dir();
-  writeFileSync(join(d, PROVISION_FILE), "{}");
+  writeFileSync(join(d, PROVISION_FILE), FIRST);
   const l = L(d);
   l.open();
   l.settle(l.reserve(1000).id, 800);
@@ -118,7 +119,7 @@ test("a ledger that does not belong to its marker (replaced or restored from ano
   const a = dir();
   const b = dir();
   for (const x of [a, b]) {
-    writeFileSync(join(x, PROVISION_FILE), "{}");
+    writeFileSync(join(x, PROVISION_FILE), FIRST);
     L(x).open();
   }
   const foreign = readFileSync(join(b, LEDGER_FILE));
@@ -132,7 +133,7 @@ test("a ledger that does not belong to its marker (replaced or restored from ano
 
 test("a lost marker does not lose spend: the ledger is authoritative and the marker is written again from it; a schema 1 ledger is upgraded", () => {
   const d = dir();
-  writeFileSync(join(d, PROVISION_FILE), "{}");
+  writeFileSync(join(d, PROVISION_FILE), FIRST);
   const l = L(d);
   l.open();
   l.settle(l.reserve(1000).id, 800);
@@ -151,7 +152,7 @@ test("a lost marker does not lose spend: the ledger is authoritative and the mar
 test("a crash during provisioning never leaves a marker without a ledger: the request is simply applied again at the next start", () => {
   for (const point of ["tmp-written", "renamed", "written"]) {
     const d = dir();
-    writeFileSync(join(d, PROVISION_FILE), "{}");
+    writeFileSync(join(d, PROVISION_FILE), FIRST);
     const l = spendLedger(d, caps, NOW, {
       fault: (p) => {
         if (p === point) throw new Error("injected crash");

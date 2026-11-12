@@ -19,6 +19,7 @@ import { rig, say } from "./threads-fixture.ts";
 // Nothing reaches OpenRouter or any paid service: the provider is a fake fetch, time is a variable, the ledger is a temp directory.
 // Names and helpers repeat openrouter-fallback.test.ts on purpose: this file must also load against the previous src.
 
+const FIRST = JSON.stringify({ openingLifetimeUsd: 0, openingTodayUsd: 0, note: "test" });
 const KEY = ["sk", "or", "v1", "abcdef0123456789abcdef0123456789"].join("-");
 const MIN = 60_000;
 const T0 = Date.parse("2026-11-12T10:00:00Z");
@@ -328,7 +329,7 @@ const statusWorld = (spec: Spec | ((n: number) => Spec) = { json: completion({ c
   const p = provider(spec);
   const model = fallbackModel({ primary: primaryOf(script), config: ready(), ledger, fetcher: p.fetcher, now: () => t });
   const init = () => {
-    writeFileSync(join(d, PROVISION_FILE), "{}");
+    writeFileSync(join(d, PROVISION_FILE), FIRST);
     ledger.open();
   };
   return { model, ledger, d, p, init, file: join(d, "openrouter-spend.json"), advance: (ms: number) => void (t += ms) };
@@ -343,7 +344,7 @@ test("B12: polling status never creates, adopts into, or rewrites the ledger and
   assert.doesNotMatch(detail, /armed:/, "an unprovisioned ledger is not 'armed'");
   assert.match(detail, /NOT armed, no paid call will be made: the spend ledger has not been provisioned/);
   // A waiting provision request is reported, but a poll never applies it.
-  writeFileSync(join(w.d, PROVISION_FILE), "{}");
+  writeFileSync(join(w.d, PROVISION_FILE), FIRST);
   for (let i = 0; i < 5; i++) assert.match(w.model.status().detail, /a provision request is waiting and is applied when ORBIT next starts/);
   assert.deepEqual(readdirSync(w.d), [PROVISION_FILE], "status neither created a ledger nor consumed the request");
   assert.equal(w.p.log.requests, 0);
@@ -395,7 +396,7 @@ test("B12: ledger failure transitions: armed -> corrupt -> restored, and armed -
   assert.match(w.model.status().detail, /fallback armed/);
   rmSync(w.file);
   const gone = w.model.status();
-  assert.match(gone.detail, /NOT armed.*missing although a history marker shows one existed/);
+  assert.match(gone.detail, /NOT armed.*(missing although a history marker shows one existed|both disappeared since this process last read it)/);
   assert.equal(gone.state, "down");
   assert.ok(!existsSync(w.file), "status did not recreate a deleted ledger");
   assert.equal(w.p.log.requests, 0);
