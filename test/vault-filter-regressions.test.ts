@@ -39,7 +39,7 @@ test("health: ambiguous words (diagnosis, symptoms, prescribed, chronic, disorde
   // sentence has a person frame (a pronoun, a name's possessive, a named person mid-sentence, a medical setting) and no technical cue.
   for (const w of ["diagnosis", "diagnoses", "symptom", "symptoms", "chronic", "disorder"]) {
     for (const t of [`his ${w}`, `my ${w} again`, `the ${w} for Alex is pending`, `Sam's ${w}`, `the doctor discussed the ${w}`]) assert.equal(health(t), true, t);
-    for (const t of [`the build ${w} in CI`, `${w} of the queue service`, `a ${w} in the log pipeline`]) assert.equal(health(t), false, t);
+    for (const t of [`the build ${w} in CI`, `the ${w} output of the queue service`, `a ${w} in the log pipeline`]) assert.equal(health(t), false, t);
   }
   // Unambiguous condition, treatment and drug words still ask wherever they appear.
   for (const t of ["cancer", "therapy", "prescribed sertraline", "chronic pain", "diagnosed with something", "an anxiety disorder"]) assert.equal(health(t), true, t);

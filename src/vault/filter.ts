@@ -96,6 +96,22 @@ const classesOf = (s: string): number => [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/
 
 // ---- credential-assignment ---------------------------------------------------------------------------------------------------------
 
+// Path and file-name exemption. A value is a path only when it has path structure AND no segment of it is an opaque random run: a
+// slash, a leading "/" or "~/", or a file extension is never enough by itself (a base64 secret access key may contain "/" and can
+// even end in something that reads as an extension). The shape check above handles the 40-character AWS secret access key form;
+// opaqueSegment handles other generated values that were split by slashes or dots.
+const AWS_SECRET_SHAPE = /^[A-Za-z0-9/+]{40}$/;
+const opaqueSegment = (seg: string): boolean => {
+  const s = seg.replace(/\.[A-Za-z0-9]{1,5}$/, "");
+  if (s.length < 20 || wordLikeRun(s.replace(/[^A-Za-z0-9_-]/g, ""))) return false;
+  return /[a-z]/.test(s) && /[A-Z]/.test(s) && /\d/.test(s);
+};
+const opaqueSegments = (t: string): boolean => t.split(/[\\/]/).some(opaqueSegment);
+function looksLikePath(t: string): boolean {
+  const structured = /^(?:\.{0,2}\/|~\/|[A-Za-z]:[\\/])/.test(t) || /^[\w.-]+\/[\w./-]+$/.test(t);
+  return structured && !opaqueSegments(t);
+}
+
 // A name that says "credential": the keyword may sit inside a longer identifier (DB_PASSWORD, github_token, clientSecret).
 const KEY = /([\w.-]*(?:passw(?:or)?d|passwd|passphrase|secret|token|api[ _-]?key|access[ _-]?key|private[ _-]?key|auth[ _-]?key|credentials?|cookie|session[_-]?id|authorization)[\w.-]*)(["']?[ \t]*[=:][ \t]*)/gi;
 const PASSWORD_NAME = /passw(?:or)?d|passwd|passphrase/i;
@@ -115,8 +131,8 @@ function tokenLooksSecret(key: string, token: string): boolean {
   if (!t || PLACEHOLDER.test(t) || DATE_LIKE.test(t) || /^\d+$/.test(t) && t.length < 12) return false;
   if (/^(?:none|null|nil|true|false|yes|no|n\/a|na|tbd|todo|unset|empty|optional|required|pass|ok|redacted)$/i.test(t)) return false;
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t) && !/^[a-z][a-z0-9+.-]*:\/\/[^\s/@]*@/i.test(t)) return false; // a URL without credentials
-  if (/^(?:\.{0,2}\/|~\/|[A-Za-z]:[\\/])/.test(t) || /^[\w.-]+\/[\w./-]+$/.test(t)) return false; // a path
-  if (FILE_EXT.test(t)) return false;
+  if (AWS_SECRET_SHAPE.test(t) && classesOf(t.replace(/[+/=]/g, "")) >= 3) return true; // 40 base64 characters with upper, lower and digits: a secret even when a "/" makes it look like a path
+  if (looksLikePath(t) || FILE_EXT.test(t) && !opaqueSegments(t)) return false; // a path or an ordinary file name
   if (wordish(key, t)) return false;
   if (PASSWORD_NAME.test(key)) return (t.length >= 6 && classesOf(t) >= 2) || t.length >= 12;
   return (t.length >= 16 && classesOf(t) >= 2 && /[A-Za-z]/.test(t) && /[\d\W_]/.test(t)) || t.length >= 24;
@@ -146,8 +162,9 @@ function valueSpan(text: string, from: number, key: string): { start: number; en
   // Several words: only the first word is a candidate, and only when it is a strong credential shape; the rest is prose after it.
   if (rest && !(first.length >= 8 && classesOf(first) >= 3 && /\d/.test(first) && !wordish(key, first))) return undefined;
   if (!tokenLooksSecret(key, first)) return undefined;
+  const trimmed = first.replace(/[.,;:)\]}]+$/, ""); // the same trim tokenLooksSecret judged, so the masked span is the judged span
   const off = lead[0].indexOf(first);
-  return { start: i + off, end: i + off + first.length };
+  return { start: i + off, end: i + off + trimmed.length };
 }
 
 function assignmentHits(text: string, out: Hit[]): void {
@@ -305,6 +322,20 @@ export function maskJsonStrings(text: string): string {
     const masked = maskVaultText(decoded);
     return masked === decoded ? whole : `"${encodeJsonString(masked)}${close}`;
   });
+}
+
+// Masking for stored text that may be JSON or plain: a tool call's summary is JSON text clipped to 300 characters on success but the
+// plain error message on failure, and arguments/output are JSON. Valid JSON is masked by its string literals only (everything outside
+// them is JSON syntax). Anything else (plain text, a clipped JSON prefix, an error that quotes JSON) gets both passes: the JSON-string
+// pass for literals that carry escaped line breaks, then the plain-text pass over the whole text, so a known credential value does not
+// survive in either shape.
+export function maskStoredText(text: string): string {
+  try {
+    JSON.parse(text);
+    return maskJsonStrings(text);
+  } catch {
+    return maskVaultText(maskJsonStrings(text));
+  }
 }
 
 // The same masking applied to every string inside a value (objects, arrays), for tool output and cards.

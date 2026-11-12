@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { redact } from "./ops/protocol.ts";
-import { maskJsonStrings, maskVaultText } from "./vault/filter.ts";
+import { maskStoredText, maskVaultText } from "./vault/filter.ts";
 import type { FallbackInfo } from "./model.ts";
 
 // Server-owned chat threads. One JSON file per thread in <state>/threads/, written atomically; the in-memory copy is
@@ -39,7 +39,7 @@ const isOpsTool = (name: string): boolean => /^(?:ops_|orbit_)/.test(name);
 
 export function maskCall(call: StoredCall): StoredCall {
   if (isOpsTool(call.name)) return maskDeep(call);
-  return { ...call, arguments: maskJsonStrings(call.arguments), output: maskJsonStrings(call.output), summary: maskJsonStrings(call.summary), ...(call.source !== undefined ? { source: maskContent(call.source) } : {}) };
+  return { ...call, arguments: maskStoredText(call.arguments), output: maskStoredText(call.output), summary: maskStoredText(call.summary), ...(call.source !== undefined ? { source: maskContent(call.source) } : {}) };
 }
 
 export function maskDeep<T>(value: T): T {
