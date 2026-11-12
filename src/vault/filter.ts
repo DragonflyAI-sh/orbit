@@ -7,12 +7,15 @@
 // The two refined rules:
 //  - secret.credential-assignment: `<name containing password|secret|token|api key|credential|...> = / : <value>`. Before, any value
 //    counted, including the "**" of a markdown heading such as "**Credential:** ..." and the file name in "some-credential-note.md:".
-//    Now the value must itself look like a secret (see valueLooksSecret). A markdown wrapper never decides the outcome: it is
-//    stripped and the value inside (or, for a bare wrapper, the next word) is judged.
+//    Now the whole value (a quoted string to its closing quote, an unquoted value to the end of the line) is judged by valueLooksSecret:
+//    conservative under strong credential names, with narrow exemptions for placeholders, stop words, dates and credential prose.
+//    A markdown wrapper never decides the outcome: it is skipped and the value inside is judged.
 //  - secret.long-opaque: a run of 32+ letters, digits, "_" and "-". Before, kebab-case note names and wikilinks matched. Now a run is
 //    exempt only when it is made of 3+ short lowercase words (see wordLikeRun). A path or a wikilink around the run is never a
 //    reason to exempt it: the same test applies to the run wherever it sits, and mixed case, digits mixed into letters, long
-//    segments and vowel-less segments all keep the run flagged.
+//    segments and vowel-less segments all keep the run flagged. Known limitation (docs/content-filter.md): outside an assignment this
+//    also exempts a 33-character repeated-letter run and a dash-separated diceware-style passphrase; inside a credential assignment
+//    the value is screened by the rule above instead. This filter does not block every real secret.
 //
 // Matched values are never returned or logged: a finding is a stable rule identifier plus a line number.
 
@@ -32,6 +35,8 @@ const SHA1 = /^[0-9a-f]{40}$/;
 const WRAP = /[*_`~[\](){}<>#|!"']/;
 const FILE_EXT = /\.(md|ts|js|mjs|json|ya?ml|txt|toml|sh|py|css|html|canvas|csv|log)$/i;
 const PROSE_AFTER_SCHEME = new Set(["tokens", "token", "authentication", "authorization", "auth", "header", "headers", "credentials", "scheme", "schemes", "prefix", "realm", "flow", "style", "type"]);
+// Under a password-like name these are weak passwords as much as placeholders, so they are not stop words there.
+const WEAK_AS_PASSWORD = new Set(["yes", "no", "true", "false", "pass", "ok"]);
 const STOP = new Set(["none", "null", "nil", "true", "false", "yes", "no", "n/a", "na", "tbd", "todo", "redacted", "unset", "empty", "optional", "required", "pass", "ok"]);
 
 // A run of letters/digits/_/- that reads as short lowercase words, like a note name. Deliberately strict: everything else stays flagged.
@@ -94,22 +99,59 @@ const strip = (v: string): string => {
 const STRONG_KEY = /passw(?:or)?d|passphrase|secret|token|api[ _-]?key|authorization|credential|private[ _-]?key|cookie|session[_-]?id/i;
 const DATE_LIKE = /^(?:\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z?)?|\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?|v?\d+(?:\.\d+){1,3})$/;
 
-// Whether the value after `name = / :` looks like a credential. A markdown wrapper or a path around it changes nothing.
-//  - a name with only "pass" in it (PASS: / passed: / bypass:) is a test verdict far more often than a credential, so its value must
-//    look like a generated password: 10+ characters mixing upper case, lower case and digits;
-//  - otherwise 8+ characters count, a password-like name is held to 4+, and shorter values count only when they mix three kinds of
-//    character; a bare date, time or version number, and a pure number under 10 digits, are not secrets.
-function valueLooksSecret(key: string, raw: string): boolean {
-  const v = strip(raw);
-  if (!v || STOP.has(v.toLowerCase())) return false;
-  if (!STRONG_KEY.test(key)) return v.length >= 10 && /[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v);
+// A value that is plainly a stand-in, not a credential: <your-token> (letters only inside), ${TOKEN}, {{token}}, %TOKEN%, or a run
+// of x / * / dots. Anything with digits, spaces or mixed content inside the brackets is not a placeholder.
+const PLACEHOLDER = /^(?:<[A-Za-z][A-Za-z_-]*>|\$\{?[A-Za-z_]\w*\}?|\{\{\s*[A-Za-z_][\w.-]*\s*\}\}|%[A-Za-z_]\w*%|[xX*•.…#_-]{3,})$/;
+// Words that make an unquoted multi-word value read as a sentence about a credential rather than a credential.
+const FUNCTION_WORDS = new Set(["the", "a", "an", "in", "on", "of", "to", "is", "are", "was", "be", "and", "or", "for", "with", "not", "no", "by", "it", "its", "this", "that", "at", "from", "as", "when", "if", "see", "only", "never", "never", "are", "lives", "kept"]);
+const TECH_WORDS = new Set(["store", "stored", "vault", "host", "env", "environment", "variable", "config", "configuration", "rotate", "rotated", "rotates", "expire", "expires", "expired", "header", "manager", "keychain", "file", "endpoint", "api", "key", "keys", "token", "tokens", "password", "passwords", "secret", "secrets", "credential", "credentials", "service", "server", "never", "budget", "limit", "scope", "bearer", "oauth", "login", "refresh"]);
+
+const unescapeQuoted = (s: string): string => s.replace(/\\(.)/g, "$1");
+
+// The value of a credential assignment: what follows `name = / :`, up to the end of the line, a ";" or a "|" (a markdown table cell),
+// or the whole quoted string when the value is quoted ("..." or '...', with \" escapes; an unclosed quote runs to the end of the
+// line). A markdown wrapper in front (`**`, `_`, backticks) is skipped. Empty means there is no value on this line.
+function assignmentValue(raw: string): { text: string; quoted: boolean; raw: string } {
+  const lead = raw.replace(/^[\s*_`~]+/, "");
+  const q = lead[0];
+  if (q === '"' || q === "'") {
+    let i = 1;
+    while (i < lead.length && lead[i] !== q) i += lead[i] === "\\" ? 2 : 1;
+    const inner = unescapeQuoted(lead.slice(1, i));
+    return { text: inner, quoted: true, raw: inner };
+  }
+  const whole = lead.trimEnd();
+  return { text: strip(whole), quoted: false, raw: whole.replace(/[.,:;]+$/, "") };
+}
+
+// Whether the value after `name = / :` looks like a credential. The WHOLE value is judged, not its first word:
+//  - a name that is not a strong credential name (a bare "pass": PASS: / passed: / bypass:) is a test verdict far more often than a
+//    credential, so its value must look generated: 10+ characters mixing upper case, lower case and digits (first word if unquoted);
+//  - under a strong name (password, passphrase, secret, token, api key, credential, private key, cookie, session id, authorization)
+//    the screen is conservative: any value of 4+ characters counts (3+ for password-like names), quoted or not, one word or many.
+//    What does not count: an empty value (a bare markdown heading), the stop words below, a bare date, time or version number, a
+//    number under 10 digits (under a password-like name, 4+ digits count), a placeholder (see PLACEHOLDER), and an UNQUOTED
+//    multi-word value that is plainly a sentence about credentials (2+ function words and a credential/technical word, such as
+//    "an API key lives in the host's secret store"). A quoted value never gets the sentence exemption.
+function valueLooksSecret(key: string, value: { text: string; quoted: boolean; raw: string }): boolean {
+  const t = value.text.trim();
+  if (!t) return false;
+  const lower = t.toLowerCase();
+  if (!STRONG_KEY.test(key)) {
+    const first = value.quoted ? t : strip(t.split(/\s+/)[0]!);
+    return first.length >= 10 && /[a-z]/.test(first) && /[A-Z]/.test(first) && /\d/.test(first);
+  }
   const passwordLike = /passw(?:or)?d|passphrase/i.test(key);
-  if (DATE_LIKE.test(v)) return false;
-  if (/^\d+$/.test(v)) return passwordLike ? v.length >= 4 : v.length >= 10;
-  if (v.length >= 8) return true;
-  if (passwordLike && v.length >= 4) return true;
-  const kinds = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter((r) => r.test(v)).length;
-  return v.length >= 5 && kinds >= 3;
+  if (PLACEHOLDER.test(value.raw.trim()) || DATE_LIKE.test(t)) return false;
+  if (STOP.has(lower) && !(passwordLike && WEAK_AS_PASSWORD.has(lower))) return false;
+  if (/^\d+$/.test(t)) return passwordLike ? t.length >= 4 : t.length >= 10;
+  const words = t.split(/\s+/);
+  if (words.length > 1 && !value.quoted) {
+    const fn = words.filter((w) => FUNCTION_WORDS.has(strip(w).toLowerCase())).length;
+    const tech = words.some((w) => TECH_WORDS.has(strip(w).toLowerCase().replace(/['’]s$/, "")));
+    if (fn >= 2 && tech) return false;
+  }
+  return t.length >= (passwordLike ? 3 : 4);
 }
 
 type Rule = { id: FilterRule; re: RegExp; replace: (m: RegExpExecArray, text: string) => string | undefined };
@@ -138,18 +180,17 @@ const RULES: Rule[] = [
   { id: "secret.jwt", re: /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]*)?/g, replace: () => "[redacted jwt]" },
   {
     id: "secret.credential-assignment",
-    re: /([\w.-]*(?:pass(?:word|wd)?|secret|token|api[ _-]?key|authorization|credential|private[ _-]?key|cookie|session[_-]?id)[\w.-]*)(["']?\s*[=:]\s*["']?)([^\s"',;&]+)/gi,
-    replace: (m, text) => {
-      const [whole, key, sep, value] = m as unknown as [string, string, string, string];
+    // key, separator, the rest of the value on the line (or the whole quoted string), and the next line when it is indented (a YAML
+    // style "password:" followed by an indented value; only judged when nothing follows the name on its own line).
+    re: /([\w.-]*(?:pass(?:word|wd)?|secret|token|api[ _-]?key|authorization|credential|private[ _-]?key|cookie|session[_-]?id)[\w.-]*)(["']?[ \t]*[=:][ \t]*)((?:[*_`~]*[ \t]*)?(?:"(?:[^"\\\n]|\\.)*(?:"|(?=\n|$))|'(?:[^'\\\n]|\\.)*(?:'|(?=\n|$))|[^\n;|]*))((?:\n[ \t]+(?![ \t]|[-*+#>]|\d+[.)]\s)[^\n;|]*)?)/gi,
+    replace: (m) => {
+      const [, key, sep, value, next] = m as unknown as [string, string, string, string, string];
       if (FILE_EXT.test(key)) return undefined; // "some-token-note.md:" names a file, it is not an assignment
-      let judged = value;
-      if (!strip(value)) {
-        // A bare wrapper such as "**" after "Credential:" decides nothing: judge the word that follows it.
-        const next = /^\s*(\S+)/.exec(text.slice((m.index ?? 0) + whole.length));
-        if (!next) return undefined;
-        judged = next[1]!;
-      }
-      return valueLooksSecret(key, judged) ? `${key}${sep}[redacted]` : undefined;
+      const own = assignmentValue(value);
+      if (own.text.trim() || own.quoted) return valueLooksSecret(key, own) ? `${key}${sep}[redacted]${next}` : undefined;
+      // Nothing after the name on its own line (a bare markdown heading, or a bare wrapper such as "**"): only an indented
+      // continuation line is a value.
+      return next.trim() && valueLooksSecret(key, assignmentValue(next)) ? `${key}${sep}${value}[redacted]` : undefined;
     },
   },
   // Routine trigger ids are masked everywhere (trig_…last4), so they are never written into a note or an export.
