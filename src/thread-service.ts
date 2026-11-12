@@ -148,6 +148,7 @@ export function threadService(d: {
         let source: string;
         let capped = false;
         let fallback: FallbackInfo | undefined;
+        let accounting: string[] | undefined;
         if (prep.tools.length && model.step) {
           const outcome = await runChat({
             model,
@@ -156,6 +157,8 @@ export function threadService(d: {
             notes,
             tools: prep.tools,
             allow: prep.allow,
+            // The owner's interactive chat is the one place a tool-using turn may use the paid fallback.
+            fallback: true,
             onCall: ({ call_id, name, arguments: args, output, record }) => {
               threads.addCall(id, mid, { callId: call_id, name, arguments: args, output, ok: record.ok, provenance: record.provenance, source: record.source, summary: record.summary, at: now().toISOString() });
               const pid = proposalIdOf(output);
@@ -168,14 +171,16 @@ export function threadService(d: {
           fallback = outcome.fallback;
           source = replySource(model.status().impl, fallback, outcome.mixed);
           capped = outcome.capped;
+          accounting = outcome.accounting;
         } else {
           const r = await model.reply(buildMessages(t), prep.limits, notes);
           reply = r.value;
           provenance = r.provenance;
           source = r.source;
           fallback = r.fallback;
+          accounting = r.accounting;
         }
-        threads.patchMessage(id, mid, { text: reply, status: "done", provenance, source, memory: prep.memory, ...(capped ? { capped } : {}), ...(fallback ? { fallback } : {}) });
+        threads.patchMessage(id, mid, { text: reply, status: "done", provenance, source, memory: prep.memory, ...(capped ? { capped } : {}), ...(fallback ? { fallback } : {}), ...(accounting?.length ? { accounting } : {}) });
         recent?.consider(id, { isOwner: prep.isOwner });
         return { thread: view(id)! };
       } catch (err) {

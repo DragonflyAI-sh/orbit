@@ -86,7 +86,7 @@ const world = (opts: { script: (Step | Error)[] | ((n: number) => Step | Error);
   const model = fallbackModel({ primary, config: cfg, ledger, fetcher: or.fetcher, now });
   return { model, primary, or, ledger, d, advance: (ms: number) => void (t += ms), now };
 };
-const ask = (m: ModelPort, tools: ToolDef[] = []) => m.step!([{ role: "user", content: "hi" }], [], undefined, tools);
+const ask = (m: ModelPort, tools: ToolDef[] = [], opts: { fallback?: boolean } = { fallback: true }) => m.step!([{ role: "user", content: "hi" }], [], undefined, tools, opts);
 const tool = (name: string): ToolDef => ({ name, description: name, parameters: { type: "object", properties: {} } });
 
 // ---- configuration ----------------------------------------------------------------------------------------------------
@@ -303,13 +303,13 @@ test("through the chat loop: a refused fallback tool never runs, and an allowed 
     { name: "jobs_list", description: "j", parameters: {}, run: async () => (listed++, { value: [], provenance: "live", source: "jobs" }) },
   ];
   const w = world({ script: [usageLimit()], replies: (n) => (n === 0 ? toolAnswer("jobs_list", {}) : answer("no jobs")) });
-  const out = await runChat({ model: w.model, messages: [{ role: "user", content: "jobs?" }], limits: [], tools });
+  const out = await runChat({ model: w.model, messages: [{ role: "user", content: "jobs?" }], limits: [], tools, fallback: true });
   assert.equal(out.text, "no jobs");
   assert.equal(listed, 1);
   assert.equal(notified, 0);
   assert.equal(out.fallback?.model, "vendor/cheap-model");
   const w2 = world({ script: [usageLimit()], replies: [toolAnswer("notify", { text: "x" })] });
-  await assert.rejects(runChat({ model: w2.model, messages: [{ role: "user", content: "x" }], limits: [], tools }), /Nothing was run/);
+  await assert.rejects(runChat({ model: w2.model, messages: [{ role: "user", content: "x" }], limits: [], tools, fallback: true }), /Nothing was run/);
   assert.equal(notified, 0);
 });
 
@@ -320,7 +320,7 @@ test("no tool side effect is replayed: a mid-reply limit continues from the reco
     script: (n) => (n === 0 ? { text: "", calls: [call("jobs_list", {})] } : usageLimit(new Date(T0 + 60 * MIN).toISOString())),
     replies: [answer("one job: job-1")],
   });
-  const out = await runChat({ model: w.model, messages: [{ role: "user", content: "jobs?" }], limits: [], tools });
+  const out = await runChat({ model: w.model, messages: [{ role: "user", content: "jobs?" }], limits: [], tools, fallback: true });
   assert.equal(ran, 1);
   assert.equal(out.text, "one job: job-1");
   assert.equal(out.mixed, true);
@@ -563,30 +563,164 @@ test("config: oversized caps are unavailable with a reason, and the ledger error
   assert.throws(() => spendLedger(dir(), { dailyMicro: toMicro(1), totalMicro: toMicro(1e10) }), (e: unknown) => e instanceof SpendError && /no larger/.test(e.message));
 });
 
-test("client: a failing ledger write on an error path does not hide the provider error or leak a path", async () => {
-  const d = dir();
+// A ledger whose settle (and optionally release) fails, with a path in the failure that must never be shown.
+const brokenLedger = (d: string) => {
   const ledger = spendLedger(d, { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
-  const real = ledger.settle.bind(ledger);
-  let boom = false;
-  const guarded = { ...ledger, settle: (...a: Parameters<typeof real>) => (boom ? (() => { throw new Error(`EISDIR ${d}/openrouter-spend.json.new`); })() : real(...a)) };
-  const client = openrouterClient(ready({ ORBIT_OPENROUTER_TIMEOUT_MS: "1000" }), guarded, fakeOpenRouter([{ hang: true }]).fetcher);
-  boom = true;
-  await assert.rejects(client.step([{ role: "user", content: "hi" }], [], undefined, []), (e: unknown) => e instanceof ProviderError && /no answer within/.test(e.message) && /spend accounting also failed/.test(e.message) && !e.message.includes(d));
+  const boom = () => {
+    throw new Error(`EISDIR ${d}/openrouter-spend.json.new`);
+  };
+  return { ...ledger, settle: boom, release: boom } as typeof ledger;
+};
+
+test("client: a failing ledger write on an error path does not hide the provider error or leak a path (diagnostic is structured)", async () => {
+  const d = dir();
+  const client = openrouterClient(ready({ ORBIT_OPENROUTER_TIMEOUT_MS: "1000" }), brokenLedger(d), fakeOpenRouter([{ hang: true }]).fetcher);
+  await assert.rejects(client.step([{ role: "user", content: "hi" }], [], undefined, []), (e: unknown) => {
+    assert.ok(e instanceof ProviderError);
+    assert.match(e.message, /no answer within/);
+    assert.equal(e.accounting?.length, 1);
+    assert.match(e.message, /Spend accounting: the ledger could not record this call/);
+    assert.ok(!e.message.includes(d));
+    return true;
+  });
 });
 
-test("client: a billed answer survives a failing settle and says so", async () => {
+test("client: provider HTTP errors plus ledger errors report both, as data and in the owner-visible message", async () => {
   const d = dir();
-  const ledger = spendLedger(d, { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
-  const guarded = { ...ledger, settle: () => { throw new Error(`EISDIR ${d}`); } };
-  const client = openrouterClient(ready(), guarded, fakeOpenRouter([answer("paid answer")]).fetcher);
+  for (const status of [429, 500]) {
+    const client = openrouterClient(ready(), brokenLedger(d), fakeOpenRouter([{ status, body: { error: { message: "upstream said no" } } }]).fetcher);
+    await assert.rejects(client.step([{ role: "user", content: "hi" }], [], undefined, []), (e: unknown) => {
+      assert.ok(e instanceof ProviderError);
+      assert.match(e.message, new RegExp(`HTTP ${status}: upstream said no`));
+      assert.deepEqual(e.accounting?.length, 1);
+      assert.match(e.message, /Spend accounting:/);
+      assert.ok(!e.message.includes(d) && !e.message.includes(KEY));
+      return true;
+    });
+  }
+});
+
+test("client: a billed answer survives a failing settle; the diagnostic is structured, not text", async () => {
+  const d = dir();
+  const client = openrouterClient(ready(), brokenLedger(d), fakeOpenRouter([answer("paid answer")]).fetcher);
   const s = await client.step([{ role: "user", content: "hi" }], [], undefined, []);
-  assert.match(s.text, /^paid answer/);
-  assert.match(s.text, /Spend accounting note/);
-  assert.ok(!s.text.includes(d));
+  assert.equal(s.text, "paid answer");
+  assert.equal(s.accounting?.length, 1);
+  assert.ok(!JSON.stringify(s).includes(d));
+});
+
+test("client: a billed tool-call-only reply with empty content keeps its calls and surfaces the ledger error", async () => {
+  const d = dir();
+  const client = openrouterClient(ready(), brokenLedger(d), fakeOpenRouter([toolAnswer("jobs_list", {})]).fetcher);
+  const s = await client.step([{ role: "user", content: "hi" }], [], undefined, [tool("jobs_list")]);
+  assert.equal(s.text, "");
+  assert.equal(s.calls.length, 1);
+  assert.equal(s.accounting?.length, 1);
+  // A billed answer that is then refused for another reason still reports the failed write.
+  const bad = openrouterClient(ready(), brokenLedger(d), fakeOpenRouter([{ body: { choices: [{ finish_reason: "stop", message: { content: "" } }], usage: { cost: 0.0001 } } }]).fetcher);
+  await assert.rejects(bad.step([{ role: "user", content: "hi" }], [], undefined, []), (e: unknown) => e instanceof ProviderError && /no text and no tool call/.test(e.message) && e.accounting?.length === 1);
 });
 
 test("client: a non-JSON balance body is reported without echoing it", async () => {
   const ledger = spendLedger(undefined, { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
   const client = openrouterClient(ready(), ledger, fakeOpenRouter([{ text: "<html>secret-ish-body" }]).fetcher);
   await assert.rejects(client.balance(), (e: unknown) => e instanceof ProviderError && /unreadable body/.test(e.message) && !/secret-ish/.test(e.message));
+});
+
+// ---- regression: PR59 review follow-ups --------------------------------------------------------------------------------
+
+test("step(): tool-using turns never spend the paid fallback unless opted in; opted-out and default paths issue zero requests", async () => {
+  const reset = new Date(T0 + 60 * MIN).toISOString();
+  const w = world({ script: [usageLimit(reset)] });
+  // No options (a caller that does not know about the fallback), explicit false, and a repeat while the limit is in force.
+  await assert.rejects(w.model.step!([{ role: "user", content: "hi" }], [], undefined, [tool("jobs_list")]), (e: unknown) => e instanceof ProviderError && e.kind === "usage_limit");
+  await assert.rejects(ask(w.model, [tool("jobs_list")], {}), (e: unknown) => e instanceof ProviderError && e.kind === "usage_limit");
+  await assert.rejects(ask(w.model, [tool("jobs_list")], { fallback: false }), ProviderError);
+  await assert.rejects(w.model.reply([{ role: "user", content: "s" }], [], undefined, { fallback: false }), ProviderError);
+  assert.equal(w.or.requests.length, 0, "fake provider counter: zero paid requests");
+  assert.equal(w.ledger.view().lifetimeUsd, 0);
+  assert.equal(w.ledger.view().reservedUsd, 0);
+  // Opted in: the same limit is served and counted exactly once.
+  assert.equal((await ask(w.model, [tool("jobs_list")], { fallback: true })).fallback?.provider, "openrouter");
+  assert.equal(w.or.requests.length, 1);
+});
+
+test("runChat: no paid fallback by default; the interactive caller opts in explicitly", async () => {
+  const tools: ChatTool[] = [{ name: "jobs_list", description: "j", parameters: {}, run: async () => ({ value: [], provenance: "live", source: "jobs" }) }];
+  const w = world({ script: [usageLimit(new Date(T0 + 60 * MIN).toISOString())] });
+  await assert.rejects(runChat({ model: w.model, messages: [{ role: "user", content: "x" }], limits: [], tools }), (e: unknown) => e instanceof ProviderError && e.kind === "usage_limit");
+  await assert.rejects(runChat({ model: w.model, messages: [{ role: "user", content: "x" }], limits: [], tools, fallback: false }), ProviderError);
+  assert.equal(w.or.requests.length, 0);
+  const out = await runChat({ model: w.model, messages: [{ role: "user", content: "x" }], limits: [], tools, fallback: true });
+  assert.equal(out.fallback?.provider, "openrouter");
+  assert.equal(w.or.requests.length, 1);
+});
+
+test("a fallback model whose primary is not limited never touches the provider, whatever the options", async () => {
+  const w = world({ script: [say("fine")] });
+  assert.equal((await ask(w.model, [], {})).text, "fine");
+  assert.equal(w.or.requests.length, 0);
+});
+
+test("runChat: accounting diagnostics from a tool-call-only round are kept for the owner and never fed back to the model", async () => {
+  const d = dir();
+  const reset = new Date(T0 + 60 * MIN).toISOString();
+  const ledger = brokenLedger(d);
+  const or = fakeOpenRouter((n) => (n === 0 ? toolAnswer("jobs_list", {}) : answer("no jobs")));
+  const model = fallbackModel({ primary: primaryModel([usageLimit(reset)]), config: ready(), ledger, fetcher: or.fetcher, now: () => T0 });
+  const tools: ChatTool[] = [{ name: "jobs_list", description: "j", parameters: {}, run: async () => ({ value: [], provenance: "live", source: "jobs" }) }];
+  const out = await runChat({ model, messages: [{ role: "user", content: "jobs?" }], limits: [], tools, fallback: true });
+  assert.equal(out.text, "no jobs");
+  assert.ok(out.accounting && out.accounting.length >= 1);
+  assert.ok(!out.text.includes("accounting"));
+  assert.equal(or.requests.length, 2);
+  for (const r of or.requests) assert.ok(!JSON.stringify(r.body.messages).toLowerCase().includes("accounting"), "diagnostics never reach a model request");
+  // A later round that fails does not lose the earlier diagnostic.
+  const or2 = fakeOpenRouter((n) => (n === 0 ? toolAnswer("jobs_list", {}) : { status: 500, body: { error: { message: "down" } } }));
+  const model2 = fallbackModel({ primary: primaryModel([usageLimit(reset)]), config: ready(), ledger: brokenLedger(d), fetcher: or2.fetcher, now: () => T0 });
+  await assert.rejects(runChat({ model: model2, messages: [{ role: "user", content: "jobs?" }], limits: [], tools, fallback: true }), /Spend accounting/);
+});
+
+test("server and thread UI: diagnostics reach the owner on /chat and on the stored thread message, and stay out of the next model turn", async () => {
+  const d = dir();
+  const reset = new Date(Date.now() + 60 * MIN).toISOString();
+  const or = fakeOpenRouter((n) => (n % 2 === 0 ? toolAnswer("jobs_list", {}) : answer("no jobs right now")));
+  const model = fallbackModel({ primary: primaryModel([usageLimit(reset)]), config: ready(), ledger: brokenLedger(d), fetcher: or.fetcher });
+  const r = rig({ model });
+  const t = await r.create("x");
+  const res = await r.send(t.id, "what jobs?");
+  assert.equal(res.status, 200);
+  const last = res.data.thread.messages.at(-1);
+  assert.equal(last.text, "no jobs right now");
+  assert.ok(last.accounting.length >= 1 && last.accounting.every((a: string) => !a.includes(d)));
+  const stored = (await r.api(`/threads/${t.id}`)).data.thread.messages.at(-1);
+  assert.deepEqual(stored.accounting, last.accounting);
+  // The next turn's model request is built from the stored text only.
+  const before = or.requests.length;
+  await r.send(t.id, "and again?");
+  for (const q of or.requests.slice(before)) assert.ok(!JSON.stringify(q.body.messages).toLowerCase().includes("accounting"));
+  // The direct /chat route returns them next to the reply.
+  const chat = await r.api("/chat", "POST", { messages: [{ role: "user", content: "what jobs?" }] });
+  assert.equal(chat.status, 200);
+  assert.ok(chat.data.reply.accounting.length >= 1);
+  assert.equal(chat.data.reply.value, "no jobs right now");
+  // The page renders them.
+  assert.match(readFileSync(new URL("../src/web/index.html", import.meta.url), "utf8"), /Spend accounting: \$\{m\.accounting/);
+  r.close();
+});
+
+test("thread turn: provider error plus ledger error shows both on the failed message and the diagnostic is not model-visible", async () => {
+  const d = dir();
+  const reset = new Date(Date.now() + 60 * MIN).toISOString();
+  const or = fakeOpenRouter([{ status: 500, body: { error: { message: "down" } } }]);
+  const model = fallbackModel({ primary: primaryModel([usageLimit(reset)]), config: ready(), ledger: brokenLedger(d), fetcher: or.fetcher });
+  const r = rig({ model });
+  const t = await r.create("x");
+  const res = await r.send(t.id, "hello");
+  const last = res.data.thread.messages.at(-1);
+  assert.equal(last.status, "error");
+  assert.match(last.error, /HTTP 500: down/);
+  assert.match(last.error, /Spend accounting:/);
+  assert.ok(!last.error.includes(d));
+  r.close();
 });

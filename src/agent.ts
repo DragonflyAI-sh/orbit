@@ -28,7 +28,8 @@ export type CallRecord = {
 };
 
 // `fallback` is set when any round was answered by the OpenRouter fallback; `mixed` when other rounds of the same reply came from the primary.
-export type ChatOutcome = { text: string; calls: CallRecord[]; rounds: number; capped: boolean; fallback?: FallbackInfo; mixed?: boolean };
+// `accounting`: spend-accounting diagnostics from every round, for the owner. Never put into `input`, so no later model turn sees them as prose.
+export type ChatOutcome = { text: string; calls: CallRecord[]; rounds: number; capped: boolean; fallback?: FallbackInfo; mixed?: boolean; accounting?: string[] };
 
 const def = (t: ChatTool): ToolDef => ({ name: t.name, description: t.description, parameters: t.parameters });
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}… (truncated)` : s);
@@ -42,6 +43,8 @@ export async function runChat(options: {
   // Policy hook: returns an error string when the call is refused.
   allow?: (tool: string) => string | undefined;
   maxRounds?: number;
+  // Whether the paid fallback model may answer these rounds. Off unless the caller says so: only the interactive owner chat does.
+  fallback?: boolean;
   // Called after each tool call has run, with exactly what the model is about to see. A thread stores it here, call by call,
   // so a later failure cannot lose the calls that already happened. A throw ends the turn.
   onCall?: (done: { call_id: string; name: string; arguments: string; output: string; record: CallRecord }) => void | Promise<void>;
@@ -54,12 +57,21 @@ export async function runChat(options: {
   const calls: CallRecord[] = [];
   let fallback: FallbackInfo | undefined;
   let primaryRounds = 0;
-  const provenance = () => (fallback ? { fallback, ...(primaryRounds ? { mixed: true } : {}) } : {});
+  const accounting: string[] = [];
+  const provenance = () => ({ ...(fallback ? { fallback, ...(primaryRounds ? { mixed: true } : {}) } : {}), ...(accounting.length ? { accounting: [...accounting] } : {}) });
 
   for (let round = 0; ; round++) {
     const capped = round >= maxRounds;
     // At the cap the model gets no tools, so it has to answer with what it has.
-    const step = await model.step(input, limits, notes, capped ? [] : tools.map(def));
+    let step;
+    try {
+      step = await model.step(input, limits, notes, capped ? [] : tools.map(def), { fallback: options.fallback === true });
+    } catch (err) {
+      // Diagnostics from earlier rounds are not lost because a later round failed.
+      if (accounting.length && err instanceof Error) err.message = `${err.message} Spend accounting from earlier rounds: ${accounting.join("; ")}.`;
+      throw err;
+    }
+    for (const a of step.accounting ?? []) if (!accounting.includes(a)) accounting.push(a);
     if (step.fallback) fallback = step.fallback;
     else primaryRounds += 1;
     if (!step.calls.length || capped) {

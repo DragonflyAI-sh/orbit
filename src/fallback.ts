@@ -97,8 +97,9 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     `ChatGPT ${l.kind === "usage_limit" ? "usage limit" : "rate limit"}, ${l.estimated ? `no reset time given, ORBIT's own pause (an estimate) until ${iso(l.until)}` : `resets at ${iso(l.until)}`}`;
 
   // The original refusal, with what the fallback could not do, so the caller sees both and nothing is hidden.
-  const augment = (err: ProviderError, detail: string) =>
-    new ProviderError(err.kind, `${err.message.replace(/\s*$/, "")} The OpenRouter fallback did not answer: ${detail}`, err.resetsAt, err.code);
+  // `accounting` is the structured spend diagnostic of the failed paid call, kept as data on the error.
+  const augment = (err: ProviderError, detail: string, accounting?: string[]) =>
+    new ProviderError(err.kind, `${err.message.replace(/\s*$/, "")} The OpenRouter fallback did not answer: ${detail}`, err.resetsAt, err.code, accounting ?? err.accounting);
 
   const viaFallback = async (cause: ProviderError | undefined, input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], paidOk = true): Promise<Step> => {
     const l = limit!;
@@ -119,12 +120,12 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     } catch (err) {
       lastFallbackError = err instanceof Error ? err.message : String(err);
       if (err instanceof SpendError) throw augment(stand, err.message);
-      throw augment(stand, lastFallbackError);
+      throw augment(stand, lastFallbackError, err instanceof ProviderError ? err.accounting : undefined);
     }
     lastFallbackError = undefined;
     const outside = paid.calls.find((c) => !names.has(c.name));
     if (outside) {
-      throw augment(stand, `it asked for the tool ${JSON.stringify(outside.name.slice(0, 60))}, which fallback mode does not allow. Nothing was run.`);
+      throw augment(stand, `it asked for the tool ${JSON.stringify(outside.name.slice(0, 60))}, which fallback mode does not allow. Nothing was run.`, paid.accounting);
     }
     lastUse = { at: iso(now()), ...(paid.costUsd !== undefined ? { costUsd: paid.costUsd } : {}) };
     const info: FallbackInfo = {
@@ -134,7 +135,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       primaryLimit: { until: iso(l.until), estimated: l.estimated },
       ...(paid.costUsd !== undefined ? { costUsd: paid.costUsd } : {}),
     };
-    return { text: paid.text, calls: paid.calls, fallback: info };
+    return { text: paid.text, calls: paid.calls, fallback: info, ...(paid.accounting?.length ? { accounting: paid.accounting } : {}) };
   };
 
   // One model turn: the primary unless its limit is still in force.
@@ -155,9 +156,11 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     }
   };
 
-  const step = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<Step> => {
+  // Tool-using turns never spend the paid fallback unless the caller says so (`fallback: true`); a caller that says nothing, or a
+  // background one, gets the limit as it is. reply() is the other way round (see ReplyOptions in model.ts).
+  const step = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], opts?: ReplyOptions): Promise<Step> => {
     if (!primary.step) throw new Error("This model cannot call tools.");
-    return turn(input, limits, notes, tools, () => primary.step!(input, limits, notes, tools));
+    return turn(input, limits, notes, tools, () => primary.step!(input, limits, notes, tools), opts?.fallback === true);
   };
 
   const spend = (): string => {
@@ -209,7 +212,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       if (primaryReply) return primaryReply;
       if (!s.text) throw new Error("response had no text");
       const used = s.fallback!;
-      return { value: s.text, provenance: "live" as const, source: replySource(primary.status().impl, used), fallback: used };
+      return { value: s.text, provenance: "live" as const, source: replySource(primary.status().impl, used), fallback: used, ...(s.accounting?.length ? { accounting: s.accounting } : {}) };
     },
 
     status(): PortStatus {
