@@ -397,10 +397,9 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
     for (;;) {
       if (tryLink(LOCK_FILE, rec)) break;
       const cur = readLock(LOCK_FILE);
-      if (cur !== undefined && cur !== "garbled" && livenessOf(cur, me) === "dead") {
-        breakDead(cur);
-        continue;
-      }
+      // Clearing a lock whose owner is proven dead does not skip the deadline below: if another breaker (or a stuck guard) is in the
+      // way, this call still gives up with "busy" instead of spinning.
+      if (cur !== undefined && cur !== "garbled" && livenessOf(cur, me) === "dead") breakDead(cur);
       if (Date.now() >= deadline) {
         throw new SpendError("busy", "The spend ledger is locked by another process, so this call is not made. Nothing was charged. A lock is never taken over on a timeout.");
       }
