@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync,
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { ZONE } from "../time.ts";
-import { applyEdit, classify, isOrbitLog, MAX_EDITS, MAX_NOTE, secretFindings, sha, summarize, VaultError } from "./edit.ts";
+import { applyEdit, classify, isOrbitLog, MAX_EDITS, MAX_NOTE, secretFindings, secretFindingsDetail, sha, summarize, VaultError } from "./edit.ts";
 import type { Applied, VaultEdit } from "./edit.ts";
 import { gitRunner } from "./git.ts";
 import type { GitRunner } from "./git.ts";
@@ -317,7 +317,7 @@ export function vaultClone(deps: VaultCloneDeps) {
     for (const edit of edits) {
       const applied: Applied = applyEdit(edit, read);
       if (secretFindings(applied.inserted)) {
-        fail("secret_refused", `The text for ${edit.path} contains something shaped like a secret, token, key or credential. Nothing was written, and nothing was redacted in its place: remove it and try again.`);
+        fail("secret_refused", `The text for ${edit.path} contains something shaped like a secret, token, key or credential (${secretFindingsDetail(applied.inserted)}; the text itself is not shown). Nothing was written, and nothing was redacted in its place: remove it and try again.`);
       }
       const verdict = classify(applied);
       if (verdict.kind === "refused") fail("policy_refused", verdict.reason);
@@ -337,7 +337,7 @@ export function vaultClone(deps: VaultCloneDeps) {
     const t = stamp(now());
     const logFile = `Log/${t.year}/${t.date}-orbit.md`;
     const line = `- ${t.time} orbit: ${summary ?? describe.join("; ")} (${actor})`;
-    if (secretFindings([line])) fail("secret_refused", "The log line for this change looks like it holds a secret. Nothing was written.");
+    if (secretFindings([line])) fail("secret_refused", `The log line for this change looks like it holds a secret (${secretFindingsDetail([line])}). Nothing was written.`);
     const existing = read(logFile);
     // The audit line is an append to the text as it will be after the explicit edits; it can never replace what is there.
     overlay.set(logFile, existing === undefined ? `# ${t.date} orbit\n\n${line}\n` : `${existing.endsWith("\n") ? existing : `${existing}\n`}${line}\n`);

@@ -205,7 +205,9 @@ test("limits: a note over the per-note limit and a set over the total limit are 
 test("secrets: a note with secret-shaped text is refused and neither the error, the job store nor the notification repeats it", async () => {
   const note = `# Setup\nthe key is ${FAKE_SECRET} keep it\n`;
   const { d, body } = await refused({ notes: { "Tasks/leaky.md": { content: note } } }, ["Tasks/leaky.md"], 422, /looks like it contains a secret/);
-  assert.deepEqual(body.context.problems, [{ path: "Tasks/leaky.md", code: "secret_detected" }]);
+  // The refusal names the stable rule and the line, never the matched text.
+  assert.deepEqual(body.context.problems, [{ path: "Tasks/leaky.md", code: "secret_detected", findings: [{ rule: "secret.long-opaque", line: 2 }, { rule: "secret.provider-token", line: 2 }] }]);
+  assert.match(body.error, /secret\.provider-token at line 2/);
   const everything = JSON.stringify([body, d.jobs.all(), d.events]);
   assert.ok(!everything.includes(FAKE_SECRET) && !everything.includes("the key is"));
   // The same for a note tagged #rai: private notes are never exported.
@@ -538,3 +540,22 @@ test("/jobs/launch passes the context list; a refusal returns the structured pro
   assert.equal(plain.status, 202);
 });
 
+
+test("vault filter on context export: headings, long note names and wikilinks export; a secret refuses with rule ids and no value, and does not retry", async () => {
+  const note = "# Plan\n\n**Credential:** the key lives on the host.\nsee [[orbit-next-compaction-empty-summary]] and Tasks/orbit-next-web-feedback-and-links.md\n";
+  const d = doubles({ notes: { "Tasks/orbit-next-filter-reliability-note.md": { content: note } } });
+  const ok = await d.launch("orbit", "x", undefined, ["Tasks/orbit-next-filter-reliability-note.md"]);
+  assert.equal(ok.code, 202, JSON.stringify(ok.body));
+  assert.equal(d.contexts[0].files.find((f) => f.path.endsWith("orbit-next-filter-reliability-note.md"))?.content, note, "exported whole, unmasked");
+
+  const value = "Zp4" + "Kw8Tn2Xc6Vb1Ld9Hq3Rm7Sj5Yf0Ga";
+  const bad = doubles({ notes: { "Tasks/orbit-next-long-kebab-name-for-display.md": { content: `# T\n\n**Credential:** ${value}\n` } } });
+  const r = await bad.launch("orbit", "x", undefined, ["Tasks/orbit-next-long-kebab-name-for-display.md"]);
+  assert.equal(r.code, 422);
+  const body = r.body as { error: string; context: { problems: { path: string; code: string; findings: { rule: string; line: number }[] }[] } };
+  assert.ok(body.error.includes("Tasks/orbit-next-long-kebab-name-for-display.md"), "the note name is shown, not [redacted]");
+  assert.match(body.error, /secret\.credential-assignment at line 3/);
+  assert.match(body.error, /separate launch and needs its own confirmation/);
+  assert.ok(!JSON.stringify(body).includes(value.slice(0, 10)));
+  assert.deepEqual([bad.briefs.length, bad.contexts.length, bad.fired.length, bad.jobs.list().length], [0, 0, 0, 0], "nothing was created, omitted or retried");
+});

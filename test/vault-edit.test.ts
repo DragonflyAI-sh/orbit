@@ -90,7 +90,8 @@ test("classify: the Journal rule, protected reasons and refusals", () => {
   assert.deepEqual(v({ op: "append_section", path: "Journal/j.md", heading: "## Plan", text: "- b" }), { kind: "direct" });
   assert.equal(v({ op: "replace_text", path: "Journal/j.md", find: "- a", replace: "- c" }).kind, "protected");
   assert.equal(v({ op: "append_section", path: "Projects/p.md", heading: "## Notes", text: "x" }).kind, "direct");
-  assert.equal(v({ op: "append_section", path: "Projects/p.md", heading: "## Notes", text: "diagnosed last week" }).kind, "protected");
+  assert.equal(v({ op: "append_section", path: "Projects/p.md", heading: "## Notes", text: "she was diagnosed with something last week" }).kind, "protected");
+  assert.equal(v({ op: "append_section", path: "Projects/p.md", heading: "## Notes", text: "diagnosed the failing build; symptoms: timeouts" }).kind, "direct");
   assert.equal(v({ op: "replace_text", path: "now.md", find: "now", replace: "later" }).kind, "direct");
   const r = classify(applyEdit({ op: "create_note", path: "Machines/laptop.md", content: "x" }, reader(files)));
   assert.equal(r.kind, "refused");
