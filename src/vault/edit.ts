@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { maskText } from "../threads.ts";
+import { describeFindings, hasVaultFindings, vaultFindings, type Finding } from "./filter.ts";
 
 // Pure parts of the vault write tools: the five edit operations, path validation and the write policy. Nothing here touches
 // the disk, git or the network; the clone (clone.ts) supplies the current text through `Read` and applies the result.
@@ -232,8 +232,24 @@ export function isTaggedRai(text: string): boolean {
 // Categories of sensitive personal detail that need Rai's confirmation before ORBIT records them (AGENTS.md section 4). This is a
 // keyword screen and errs toward asking: it can over-match, never under-match known words. A category already present in the
 // note is not "new", so adding to an established note is not blocked by what is already there.
+// Health: condition and treatment words always count. Words that are everyday technical vocabulary (diagnose, diagnostics,
+// diagnosis, symptom, chronic, disorder, prescribed) count only in a personal or medical construction, so a bug write-up that
+// "diagnoses" a failure or lists "symptoms" is not asked about, while "diagnosed with ...", "my symptoms", "chronic pain",
+// "prescribed antibiotics" or "an anxiety disorder" still are. When a phrase is both, the screen asks (it errs toward asking).
+const HEALTH = new RegExp(
+  [
+    "psychiatr\\w+|depress(?:ed|ion)|anxiety|cancer|hiv|pregnan\\w+|illness|surgery|medicat\\w+|therap(?:y|ist)\\w*|prescription\\w*|blood pressure|mental health",
+    "diagnosed (?:with|me|him|her|them)|diagnosis of|(?:my|his|her|their|your) (?:\\w+ )?diagnos(?:is|es|ed)",
+    "(?:my|his|her|their|your|having|experiencing|new) (?:\\w+ )?symptoms?",
+    "chronic (?:pain|illness|fatigue|condition|disease|migraines?|headaches?|insomnia|asthma|back|stress)",
+    "(?:anxiety|bipolar|eating|sleep|mood|personality|panic|autism|attention|mental|seizure|stress) disorders?|(?:my|his|her|their|your) disorder",
+    "prescribed (?:me|him|her|them|\\d+\\w*|an?|some|medication|medicine|drugs?|antibiotics?|pills?)",
+  ].join("|").replace(/^/, "\\b(?:").concat(")\\b"),
+  "i",
+);
+
 const SENSITIVE: [string, RegExp][] = [
-  ["health", /\b(diagnos\w*|prescri\w+|medicat\w+|therap(y|ist)\w*|psychiatr\w+|depress(ed|ion)|anxiety|disorder|surgery|cancer|hiv|pregnan\w+|chronic|illness|symptom\w*|blood pressure|mental health)\b/i],
+  ["health", HEALTH],
   ["finances", /\b(bank account|account number|routing number|credit card|salary|net worth|tax return|mortgage|debt|loan balance|income of)\b/i],
   ["identity documents", /\b(passport|social security|ssn|driver'?s licen[cs]e|national id|date of birth|home address)\b/i],
   ["sexual or relationship detail", /\b(sexual\w*|orientation|affair|divorce|breakup|dating)\b/i],
@@ -433,8 +449,20 @@ export function classify(applied: Applied): Verdict {
 
 // The secret check. Redaction exists to hide secrets in output; for a vault write ORBIT refuses instead, so redacted text is
 // never silently committed. Looks only at what the edit adds (an old note that already holds something odd does not block edits).
+// It uses the vault filter (filter.ts): the same rules as the global masker, with the two prose-prone ones (credential assignment,
+// long opaque run) judged by what the value looks like, so headings, note names, paths and wikilinks pass while real secrets do not.
 export function secretFindings(texts: string[]): boolean {
-  return texts.some((t) => maskText(t) !== t);
+  return texts.some(hasVaultFindings);
+}
+
+// The same check with where it fired: rule identifiers and a line number in the text that was checked, never the matched text.
+export function secretFindingsDetail(texts: string[]): string {
+  const parts: string[] = [];
+  texts.forEach((t, i) => {
+    const f: Finding[] = vaultFindings(t);
+    if (f.length) parts.push(`${describeFindings(f)}${texts.length > 1 ? ` of text ${i + 1}` : ""}`);
+  });
+  return parts.join("; ");
 }
 
 // ---- confirmation digest ---------------------------------------------------------------------------------------------------------
@@ -483,7 +511,7 @@ export function cardDisplay(edit: VaultEdit, reasons: string[]): Record<string, 
     throw new VaultError("policy_refused", `This protected change is ${change.length} characters, more than the ${CARD_MAX_CHARS} a confirmation card can show in full. ORBIT does not ask for approval of text Rai cannot see; split it into smaller edits. Nothing was written.`);
   }
   const display = { path: edit.path, operation: edit.op, why: reasons.join("; "), change };
-  if (Object.values(display).some((v) => maskText(v) !== v)) {
+  if (Object.values(display).some(hasVaultFindings)) {
     throw new VaultError("policy_refused", "This protected change contains text that would be masked on the confirmation card (it looks like a secret or credential), so the card could not show what would run. Nothing was written.");
   }
   return display;

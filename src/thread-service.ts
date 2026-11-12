@@ -8,6 +8,7 @@ import type { SysOps } from "./ops-sys.ts";
 import type { RecentContextRefresher } from "./recent-context.ts";
 import { buildItems, buildMessages, compactThread, dataBlock, summaryNote, summaryUnusable } from "./thread-context.ts";
 import { maskDeep, maskText, ThreadError } from "./threads.ts";
+import { maskVaultText } from "./vault/filter.ts";
 import type { Card, CardState, StoredCall, Thread, ThreadMessage, Threads } from "./threads.ts";
 
 // Runs one chat turn against a stored thread and shapes threads for the page. The server owns the policy checks and the
@@ -108,9 +109,12 @@ export function threadService(d: {
     const base = { id: p.id, state: "open" as const, createdAt: p.createdAt, expiresAt: p.expiresAt };
     if (p.kind === "job_launch") {
       const brief = maskText(p.brief);
-      return { ...base, kind: p.kind, routine: p.routine, brief, ...(brief !== p.brief ? { briefMasked: true } : {}), ...(p.context?.length ? { context: p.context.map(maskText) } : {}), ...(p.duplicates?.length ? { duplicates: p.duplicates } : {}) };
+      return { ...base, kind: p.kind, routine: p.routine, brief, ...(brief !== p.brief ? { briefMasked: true } : {}), ...(p.context?.length ? { context: p.context.map(maskVaultText) } : {}), ...(p.duplicates?.length ? { duplicates: p.duplicates } : {}) };
     }
     if (p.kind === "job_steer") return { ...base, kind: p.kind, job: p.job, text: maskText(p.text) };
+    // A vault edit card shows exactly what will run (cardDisplay refuses text the vault filter would mask), so it is masked by the
+    // same filter and a note name or path is not turned into "[redacted]"; every other card keeps the global masking.
+    if (p.kind === "vault_edit") return { ...base, kind: p.kind, action: p.action, summary: maskVaultText(p.summary), display: Object.fromEntries(Object.entries(p.display).map(([k, v]) => [k, typeof v === "string" ? maskVaultText(v) : v])) as typeof p.display, digest: p.digest };
     return { ...base, kind: p.kind, action: p.action, summary: maskText(p.summary), display: maskDeep(p.display), digest: p.digest, ...(p.kind === "ops_sys" ? { warnings: p.warnings.map(maskText) } : {}) };
   };
 

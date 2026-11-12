@@ -267,3 +267,24 @@ test("archive keeps the folder structure, never overwrites, and only moves notes
   await clone.write([E("create_note", { path: "Projects/alpha.md", content: "again" })], direct, meta);
   await rejects(clone.write([E("archive_note", { path: "Projects/alpha.md" })], direct, meta), "precondition_failed", /already exists/);
 });
+
+test("vault filter on the write path: ordinary headings, long note names and wikilinks are written; secrets are refused by rule id without the value", async () => {
+  const fx = makeFixture();
+  const clone = fx.make({ now: fixedNow });
+  const benign = "# Plan\n\n**Credential:** the key lives on the host.\n- see [[orbit-next-compaction-empty-summary]] and Tasks/orbit-next-web-feedback-and-links.md\n";
+  const made = await clone.write([E("create_note", { path: "Projects/orbit-next-filter-reliability-plan-notes.md", content: benign })], direct, meta);
+  assert.equal(made.status, "committed");
+  assert.equal(fx.remoteFile("Projects/orbit-next-filter-reliability-plan-notes.md"), benign);
+  assert.ok(fx.remoteFile(made.logFile).includes("orbit-next-filter-reliability-plan-notes.md"), "the audit line names the long path");
+  const value = "Qx7" + "Lm2Zp9Rt4Vb8Nc3Hd6Ks1Wf5Yg0Ja";
+  const before = fx.remoteHead();
+  for (const text of [`token: ${value}`, `**Credential:** ${value}`, `see [[orbit-next-${value}]]`, `Tasks/${value}.md`]) {
+    await assert.rejects(clone.write([E("append_section", { path: "Projects/alpha.md", heading: "## Notes", text })], direct, meta), (e: unknown) => {
+      assert.ok(e instanceof VaultError && e.code === "secret_refused");
+      assert.match(e.message, /secret\.[a-z-]+ at line 1/);
+      assert.ok(!e.message.includes(value.slice(0, 10)), "the value is not echoed");
+      return true;
+    });
+  }
+  assert.equal(fx.remoteHead(), before, "nothing was written, redacted or retried");
+});

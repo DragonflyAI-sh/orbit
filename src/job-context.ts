@@ -1,6 +1,6 @@
 import { secretFindings, sha, isTaggedRai, validatePath } from "./vault/edit.ts";
+import { describeFindings, maskVaultText, vaultFindings, type Finding } from "./vault/filter.ts";
 import type { VaultClone } from "./vault/clone.ts";
-import { maskText } from "./threads.ts";
 import type { ChatTool, Proposals } from "./agent.ts";
 
 // Vault context for a job: the exact vault notes a brief relies on, read by ORBIT at launch and committed to the job's control
@@ -24,7 +24,8 @@ export const MAX_CONTEXT_TOTAL_BYTES = 384 * 1024;
 const EXPORT_DIRS = ["System", "Projects", "Areas", "Resources", "Tasks"];
 
 export type ProblemCode = "invalid_path" | "not_allowed" | "duplicate" | "limit" | "missing" | "unsafe" | "too_large" | "unreadable" | "not_text" | "private_note" | "secret_detected";
-export type ContextProblem = { path?: string; code: ProblemCode };
+// `findings` (secret_detected only) are stable rule identifiers with line numbers in the note, never matched text.
+export type ContextProblem = { path?: string; code: ProblemCode; findings?: Finding[] };
 
 const REASON: Record<ProblemCode, string> = {
   invalid_path: "not a valid vault-relative path",
@@ -45,8 +46,8 @@ export type ContextRefusal = { ok: false; code: number; error: string; problems:
 const refuse = (code: number, problems: ContextProblem[], prefix: string): ContextRefusal => ({
   ok: false,
   code,
-  problems: problems.map((p) => (p.path === undefined ? p : { ...p, path: maskText(p.path).slice(0, 120) })),
-  error: `${prefix}${problems.length ? ` ${problems.map((p) => `${p.path !== undefined ? maskText(p.path).slice(0, 120) : "(context)"}: ${REASON[p.code]}`).join("; ")}.` : ""} No job was created and no runner was started.`,
+  problems: problems.map((p) => (p.path === undefined ? p : { ...p, path: maskVaultText(p.path).slice(0, 120) })),
+  error: `${prefix}${problems.length ? ` ${problems.map((p) => `${p.path !== undefined ? maskVaultText(p.path).slice(0, 120) : "(context)"}: ${REASON[p.code]}${p.findings?.length ? ` [${describeFindings(p.findings)}]` : ""}`).join("; ")}.` : ""} No job was created and no runner was started, and nothing was exported or omitted. To go on without a note, ask for a new launch that leaves it out and says the runner should read it from its own vault checkout; that is a separate launch and needs its own confirmation.`,
 });
 
 // The normalised path list, or the problems. Accepts only an array of strings; duplicates (also by case) are refused, not merged.
@@ -168,7 +169,7 @@ export async function prepareContext(input: unknown, deps: PrepareDeps): Promise
     if (r.content.includes("�")) problems.push({ path, code: "not_text" });
     else if (bytes > MAX_CONTEXT_FILE_BYTES) problems.push({ path, code: "too_large" });
     else if (isTaggedRai(r.content)) problems.push({ path, code: "private_note" });
-    else if (secretFindings([r.content])) problems.push({ path, code: "secret_detected" });
+    else if (secretFindings([r.content])) problems.push({ path, code: "secret_detected", findings: vaultFindings(r.content) });
     else {
       files.push({ path, content: r.content });
       total += bytes;
