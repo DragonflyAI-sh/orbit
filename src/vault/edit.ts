@@ -230,36 +230,64 @@ export function isTaggedRai(text: string): boolean {
 }
 
 // Categories of sensitive personal detail that need Rai's confirmation before ORBIT records them (AGENTS.md section 4). This is a
-// keyword screen and errs toward asking: it can over-match, never under-match known words. A category already present in the
-// note is not "new", so adding to an established note is not blocked by what is already there.
-// Health: condition and treatment words always count. Words that are everyday technical vocabulary (diagnose, diagnostics,
-// diagnosis, symptom, chronic, disorder, prescribed) count only in a personal or medical construction, so a bug write-up that
-// "diagnoses" a failure or lists "symptoms" is not asked about, while "diagnosed with ...", "my symptoms", "chronic pain",
-// "prescribed antibiotics" or "an anxiety disorder" still are. When a phrase is both, the screen asks (it errs toward asking).
-const HEALTH = new RegExp(
+// keyword screen. It is conservative, not complete: it asks for every occurrence of the condition-bearing words below unless the
+// sentence is demonstrably technical (see healthScreen), and it can still miss a disclosure that names a condition, drug or
+// treatment it does not list (the lists below are finite, and no word list can be a complete privacy control). A category
+// already present in the note is not "new", so adding to an established note is not blocked by what is already there.
+//
+// Health, in two tiers:
+//  - HEALTH_ALWAYS: condition, treatment and drug words (and "diagnosed with", "prescribed <thing>", "has a heart condition"
+//    style phrases). They count wherever they appear; there is no technical exemption for them.
+//  - HEALTH_AMBIGUOUS: words that are also everyday technical vocabulary, matched as broadly as before (diagnos*, prescri*,
+//    symptom*, chronic, disorder*, and "has a ... condition"). Each sentence containing one is flagged unless it is demonstrably
+//    technical: it has a technical cue word (service, build, queue, ...) and NO personal cue (a pronoun, a possessive such as
+//    "Sam's", "was diagnosed/prescribed", a medical-setting word such as doctor or clinic, or a capitalised name that does not
+//    start the sentence). A bare pronoun requirement is not used: names, possessives and passives are personal too.
+// Known limits: a technical sentence that also happens to hold a personal cue is asked about (over-matching); a disclosure that
+// uses none of the listed words, or hides a condition behind slang or a misspelling, is not caught.
+const HEALTH_ALWAYS = new RegExp(
   [
-    "psychiatr\\w+|depress(?:ed|ion)|anxiety|cancer|hiv|pregnan\\w+|illness|surgery|medicat\\w+|therap(?:y|ist)\\w*|prescription\\w*|blood pressure|mental health",
-    "diagnosed (?:with|me|him|her|them)|diagnosis of|(?:my|his|her|their|your) (?:\\w+ )?diagnos(?:is|es|ed)",
-    "(?:my|his|her|their|your|having|experiencing|new) (?:\\w+ )?symptoms?",
+    "psychiatr\\w+|psycholog\\w+|depress(?:ed|ion|ive)|anxiety|cancer|tumou?r|hiv|pregnan\\w+|illness|surgery|medicat\\w+|therap(?:y|ist)\\w*|prescription\\w*|blood pressure|mental health|antibiotics?",
+    "adhd|ocd|ptsd|bipolar|schizo\\w*|diabet\\w+|asthma\\w*|epilep\\w+|autis(?:m|tic)|dementia|alzheimer\\w*|parkinson\\w*|arthritis|anorexia|bulimi\\w+|migraines?|insomnia|dyslexi\\w+|leukemia|lymphoma|hepatitis|tuberculosis|covid\\w*",
+    "(?:heart|kidney|liver|lung|autoimmune|thyroid) (?:condition|disease|failure|attack|murmur|problems?|issues?)",
+    "sertraline|fluoxetine|prozac|zoloft|lexapro|escitalopram|citalopram|paroxetine|venlafaxine|bupropion|lithium|xanax|valium|klonopin|adderall|ritalin|insulin|metformin|statins?|ibuprofen|amoxicillin|opioids?|oxycodone|methadone|gabapentin|ozempic|antidepressants?|antipsychotics?",
+    "diagnosed (?:with|me|him|her|them)|diagnosis of",
+    "(?:was|were|been|got|being|is|are) (?:\\w+ )?prescribed|prescribed (?:me|him|her|them|\\d+\\w*|an?|some|medication|medicine|drugs?|pills?)",
     "chronic (?:pain|illness|fatigue|condition|disease|migraines?|headaches?|insomnia|asthma|back|stress)",
-    "(?:anxiety|bipolar|eating|sleep|mood|personality|panic|autism|attention|mental|seizure|stress) disorders?|(?:my|his|her|their|your) disorder",
-    "prescribed (?:me|him|her|them|\\d+\\w*|an?|some|medication|medicine|drugs?|antibiotics?|pills?)",
+    "(?:anxiety|bipolar|eating|sleep|mood|personality|panic|autism|attention|mental|seizure|stress) disorders?",
   ].join("|").replace(/^/, "\\b(?:").concat(")\\b"),
   "i",
 );
+const HEALTH_AMBIGUOUS = /\b(?:diagnos\w*|prescri\w+|symptom\w*|chronic|disorder\w*|(?:has|have|had|living with|suffers? from|suffering from|struggles? with) (?:an? |the )?(?:\w+ ){0,2}(?:condition|disease|syndrome))\b/i;
+const TECHNICAL_CUE = /\b(?:services?|servers?|systems?|build|builds|tests?|ci|cd|pipelines?|jobs?|queues?|logs?|errors?|failures?|failing|fails|timeouts?|retr(?:y|ies)|locks?|endpoints?|apis?|deploy\w*|latency|cpu|memory|disk|network|dns|databases?|db|cache|crash\w*|bugs?|incidents?|outages?|monitor\w*|metrics?|daemons?|process(?:es)?|runtime|kernel|https?|tls|ssl|containers?|hosts?|clusters?|events?|format|schema|config\w*|scripts?|code|stack|traces?|debug\w*|health checks?|dashboards?|race condition|regression)\b/i;
+const PERSONAL_CUE = /\b(?:my|me|mine|his|her|hers|him|their|them|your|yours|patients?|doctors?|dr|nurse|hospital|clinic\w*|medical|medicine|pharmac\w+|physician|gp)\b|\w['’]s\b|\b(?:was|were|been|got|being|is|are) (?:\w+ )?(?:diagnosed|prescribed)\b|\bdiagnosed with\b/i;
+// A capitalised word that is not the first of its sentence and not an acronym reads as a name ("... told Pat about ..."). Case-sensitive on purpose.
+const NAME_CUE = /(?<=[a-z,;:)] )[A-Z][a-z]+\b/;
 
-const SENSITIVE: [string, RegExp][] = [
-  ["health", HEALTH],
-  ["finances", /\b(bank account|account number|routing number|credit card|salary|net worth|tax return|mortgage|debt|loan balance|income of)\b/i],
-  ["identity documents", /\b(passport|social security|ssn|driver'?s licen[cs]e|national id|date of birth|home address)\b/i],
-  ["sexual or relationship detail", /\b(sexual\w*|orientation|affair|divorce|breakup|dating)\b/i],
-  ["religion or politics", /\b(religio\w+|church|synagogue|mosque|vote[ds]? for|political part\w+)\b/i],
-  ["legal or immigration", /\b(lawsuit|arrest\w*|convict\w*|criminal record|immigration|visa status|asylum|custody)\b/i],
-  ["family members' private details", /\b(my (son|daughter|child|kid|wife|husband|partner|mother|father)'?s? (health|diagnos\w+|school|grades))\b/i],
+function healthScreen(text: string): boolean {
+  if (HEALTH_ALWAYS.test(text)) return true;
+  for (const sentence of text.split(/(?<=[.!?])\s+|\n+/)) {
+    if (!HEALTH_AMBIGUOUS.test(sentence)) continue;
+    const technical = TECHNICAL_CUE.test(sentence) && !PERSONAL_CUE.test(sentence) && !NAME_CUE.test(sentence);
+    if (!technical) return true;
+  }
+  return false;
+}
+
+const SENSITIVE: [string, (t: string) => boolean][] = [
+  ["health", healthScreen],
+  ...([
+    ["finances", /\b(bank account|account number|routing number|credit card|salary|net worth|tax return|mortgage|debt|loan balance|income of)\b/i],
+    ["identity documents", /\b(passport|social security|ssn|driver'?s licen[cs]e|national id|date of birth|home address)\b/i],
+    ["sexual or relationship detail", /\b(sexual\w*|orientation|affair|divorce|breakup|dating)\b/i],
+    ["religion or politics", /\b(religio\w+|church|synagogue|mosque|vote[ds]? for|political part\w+)\b/i],
+    ["legal or immigration", /\b(lawsuit|arrest\w*|convict\w*|criminal record|immigration|visa status|asylum|custody)\b/i],
+    ["family members' private details", /\b(my (son|daughter|child|kid|wife|husband|partner|mother|father)'?s? (health|diagnos\w+|school|grades))\b/i],
+  ] as [string, RegExp][]).map(([n, re]): [string, (t: string) => boolean] => [n, (t) => re.test(t)]),
 ];
 
 export function sensitiveCategories(inserted: string, before: string): string[] {
-  return SENSITIVE.filter(([, re]) => re.test(inserted) && !re.test(before)).map(([name]) => name);
+  return SENSITIVE.filter(([, hit]) => hit(inserted) && !hit(before)).map(([name]) => name);
 }
 
 // ---- applying an edit ------------------------------------------------------------------------------------------------------------

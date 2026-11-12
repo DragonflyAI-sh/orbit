@@ -94,7 +94,7 @@ test("masking for vault display keeps note names and paths and still masks secre
   assert.equal(maskVaultText(`see [[orbit-next-web-feedback-and-links]] in ${name}`), `see [[orbit-next-web-feedback-and-links]] in ${name}`);
   assert.ok(maskText(name).includes("[redacted]"), "the global masker is unchanged");
   const k = random(40);
-  const masked = maskVaultText(`${name} ${k} token: ${random(20)} trig_${random(12)}`);
+  const masked = maskVaultText(`${name} ${k} token: ${random(20)}\ntrig_${random(12)}`); // an unquoted value runs to the end of its line, so the id is on its own line
   assert.ok(masked.includes(name) && !masked.includes(k) && masked.includes("[redacted]") && /trig_…/.test(masked));
   assert.equal(maskVaultText(`Tasks/${k}.md`).includes(k), false);
 });
