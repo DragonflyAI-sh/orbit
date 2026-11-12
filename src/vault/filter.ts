@@ -106,6 +106,10 @@ const PLACEHOLDER = /^(?:<[A-Za-z][A-Za-z_-]*>|\$\{?[A-Za-z_]\w*\}?|\{\{\s*[A-Za
 const FUNCTION_WORDS = new Set(["the", "a", "an", "in", "on", "of", "to", "is", "are", "was", "be", "and", "or", "for", "with", "not", "no", "by", "it", "its", "this", "that", "at", "from", "as", "when", "if", "see", "only", "never", "never", "are", "lives", "kept"]);
 const TECH_WORDS = new Set(["store", "stored", "vault", "host", "env", "environment", "variable", "config", "configuration", "rotate", "rotated", "rotates", "expire", "expires", "expired", "header", "manager", "keychain", "file", "endpoint", "api", "key", "keys", "token", "tokens", "password", "passwords", "secret", "secrets", "credential", "credentials", "service", "server", "never", "budget", "limit", "scope", "bearer", "oauth", "login", "refresh"]);
 
+// Plain connective words that appear in credential prose but are no credential content. Kept short and closed on purpose: a word
+// that is not in one of these three lists makes the whole unquoted value be judged as a credential.
+const PROSE_WORDS = new Set(["note", "notes", "commit", "committed", "git", "repo", "code", "docs", "chat", "here", "there", "ever", "any", "all", "but", "use", "used", "set", "kept", "stays", "lives"]);
+
 const unescapeQuoted = (s: string): string => s.replace(/\\(.)/g, "$1");
 
 // The value of a credential assignment: what follows `name = / :`, up to the end of the line, a ";" or a "|" (a markdown table cell),
@@ -147,14 +151,18 @@ function valueLooksSecret(key: string, value: { text: string; quoted: boolean; r
   if (/^\d+$/.test(t)) return passwordLike ? t.length >= 4 : t.length >= 10;
   const words = t.split(/\s+/);
   if (words.length > 1 && !value.quoted) {
-    const fn = words.filter((w) => FUNCTION_WORDS.has(strip(w).toLowerCase())).length;
-    const tech = words.some((w) => TECH_WORDS.has(strip(w).toLowerCase().replace(/['’]s$/, "")));
-    if (fn >= 2 && tech) return false;
+    // Every word must be a known function or technical word. One unknown word (a name, a digit-bearing token, an English
+    // passphrase word) means the value is not demonstrably prose, so it is judged as a credential: function words never
+    // immunize the rest of the value.
+    const norm = words.map((w) => strip(w).toLowerCase().replace(/['’]s$/, ""));
+    const fn = norm.filter((w) => FUNCTION_WORDS.has(w)).length;
+    const tech = norm.some((w) => TECH_WORDS.has(w));
+    if (fn >= 2 && tech && norm.every((w) => FUNCTION_WORDS.has(w) || TECH_WORDS.has(w) || PROSE_WORDS.has(w))) return false;
   }
   return t.length >= (passwordLike ? 3 : 4);
 }
 
-type Rule = { id: FilterRule; re: RegExp; replace: (m: RegExpExecArray, text: string) => string | undefined };
+type Rule = { id: FilterRule; re: RegExp; replace: (m: RegExpExecArray, text: string) => string | undefined; at?: (m: RegExpExecArray, text: string) => number };
 
 const RULES: Rule[] = [
   { id: "secret.private-key", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, replace: () => "[redacted key]" },
@@ -182,21 +190,39 @@ const RULES: Rule[] = [
     id: "secret.credential-assignment",
     // key, separator, the rest of the value on the line (or the whole quoted string), and the next line when it is indented (a YAML
     // style "password:" followed by an indented value; only judged when nothing follows the name on its own line).
-    re: /([\w.-]*(?:pass(?:word|wd)?|secret|token|api[ _-]?key|authorization|credential|private[ _-]?key|cookie|session[_-]?id)[\w.-]*)(["']?[ \t]*[=:][ \t]*)((?:[*_`~]*[ \t]*)?(?:"(?:[^"\\\n]|\\.)*(?:"|(?=\n|$))|'(?:[^'\\\n]|\\.)*(?:'|(?=\n|$))|[^\n;|]*))((?:\n[ \t]+(?![ \t]|[-*+#>]|\d+[.)]\s)[^\n;|]*)?)/gi,
-    replace: (m) => {
-      const [, key, sep, value, next] = m as unknown as [string, string, string, string, string];
+    re: /([\w.-]*(?:pass(?:word|wd)?|secret|token|api[ _-]?key|authorization|credential|private[ _-]?key|cookie|session[_-]?id)[\w.-]*)(["']?[ \t]*[=:][ \t]*)((?:[*_`~]*[ \t]*)?(?:"(?:[^"\\\n]|\\.)*(?:"|(?=\n|$))|'(?:[^'\\\n]|\\.)*(?:'|(?=\n|$))|[^\n;|]*))((?:(?:\n[ \t]*){0,2}\n[ \t]+(?![ \t]|[-*+#>]|\d+[.)]\s)[^\n;|]*)?)/gi,
+    replace: (m, text) => {
+      const [, key, sep, value, next] = m as unknown as [string, string, string, string, string | undefined];
       if (FILE_EXT.test(key)) return undefined; // "some-token-note.md:" names a file, it is not an assignment
       const own = assignmentValue(value);
-      if (own.text.trim() || own.quoted) return valueLooksSecret(key, own) ? `${key}${sep}[redacted]${next}` : undefined;
+      if (own.text.trim() || own.quoted) return valueLooksSecret(key, own) ? `${key}${sep}[redacted]${next ?? ""}` : undefined;
       // Nothing after the name on its own line (a bare markdown heading, or a bare wrapper such as "**"): only an indented
-      // continuation line is a value.
-      return next.trim() && valueLooksSecret(key, assignmentValue(next)) ? `${key}${sep}${value}[redacted]` : undefined;
+      // continuation line is a value. Continuation rule: at most two blank (or whitespace-only) lines, then a line indented by
+      // a space or tab that is not a list item, heading or quote marker. Unindented text never continues, so a following
+      // paragraph or heading is not swallowed, and a markdown heading line ("## Token:") takes no continuation across a blank line.
+      if (!next) return undefined;
+      const cont = /^((?:\n[ \t]*)*\n[ \t]+)([^\n]*)$/.exec(next);
+      if (!cont) return undefined;
+      const blanks = (next.match(/\n/g) ?? []).length > 1;
+      if (blanks && isHeadingLine(text, m.index ?? 0)) return undefined;
+      // The layout (newline and indent) is kept; only the value is replaced.
+      return valueLooksSecret(key, assignmentValue(cont[2]!)) ? `${key}${sep}${value}${cont[1]}[redacted]` : undefined;
+    },
+    // A continuation finding is reported on the line that holds the value, not on the name's line.
+    at: (m) => {
+      const [, key, sep, value, next] = m as unknown as [string, string, string, string, string | undefined];
+      const own = assignmentValue(value);
+      if (own.text.trim() || own.quoted || !next) return m.index ?? 0;
+      const cont = /^((?:\n[ \t]*)*\n[ \t]+)/.exec(next);
+      return (m.index ?? 0) + key.length + sep.length + value.length + (cont ? cont[1]!.length : 0);
     },
   },
   // Routine trigger ids are masked everywhere (trig_…last4), so they are never written into a note or an export.
   { id: "secret.routine-trigger", re: /\btrig_[A-Za-z0-9]{6,64}\b/g, replace: (m) => `trig_…${m[0].slice(-4)}` },
   { id: "secret.long-opaque", re: /[A-Za-z0-9_-]{32,}/g, replace: (m) => (SHA1.test(m[0]) || wordLikeRun(m[0]) ? undefined : "[redacted]") },
 ];
+
+const isHeadingLine = (text: string, index: number): boolean => /^[ \t]{0,3}#{1,6}[ \t]/.test(text.slice(text.lastIndexOf("\n", index - 1) + 1, index + 1));
 
 const lineOf = (text: string, index: number): number => {
   let n = 1;
@@ -209,7 +235,7 @@ export function vaultFindings(text: string): Finding[] {
   const out: Finding[] = [];
   for (const rule of RULES) {
     for (const m of text.matchAll(rule.re)) {
-      if (rule.replace(m as RegExpExecArray, text) !== undefined) out.push({ rule: rule.id, line: lineOf(text, m.index ?? 0) });
+      if (rule.replace(m as RegExpExecArray, text) !== undefined) out.push({ rule: rule.id, line: lineOf(text, rule.at ? rule.at(m as RegExpExecArray, text) : (m.index ?? 0)) });
     }
   }
   return out.sort((a, b) => a.line - b.line || a.rule.localeCompare(b.rule));

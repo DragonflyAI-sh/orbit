@@ -251,6 +251,9 @@ const HEALTH_ALWAYS = new RegExp(
     "adhd|ocd|ptsd|bipolar|schizo\\w*|diabet\\w+|asthma\\w*|epilep\\w+|autis(?:m|tic)|dementia|alzheimer\\w*|parkinson\\w*|arthritis|anorexia|bulimi\\w+|migraines?|insomnia|dyslexi\\w+|leukemia|lymphoma|hepatitis|tuberculosis|covid\\w*",
     "(?:heart|kidney|liver|lung|autoimmune|thyroid) (?:condition|disease|failure|attack|murmur|problems?|issues?)",
     "sertraline|fluoxetine|prozac|zoloft|lexapro|escitalopram|citalopram|paroxetine|venlafaxine|bupropion|lithium|xanax|valium|klonopin|adderall|ritalin|insulin|metformin|statins?|ibuprofen|amoxicillin|opioids?|oxycodone|methadone|gabapentin|ozempic|antidepressants?|antipsychotics?",
+    "crohn['’]?s(?: disease)?|lupus|multiple sclerosis|chemo(?:therapy)?|rehab(?:ilitation)?",
+    // MS and MS-style acronyms are matched only with a clear personal/medical frame, never bare (MS Office, MS SQL, ms for milliseconds).
+    "(?:has|have|had|diagnosed with|living with|suffers? from|suffering from) (?:an? |the )?ms\\b",
     "diagnosed (?:with|me|him|her|them)|diagnosis of",
     "(?:was|were|been|got|being|is|are) (?:\\w+ )?prescribed|prescribed (?:me|him|her|them|\\d+\\w*|an?|some|medication|medicine|drugs?|pills?)",
     "chronic (?:pain|illness|fatigue|condition|disease|migraines?|headaches?|insomnia|asthma|back|stress)",
