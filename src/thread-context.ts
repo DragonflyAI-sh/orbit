@@ -164,7 +164,7 @@ export async function compactThread(deps: { threads: Threads; model: ModelPort; 
   const real = model.status().state !== "mock";
   if (real) {
     try {
-      const out = (await model.reply([{ role: "user", content: summaryPrompt(prior, older) }], [], undefined)).value;
+      const out = (await model.reply([{ role: "user", content: summaryPrompt(prior, older) }], [], undefined, { fallback: false })).value;
       const candidate = typeof out === "string" ? out.trim().slice(0, SUMMARY_MAX_CHARS) : "";
       // Checked the way it will be stored (masked): a summary that is empty, blank or only invisible characters is a failure.
       if (!hasContent(maskText(candidate))) throw new Error("the model returned an empty summary");

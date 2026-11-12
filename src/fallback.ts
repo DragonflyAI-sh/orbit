@@ -1,6 +1,7 @@
 import { PR_INSPECT_TOOL_NAMES } from "./pr-inspect.ts";
 import { MAX_RESET_MS, ProviderError, RATE_PAUSE_MS, USAGE_PAUSE_MS } from "./chatgpt.ts";
-import type { FallbackInfo, Item, Message, ModelPort, Step, ToolDef } from "./model.ts";
+import { replySource } from "./model.ts";
+import type { FallbackInfo, Item, Message, ModelPort, Reply, ReplyOptions, Step, ToolDef } from "./model.ts";
 import { BALANCE_EVERY_MS, openrouterClient } from "./openrouter.ts";
 import type { OpenRouterClient, OpenRouterConfig } from "./openrouter.ts";
 import { SpendError } from "./spend-ledger.ts";
@@ -99,9 +100,11 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   const augment = (err: ProviderError, detail: string) =>
     new ProviderError(err.kind, `${err.message.replace(/\s*$/, "")} The OpenRouter fallback did not answer: ${detail}`, err.resetsAt, err.code);
 
-  const viaFallback = async (cause: ProviderError | undefined, input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<Step> => {
+  const viaFallback = async (cause: ProviderError | undefined, input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], paidOk = true): Promise<Step> => {
     const l = limit!;
     const stand = cause ?? new ProviderError(l.kind, `${why(l)}.`, l.estimated ? undefined : iso(l.until));
+    // Background callers never spend the paid fallback: they get the limit as it is.
+    if (!paidOk) throw stand;
     const problem = unavailable();
     if (problem) throw augment(stand, problem);
     const allowed = tools.filter((t) => FALLBACK_TOOLS.has(t.name));
@@ -135,8 +138,8 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   };
 
   // One model turn: the primary unless its limit is still in force.
-  const turn = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], viaPrimary: () => Promise<Step>): Promise<Step> => {
-    if (active()) return viaFallback(undefined, input, limits, notes, tools);
+  const turn = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], viaPrimary: () => Promise<Step>, paidOk = true): Promise<Step> => {
+    if (active()) return viaFallback(undefined, input, limits, notes, tools, paidOk);
     try {
       const step = await viaPrimary();
       if (limit) {
@@ -148,7 +151,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     } catch (err) {
       if (!isLimit(err)) throw err;
       noteLimit(err);
-      return viaFallback(err, input, limits, notes, tools);
+      return viaFallback(err, input, limits, notes, tools, paidOk);
     }
   };
 
@@ -180,7 +183,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
               const usd = (v: number | null) => (v === null ? "unknown" : `$${v.toFixed(2)}`);
               balance = { at: iso(now()), text: `OpenRouter key (account side, not the local allowance): limit ${b.limitUsd === null ? "none" : usd(b.limitUsd)}, remaining ${usd(b.remainingUsd)}, used ${usd(b.usedUsd)}, read ${iso(now())}.` };
             } catch (err) {
-              balance = { at: iso(now()), text: `OpenRouter key balance unavailable: ${err instanceof Error ? err.message : "failed"}.` };
+              balance = { at: iso(now()), text: `OpenRouter key balance unavailable: ${err instanceof ProviderError ? err.message : "lookup failed"}.` };
             }
           },
         }
@@ -188,23 +191,25 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
 
     step: primary.step ? step : undefined,
 
-    async reply(messages: Message[], limits: string[], notes?: string) {
+    async reply(messages: Message[], limits: string[], notes?: string, opts?: ReplyOptions): Promise<Reply> {
       const items: Item[] = messages;
-      const asText = (s: Step) => {
-        if (!s.text) throw new Error("response had no text");
-        return s;
-      };
-      let used: FallbackInfo | undefined;
-      const result = await turn(items, limits, notes, [], async () => {
-        const r = await primary.reply(messages, limits, notes);
-        return { text: r.value, calls: [] };
-      }).then((s) => {
-        used = s.fallback;
-        return asText(s);
-      });
-      return used
-        ? { value: result.text, provenance: "live" as const, source: `model/openrouter/${(used as FallbackInfo).model}`, fallback: used as FallbackInfo }
-        : { value: result.text, provenance: "live" as const, source: `model/${primary.status().impl}` };
+      let primaryReply: Reply | undefined;
+      const s = await turn(
+        items,
+        limits,
+        notes,
+        [],
+        async () => {
+          primaryReply = await primary.reply(messages, limits, notes);
+          return { text: primaryReply.value, calls: [] };
+        },
+        opts?.fallback !== false,
+      );
+      // The primary answered: its own result (value, provenance, source) passes through untouched, so a mock stays a mock.
+      if (primaryReply) return primaryReply;
+      if (!s.text) throw new Error("response had no text");
+      const used = s.fallback!;
+      return { value: s.text, provenance: "live" as const, source: replySource(primary.status().impl, used), fallback: used };
     },
 
     status(): PortStatus {

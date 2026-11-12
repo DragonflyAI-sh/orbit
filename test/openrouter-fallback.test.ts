@@ -518,3 +518,75 @@ test("a call during a limit made after a restart: the new process learns the pau
   assert.equal(s.fallback?.primaryLimit.estimated, true);
   assert.equal(w.model.fallbackState().limit?.kind, "usage_limit");
 });
+
+// ---- regression: defects confirmed on main after #56 -------------------------------------------------------------------
+
+test("reply: a mock primary's own result passes through, never relabelled live", async () => {
+  const mock: ModelPort = {
+    status: () => ({ port: "model", state: "mock", impl: "mock-echo", detail: "mock", verifiedAt: new Date(T0).toISOString() }),
+    reply: async () => ({ value: "echo", provenance: "mock", source: "model/mock-echo" }),
+  };
+  const m = fallbackModel({ primary: mock, config: ready(), ledger: spendLedger(dir(), { dailyMicro: toMicro(5), totalMicro: toMicro(150) }), fetcher: fakeOpenRouter([answer("x")]).fetcher });
+  const r = await m.reply([{ role: "user", content: "hi" }], []);
+  assert.equal(r.provenance, "mock");
+  assert.equal(r.source, "model/mock-echo");
+  assert.equal(r.fallback, undefined);
+});
+
+test("reply: the fallback path carries the labelled FALLBACK, paid source", async () => {
+  const w = world({ script: [usageLimit(new Date(T0 + 60 * MIN).toISOString())] });
+  const r = await w.model.reply([{ role: "user", content: "hi" }], []);
+  assert.equal(r.value, "from openrouter");
+  assert.match(r.source, /model\/openrouter\/vendor\/cheap-model \(FALLBACK, paid: ChatGPT usage limit/);
+  assert.ok(r.fallback);
+});
+
+test("reply: background callers (fallback: false) never spend OpenRouter while the primary is limited", async () => {
+  const w = world({ script: [usageLimit(new Date(T0 + 60 * MIN).toISOString())] });
+  await assert.rejects(w.model.reply([{ role: "user", content: "summarise" }], [], undefined, { fallback: false }), (e: unknown) => e instanceof ProviderError && e.kind === "usage_limit");
+  // Limit now in force: a second background call is refused without reaching the primary or OpenRouter.
+  await assert.rejects(w.model.reply([{ role: "user", content: "again" }], [], undefined, { fallback: false }), ProviderError);
+  assert.equal(w.or.requests.length, 0);
+  assert.equal(w.ledger.view().lifetimeUsd, 0);
+  // An interactive reply still gets the fallback.
+  assert.equal((await w.model.reply([{ role: "user", content: "hi" }], [])).fallback?.provider, "openrouter");
+  assert.equal(w.or.requests.length, 1);
+});
+
+test("config: oversized caps are unavailable with a reason, and the ledger error says too large", () => {
+  for (const cap of ["1e10", "1e11", "9.1e9", "10001"]) {
+    const c = openrouterConfig({ ...ENV, ORBIT_OPENROUTER_DAILY_CAP_USD: "1", ORBIT_OPENROUTER_TOTAL_CAP_USD: cap }, readKey);
+    assert.equal(c.state, "unavailable", cap);
+    assert.match((c as { reason: string }).reason, /at most 10000/);
+  }
+  assert.equal(ready({ ORBIT_OPENROUTER_TOTAL_CAP_USD: "10000" }).totalCapUsd, 10000);
+  assert.throws(() => spendLedger(dir(), { dailyMicro: toMicro(1), totalMicro: toMicro(1e10) }), (e: unknown) => e instanceof SpendError && /no larger/.test(e.message));
+});
+
+test("client: a failing ledger write on an error path does not hide the provider error or leak a path", async () => {
+  const d = dir();
+  const ledger = spendLedger(d, { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
+  const real = ledger.settle.bind(ledger);
+  let boom = false;
+  const guarded = { ...ledger, settle: (...a: Parameters<typeof real>) => (boom ? (() => { throw new Error(`EISDIR ${d}/openrouter-spend.json.new`); })() : real(...a)) };
+  const client = openrouterClient(ready({ ORBIT_OPENROUTER_TIMEOUT_MS: "1000" }), guarded, fakeOpenRouter([{ hang: true }]).fetcher);
+  boom = true;
+  await assert.rejects(client.step([{ role: "user", content: "hi" }], [], undefined, []), (e: unknown) => e instanceof ProviderError && /no answer within/.test(e.message) && /spend accounting also failed/.test(e.message) && !e.message.includes(d));
+});
+
+test("client: a billed answer survives a failing settle and says so", async () => {
+  const d = dir();
+  const ledger = spendLedger(d, { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
+  const guarded = { ...ledger, settle: () => { throw new Error(`EISDIR ${d}`); } };
+  const client = openrouterClient(ready(), guarded, fakeOpenRouter([answer("paid answer")]).fetcher);
+  const s = await client.step([{ role: "user", content: "hi" }], [], undefined, []);
+  assert.match(s.text, /^paid answer/);
+  assert.match(s.text, /Spend accounting note/);
+  assert.ok(!s.text.includes(d));
+});
+
+test("client: a non-JSON balance body is reported without echoing it", async () => {
+  const ledger = spendLedger(undefined, { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
+  const client = openrouterClient(ready(), ledger, fakeOpenRouter([{ text: "<html>secret-ish-body" }]).fetcher);
+  await assert.rejects(client.balance(), (e: unknown) => e instanceof ProviderError && /unreadable body/.test(e.message) && !/secret-ish/.test(e.message));
+});

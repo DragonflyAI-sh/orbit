@@ -66,7 +66,7 @@ export type SpendLedger = {
 
 export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () => Date = () => new Date()): SpendLedger {
   if (!isMicro(caps.dailyMicro) || !isMicro(caps.totalMicro) || caps.dailyMicro <= 0 || caps.totalMicro <= 0) {
-    throw new SpendError("bad_amount", "Spend caps must be positive.");
+    throw new SpendError("bad_amount", "Spend caps must be positive and no larger than about 9 billion USD.");
   }
   const file = dir ? join(dir, "openrouter-spend.json") : undefined;
   let memory: Ledger | undefined;

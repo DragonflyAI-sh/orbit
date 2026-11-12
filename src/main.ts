@@ -58,14 +58,17 @@ const primaryModel = selectModel(process.env, (name) => (chatgpt.current = chatg
 // The OpenRouter fallback is off unless ORBIT_OPENROUTER_ENABLED=1 and its model, prices and orbit.openrouter credential are all set.
 // Disabled, the primary model is used as it is, untouched.
 const openrouter = openrouterConfig(process.env);
-const model =
-  openrouter.state === "disabled"
-    ? primaryModel
-    : fallbackModel({
-        primary: primaryModel,
-        config: openrouter,
-        ledger: openrouter.state === "ready" && stateDir ? spendLedger(stateDir, { dailyMicro: toMicro(openrouter.dailyCapUsd), totalMicro: toMicro(openrouter.totalCapUsd) }) : undefined,
-      });
+// A ledger that cannot be built (bad caps) must not stop ORBIT starting: the fallback is then reported as unavailable.
+let openrouterLedger: ReturnType<typeof spendLedger> | undefined;
+let openrouterEffective = openrouter;
+if (openrouter.state === "ready" && stateDir) {
+  try {
+    openrouterLedger = spendLedger(stateDir, { dailyMicro: toMicro(openrouter.dailyCapUsd), totalMicro: toMicro(openrouter.totalCapUsd) });
+  } catch (err) {
+    openrouterEffective = { state: "unavailable", reason: `The spend ledger could not be set up: ${err instanceof Error ? err.message : "unknown error"}` };
+  }
+}
+const model = openrouterEffective.state === "disabled" ? primaryModel : fallbackModel({ primary: primaryModel, config: openrouterEffective, ledger: openrouterLedger });
 // The writable vault clone needs a state directory and the orbit.github-vault credential (read when used, never cached). Without
 // either, memory reads the read-only server copy and no vault write tool is offered; /status and the tool results say so.
 const vault = stateDir
