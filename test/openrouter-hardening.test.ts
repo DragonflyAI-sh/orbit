@@ -10,7 +10,8 @@ import { fallbackModel } from "../src/fallback.ts";
 import type { ModelPort, Step, ToolDef } from "../src/model.ts";
 import { MAX_REPLY_CHARS, MAX_RESPONSE_BYTES, openrouterClient, openrouterConfig } from "../src/openrouter.ts";
 import type { OpenRouterConfig } from "../src/openrouter.ts";
-import { spendLedger, toMicro } from "../src/spend-ledger.ts";
+import { PROVISION_FILE, spendLedger, toMicro } from "../src/spend-ledger.ts";
+import { provisioned } from "./helpers/ledger.ts";
 import type { SpendLedger } from "../src/spend-ledger.ts";
 import { rig, say } from "./threads-fixture.ts";
 
@@ -35,7 +36,10 @@ const ready = () => {
   return c as Extract<OpenRouterConfig, { state: "ready" }>;
 };
 const dir = () => mkdtempSync(join(tmpdir(), "orbit-harden-"));
-const ledgerIn = (d: string, now: () => Date = () => new Date(T0)) => spendLedger(d, { dailyMicro: toMicro(5), totalMicro: toMicro(150) }, now);
+const ledgerIn = (d: string, now: () => Date = () => new Date(T0)) => provisioned(d, { dailyMicro: toMicro(5), totalMicro: toMicro(150) }, now);
+// A process identity that is provably gone (the pid is above any kernel's pid_max): reservations it made are orphans.
+const DEAD = { pid: 2_147_483_000, start: "1" };
+const caps5 = { dailyMicro: toMicro(5), totalMicro: toMicro(150) };
 const userMsg = [{ role: "user" as const, content: "hi" }];
 const tool = (name: string): ToolDef => ({ name, description: name, parameters: { type: "object", properties: {} } });
 const completion = (message: Record<string, unknown>, finish = "stop", cost: number | null = 0.0001) => ({ choices: [{ finish_reason: finish, message }], usage: cost === null ? {} : { cost } });
@@ -249,7 +253,7 @@ test("accounting: a plain (non-provider) later-round error is wrapped, not mutat
 
 test("accounting: the fallback's SpendError branch passes its accounting explicitly (none) and never inherits the primary error's", async () => {
   let t = T0;
-  const ledger = spendLedger(dir(), { dailyMicro: toMicro(0.0001), totalMicro: toMicro(150) }, () => new Date(t));
+  const ledger = provisioned(dir(), { dailyMicro: toMicro(0.0001), totalMicro: toMicro(150) }, () => new Date(t));
   const limited = new ProviderError("usage_limit", "ChatGPT usage limit reached.", new Date(T0 + 60 * MIN).toISOString());
   // A primary error that (wrongly) carries a diagnostic of its own: the old code inherited it into the augmented error.
   Object.defineProperty(limited, "accounting", { value: ["inherited from the primary"] });
@@ -284,11 +288,14 @@ test("accounting: a failed paid round with a ledger error names the diagnostic o
   const last = res.data.thread.messages.at(-1);
   assert.equal(last.status, "error");
   assert.equal(count(last.error, "the ledger could not record this call"), 1, last.error);
+  // Round 1 was billed and could not be recorded: the ledger is latched, so round 2 was REFUSED (no second paid request).
+  assert.match(last.error, /latched as untrusted/);
+  assert.equal(seen.length, 1, "the latched ledger admitted no further paid call");
   assert.ok(!last.error.includes(d));
   const chat = await r.api("/chat", "POST", { messages: [{ role: "user", content: "what jobs?" }] });
   assert.equal(chat.status, 502);
-  assert.equal(count(chat.data.error, "the ledger could not record this call"), 1, chat.data.error);
-  assert.match(chat.data.error, /HTTP 500: down/);
+  assert.match(chat.data.error, /latched as untrusted/);
+  assert.equal(seen.length, 1, "still no paid call admitted");
   // The next turn is built from stored thread text only: the failed message and its diagnostics never reach a model.
   const mark = seen.length;
   await r.send(t.id, "and again?");
@@ -316,10 +323,15 @@ const primaryOf = (script: () => Step | Error): ModelPort => ({
 const statusWorld = (spec: Spec | ((n: number) => Spec) = { json: completion({ content: "paid" }) }, script: () => Step | Error = () => say("fine")) => {
   let t = T0;
   const d = dir();
-  const ledger = ledgerIn(d, () => new Date(t));
+  // Unprovisioned until a test calls init(): that is what the owner's provision request plus the startup step does.
+  const ledger = spendLedger(d, caps5, () => new Date(t));
   const p = provider(spec);
   const model = fallbackModel({ primary: primaryOf(script), config: ready(), ledger, fetcher: p.fetcher, now: () => t });
-  return { model, ledger, d, p, file: join(d, "openrouter-spend.json"), advance: (ms: number) => void (t += ms) };
+  const init = () => {
+    writeFileSync(join(d, PROVISION_FILE), "{}");
+    ledger.open();
+  };
+  return { model, ledger, d, p, init, file: join(d, "openrouter-spend.json"), advance: (ms: number) => void (t += ms) };
 };
 
 test("B12: polling status never creates, adopts into, or rewrites the ledger and sends no provider request (fresh install)", () => {
@@ -328,10 +340,18 @@ test("B12: polling status never creates, adopts into, or rewrites the ledger and
   assert.deepEqual(readdirSync(w.d), [], "no ledger file was created by status");
   assert.equal(w.p.log.requests, 0);
   const detail = w.model.status().detail;
-  assert.doesNotMatch(detail, /armed:/, "an uncreated ledger is not 'armed'");
-  assert.match(detail, /not verified/);
-  assert.match(detail, /have not been verified with OpenRouter/);
-  assert.match(detail, /balance has not been read yet/);
+  assert.doesNotMatch(detail, /armed:/, "an unprovisioned ledger is not 'armed'");
+  assert.match(detail, /NOT armed, no paid call will be made: the spend ledger has not been provisioned/);
+  // A waiting provision request is reported, but a poll never applies it.
+  writeFileSync(join(w.d, PROVISION_FILE), "{}");
+  for (let i = 0; i < 5; i++) assert.match(w.model.status().detail, /a provision request is waiting and is applied when ORBIT next starts/);
+  assert.deepEqual(readdirSync(w.d), [PROVISION_FILE], "status neither created a ledger nor consumed the request");
+  assert.equal(w.p.log.requests, 0);
+  // Applied by the explicit startup step: now it is created, and a status that has the balance unread says so.
+  w.ledger.open();
+  assert.match(w.model.status().detail, /OpenRouter fallback armed/);
+  assert.match(w.model.status().detail, /have not been verified with OpenRouter/);
+  assert.match(w.model.status().detail, /balance has not been read yet/);
 });
 
 test("B12: polling status leaves an existing ledger byte for byte unchanged, orphaned reservations included", () => {
@@ -341,7 +361,7 @@ test("B12: polling status leaves an existing ledger byte for byte unchanged, orp
   writeFileSync(file, JSON.stringify(seed));
   const before = readFileSync(file);
   const mtime = statSync(file).mtimeMs;
-  const ledger = ledgerIn(d);
+  const ledger = spendLedger(d, caps5, () => new Date(T0));
   const model = fallbackModel({ primary: primaryOf(() => say("x")), config: ready(), ledger, fetcher: provider({ json: {} }).fetcher, now: () => T0 });
   for (let i = 0; i < 10; i++) model.status();
   assert.ok(readFileSync(file).equals(before), "bytes unchanged: the orphaned reservation was NOT adopted by polling");
@@ -357,7 +377,7 @@ test("B12: polling status leaves an existing ledger byte for byte unchanged, orp
 
 test("B12: ledger failure transitions: armed -> corrupt -> restored, and armed -> deleted, are each reported truthfully without writes", async () => {
   const w = statusWorld({ json: completion({ content: "paid" }) }, () => new ProviderError("usage_limit", "ChatGPT usage limit reached.", new Date(T0 + 60 * MIN).toISOString()));
-  w.ledger.view(); // initialised the way a paid call would
+  w.init();
   const good = readFileSync(w.file);
   // The primary's limit is in force, so status shows the limited path.
   await w.model.step!(userMsg, [], undefined, [], { fallback: false }).catch(() => {});
@@ -375,18 +395,19 @@ test("B12: ledger failure transitions: armed -> corrupt -> restored, and armed -
   assert.match(w.model.status().detail, /fallback armed/);
   rmSync(w.file);
   const gone = w.model.status();
-  assert.match(gone.detail, /NOT armed.*disappeared/);
+  assert.match(gone.detail, /NOT armed.*missing although a history marker shows one existed/);
   assert.equal(gone.state, "down");
   assert.ok(!existsSync(w.file), "status did not recreate a deleted ledger");
   assert.equal(w.p.log.requests, 0);
   // Schema-invalid is also a failure.
-  writeFileSync(w.file, JSON.stringify({ schema: 2 }));
+  writeFileSync(w.file, JSON.stringify({ schema: 3 }));
   assert.match(w.model.status().detail, /NOT armed.*unknown schema/);
 });
 
-test("B12: a billed call whose ledger write failed makes status say NOT armed until a later paid call records cleanly", async () => {
+test("B12: a billed call whose ledger write failed latches the ledger: status says NOT armed and no later paid call is admitted until a restart", async () => {
   const d = dir();
-  const base = ledgerIn(d);
+  // The process that makes the call is "gone" by the time the replacement starts, as after a real restart.
+  const base = provisioned(d, caps5, () => new Date(T0), { identity: DEAD });
   let failing = true;
   const ledger: SpendLedger = {
     ...base,
@@ -398,21 +419,31 @@ test("B12: a billed call whose ledger write failed makes status say NOT armed un
   const p = provider({ json: completion({ content: "paid" }) });
   const limited = () => new ProviderError("usage_limit", "ChatGPT usage limit reached.", new Date(T0 + 60 * MIN).toISOString());
   const model = fallbackModel({ primary: primaryOf(limited), config: ready(), ledger, fetcher: p.fetcher, now: () => T0 });
-  base.view();
   assert.match(model.status().detail, /fallback armed/);
   const s = await model.step!(userMsg, [], undefined, [], { fallback: true });
   assert.equal(s.text, "paid", "the billed answer is still returned");
   assert.equal(s.accounting?.length, 1);
   assert.doesNotMatch(model.status().detail, /fallback armed/);
-  assert.match(model.status().detail, /NOT armed: the ledger could not record a paid call/);
+  assert.match(model.status().detail, /NOT armed, no paid call will be made: the ledger could not record a paid call/);
+  // The cause went away, but nothing clears the latch: not polling status, not a later call (which is refused, not sent).
   failing = false;
-  await model.step!(userMsg, [], undefined, [], { fallback: true });
-  assert.match(model.status().detail, /fallback armed/);
+  for (let i = 0; i < 5; i++) assert.match(model.status().detail, /NOT armed/);
+  const requests = p.log.requests;
+  await assert.rejects(model.step!(userMsg, [], undefined, [], { fallback: true }), /latched as untrusted/);
+  assert.equal(p.log.requests, requests, "no paid request was admitted while latched");
+  assert.match(model.status().detail, /NOT armed/);
+  // Restart: a new instance reads the ledger; the call that was never recorded is charged at its upper bound, not dropped.
+  const after = spendLedger(d, caps5, () => new Date(T0));
+  const restarted = fallbackModel({ primary: primaryOf(limited), config: ready(), ledger: after, fetcher: p.fetcher, now: () => T0 });
+  const v = after.open();
+  assert.equal(v.uncertainRequests, 1);
+  assert.ok(v.lifetimeUsd > 0, "the unrecorded call is charged at its bound");
+  assert.match(restarted.status().detail, /fallback armed/);
 });
 
 test("B12: balance shown by status carries its read time and is flagged STALE once it is old; status itself never fetches it", async () => {
   const w = statusWorld((n) => (n === 0 ? { json: { data: { limit: 20, limit_remaining: 12.5, usage: 7.5 } } } : { json: completion({ content: "x" }) }));
-  w.ledger.view();
+  w.init();
   await w.model.maintain!();
   assert.equal(w.p.log.requests, 1);
   assert.match(w.model.status().detail, /read 2026-11-12T10:00:00\.000Z/);
@@ -426,7 +457,7 @@ test("B12: balance shown by status carries its read time and is flagged STALE on
 test("B12: repeated status() with the ChatGPT limit in force and an armed fallback issues zero provider requests and zero ledger writes", async () => {
   const w = statusWorld({ json: completion({ content: "x" }) }, () => new ProviderError("usage_limit", "ChatGPT usage limit reached.", new Date(T0 + 60 * MIN).toISOString()));
   await w.model.step!(userMsg, [], undefined, [], { fallback: false }).catch(() => {});
-  w.ledger.view();
+  w.init();
   const before = readFileSync(w.file);
   for (let i = 0; i < 20; i++) {
     w.model.status();
@@ -455,12 +486,43 @@ test("B14: a text reply that hit the output limit is marked incomplete in a sepa
   assert.equal(s.accounting, undefined, "not a billing warning");
 });
 
-test("B14: complete replies are never marked: stop, tool_calls and a missing finish reason", async () => {
+test("B14: complete replies are never marked: stop and tool_calls", async () => {
   assert.equal((await stepWith({ content: "done" }, "stop")).incomplete, undefined);
-  assert.equal((await stepWith({ content: "done" }, undefined)).incomplete, undefined);
   const t = await stepWith({ content: null, tool_calls: [toolCall('{"a":1}')] }, "tool_calls");
   assert.equal(t.incomplete, undefined);
   assert.equal(t.calls[0]!.arguments, '{"a":1}', "tool argument JSON is byte for byte what the model sent");
+});
+
+test("PR64 finding 3: a missing, null or non-string finish reason is not a clean stop: text is marked, tool calls are never returned for running", async () => {
+  const bodyOf = (choice: Record<string, unknown>) => ({ choices: [choice], usage: { cost: 0.0001 } });
+  const run = (choice: Record<string, unknown>, ledger = ledgerIn(dir())) => openrouterClient(ready(), ledger, provider({ json: bodyOf(choice) }).fetcher).step(userMsg, [], undefined, [tool("jobs_list")]);
+  const calls = { content: null, tool_calls: [toolCall('{"a": "trunc')] };
+  for (const finish of [{}, { finish_reason: null }, { finish_reason: 7 }, { finish_reason: "" }]) {
+    const text = await run({ ...finish, message: { content: "maybe whole" } });
+    assert.equal(text.text, "maybe whole");
+    assert.match(text.incomplete![0]!, /no finish reason|unrecognised finish reason/, JSON.stringify(finish));
+  }
+  const d = dir();
+  const base = ledgerIn(d);
+  const ledger: SpendLedger = { ...base, settle: () => { throw new Error("EIO"); } };
+  for (const finish of [{}, { finish_reason: null }, { finish_reason: "mystery" }]) {
+    await assert.rejects(run({ ...finish, message: calls }, ledger), (e: unknown) => {
+      assert.ok(e instanceof ProviderError);
+      assert.match(e.message, /carried a tool call but (no finish reason|an unrecognised finish reason).*no tool was run/, JSON.stringify(finish));
+      assert.equal(e.accounting?.length, 1, "the billing diagnostic is still reported with it");
+      return true;
+    });
+  }
+  // The same through the chat loop: nothing runs, whatever the arguments look like.
+  let ran = 0;
+  const counting: ChatTool[] = [{ name: "jobs_list", description: "j", parameters: {}, run: async () => (ran++, { value: [], provenance: "live", source: "jobs" }) }];
+  const client = openrouterClient(ready(), ledgerIn(dir()), provider({ json: bodyOf({ message: { content: null, tool_calls: [toolCall("{}")] } }) }).fetcher);
+  const model: ModelPort = { status: () => ({ port: "model", state: "live", impl: "x", detail: "", verifiedAt: "" }), reply: async () => assert.fail(), step: (i, l, n, t) => client.step(i, l, n, t) };
+  await assert.rejects(runChat({ model, messages: [{ role: "user", content: "hi" }], limits: [], tools: counting }), /no finish reason/);
+  assert.equal(ran, 0);
+  // A well-formed finish reason still runs the call (guard).
+  const ok = await run({ finish_reason: "tool_calls", message: { content: null, tool_calls: [toolCall("{}")] } });
+  assert.equal(ok.calls.length, 1);
 });
 
 test("B14: other finish reasons: content_filter and error are early ends, an unknown one is reported as unrecognised, never as a clean stop", async () => {
@@ -520,23 +582,33 @@ test("B14: runChat, /chat and the stored thread carry the note beside the reply 
   assert.match(out.incomplete![0]!, /cut off/);
   assert.equal(out.accounting?.length, 1);
   assert.notDeepEqual(out.incomplete, out.accounting);
-  const r = rig({ model });
+  // The thread with a ledger that cannot record: both lists arrive, apart (the latch then refuses a second paid call, by design).
+  const r = rig({ model: fallbackModel({ primary: primaryOf(limited), config: ready(), ledger: { ...ledgerIn(dir(), () => new Date()), settle: () => { throw new Error("EIO"); } }, fetcher }) });
   const t = await r.create("x");
   const res = await r.send(t.id, "tell me");
   const last = res.data.thread.messages.at(-1);
   assert.equal(last.text, "Half an answ", "no marker in the stored text");
   assert.match(last.incomplete[0], /cut off/);
   assert.equal(last.accounting.length, 1);
-  const stored = (await r.api(`/threads/${t.id}`)).data.thread.messages.at(-1);
-  assert.deepEqual(stored.incomplete, last.incomplete);
-  const chat = await r.api("/chat", "POST", { messages: [{ role: "user", content: "tell me" }] });
+  r.close();
+  // A healthy ledger: the note is stored, returned by /chat, and never reaches a later model request.
+  const r2 = rig({ model: fallbackModel({ primary: primaryOf(limited), config: ready(), ledger: ledgerIn(dir(), () => new Date()), fetcher }) });
+  const t2 = await r2.create("x");
+  const res2 = await r2.send(t2.id, "tell me");
+  const last2 = res2.data.thread.messages.at(-1);
+  assert.equal(last2.text, "Half an answ");
+  assert.match(last2.incomplete[0], /cut off/);
+  assert.equal(last2.accounting, undefined);
+  const stored = (await r2.api(`/threads/${t2.id}`)).data.thread.messages.at(-1);
+  assert.deepEqual(stored.incomplete, last2.incomplete);
+  const chat = await r2.api("/chat", "POST", { messages: [{ role: "user", content: "tell me" }] });
   assert.equal(chat.status, 200);
   assert.equal(chat.data.reply.value, "Half an answ");
   assert.match(chat.data.reply.incomplete[0], /cut off/);
-  assert.equal(chat.data.reply.accounting.length, 1);
   const mark = reqs.length;
-  await r.send(t.id, "continue");
+  await r2.send(t2.id, "continue");
+  assert.ok(reqs.length > mark, "a healthy ledger admitted the next paid call");
   for (const q of reqs.slice(mark)) assert.ok(!/cut off|incomplete/i.test(JSON.stringify(q.messages.slice(1))), "the note never reaches a model request");
   assert.match(readFileSync(new URL("../src/web/index.html", import.meta.url), "utf8"), /Incomplete reply: \$\{m\.incomplete/);
-  r.close();
+  r2.close();
 });

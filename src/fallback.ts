@@ -70,8 +70,13 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   let recoveredAt: string | undefined;
   let lastUse: { at: string; costUsd?: number } | undefined;
   let lastFallbackError: string | undefined;
-  // Set when a paid call showed the ledger cannot be trusted (it refused, or could not record a billed answer); cleared by a clean one.
+  // Fail-closed latch. Set when a paid call showed the ledger cannot be trusted: it refused to admit a call, or it could not record a
+  // call's outcome (billed answer, failed call, unreadable body, timeout). While it is set NO paid call is admitted (unavailable()),
+  // and status says so. Nothing in this process clears it: not polling status, not a later call (none is made), not time. The way out is
+  // a restart after the ledger has been checked: the ledger then charges the unrecorded call at its upper bound (the owner process
+  // is gone), so uncertain spend is kept, never dropped. The first reason is kept.
   let ledgerFault: string | undefined;
+  const latch = (reason: string) => void (ledgerFault ??= reason);
   let balance: { at: string; text: string } | undefined;
   let balanceTried = 0;
 
@@ -80,6 +85,8 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     if (!client || !ledger) return "The spend ledger is not configured.";
     return undefined;
   };
+  // Actual admission of a paid call: configuration complete AND the ledger not latched as untrusted.
+  const refusal = (): string | undefined => unavailable() ?? (ledgerFault ? `the spend ledger is latched as untrusted (${ledgerFault}); no paid call is admitted until ORBIT is restarted after the ledger is checked` : undefined);
 
   const noteLimit = (err: ProviderError) => {
     const kind = err.kind as Limit["kind"];
@@ -110,7 +117,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     const stand = cause ?? new ProviderError(l.kind, `${why(l)}.`, l.estimated ? undefined : iso(l.until));
     // Background callers never spend the paid fallback: they get the limit as it is.
     if (!paidOk) throw stand;
-    const problem = unavailable();
+    const problem = refusal();
     if (problem) throw augment(stand, problem, []);
     const allowed = tools.filter((t) => FALLBACK_TOOLS.has(t.name));
     const names = new Set(allowed.map((t) => t.name));
@@ -124,15 +131,19 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     } catch (err) {
       lastFallbackError = err instanceof Error ? err.message : String(err);
       if (err instanceof SpendError) {
-        if (err.code === "ledger") ledgerFault = "the spend ledger refused a paid call";
+        // "ledger": it could not be read or written. "busy" (another process holds the lock) and the caps refused this one call before
+        // anything was charged or sent: nothing is uncertain, so nothing latches.
+        if (err.code === "ledger") latch("the spend ledger refused a paid call");
         throw augment(stand, err.message, []);
       }
-      throw augment(stand, err instanceof ProviderError ? err.base : lastFallbackError, err instanceof ProviderError ? (err.accounting ?? []) : []);
+      // A failed paid call whose outcome the ledger could not record is as uncertain as a billed answer that could not be recorded.
+      const unrecorded = err instanceof ProviderError ? (err.accounting ?? []) : [];
+      if (unrecorded.length) latch("the ledger could not record the outcome of a paid call");
+      throw augment(stand, err instanceof ProviderError ? err.base : lastFallbackError, unrecorded);
     }
     lastFallbackError = undefined;
-    // A billed answer whose ledger write failed is returned (never discarded), but the ledger is then not trustworthy: status says so
-    // until a later paid call records cleanly.
-    ledgerFault = paid.accounting?.length ? "the ledger could not record a paid call" : undefined;
+    // A billed answer whose ledger write failed is returned (never discarded), but the ledger is then not trustworthy.
+    if (paid.accounting?.length) latch("the ledger could not record a paid call");
     const outside = paid.calls.find((c) => !names.has(c.name));
     if (outside) {
       throw augment(stand, `it asked for the tool ${JSON.stringify(outside.name.slice(0, 60))}, which fallback mode does not allow. Nothing was run.`, paid.accounting ?? []);
@@ -188,11 +199,18 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     } catch {
       seen = { state: "failed", reason: "the spend ledger could not be checked" };
     }
+    if (seen.state === "unprovisioned") {
+      return {
+        armed: false,
+        usable: false,
+        text: ` OpenRouter fallback NOT armed, no paid call will be made: the spend ledger has not been provisioned${seen.requested ? " (a provision request is waiting and is applied when ORBIT next starts)" : ""}. It is never created by a status check or by a first call; see docs/openrouter-ledger-integrity.md.`,
+      };
+    }
     if (seen.state === "failed") {
       return { armed: false, usable: false, text: ` OpenRouter fallback NOT armed, no paid call will be made: ${seen.reason}. The ledger is never reset automatically; fix or restore it by hand.` };
     }
     if (ledgerFault) {
-      return { armed: false, usable: false, text: ` OpenRouter fallback NOT armed: ${ledgerFault}. Check the spend ledger before any further paid call; this clears only after a paid call is recorded cleanly.` };
+      return { armed: false, usable: false, text: ` OpenRouter fallback NOT armed, no paid call will be made: ${ledgerFault}. Check the spend ledger, then restart ORBIT; polling this status never clears it, and a restart charges the unrecorded call at its upper bound.` };
     }
     const unverified = ` Model ${client!.model}, key and prices come from ORBIT's configuration; they have not been verified with OpenRouter.`;
     const bal = !balance
@@ -200,9 +218,6 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       : now() - Date.parse(balance.at) > 2 * BALANCE_EVERY_MS
         ? ` STALE (last read ${balance.at}): ${balance.text}`
         : ` ${balance.text}`;
-    if (seen.state === "uninitialized") {
-      return { armed: false, usable: true, text: ` OpenRouter fallback configured but not verified: the spend ledger has not been created yet (the first paid call would create it, and nothing has checked that it can).${unverified}${bal}` };
-    }
     const v = seen.view;
     const allowance = ` Local OpenRouter allowance as last written (UTC ${v.day}): $${v.spentTodayUsd.toFixed(4)} spent today of $${v.caps.dailyUsd}, $${v.lifetimeUsd.toFixed(4)} of $${v.caps.totalUsd} lifetime, $${v.reservedUsd.toFixed(4)} reserved for calls in flight${v.uncertainRequests ? `, ${v.uncertainRequests} request(s) charged at their upper bound because the cost was unknown` : ""}. This is ORBIT's own count, not a hard spending ceiling.`;
     return { armed: true, usable: true, text: ` OpenRouter fallback armed: ${client!.model}, used only while ChatGPT is limited.${allowance}${unverified}${bal}` };
