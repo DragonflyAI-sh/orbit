@@ -1,5 +1,5 @@
 import type { Item, Message, ModelPort } from "./model.ts";
-import { hasContent, maskText } from "./threads.ts";
+import { hasContent, maskContent, maskText } from "./threads.ts";
 import type { Summary, Thread, ThreadMessage, Threads } from "./threads.ts";
 
 // What the model is sent for a thread, and per-thread compaction. Everything comes from the stored thread, never from
@@ -167,7 +167,7 @@ export async function compactThread(deps: { threads: Threads; model: ModelPort; 
       const out = (await model.reply([{ role: "user", content: summaryPrompt(prior, older) }], [], undefined, { fallback: false })).value;
       const candidate = typeof out === "string" ? out.trim().slice(0, SUMMARY_MAX_CHARS) : "";
       // Checked the way it will be stored (masked): a summary that is empty, blank or only invisible characters is a failure.
-      if (!hasContent(maskText(candidate))) throw new Error("the model returned an empty summary");
+      if (!hasContent(maskContent(candidate))) throw new Error("the model returned an empty summary");
       text = candidate;
       method = "model";
     } catch (err) {
@@ -181,7 +181,7 @@ export async function compactThread(deps: { threads: Threads; model: ModelPort; 
       // A bounded digest says so, on the page and to the model; it never passes for a complete summary.
       if (digest.lossy) degraded = degraded ? `${degraded} ${digest.lossy}` : digest.lossy;
     }
-    if (!hasContent(maskText(text))) throw new Error("the fallback digest was empty");
+    if (!hasContent(maskContent(text))) throw new Error("the fallback digest was empty");
     threads.setSummary(id, { text, covers: cut, at: (deps.now ?? (() => new Date()))().toISOString(), method, ...(degraded ? { degraded: maskText(degraded) } : {}) }, degraded);
     return { compacted: true, covers: cut, ...(degraded ? { degraded } : {}) };
   } catch (err) {

@@ -68,9 +68,9 @@ test("sensitive categories are flagged only when new to the note", () => {
   assert.deepEqual(sensitiveCategories("ship the release", ""), []);
 });
 
-test("secrets: anything the existing redaction would change is a finding", () => {
-  for (const t of ["gh" + "p_" + "abcdefghijklmnopqrstuv", "Bear" + "er " + "abcdefghijkl", "https://user:" + "pw" + "@example.com/", "api_" + "key=" + "abc12345", "ey" + "JhbGciOi." + "ey" + "JzdWIi.sig", "Zq".repeat(20), "tri" + "g_" + "ABCDEFGHIJKLMNOP"]) assert.equal(secretFindings([t]), true, t);
-  for (const t of ["plain text with a commit 0123456789abcdef0123456789abcdef01234567", "# Heading\n- [ ] item\n", "Projects/some-note.md"]) assert.equal(secretFindings([t]), false, t);
+test("secrets: known credential shapes are findings; weak or unknown values pass (permissive policy, docs/content-filter.md)", () => {
+  for (const t of ["gh" + "p_" + "abcdefghijklmnopqrstuv", "Bear" + "er " + "Ab3dEfGh1jKlMn0p", "https://user:" + "Pw9xKq2mZ4" + "@example.com/", "api_" + "key=" + "Ab3dEfGh1jKlMn0pQr5s", "ey" + "JhbGciOi." + "ey" + "JzdWIi.sig", "tri" + "g_" + "ABCDEFGHIJKLMNOP"]) assert.equal(secretFindings([t]), true, t);
+  for (const t of ["plain text with a commit 0123456789abcdef0123456789abcdef01234567", "# Heading\n- [ ] item\n", "Projects/some-note.md", "Bear" + "er abcdefghijkl", "https://user:" + "pw" + "@example.com/", "api_" + "key=" + "abc12345", "Zq".repeat(20)]) assert.equal(secretFindings([t]), false, t);
 });
 
 test("parseEdit is strict: unknown arguments, wrong types and oversize text are refused", () => {

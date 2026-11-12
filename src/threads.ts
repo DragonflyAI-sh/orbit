@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { redact } from "./ops/protocol.ts";
+import { maskJsonStrings, maskVaultText } from "./vault/filter.ts";
 import type { FallbackInfo } from "./model.ts";
 
 // Server-owned chat threads. One JSON file per thread in <state>/threads/, written atomically; the in-memory copy is
@@ -26,6 +27,20 @@ export function maskText(text: string): string {
 // invisible format characters (zero-width spaces, byte-order marks, blank braille and Hangul fillers) are ignored. A summary
 // that fails this is treated as empty everywhere: it is never stored, never counted as covering messages, never sent.
 export const hasContent = (text: string | undefined): boolean => typeof text === "string" && /[\p{L}\p{N}]/u.test(text.replace(/[\u115f\u1160\u3164\uffa0]/g, ""));
+
+// What the conversation itself holds (what Rai and ORBIT say, thread titles and summaries, and the results of vault, memory, job and
+// pull-request tools) is masked by value, by known credential shape only (src/vault/filter.ts): a note name, a path, a heading or a
+// run of letters is kept exactly, and only the matched secret value is replaced. The tier-1 masker above (redact) keeps masking
+// everything that comes from ops tools (logs, host and admin output are already redacted at their source) and error text.
+export const maskContent = (text: string): string => maskVaultText(text);
+
+// Tool calls whose results are ops output (ops_*) or ORBIT's own configuration view (orbit_*) keep the tier-1 masking.
+const isOpsTool = (name: string): boolean => /^(?:ops_|orbit_)/.test(name);
+
+export function maskCall(call: StoredCall): StoredCall {
+  if (isOpsTool(call.name)) return maskDeep(call);
+  return { ...call, arguments: maskJsonStrings(call.arguments), output: maskJsonStrings(call.output), summary: maskJsonStrings(call.summary), ...(call.source !== undefined ? { source: maskContent(call.source) } : {}) };
+}
 
 export function maskDeep<T>(value: T): T {
   if (typeof value === "string") return maskText(value) as T;
@@ -248,7 +263,7 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
 
   const clean = (s: string) => s.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
   const autoTitle = (text: string) => {
-    const t = clean(maskText(text));
+    const t = clean(maskContent(text));
     return t.length > 60 ? `${t.slice(0, 59)}…` : t || DEFAULT_TITLE;
   };
 
@@ -273,7 +288,7 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
 
     create(title?: string): Thread {
       const at = now().toISOString();
-      const given = typeof title === "string" ? clean(maskText(title)).slice(0, MAX_TITLE) : "";
+      const given = typeof title === "string" ? clean(maskContent(title)).slice(0, MAX_TITLE) : "";
       const t: Thread = { schema: THREAD_SCHEMA, id: randomUUID(), title: given || DEFAULT_TITLE, titleSet: Boolean(given), createdAt: at, updatedAt: at, archived: false, rev: 1, messages: [], cards: [] };
       persist(t);
       threads.set(t.id, t);
@@ -295,7 +310,7 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
 
     rename(id: string, title: unknown): Thread {
       if (typeof title !== "string" || !clean(title)) throw new ThreadError(400, "A thread needs a title.");
-      const next = clean(maskText(title)).slice(0, MAX_TITLE);
+      const next = clean(maskContent(title)).slice(0, MAX_TITLE);
       mutate(id, (t) => void ((t.title = next), (t.titleSet = true)));
       return this.get(id)!;
     },
@@ -323,7 +338,7 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
 
     appendUser(id: string, text: string): ThreadMessage {
       return mutate(id, (t) => {
-        const m: ThreadMessage = { id: randomUUID(), role: "user", at: now().toISOString(), text: maskText(text).slice(0, MAX_MESSAGE_CHARS) };
+        const m: ThreadMessage = { id: randomUUID(), role: "user", at: now().toISOString(), text: maskContent(text).slice(0, MAX_MESSAGE_CHARS) };
         t.messages.push(m);
         if (!t.titleSet && t.title === DEFAULT_TITLE) t.title = autoTitle(text);
         return m;
@@ -344,7 +359,7 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
       mutate(id, (t) => {
         const m = t.messages.find((x) => x.id === messageId);
         if (!m) throw new ThreadError(404, "No such message.");
-        (m.calls ??= []).push(maskDeep(call));
+        (m.calls ??= []).push(maskCall(call));
       });
     },
 
@@ -353,7 +368,7 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
         const m = t.messages.find((x) => x.id === messageId);
         if (!m) throw new ThreadError(404, "No such message.");
         const safe = { ...patch };
-        if (typeof safe.text === "string") safe.text = maskText(safe.text).slice(0, MAX_MESSAGE_CHARS);
+        if (typeof safe.text === "string") safe.text = maskContent(safe.text).slice(0, MAX_MESSAGE_CHARS);
         if (typeof safe.error === "string") safe.error = maskText(safe.error).slice(0, 1000);
         if (Array.isArray(safe.accounting)) safe.accounting = safe.accounting.slice(0, 5).map((a) => maskText(String(a)).slice(0, 300));
         if (Array.isArray(safe.incomplete)) safe.incomplete = safe.incomplete.slice(0, 5).map((a) => maskText(String(a)).slice(0, 300));
@@ -409,7 +424,7 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
     // `error` records that the model summarizer failed and a mechanical digest was stored instead (summary.degraded says the same).
     setSummary(id: string, summary: Summary, error?: string): void {
       // Never replace messages with nothing: an empty (or only-invisible) summary is refused here, whatever the caller did.
-      const text = maskText(summary.text);
+      const text = maskContent(summary.text);
       if (!hasContent(text)) throw new ThreadError(500, "Refusing to store an empty summary: the messages it would replace stay as they are.");
       mutate(id, (t) => {
         t.summary = { ...summary, text };

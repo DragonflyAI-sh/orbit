@@ -7,7 +7,7 @@ import type { Decision } from "./policy.ts";
 import { applyEdit, bodyShaOf, setFrontmatter, splitFrontmatter, VaultError } from "./vault/edit.ts";
 import type { VaultEdit } from "./vault/edit.ts";
 import { dataBlock, neutralize } from "./thread-context.ts";
-import { maskText } from "./threads.ts";
+import { maskContent, maskText } from "./threads.ts";
 import type { Thread, Threads } from "./threads.ts";
 
 // Rolling recent context: a short, model-rewritten note about what Rai has been working on and what is still open, fed to
@@ -183,7 +183,7 @@ export function recentContext(deps: {
       const out = (await model.reply([{ role: "user", content: prompt(prior?.text, t) }], [], undefined, { fallback: false })).value.trim();
       if (!out) throw new Error("the model returned an empty note");
       // A port that refuses secrets gets the text as written, so it can refuse; every other port gets it masked.
-      const text = port.refusesSecrets ? out.slice(0, NOTE_MAX_CHARS) : maskText(out).slice(0, NOTE_MAX_CHARS);
+      const text = port.refusesSecrets ? out.slice(0, NOTE_MAX_CHARS) : maskContent(out).slice(0, NOTE_MAX_CHARS);
       await port.write({ text, updatedAt: at, sources: [...new Set([id, ...(prior?.sources ?? [])])].slice(0, 5) }, caller);
       delete meta.lastError;
       saveMeta();

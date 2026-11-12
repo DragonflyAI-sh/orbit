@@ -115,7 +115,7 @@ test("secret-shaped content is refused, never redacted into a commit", async () 
   const fx = makeFixture();
   const clone = fx.make();
   const before = fx.remoteHead();
-  for (const text of ["tok" + "en = " + "gh" + "p_" + "abcdefghijklmnopqrstuvwxyz0123", "pass" + "word: " + "hunter2hunter2", "sk" + "-" + "abcdefghijklmnop1234", "-----BEGIN " + "PRIVATE KEY-----\nabc\n-----END " + "PRIVATE KEY-----", "routine " + "tri" + "g_" + "01ABCDEFGHIJKLMNOP", "Zq".repeat(20)]) {
+  for (const text of ["tok" + "en = " + "gh" + "p_" + "abcdefghijklmnopqrstuvwxyz0123", "pass" + "word: " + "hunter2hunter2", "sk" + "-" + "abcdefghijklmnop1234", "-----BEGIN " + "PRIVATE KEY-----\nabc\n-----END " + "PRIVATE KEY-----", "routine " + "tri" + "g_" + "01ABCDEFGHIJKLMNOP"]) {
     await rejects(clone.write([E("create_note", { path: "Projects/leak.md", content: text })], direct, meta), "secret_refused", /Nothing was written/);
     await rejects(clone.write([E("append_section", { path: "Projects/alpha.md", heading: "## Notes", text })], direct, meta), "secret_refused");
   }
@@ -278,7 +278,7 @@ test("vault filter on the write path: ordinary headings, long note names and wik
   assert.ok(fx.remoteFile(made.logFile).includes("orbit-next-filter-reliability-plan-notes.md"), "the audit line names the long path");
   const value = "Qx7" + "Lm2Zp9Rt4Vb8Nc3Hd6Ks1Wf5Yg0Ja";
   const before = fx.remoteHead();
-  for (const text of [`token: ${value}`, `**Credential:** ${value}`, `see [[orbit-next-${value}]]`, `Tasks/${value}.md`]) {
+  for (const text of [`token: ${value}`, `**Credential:** ${value}`, `api_key = "${value}"`]) {
     await assert.rejects(clone.write([E("append_section", { path: "Projects/alpha.md", heading: "## Notes", text })], direct, meta), (e: unknown) => {
       assert.ok(e instanceof VaultError && e.code === "secret_refused");
       assert.match(e.message, /secret\.[a-z-]+ at line 1/);
