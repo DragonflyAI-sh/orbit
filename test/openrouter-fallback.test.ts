@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -12,6 +12,7 @@ import type { Item, ModelPort, Step, ToolDef } from "../src/model.ts";
 import { openrouterClient, openrouterConfig, sanitize, toMessages } from "../src/openrouter.ts";
 import type { OpenRouterConfig } from "../src/openrouter.ts";
 import { spendLedger, SpendError, toMicro } from "../src/spend-ledger.ts";
+import { provisioned } from "./helpers/ledger.ts";
 import { call, OWNER, rig, say } from "./threads-fixture.ts";
 
 // Nothing here reaches OpenRouter or any paid service: the "provider" is a fake fetch, time is a variable.
@@ -80,7 +81,9 @@ const world = (opts: { script: (Step | Error)[] | ((n: number) => Step | Error);
   const now = () => t;
   const cfg = opts.cfg ?? ready();
   const d = opts.d ?? dir();
-  const ledger = spendLedger(d, { dailyMicro: toMicro(opts.caps?.d ?? 5), totalMicro: toMicro(opts.caps?.t ?? 150) }, () => new Date(t));
+  // A directory the test supplies may hold a ledger in any state (corrupt, restored); only a fresh one is provisioned.
+  const make = opts.d ? spendLedger : provisioned;
+  const ledger = make(d, { dailyMicro: toMicro(opts.caps?.d ?? 5), totalMicro: toMicro(opts.caps?.t ?? 150) }, () => new Date(t));
   const or = fakeOpenRouter(opts.replies ?? [answer("from openrouter")]);
   const primary = primaryModel(opts.script);
   const model = fallbackModel({ primary, config: cfg, ledger, fetcher: or.fetcher, now });
@@ -117,7 +120,7 @@ test("config: disabled by default; every missing or bad setting makes the fallba
 
 test("client: tool-call round trip with every billable option pinned and the cost reconciled", async () => {
   const d = dir();
-  const ledger = spendLedger(d, { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
+  const ledger = provisioned(d, { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
   const or = fakeOpenRouter([toolAnswer("jobs_list", {}, 0.0002), answer("done", 0.0003)]);
   const client = openrouterClient(ready(), ledger, or.fetcher);
   const first = await client.step([{ role: "user", content: "list" }], ["x"], undefined, [tool("jobs_list")]);
@@ -374,7 +377,7 @@ test("daily cap: calls stop when the next bound would exceed it, with a fallback
 
 test("total cap: lifetime is its own counter and day rollover does not reset it, a new UTC day resets only the daily one", () => {
   let t = Date.parse("2026-11-12T23:59:00Z");
-  const l = spendLedger(dir(), { dailyMicro: 1000, totalMicro: 1500 }, () => new Date(t));
+  const l = provisioned(dir(), { dailyMicro: 1000, totalMicro: 1500 }, () => new Date(t));
   const a = l.reserve(900);
   l.settle(a.id, 900);
   assert.throws(() => l.reserve(200), (e: unknown) => e instanceof SpendError && e.code === "daily_cap");
@@ -388,22 +391,34 @@ test("total cap: lifetime is its own counter and day rollover does not reset it,
   assert.equal(l.view().remainingTotalUsd, 0.0001);
 });
 
-test("restart durability: spend and reservations survive a new process; a reservation left behind is charged at its bound", () => {
+test("restart durability: spend and reservations survive a new process; a reservation left behind by a gone process is charged at its bound", () => {
   const d = dir();
   const caps = { dailyMicro: 10_000, totalMicro: 100_000 };
   const now = () => new Date("2026-11-12T10:00:00Z");
-  const one = spendLedger(d, caps, now);
+  // The first process: a pid that is provably gone by the time the second one starts.
+  const one = provisioned(d, caps, now, { identity: { pid: 2_147_483_000, start: "1" } });
   const a = one.reserve(1000);
   one.settle(a.id, 400);
   one.reserve(2000); // the process "dies" with this request unsettled
   const two = spendLedger(d, caps, now);
-  const v = two.view();
+  const v = two.open();
   assert.equal(v.lifetimeUsd, 0.0024);
   assert.equal(v.spentTodayUsd, 0.0024);
   assert.equal(v.reservedUsd, 0);
   assert.equal(v.uncertainRequests, 1);
-  assert.equal(spendLedger(d, caps, now).view().lifetimeUsd, 0.0024);
-  assert.deepEqual(readdirSync(d), ["openrouter-spend.json"]);
+  assert.equal(spendLedger(d, caps, now).open().lifetimeUsd, 0.0024);
+  assert.deepEqual(readdirSync(d).sort(), ["openrouter-spend.json", "openrouter-spend.marker", `openrouter-spend.provision.used-${JSON.parse(readFileSync(join(d, "openrouter-spend.marker"), "utf8")).epoch}`].sort());
+});
+
+test("a reservation of a LIVE process is never adopted as an orphan by another ledger instance in the same state directory", () => {
+  const d = dir();
+  const caps = { dailyMicro: 10_000, totalMicro: 100_000 };
+  const live = provisioned(d, caps);
+  live.reserve(2000);
+  const other = spendLedger(d, caps);
+  const v = other.open();
+  assert.equal(v.reservedUsd, 0.002, "still reserved, still counted against the caps");
+  assert.equal(v.uncertainRequests, 0);
 });
 
 test("concurrency: simultaneous calls cannot together exceed the allowance", async () => {
@@ -461,23 +476,28 @@ test("a corrupt, unknown or vanished ledger stops all paid calls instead of star
   const d = dir();
   const file = join(d, "openrouter-spend.json");
   const caps = { dailyMicro: 10_000, totalMicro: 100_000 };
-  const first = spendLedger(d, caps);
+  const first = provisioned(d, caps);
   first.settle(first.reserve(100).id, 100);
+  const good = readFileSync(file);
   for (const bad of ["{not json", "[]", JSON.stringify({ schema: 2 }), JSON.stringify({ schema: 1, lifetimeMicro: -5, days: {}, reservations: {}, uncertain: [] }), ""]) {
     writeFileSync(file, bad);
     assert.throws(() => spendLedger(d, caps).reserve(10), (e: unknown) => e instanceof SpendError && e.code === "ledger", bad);
+    assert.throws(() => spendLedger(d, caps).open(), (e: unknown) => e instanceof SpendError && e.code === "ledger", `open: ${bad}`);
   }
   writeFileSync(file, "{not json");
   const w = world({ script: [usageLimit()], d });
-  await assert.rejects(ask(w.model), /spend ledger is corrupt/);
+  await assert.rejects(ask(w.model), /spend ledger file is corrupt/);
   assert.equal(w.or.requests.length, 0);
   assert.equal(readFileSync(file, "utf8"), "{not json", "the bad file is left alone for a person to look at");
-  // The file disappearing under a running process is not a fresh start either.
+  // The file disappearing under a running process is not a fresh start either (more in test/spend-ledger-provisioning.test.ts).
   const live = spendLedger(d, caps);
-  writeFileSync(file, JSON.stringify({ schema: 1, createdAt: "x", lifetimeMicro: 0, days: {}, reservations: {}, uncertain: [] }));
+  writeFileSync(file, good);
   live.view();
   writeFileSync(file, "garbage");
   assert.throws(() => live.view(), SpendError);
+  rmSync(file);
+  assert.throws(() => live.view(), /missing although a history marker/);
+  assert.ok(!existsSync(file), "never recreated");
   assert.throws(() => spendLedger(undefined, { dailyMicro: 0, totalMicro: 1 }), SpendError);
   assert.throws(() => spendLedger(d, caps).reserve(0), /not a positive amount/);
 });
@@ -528,7 +548,7 @@ test("reply: a mock primary's own result passes through, never relabelled live",
     status: () => ({ port: "model", state: "mock", impl: "mock-echo", detail: "mock", verifiedAt: new Date(T0).toISOString() }),
     reply: async () => ({ value: "echo", provenance: "mock", source: "model/mock-echo" }),
   };
-  const m = fallbackModel({ primary: mock, config: ready(), ledger: spendLedger(dir(), { dailyMicro: toMicro(5), totalMicro: toMicro(150) }), fetcher: fakeOpenRouter([answer("x")]).fetcher });
+  const m = fallbackModel({ primary: mock, config: ready(), ledger: provisioned(dir(), { dailyMicro: toMicro(5), totalMicro: toMicro(150) }), fetcher: fakeOpenRouter([answer("x")]).fetcher });
   const r = await m.reply([{ role: "user", content: "hi" }], []);
   assert.equal(r.provenance, "mock");
   assert.equal(r.source, "model/mock-echo");
@@ -562,12 +582,12 @@ test("config: oversized caps are unavailable with a reason, and the ledger error
     assert.match((c as { reason: string }).reason, /at most 10000/);
   }
   assert.equal(ready({ ORBIT_OPENROUTER_TOTAL_CAP_USD: "10000" }).totalCapUsd, 10000);
-  assert.throws(() => spendLedger(dir(), { dailyMicro: toMicro(1), totalMicro: toMicro(1e10) }), (e: unknown) => e instanceof SpendError && /no larger/.test(e.message));
+  assert.throws(() => provisioned(dir(), { dailyMicro: toMicro(1), totalMicro: toMicro(1e10) }), (e: unknown) => e instanceof SpendError && /no larger/.test(e.message));
 });
 
 // A ledger whose settle (and optionally release) fails, with a path in the failure that must never be shown.
 const brokenLedger = (d: string) => {
-  const ledger = spendLedger(d, { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
+  const ledger = provisioned(d, { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
   const boom = () => {
     throw new Error(`EISDIR ${d}/openrouter-spend.json.new`);
   };
@@ -664,29 +684,29 @@ test("a fallback model whose primary is not limited never touches the provider, 
   assert.equal(w.or.requests.length, 0);
 });
 
-test("runChat: accounting diagnostics from a tool-call-only round are kept for the owner and never fed back to the model", async () => {
+test("runChat: accounting diagnostics from a billed round are kept for the owner and never fed back to the model; the next paid round is refused", async () => {
   const d = dir();
   const reset = new Date(T0 + 60 * MIN).toISOString();
-  const ledger = brokenLedger(d);
-  const or = fakeOpenRouter((n) => (n === 0 ? toolAnswer("jobs_list", {}) : answer("no jobs")));
-  const model = fallbackModel({ primary: primaryModel([usageLimit(reset)]), config: ready(), ledger, fetcher: or.fetcher, now: () => T0 });
   const tools: ChatTool[] = [{ name: "jobs_list", description: "j", parameters: {}, run: async () => ({ value: [], provenance: "live", source: "jobs" }) }];
+  const or = fakeOpenRouter([answer("no jobs")]);
+  const model = fallbackModel({ primary: primaryModel([usageLimit(reset)]), config: ready(), ledger: brokenLedger(d), fetcher: or.fetcher, now: () => T0 });
   const out = await runChat({ model, messages: [{ role: "user", content: "jobs?" }], limits: [], tools, fallback: true });
   assert.equal(out.text, "no jobs");
   assert.ok(out.accounting && out.accounting.length >= 1);
   assert.ok(!out.text.includes("accounting"));
-  assert.equal(or.requests.length, 2);
+  assert.equal(or.requests.length, 1);
   for (const r of or.requests) assert.ok(!JSON.stringify(r.body.messages).toLowerCase().includes("accounting"), "diagnostics never reach a model request");
-  // A later round that fails does not lose the earlier diagnostic.
-  const or2 = fakeOpenRouter((n) => (n === 0 ? toolAnswer("jobs_list", {}) : { status: 500, body: { error: { message: "down" } } }));
+  // A tool round that was billed but not recorded latches the ledger: the following round is refused and the earlier diagnostic is kept.
+  const or2 = fakeOpenRouter((n) => (n === 0 ? toolAnswer("jobs_list", {}) : answer("never asked")));
   const model2 = fallbackModel({ primary: primaryModel([usageLimit(reset)]), config: ready(), ledger: brokenLedger(d), fetcher: or2.fetcher, now: () => T0 });
-  await assert.rejects(runChat({ model: model2, messages: [{ role: "user", content: "jobs?" }], limits: [], tools, fallback: true }), /Spend accounting/);
+  await assert.rejects(runChat({ model: model2, messages: [{ role: "user", content: "jobs?" }], limits: [], tools, fallback: true }), /latched as untrusted[\s\S]*Spend accounting/);
+  assert.equal(or2.requests.length, 1, "the second paid round was not admitted");
 });
 
 test("server and thread UI: diagnostics reach the owner on /chat and on the stored thread message, and stay out of the next model turn", async () => {
   const d = dir();
   const reset = new Date(Date.now() + 60 * MIN).toISOString();
-  const or = fakeOpenRouter((n) => (n % 2 === 0 ? toolAnswer("jobs_list", {}) : answer("no jobs right now")));
+  const or = fakeOpenRouter([answer("no jobs right now")]);
   const model = fallbackModel({ primary: primaryModel([usageLimit(reset)]), config: ready(), ledger: brokenLedger(d), fetcher: or.fetcher });
   const r = rig({ model });
   const t = await r.create("x");
@@ -697,18 +717,25 @@ test("server and thread UI: diagnostics reach the owner on /chat and on the stor
   assert.ok(last.accounting.length >= 1 && last.accounting.every((a: string) => !a.includes(d)));
   const stored = (await r.api(`/threads/${t.id}`)).data.thread.messages.at(-1);
   assert.deepEqual(stored.accounting, last.accounting);
-  // The next turn's model request is built from the stored text only.
+  // The ledger is now latched: the next turn and /chat are refused and no paid request is made, so nothing is built from stored text.
   const before = or.requests.length;
   await r.send(t.id, "and again?");
-  for (const q of or.requests.slice(before)) assert.ok(!JSON.stringify(q.body.messages).toLowerCase().includes("accounting"));
-  // The direct /chat route returns them next to the reply.
-  const chat = await r.api("/chat", "POST", { messages: [{ role: "user", content: "what jobs?" }] });
+  assert.equal(or.requests.length, before);
+  const refused = await r.api("/chat", "POST", { messages: [{ role: "user", content: "what jobs?" }] });
+  assert.equal(refused.status, 502);
+  assert.match(refused.data.error, /latched as untrusted/);
+  assert.equal(or.requests.length, before);
+  // The direct /chat route returns the diagnostics next to the reply (a fresh model whose ledger fails the same way).
+  const or2 = fakeOpenRouter([answer("no jobs right now")]);
+  const r2 = rig({ model: fallbackModel({ primary: primaryModel([usageLimit(reset)]), config: ready(), ledger: brokenLedger(dir()), fetcher: or2.fetcher }) });
+  const chat = await r2.api("/chat", "POST", { messages: [{ role: "user", content: "what jobs?" }] });
   assert.equal(chat.status, 200);
   assert.ok(chat.data.reply.accounting.length >= 1);
   assert.equal(chat.data.reply.value, "no jobs right now");
   // The page renders them.
   assert.match(readFileSync(new URL("../src/web/index.html", import.meta.url), "utf8"), /Spend accounting: \$\{m\.accounting/);
   r.close();
+  r2.close();
 });
 
 test("thread turn: provider error plus ledger error shows both on the failed message and the diagnostic is not model-visible", async () => {

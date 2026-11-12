@@ -11,7 +11,7 @@ import { proposals as newProposals } from "./agent.ts";
 import { fallbackModel } from "./fallback.ts";
 import { selectModel } from "./model.ts";
 import { openrouterConfig } from "./openrouter.ts";
-import { spendLedger, toMicro } from "./spend-ledger.ts";
+import { SpendError, spendLedger, toMicro } from "./spend-ledger.ts";
 import { nodes as devicePresence, tailscaleStatus } from "./nodes.ts";
 import { notifier, selectDiscord } from "./notify.ts";
 import { adminOps } from "./ops-admin.ts";
@@ -64,13 +64,15 @@ let openrouterEffective = openrouter;
 if (openrouter.state === "ready" && stateDir) {
   try {
     openrouterLedger = spendLedger(stateDir, { dailyMicro: toMicro(openrouter.dailyCapUsd), totalMicro: toMicro(openrouter.totalCapUsd) });
-    // The one explicit, startup-time initialisation: creates a missing ledger and charges reservations left by a crashed process, exactly
-    // as the first paid call would, but before any call. /status only observes (src/fallback.ts) and never does either. A failure is not
-    // fatal and not hidden: /status reports the fallback as NOT armed while the ledger cannot be read.
+    // The one explicit, startup-time initialisation. It charges reservations left by a process that is proven gone and retires a used
+    // provision request. It creates a missing ledger ONLY when the owner deliberately asked for it (docs/openrouter-ledger-integrity.md);
+    // otherwise a missing ledger stays missing and /status says NOT armed. /status only observes (src/fallback.ts) and never does any of
+    // this. A failure is not fatal and not hidden: /status reports the fallback as NOT armed while the ledger cannot be used.
     try {
-      openrouterLedger.view();
-    } catch {
-      console.error(JSON.stringify({ at: new Date().toISOString(), openrouter: "the spend ledger could not be initialised at startup; no paid call will be made until it is fixed" }));
+      openrouterLedger.open();
+    } catch (err) {
+      const code = err instanceof SpendError ? err.code : "error";
+      console.error(JSON.stringify({ at: new Date().toISOString(), openrouter: `the spend ledger could not be opened at startup (${code}); no paid call will be made until it is fixed or provisioned` }));
     }
   } catch (err) {
     openrouterEffective = { state: "unavailable", reason: `The spend ledger could not be set up: ${err instanceof Error ? err.message : "unknown error"}` };

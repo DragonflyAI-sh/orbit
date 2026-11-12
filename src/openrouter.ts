@@ -134,7 +134,10 @@ export async function readBounded(res: Response, maxBytes: number, signal: Abort
     }
   } catch (err) {
     void reader.cancel().catch(() => {});
-    throw err instanceof ReadLimit ? err : new ReadLimit("stream");
+    if (err instanceof ReadLimit) throw err;
+    // The deadline also errors the body stream itself, and that rejection can win the race against `aborted`: a read that fails after
+    // the deadline passed is a timeout, not a generic read error.
+    throw new ReadLimit(signal.aborted ? "time" : "stream");
   } finally {
     signal.removeEventListener("abort", onAbort);
   }
@@ -225,7 +228,9 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
       try {
         reservation = ledger.reserve(bound);
       } catch (err) {
-        throw err instanceof SpendError ? err : fail("spend accounting failed");
+        // Any failure to reserve (cap, lock, disk) refuses the call before anything is sent. A non-SpendError is a ledger fault too, so
+        // the caller can latch it; the raw error text (it may hold a path) is dropped.
+        throw err instanceof SpendError ? err : new SpendError("ledger", "The spend ledger could not record this call, so no paid call is made.");
       }
 
       // One deadline covers the request and reading the whole body, so a provider that sends headers and then stalls cannot hold the turn.
@@ -289,9 +294,16 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
         .map((c) => ({ call_id: String(c.id), name: String(c.function!.name), arguments: c.function!.arguments ?? "{}" }));
       if (calls.length > MAX_TOOL_CALLS) throw fail(`the model asked for ${calls.length} tool calls at once; the limit is ${MAX_TOOL_CALLS}`, "failed", settleNote);
       const finish = typeof choice?.finish_reason === "string" ? choice.finish_reason : undefined;
-      // A reply cut off (output limit, content filter, error) may carry half a tool call: it is never run, whatever its arguments look like.
-      if (finish !== undefined && CUT_FINISH.has(finish) && (calls.length || rawCalls.length)) {
-        throw fail(`the reply ended early (finish: ${sanitize(finish, cfg.key, 40)}) in the middle of a tool call, so no tool was run`, "failed", settleNote);
+      // A tool call runs only after a finish reason that says the model ended normally. A reply cut off (output limit, content filter,
+      // error), one with no finish reason (absent, null or not a string) and one with a reason ORBIT does not know may all carry half a
+      // tool call: none of them is run, whatever its arguments look like.
+      if (calls.length || rawCalls.length) {
+        if (finish !== undefined && CUT_FINISH.has(finish)) {
+          throw fail(`the reply ended early (finish: ${sanitize(finish, cfg.key, 40)}) in the middle of a tool call, so no tool was run`, "failed", settleNote);
+        }
+        if (finish === undefined || !NORMAL_FINISH.has(finish)) {
+          throw fail(`the reply carried a tool call but ${finish === undefined ? "no finish reason" : `an unrecognised finish reason (${sanitize(finish, cfg.key, 40)})`}, so it cannot be shown complete and no tool was run`, "failed", settleNote);
+        }
       }
       const full = typeof message.content === "string" ? message.content : "";
       const content = full.slice(0, MAX_REPLY_CHARS);
@@ -300,7 +312,8 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
       // so they cannot reach a later model request or change what a tool runs. A normal stop adds nothing.
       const incomplete: string[] = [];
       if (finish !== undefined && CUT_FINISH.has(finish)) incomplete.push(finish === "length" ? "The reply was cut off at the output limit (finish: length); it may be incomplete." : `The provider ended the reply early (finish: ${sanitize(finish, cfg.key, 40)}); it may be incomplete.`);
-      else if (finish !== undefined && !NORMAL_FINISH.has(finish)) incomplete.push(`The provider gave an unrecognised finish reason (${sanitize(finish, cfg.key, 40)}), not a normal stop; the reply may be incomplete.`);
+      else if (finish === undefined) incomplete.push("The provider gave no finish reason, so ORBIT cannot tell whether the reply is complete.");
+      else if (!NORMAL_FINISH.has(finish)) incomplete.push(`The provider gave an unrecognised finish reason (${sanitize(finish, cfg.key, 40)}), not a normal stop; the reply may be incomplete.`);
       if (full.length > content.length) incomplete.push(`ORBIT shortened the reply to ${MAX_REPLY_CHARS} characters.`);
       if (rawCalls.length > calls.length) incomplete.push(`${rawCalls.length - calls.length} tool call(s) from the model had no id or name and were dropped; nothing was run for them.`);
       return { text: content, calls, costUsd: cost, model: cfg.model, ...(settleNote.length ? { accounting: settleNote } : {}), ...(incomplete.length ? { incomplete } : {}) };
@@ -309,7 +322,14 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
     async balance() {
       const timeoutMs = Math.min(cfg.timeoutMs, 15_000);
       const signal = AbortSignal.timeout(timeoutMs);
-      const res = await fetcher(`${OPENROUTER_BASE}/key`, { headers, signal });
+      let res: Response;
+      try {
+        res = await fetcher(`${OPENROUTER_BASE}/key`, { headers, signal });
+      } catch (err) {
+        // Before any header arrived: a network error, a refused connection or the deadline. Normalised, nothing from the error is kept.
+        const timedOut = signal.aborted || (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError"));
+        throw fail(timedOut ? `balance lookup did not answer within ${timeoutMs / 1000} s` : "balance lookup failed before an answer arrived");
+      }
       if (!res.ok) {
         // The error body is not read at all: only the status is reported. Cancel it so the connection is released.
         void res.body?.cancel().catch(() => {});
