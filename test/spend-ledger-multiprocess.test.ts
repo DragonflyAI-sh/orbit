@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -186,17 +186,80 @@ test("a host that rebooted since the lock was written has no live owner left: it
   assert.ok(l.reserve(1000).id);
 });
 
-test("a process killed while breaking a dead lock leaves the break guard: everything then fails closed (busy) until a person looks", async () => {
+test("a process killed while breaking a dead lock leaves a guard, and the next caller recovers: the dead breaker is proven dead, nothing is charged or lost", async () => {
   const d = dir();
   const caps = { dailyMicro: 100_000, totalMicro: 1_000_000 };
   provisioned(d, caps, NOW);
   await race(d, caps, [{ ops: [{ op: "reserve", micro: 1000 }], fault: { point: "locked", action: "kill" } }]); // leaves a dead lock
   const [breaker] = await race(d, caps, [{ ops: [{ op: "reserve", micro: 1000 }], fault: { point: "breaking", action: "kill" } }]);
   assert.equal(breaker!.signal, "SIGKILL");
-  assert.ok(existsSync(join(d, "openrouter-spend.lock")) && existsSync(join(d, "openrouter-spend.lock.break")));
-  const l = spendLedger(d, caps, NOW, { lockWaitMs: 200 });
+  const names = () => readdirSync(d).filter((f) => f.startsWith("openrouter-spend.lock"));
+  assert.ok(names().includes("openrouter-spend.lock") && names().some((f) => f.startsWith("openrouter-spend.lock.break.")), "the dead lock and the dead breaker's guard are both left");
+  const l = spendLedger(d, caps, NOW, { lockWaitMs: 1000 });
+  assert.ok(l.reserve(1000).id, "recovered: the guard's owner is proven dead, so it is superseded and the dead lock is cleared");
+  assert.deepEqual(names(), [], "no lock, guard or token file is left behind");
+  const st = stateOf(d);
+  assert.equal(st.lifetimeMicro + Object.values<any>(st.reservations).reduce((a, r) => a + r.micro, 0), 1000, "exactly the one admitted reservation: the two killed processes reserved nothing, and nothing was lost");
+});
+
+test("a break guard whose owner is not provably dead is never removed or superseded: the call is refused busy", () => {
+  const caps = { dailyMicro: 100_000, totalMicro: 1_000_000 };
+  const me = selfIdentity();
+  const forgedGuards: [string, Record<string, unknown>][] = [
+    ["a guard of a live pid", { ...me, tok: "g1", at: "x" }],
+    ["a guard of another host", { ...me, host: `${me.host}-other`, tok: "g2", at: "x" }],
+    ["a guard with no boot id", { pid: GONE.pid, host: me.host, tok: "g3", at: "x" }],
+  ];
+  for (const [name, guard] of forgedGuards) {
+    const d = dir();
+    const l = provisioned(d, caps, NOW, { lockWaitMs: 150 });
+    writeFileSync(join(d, "openrouter-spend.lock"), JSON.stringify({ ...me, ...GONE, tok: "deadlock", at: "x" }));
+    const gpath = join(d, "openrouter-spend.lock.break.deadlock.1");
+    writeFileSync(gpath, JSON.stringify(guard));
+    assert.throws(() => l.reserve(1000), (e: unknown) => e instanceof SpendError && e.code === "busy", name);
+    assert.ok(existsSync(join(d, "openrouter-spend.lock")) && existsSync(gpath), `${name}: lock and guard untouched`);
+    assert.equal(JSON.parse(readFileSync(gpath, "utf8")).tok, guard.tok);
+  }
+});
+
+test("a lock token that is not file-name safe is never broken, even when its owner is dead", () => {
+  const d = dir();
+  const caps = { dailyMicro: 100_000, totalMicro: 1_000_000 };
+  const l = provisioned(d, caps, NOW, { lockWaitMs: 100 });
+  writeFileSync(join(d, "openrouter-spend.lock"), JSON.stringify({ ...selfIdentity(), ...GONE, tok: "../../x", at: "x" }));
   assert.throws(() => l.reserve(1000), (e: unknown) => e instanceof SpendError && e.code === "busy");
-  assert.equal(stateOf(d).lifetimeMicro, 0, "nothing was charged or lost by the refusals");
+  assert.ok(existsSync(join(d, "openrouter-spend.lock")));
+});
+
+test("two live breakers racing for the same dead lock: exactly one breaks it, the new lock is never broken by the other", async () => {
+  const caps = { dailyMicro: 1_000_000, totalMicro: 10_000_000 };
+  for (let round = 0; round < 8; round++) {
+    const d = dir();
+    provisioned(d, caps, NOW);
+    await race(d, caps, [{ ops: [{ op: "reserve", micro: 1000 }], fault: { point: "locked", action: "kill" } }]);
+    const rs = await race(d, caps, Array.from({ length: 5 }, () => ({ ops: [{ op: "reserve", micro: 1000, count: 4 }], lockWaitMs: 5000 })));
+    for (const r of rs) assert.equal(r.code, 0, JSON.stringify(r.lines));
+    assert.equal(all(rs).filter((l) => l.ok).length, 20, `round ${round}: every attempt admitted`);
+    const st = stateOf(d);
+    assert.equal(st.lifetimeMicro + Object.values<any>(st.reservations).reduce((a, r) => a + r.micro, 0), 20_000, "every admitted reservation is accounted for exactly once (charged as an orphan or still reserved), none lost or doubled");
+    assert.deepEqual(readdirSync(d).filter((f) => f.startsWith("openrouter-spend.lock")), []);
+  }
+});
+
+test("stray lock token temp files: old ones are swept at startup, a recent one (a live process may be using it) is kept", () => {
+  const d = dir();
+  const caps = { dailyMicro: 100_000, totalMicro: 1_000_000 };
+  writeFileSync(join(d, "openrouter-spend.provision"), JSON.stringify({ openingLifetimeUsd: 0, openingTodayUsd: 0 }));
+  const oldTmp = join(d, "openrouter-spend.lock.11111111-1111-1111-1111-111111111111");
+  const newTmp = join(d, "openrouter-spend.lock.22222222-2222-2222-2222-222222222222");
+  const oldGuard = join(d, "openrouter-spend.lock.break");
+  for (const f of [oldTmp, newTmp, oldGuard]) writeFileSync(f, "x");
+  const longAgo = new Date(Date.now() - 10 * 60_000);
+  utimesSync(oldTmp, longAgo, longAgo);
+  utimesSync(oldGuard, longAgo, longAgo);
+  spendLedger(d, caps, NOW).open();
+  assert.ok(!existsSync(oldTmp) && !existsSync(oldGuard), "old leftovers are removed");
+  assert.ok(existsSync(newTmp), "a recent file is left alone");
 });
 
 test("write failure: a failing write refuses the call, leaves the ledger byte for byte as it was, releases the lock and leaves no temp file", () => {
