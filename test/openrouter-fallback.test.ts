@@ -757,3 +757,35 @@ test("thread turn: provider error plus ledger error shows both on the failed mes
   assert.ok(!last.error.includes(d));
   r.close();
 });
+
+// ---- readiness audit (orbit-202611130644-epou): the real background callers, driven through a limited fallback model ----
+
+test("readiness: the scheduled model-task worker never spends OpenRouter while ChatGPT is limited", async () => {
+  const { modelTask } = await import("../src/runs.ts");
+  const w = world({ script: [usageLimit(new Date(T0 + 60 * MIN).toISOString())] });
+  const worker = modelTask(w.model);
+  await assert.rejects(worker.run({ prompt: "background summary" }, new AbortController().signal), ProviderError);
+  await assert.rejects(worker.run({ prompt: "again, while the limit is in force" }, new AbortController().signal), ProviderError);
+  assert.equal(w.or.requests.length, 0);
+  assert.equal(w.ledger.view().lifetimeUsd, 0);
+});
+
+test("readiness: thread compaction never spends OpenRouter while ChatGPT is limited; it degrades to the extractive digest", async () => {
+  const { compactThread } = await import("../src/thread-context.ts");
+  const { threadService } = await import("../src/thread-service.ts");
+  const { threadStore } = await import("../src/threads.ts");
+  const { proposals } = await import("../src/agent.ts");
+  const { scripted } = await import("./threads-fixture.ts");
+  const threads = threadStore(undefined);
+  // Build a long thread with a free scripted model and a budget that never compacts.
+  const svc = threadService({ threads, model: scripted(() => say("x".repeat(400))), proposals: proposals(), budget: 1_000_000 });
+  const t = threads.create();
+  for (let i = 0; i < 8; i++) await svc.turn(t.id, `question ${i} ${"y".repeat(400)}`, { memory: [], limits: [], tools: [], isOwner: true });
+  const w = world({ script: [usageLimit(new Date(T0 + 60 * MIN).toISOString())] });
+  const out = await compactThread({ threads, model: w.model, id: t.id, budget: 500 });
+  assert.equal(out.compacted, true);
+  assert.match(out.degraded ?? "", /could not summarize/);
+  assert.equal(threads.get(t.id)!.summary!.method, "extractive");
+  assert.equal(w.or.requests.length, 0);
+  assert.equal(w.ledger.view().lifetimeUsd, 0);
+});
