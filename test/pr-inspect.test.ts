@@ -963,3 +963,29 @@ test("log redirects: only GitHub's Actions log hosts over https, once, with no c
   assert.match(c.unavailable, /redirected again|redirected the request/);
   assert.equal(chain.calls.filter((x) => x.url.startsWith("https://pipelines")).length, 1);
 });
+
+// ---- readiness audit (orbit-202611130644-epou): discussion paging beyond one GitHub page ----
+
+test("readiness: reviews beyond GitHub's first page of 100 are all read, and the final verdict on page 2 is reachable", async () => {
+  const list = Array.from({ length: 150 }, (_, k) => review(k + 1, `reviewer${k % 3}`, "COMMENTED", HEAD, `note ${k + 1}`));
+  list[149] = review(150, "final-reviewer", "CHANGES_REQUESTED", HEAD, "Verdict: blocking issues found");
+  const f = fake({ reviews: list });
+  const first = await use(f, "pr_discussion", { ...A, kind: "reviews" });
+  assert.equal(first.listed, 150);
+  assert.equal(first.readAllPages, true);
+  assert.equal(first.incompleteNote, undefined);
+  const pages = f.calls.filter((c) => /\/pulls\/7\/reviews$/.test(new URL(c.url).pathname)).map((c) => new URL(c.url));
+  assert.ok(pages.every((u) => u.searchParams.get("per_page") === "100"), "every page asks for 100");
+  assert.deepEqual(pages.map((u) => u.searchParams.get("page") ?? "1"), ["1", "2"]);
+  const last = await use(f, "pr_discussion", { ...A, kind: "reviews", start: 149 });
+  assert.equal(last.items[0].id, 150);
+  assert.equal(last.items[0].state, "CHANGES_REQUESTED");
+});
+
+test("readiness: conversation comments beyond the first page are all read", async () => {
+  const comments = Array.from({ length: 130 }, (_, k) => ({ id: 9000 + k, user: { login: "someone" }, created_at: "2026-11-11T11:00:00Z", updated_at: "2026-11-11T11:00:00Z", body: `comment ${k}` }));
+  const f = fake({ comments });
+  const v = await use(f, "pr_discussion", { ...A, kind: "comments" });
+  assert.equal(v.listed, 130);
+  assert.equal(v.readAllPages, true);
+});
