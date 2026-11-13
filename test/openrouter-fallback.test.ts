@@ -25,6 +25,8 @@ const ENV = {
   ORBIT_OPENROUTER_MODEL: "vendor/cheap-model",
   ORBIT_OPENROUTER_PRICE_IN_USD_PER_MTOK: "0.2",
   ORBIT_OPENROUTER_PRICE_OUT_USD_PER_MTOK: "0.4",
+  // Equal to max_tokens so the reservation arithmetic in these tests is unchanged; test/openrouter-output-bound.test.ts covers the bound.
+  ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS: "2048",
   CREDENTIALS_DIRECTORY: "/creds",
 };
 const readKey = () => KEY;
@@ -134,8 +136,10 @@ test("client: tool-call round trip with every billable option pinned and the cos
   assert.equal(r1.body.model, "vendor/cheap-model");
   assert.equal(r1.body.max_tokens, 2048);
   assert.equal(r1.body.stream, false);
-  assert.deepEqual(r1.body.usage, { include: true });
-  assert.deepEqual(r1.body.provider, { max_price: { prompt: 0.2, completion: 0.4 }, data_collection: "deny", allow_fallbacks: false });
+  // `usage: {include: true}` is deprecated with no effect (usage is always returned), so it is no longer sent.
+  assert.equal(r1.body.usage, undefined);
+  assert.deepEqual(r1.body.reasoning, { effort: "none" });
+  assert.deepEqual(r1.body.provider, { max_price: { prompt: 0.2, completion: 0.4 }, data_collection: "deny", allow_fallbacks: false, require_parameters: true });
   assert.equal(r1.body.models, undefined);
   assert.equal(r1.body.plugins, undefined);
   assert.equal(r1.body.tools[0].function.name, "jobs_list");
@@ -439,7 +443,7 @@ test("concurrency: simultaneous calls cannot together exceed the allowance", asy
   const done = await Promise.all(results);
   const ok = done.filter((x) => x === "ok").length;
   const bytes = Buffer.byteLength(JSON.stringify(or.requests[0].body));
-  const bound = toMicro((bytes + 64) * cfg.priceIn / 1e6 + cfg.maxOutputTokens * cfg.priceOut / 1e6);
+  const bound = toMicro((bytes + 64) * cfg.priceIn / 1e6 + cfg.outputBoundTokens * cfg.priceOut / 1e6);
   assert.equal(ok, Math.floor(3000 / bound), `bound ${bound}`);
   assert.ok(ok >= 1 && ok < 20);
   assert.equal(done.filter((x) => x === "cap").length, 20 - ok);

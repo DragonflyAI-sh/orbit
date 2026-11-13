@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -260,6 +260,25 @@ test("stray lock token temp files: old ones are swept at startup, a recent one (
   spendLedger(d, caps, NOW).open();
   assert.ok(!existsSync(oldTmp) && !existsSync(oldGuard), "old leftovers are removed");
   assert.ok(existsSync(newTmp), "a recent file is left alone");
+});
+
+test("stray-file sweep: one entry that cannot be stat'ed does not stop the sweep of the others (PR #68 review, finding 3)", () => {
+  // A dangling symlink stands in for a guard removed between readdir and stat: statSync throws ENOENT for it. Before the per-file
+  // try/catch, that throw ended the whole sweep, so whichever leftovers the directory listed after it survived.
+  const d = dir();
+  writeFileSync(join(d, "openrouter-spend.provision"), JSON.stringify({ openingLifetimeUsd: 0, openingTodayUsd: 0 }));
+  const longAgo = new Date(Date.now() - 10 * 60_000);
+  const old: string[] = [];
+  for (let i = 0; i < 24; i++) {
+    const f = join(d, `openrouter-spend.lock.z${String(i).padStart(7, "0")}-1111-1111-1111-111111111111`);
+    writeFileSync(f, "x");
+    utimesSync(f, longAgo, longAgo);
+    old.push(f);
+  }
+  // Named to list before the leftovers where the directory order is sorted, and several of them where it is hashed.
+  for (let i = 0; i < 4; i++) symlinkSync(join(d, `gone-${i}`), join(d, `openrouter-spend.lock.a${i}-dangling`));
+  spendLedger(d, { dailyMicro: 100_000, totalMicro: 1_000_000 }, NOW).open();
+  assert.deepEqual(old.filter((f) => existsSync(f)), [], "every old leftover is removed");
 });
 
 test("write failure: a failing write refuses the call, leaves the ledger byte for byte as it was, releases the lock and leaves no temp file", () => {

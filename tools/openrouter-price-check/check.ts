@@ -1,10 +1,10 @@
-// Usage: node tools/openrouter-price-check/check.ts <saved-endpoints.json> --in <USD/M> --out <USD/M> [--max-output <tokens>] [--json]
+// Usage: node tools/openrouter-price-check/check.ts <saved-endpoints.json> --in <USD/M> --out <USD/M> --output-bound <tokens> [--max-output <tokens>] [--json]
 // Reads a saved copy of https://openrouter.ai/api/v1/models/<id>/endpoints (fetched by a person; this tool never uses the network,
 // a key or the ledger) and says whether ORBIT's configured prices bound every endpoint max_price admits. Exit 0 ok, 1 blocked, 2 usage.
 // See docs/openrouter-preactivation-evidence.md, "Price check".
 import { readFileSync } from "node:fs";
 import { checkPrices } from "../../src/openrouter-price-check.ts";
-import { DEFAULT_MAX_OUTPUT_TOKENS } from "../../src/openrouter.ts";
+import { DEFAULT_MAX_OUTPUT_TOKENS, MAX_REQUEST_BYTES } from "../../src/openrouter.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string) => {
@@ -15,8 +15,10 @@ const file = args[0];
 const priceIn = Number(flag("--in"));
 const priceOut = Number(flag("--out"));
 const maxOutputTokens = Number(flag("--max-output") ?? DEFAULT_MAX_OUTPUT_TOKENS);
-if (!file || file.startsWith("--") || !(priceIn > 0) || !(priceOut > 0) || !Number.isInteger(maxOutputTokens) || maxOutputTokens < 1) {
-  process.stderr.write("usage: check.ts <saved-endpoints.json> --in <USD per M> --out <USD per M> [--max-output <tokens>] [--json]\n");
+// Required, like ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS: there is no default output bound.
+const outputBoundTokens = Number(flag("--output-bound"));
+if (!file || file.startsWith("--") || !(priceIn > 0) || !(priceOut > 0) || !Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || !Number.isInteger(outputBoundTokens) || outputBoundTokens < 1) {
+  process.stderr.write("usage: check.ts <saved-endpoints.json> --in <USD per M> --out <USD per M> --output-bound <tokens> [--max-output <tokens>] [--json]\n");
   process.exit(2);
 }
 let json: unknown;
@@ -26,16 +28,16 @@ try {
   process.stderr.write("the file could not be read as JSON\n");
   process.exit(2);
 }
-const r = checkPrices(json, { priceIn, priceOut, maxOutputTokens });
+const r = checkPrices(json, { priceIn, priceOut, maxOutputTokens, outputBoundTokens });
 if (args.includes("--json")) process.stdout.write(JSON.stringify(r, null, 2) + "\n");
 else {
   const lines = [
-    `model ${r.model}: ${r.ok ? "OK" : "BLOCKED"} at in ${priceIn} / out ${priceOut} USD per M, max_tokens ${maxOutputTokens}`,
-    `admitted endpoints (every price window within the configured prices): ${r.admitted.length}; excluded: ${r.excluded.length}`,
-    ...r.admitted.map((v) => `  + ${v.tag}: in <= ${v.maxPromptPerMtok}, out <= ${v.maxCompletionPerMtok}, output limit ${v.maxCompletionTokens ?? "?"}${v.tools ? "" : ", NO tools"}`),
-    ...r.excluded.map((v) => `  - ${v.tag}: in up to ${v.maxPromptPerMtok}, out up to ${v.maxCompletionPerMtok}`),
-    `reservation for the largest request: ${r.boundPerCallUsd} USD`,
-    `one call if a provider did not count reasoning against max_tokens: up to ${r.worstIfReasoningUncappedUsd} USD`,
+    `model ${r.model}: ${r.ok ? "OK" : "BLOCKED"} at in ${priceIn} / out ${priceOut} USD per M, max_tokens ${maxOutputTokens}, output bound ${outputBoundTokens}`,
+    `admitted endpoints (every price window within the configured prices, every required parameter listed): ${r.admitted.length}; excluded: ${r.excluded.length}`,
+    ...r.admitted.map((v) => `  + ${v.tag}: in <= ${v.maxPromptPerMtok}, out <= ${v.maxCompletionPerMtok}, context ${v.contextLength ?? "?"}, output limit ${v.maxCompletionTokens ?? "?"}${v.tools ? "" : ", NO tools/tool_choice"}`),
+    ...r.excluded.map((v) => `  - ${v.tag}: in up to ${v.maxPromptPerMtok}, out up to ${v.maxCompletionPerMtok}${v.missingParams.length ? `, missing ${v.missingParams.join(", ")}` : ""}`),
+    `smallest output bound covering every admitted endpoint: ${r.requiredOutputBoundTokens} tokens`,
+    `reservation for the largest request (${MAX_REQUEST_BYTES} bytes, output bound ${outputBoundTokens}): ${r.boundPerCallUsd} USD`,
     ...r.blockers.map((b) => `BLOCKER: ${b}`),
     ...r.warnings.map((w) => `warning: ${w}`),
   ];
