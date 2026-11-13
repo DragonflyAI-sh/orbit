@@ -223,7 +223,8 @@ test("2: a chat read never waits for a failing refresh: it answers from the last
     let t = Date.parse("2026-11-10T18:00:00Z");
     const clone = fx.make({ now: () => new Date(t), readWaitMs: 150 });
     const memory = cloneMemory(clone, undefined, () => new Date(t));
-    await memory.refresh!(0);
+    // Set up the last good clone with an unbounded sync: a bounded read (readWaitMs) may return before a first clone finishes on a slow runner.
+    await clone.sync();
     assert.equal(memory.search("alpha").value[0]!.path, "Projects/alpha.md");
     // The network now hangs (a fetch that takes 4 s and fails). A read that wants a refresh is back within its short bound.
     writeFileSync(join(dir, "hang"), "");
