@@ -208,8 +208,16 @@
     brief.textContent = vault ? `${Object.entries(p.display || {}).map(([k, v]) => `${k}: ${v}`).join("\n")}\n\ndigest ${p.digest.slice(0, 16)}` : sysop ? `${p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action}\n\n${(p.warnings || []).map((w) => `! ${w}`).join("\n\n")}\n\ndigest ${p.digest.slice(0, 16)}` : ops ? (p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action) + `\n\ndigest ${p.digest.slice(0, 16)}`  : steer ? p.text : p.brief + (p.context && p.context.length ? `\n\nVault context ORBIT will copy at launch:\n${p.context.map((c) => `- ${c}`).join("\n")}` : "");
     const status = document.createElement("div");
     const dups = (p.duplicates || []).map((d) => Object.assign(document.createElement("div"), { className: "dup", textContent: `Possible duplicate: this brief is ${Math.round(d.similarity * 100)}% similar to job ${d.job} (${d.state}), launched ${d.launchedAt || "recently"}. Check before confirming.` }));
-    const done = (text) => { box.replaceChildren(head, brief, Object.assign(document.createElement("div"), { textContent: text })); if (after) after(); };
+    // The answer replaces the buttons; a keyboard user who pressed one lands on the answer instead of the page body.
+    let hadFocus = false;
+    const done = (text) => {
+      const result = Object.assign(document.createElement("div"), { textContent: text, tabIndex: -1 });
+      box.replaceChildren(head, brief, result);
+      if (hadFocus) result.focus({ preventScroll: true });
+      if (after) after();
+    };
     const act = async (verb) => {
+      hadFocus = box.contains(document.activeElement);
       confirm.disabled = cancel.disabled = true;
       try {
         const res = await fetch(`/chat/proposals/${p.id}/${verb}`, ops && verb === "confirm"
@@ -255,6 +263,7 @@
   let current = null;         // the thread being shown, as the server sent it
   let sending = false;
   let showArchived = false;
+  let barSig = "";
   const tsel = document.getElementById("threadsel");
   const readSel = () => { try { return localStorage.getItem(THREAD_KEY); } catch { return null; } };
   const writeSel = (id) => { try { id ? localStorage.setItem(THREAD_KEY, id) : localStorage.removeItem(THREAD_KEY); } catch { /* per-device convenience only */ } };
@@ -268,8 +277,13 @@
 
   function renderBar() {
     const rows = threadList.filter((t) => showArchived || !t.archived || t.id === current?.id);
-    tsel.replaceChildren(...rows.map((t) => Object.assign(document.createElement("option"), { value: t.id, textContent: threadOption(t), selected: t.id === current?.id })));
-    if (!rows.length) tsel.append(Object.assign(document.createElement("option"), { value: "", textContent: "No threads yet" }));
+    // The options are rebuilt only when they changed, so a poll does not reset the menu while it has focus.
+    const optionsSig = JSON.stringify([current?.id ?? null, rows.map((t) => [t.id, threadOption(t)])]);
+    if (optionsSig !== barSig) {
+      barSig = optionsSig;
+      tsel.replaceChildren(...rows.map((t) => Object.assign(document.createElement("option"), { value: t.id, textContent: threadOption(t), selected: t.id === current?.id })));
+      if (!rows.length) tsel.append(Object.assign(document.createElement("option"), { value: "", textContent: "No threads yet" }));
+    }
     document.getElementById("tarchive").textContent = current?.archived ? "Restore" : "Archive";
     document.getElementById("trename").disabled = document.getElementById("tarchive").disabled = !current;
     const input = document.getElementById("input");
@@ -278,29 +292,62 @@
     input.placeholder = current?.archived ? "This thread is archived. Restore it to continue." : "Message ORBIT";
   }
 
-  function renderCard(card) {
+  function renderCard(card, threadId) {
     const holder = el("div", { className: "cardwrap" });
-    if (card.state === "open") { showProposal(holder, card, () => loadThread(current.id)); return holder; }
+    // After Confirm/Cancel, reload the same thread (if it is still the one showing) without moving the reader.
+    if (card.state === "open") { showProposal(holder, card, () => { if (current?.id === threadId) loadThread(threadId, true); }); return holder; }
     const head = el("div", {}, ...cardTitle(card));
     holder.append(el("div", { className: "proposal closed" }, head, ...(card.brief || card.text ? [el("pre", { tabIndex: 0, textContent: String(card.brief ?? card.text).slice(0, 1200) + (card.context && card.context.length ? `\n\nVault context: ${card.context.join(", ")}` : "") })] : []), ...cardStateNodes(card, el)));
     return holder;
   }
 
+  // The thread is drawn incrementally: every poll compares the server's view with what is on screen and changes only
+  // what differs (see the reconcile block). Messages are keyed by thread and message id, cards by card id, and each part
+  // by a signature of the data it shows, so an unchanged message keeps its DOM nodes and the reader's selection, focus
+  // and scroll positions in it; a pending reply or a card whose state changed is the only thing redrawn.
+  const shownMeta = new WeakMap();
+  let shownThreadId = null;   // the thread whose nodes are in the log; null when the log holds something else
+  let loadSeq = 0;            // bumped by every draw, so an older, slower load cannot overwrite a newer view
+  const nearBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+  const selectingInLog = () => {
+    try { const s = window.getSelection(); return Boolean(s && !s.isCollapsed && s.rangeCount && log.contains(s.getRangeAt(0).commonAncestorContainer)); } catch { return false; }
+  };
+  // A replaced part (a card that changed state, a reply that finished) keeps keyboard focus and inner scroll positions.
+  function carryOver(old, fresh, swap) {
+    const scrollers = (n) => [n, ...n.querySelectorAll("pre, .scrollx")];
+    const tops = scrollers(old).map((n) => n.scrollTop);
+    const hadFocus = old.contains(document.activeElement);
+    swap();
+    scrollers(fresh).forEach((n, i) => { if (tops[i]) n.scrollTop = tops[i]; });
+    if (hadFocus) {
+      if (!fresh.hasAttribute("tabindex")) fresh.tabIndex = -1;
+      fresh.focus({ preventScroll: true });
+    }
+  }
   function renderThread(view, keepScroll) {
+    loadSeq++;
+    const switched = shownThreadId !== view.id;
+    const atBottom = nearBottom();
     current = view;
-    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+    if (switched) { log.replaceChildren(); shownThreadId = view.id; }
     const byId = new Map(view.cards.map((c) => [c.id, c]));
-    const nodes = [];
-    if (pendingNotice) nodes.push(noticeBanner(pendingNotice));
-    if (view.summary && view.summaryUnusable) nodes.push(compactionNode(view, el));
+    const cardSpec = (id) => { const c = byId.get(id); return c ? { sig: JSON.stringify(c), build: () => renderCard(c, view.id) } : null; };
+    const specs = [];
+    if (pendingNotice) { const n = pendingNotice; specs.push({ key: "notice", sig: JSON.stringify(n), build: () => noticeBanner(n) }); }
+    const compact = () => ({ key: "compact", sig: JSON.stringify([view.summary, Boolean(view.summaryUnusable)]), build: () => compactionNode(view, el) });
+    if (view.summary && view.summaryUnusable) specs.push(compact());
     view.messages.forEach((m, i) => {
-      if (view.summary && !view.summaryUnusable && i === view.summary.covers) nodes.push(compactionNode(view, el));
-      nodes.push(renderStoredMessage(m, el, (id) => { const c = byId.get(id); return c ? renderCard(c) : null; }));
+      if (view.summary && !view.summaryUnusable && i === view.summary.covers) specs.push(compact());
+      const parts = messageParts(m, el, cardSpec);
+      const update = (node) => { const cls = messageClass(m); if (node.className !== cls) node.className = cls; reconcileChildren(node, parts, shownMeta, carryOver); };
+      specs.push({ key: `m:${view.id}:${m.id}`, sig: JSON.stringify([messageClass(m), parts.map((p) => [p.key, p.sig])]), build: () => { const node = el("div"); update(node); return node; }, update });
     });
-    if (view.summary && !view.summaryUnusable && view.summary.covers >= view.messages.length) nodes.push(compactionNode(view, el));
-    if (!view.messages.length) nodes.push(el("div", { className: "compact", textContent: "This thread is empty. Messages are saved on ORBIT's server and show on your other devices." }));
-    log.replaceChildren(...nodes);
-    if (!keepScroll || atBottom) log.scrollTop = log.scrollHeight;
+    if (view.summary && !view.summaryUnusable && view.summary.covers >= view.messages.length) specs.push(compact());
+    if (!view.messages.length) specs.push({ key: "empty", sig: "", build: () => el("div", { className: "compact", textContent: "This thread is empty. Messages are saved on ORBIT's server and show on your other devices." }) });
+    reconcileChildren(log, specs, shownMeta, carryOver);
+    // Follow new messages only when the reader was already at the bottom and is not selecting text; a thread switch or
+    // the reader's own send goes to the newest message.
+    if (switched || !keepScroll || (atBottom && !selectingInLog())) log.scrollTop = log.scrollHeight;
     renderBar();
   }
 
@@ -309,6 +356,7 @@
     return el("div", { className: "banner", role: "note" }, n.text, el("button", { type: "button", textContent: "Got it", onclick: async () => { await tapi("/threads/notice/ack", "POST"); pendingNotice = null; if (current) renderThread(current, true); else showEmpty(); } }));
   }
   function showEmpty() {
+    shownThreadId = null;
     log.replaceChildren(...(pendingNotice ? [noticeBanner(pendingNotice)] : []), el("div", { className: "compact", textContent: "No thread is open. Send a message to start one; it is saved on ORBIT's server." }));
     renderBar();
   }
@@ -323,10 +371,16 @@
     return true;
   }
   async function loadThread(id, keepScroll) {
+    const seq = ++loadSeq;
     const r = await tapi(`/threads/${encodeURIComponent(id)}`, "GET");
+    // A newer load, a thread switch or a send drew something since this request left: this answer is stale, drop it.
+    if (seq !== loadSeq) return true;
     if (!r.ok) { if (r.status === 404) { writeSel(null); current = null; } return false; }
+    const view = r.data.thread;
+    // An answer older than what is showing (a delayed poll) never rolls the thread back.
+    if (current && current.id === view.id && shownThreadId === view.id && view.rev < current.rev) return true;
     writeSel(id);
-    renderThread(r.data.thread, keepScroll);
+    renderThread(view, keepScroll);
     return true;
   }
   async function initThreads() {
@@ -388,9 +442,12 @@
       }
       log.append(el("div", { className: "msg user", textContent: content }), el("div", { className: "msg orbit", textContent: "Working…" }));
       log.scrollTop = log.scrollHeight;
-      const r = await tapi(`/threads/${current.id}/messages`, "POST", { text: content });
+      const sentTo = current.id;
+      const r = await tapi(`/threads/${sentTo}/messages`, "POST", { text: content });
+      // If the reader switched threads while waiting, the reply stays in its own thread and is not drawn over this one.
+      if (current?.id !== sentTo) { await loadList(); renderBar(); return; }
       if (r.data.thread) renderThread(r.data.thread);
-      else { await loadThread(current.id); add("orbit", r.data.error || "ORBIT did not answer.", "error", "down"); }
+      else { await loadThread(sentTo); add("orbit", r.data.error || "ORBIT did not answer.", "error", "down"); }
       if (!r.ok && r.data.error) add("orbit", r.data.error, "error", "down");
       await loadList();
       renderBar();
@@ -973,27 +1030,81 @@
     node.append(det);
     return node;
   }
-  function renderStoredMessage(m, mk, cardFor) {
-    const node = mk("div", { className: `msg ${m.role === "user" ? "user" : "orbit"}` });
-    const text = m.status === "pending" ? "Working…" : m.text || (m.error ? "" : m.role === "assistant" ? "(no text)" : "");
+  const messageClass = (m) => `msg ${m.role === "user" ? "user" : "orbit"}`;
+  // A stored message as separately keyed parts (body, tag, warnings, tool calls, one per card). Each part carries a
+  // signature of exactly the data it shows, so the page can keep every part whose data did not change (and the text the
+  // reader has selected in it) and rebuild only the part that did. `cardSpec(id)` gives a card's { sig, build } or null.
+  function messageParts(m, mk, cardSpec) {
+    const parts = [];
+    const pending = m.status === "pending";
+    const text = pending ? "Working…" : m.text || (m.error ? "" : m.role === "assistant" ? "(no text)" : "");
     // A finished reply is Markdown (rendered without any HTML parsing, see the markdown block); the user's own text, a
     // pending placeholder and error text stay plain.
-    if (m.role === "assistant" && m.status !== "pending" && m.text) node.append(renderMarkdown(m.text, mk));
-    else node.append(...linkify(text, mk));
+    const markdown = m.role === "assistant" && !pending && Boolean(m.text);
+    parts.push({ key: "body", sig: JSON.stringify([markdown, markdown ? m.text : text]), build: () => (markdown ? renderMarkdown(m.text, mk) : mk("span", { className: "body" }, ...linkify(text, mk))) });
     const mem = m.memory && m.memory.length ? ` · memory: ${m.memory.join(", ")}` : "";
-    const tag = m.status === "error" || m.status === "interrupted" ? `${m.status}: ${m.error || ""}` : m.role === "assistant" && m.provenance ? `${m.provenance} · ${m.source}${mem}` : "";
-    if (tag) node.append(mk("span", { className: `tag ${m.status === "error" || m.status === "interrupted" ? "down" : m.provenance || ""}`, textContent: m.fallback && m.status === "done" ? `⚠ Fallback model, not ChatGPT · ${tag}` : tag }));
-    if (m.incomplete && m.incomplete.length) node.append(mk("div", { className: "warn", textContent: `Incomplete reply: ${m.incomplete.join("; ")}` }));
-    if (m.accounting && m.accounting.length) node.append(mk("div", { className: "warn", textContent: `Spend accounting: ${m.accounting.join("; ")}` }));
-    if (m.calls && m.calls.length) {
-      const box = mk("span", { className: "calls" }, `Tool calls (${m.calls.length}):`);
-      for (const c of m.calls) box.append(mk("div", { textContent: `${c.ok ? "✓" : "✗"} ${c.name}(${String(c.arguments).slice(0, 120)}) [${c.ok ? `${c.provenance} · ${c.source}` : "failed"}] ${String(c.summary).slice(0, 160)}` }));
-      node.append(box);
+    const failed = m.status === "error" || m.status === "interrupted";
+    const tag = failed ? `${m.status}: ${m.error || ""}` : m.role === "assistant" && m.provenance ? `${m.provenance} · ${m.source}${mem}` : "";
+    if (tag) {
+      const tagText = m.fallback && m.status === "done" ? `⚠ Fallback model, not ChatGPT · ${tag}` : tag;
+      const tagClass = `tag ${failed ? "down" : m.provenance || ""}`;
+      parts.push({ key: "tag", sig: JSON.stringify([tagClass, tagText]), build: () => mk("span", { className: tagClass, textContent: tagText }) });
     }
-    for (const id of m.cards || []) { const c = cardFor && cardFor(id); if (c) node.append(c); }
+    const warn = (key, t) => parts.push({ key, sig: t, build: () => mk("div", { className: "warn", textContent: t }) });
+    if (m.incomplete && m.incomplete.length) warn("incomplete", `Incomplete reply: ${m.incomplete.join("; ")}`);
+    if (m.accounting && m.accounting.length) warn("accounting", `Spend accounting: ${m.accounting.join("; ")}`);
+    if (m.calls && m.calls.length) {
+      const rows = m.calls.map((c) => `${c.ok ? "✓" : "✗"} ${c.name}(${String(c.arguments).slice(0, 120)}) [${c.ok ? `${c.provenance} · ${c.source}` : "failed"}] ${String(c.summary).slice(0, 160)}`);
+      parts.push({ key: "calls", sig: JSON.stringify(rows), build: () => mk("span", { className: "calls" }, `Tool calls (${rows.length}):`, ...rows.map((r) => mk("div", { textContent: r }))) });
+    }
+    for (const id of m.cards || []) { const c = cardSpec && cardSpec(id); if (c) parts.push({ key: `card:${id}`, sig: c.sig, build: c.build }); }
+    return parts;
+  }
+  function renderStoredMessage(m, mk, cardFor) {
+    const node = mk("div", { className: messageClass(m) });
+    for (const p of messageParts(m, mk, (id) => { const c = cardFor && cardFor(id); return c ? { sig: "", build: () => c } : null; })) node.append(p.build());
     return node;
   }
   // </threads>
+
+  // <reconcile>
+  // Brings `parent`'s children in line with `specs` ([{ key, sig, build(), update?(node) }], in order) while touching as
+  // little as possible: a child whose key and signature are unchanged is left exactly where it is (its text, the
+  // reader's selection in it, its focus, its scroll position and its event handlers all survive); a changed child is
+  // updated in place when the spec can (`update`) or else replaced by a fresh build; children no longer wanted are
+  // removed first, so kept children never need to move; new children are inserted at their place. `meta` (a WeakMap)
+  // remembers each child's key and signature; children it does not know (an optimistic "Working…" bubble, an old
+  // thread's nodes) are removed. `onReplace(old, fresh, swap)`, when given, must call `swap()` to make a replacement. Tests load this block on its own.
+  function reconcileChildren(parent, specs, meta, onReplace) {
+    const seen = new Set();
+    const list = specs.filter((s) => !seen.has(s.key) && seen.add(s.key));
+    const have = new Map();
+    for (const n of Array.from(parent.childNodes)) {
+      const k = meta.get(n)?.key;
+      if (k !== undefined && seen.has(k) && !have.has(k)) have.set(k, n); else parent.removeChild(n);
+    }
+    let ref = parent.firstChild;
+    let built = 0, replaced = 0, updated = 0;
+    for (const s of list) {
+      let node = have.get(s.key);
+      const info = node && meta.get(node);
+      if (node && info.sig !== s.sig) {
+        if (s.update) { s.update(node); info.sig = s.sig; updated++; }
+        else {
+          const fresh = s.build();
+          meta.set(fresh, { key: s.key, sig: s.sig });
+          const swap = () => parent.replaceChild(fresh, node);
+          if (onReplace) onReplace(node, fresh, swap); else swap();
+          if (ref === node) ref = fresh;
+          node = fresh; replaced++;
+        }
+      }
+      if (!node) { node = s.build(); meta.set(node, { key: s.key, sig: s.sig }); built++; }
+      if (node === ref) ref = ref.nextSibling; else parent.insertBefore(node, ref);
+    }
+    return { built, replaced, updated };
+  }
+  // </reconcile>
 
   // <poller>
   // Runs `refresh` when `shouldRun()` says so, never two at once. Tests load this block on its own.
