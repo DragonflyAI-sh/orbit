@@ -293,3 +293,27 @@ test("launch refuses an unknown routine, a missing brief, and anyone but the own
   assert.equal((await fetch(`${base}/jobs/launch`, { method: "POST", body: JSON.stringify({ routine: "orbit", brief: "x" }) })).status, 403);
   caller = "rai@example.com";
 });
+
+test("every navigation link on the page leads to a real GET route that answers, even for a non-owner", async () => {
+  const saved = caller;
+  caller = undefined;
+  try {
+    const page = await fetch(`${base}/`);
+    assert.equal(page.status, 200);
+    const html = await page.text();
+    const nav = html.match(/<nav id="tabs"[^>]*>[\s\S]*?<\/nav>/)?.[0] ?? "";
+    const hrefs = [...nav.matchAll(/<a [^>]*href="([^"]+)"/g)].map((m) => m[1]!);
+    assert.deepEqual(hrefs, ["/#chat", "/#jobs", "/status"]);
+    for (const href of hrefs) {
+      const url = new URL(href, base);
+      const res = await fetch(url);
+      assert.equal(res.status, 200, href);
+      const type = res.headers.get("content-type") ?? "";
+      if (url.pathname === "/") assert.match(type, /text\/html/, "Chat and Jobs are views of the page itself");
+      else assert.match(type, /application\/json/, "the status link is the JSON endpoint, and the page says so");
+      await res.arrayBuffer();
+    }
+  } finally {
+    caller = saved;
+  }
+});

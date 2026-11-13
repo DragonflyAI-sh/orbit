@@ -56,7 +56,7 @@
   .banner { align-self: stretch; max-width: 720px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--gold); background: var(--card); font-size: 14px; overflow-wrap: anywhere; }
   .banner button { margin-top: 6px; padding: 4px 12px; display: block; }
   .compact { align-self: stretch; max-width: 720px; padding: 6px 10px; border-radius: 10px; border: 1px dashed var(--line); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
-  .compact pre { white-space: pre-wrap; margin: 4px 0 0; font: 12px/1.4 ui-monospace, monospace; }
+  .compact pre { white-space: pre-wrap; margin: 4px 0 0; font: 12px/1.4 ui-monospace, monospace; max-height: 50vh; overflow: auto; overscroll-behavior: contain; }
   .msg .warn { color: var(--mock); font-weight: 600; margin-top: .3rem; }
   .compact .warn, .dup { color: var(--mock); font-weight: 600; }
   .cardstate { margin-top: 6px; font-size: 13px; overflow-wrap: anywhere; }
@@ -66,9 +66,10 @@
   #signin button { padding: 4px 12px; margin-top: 4px; }
   #signin code { font-size: 16px; letter-spacing: .12em; color: var(--gold); }
   #signin a { color: var(--accent-2); }
-  #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-  .msg { max-width: 720px; padding: 8px 12px; border-radius: 12px; background: var(--card);
-         border: 1px solid var(--line); white-space: pre-wrap; }
+  #log { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  /* A message never grows past the log's width: long words and URLs wrap, wide code and tables scroll inside it. */
+  .msg { max-width: min(720px, 100%); min-width: 0; padding: 8px 12px; border-radius: 12px; background: var(--card);
+         border: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
   .user { align-self: flex-end; background: var(--accent); color: var(--on-accent); border-color: transparent; }
   .msg a { color: var(--accent-2); overflow-wrap: anywhere; }
   .msg.user a { color: inherit; text-decoration: underline; }
@@ -76,16 +77,19 @@
   .calls { display: block; margin-top: 6px; font-size: 12px; color: var(--muted); }
   .calls div { margin-top: 2px; }
   .proposal { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--gold); border-radius: 8px; background: var(--bg); }
-  .proposal pre { margin: 4px 0; white-space: pre-wrap; max-height: 240px; overflow-y: auto; font: 12px/1.4 ui-monospace, monospace; }
+  .proposal pre { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; overscroll-behavior: contain; font: 12px/1.4 ui-monospace, monospace; }
   .proposal button { padding: 4px 12px; margin-right: 6px; }
   .proposal button.cancel { background: var(--card); color: var(--fg); border: 1px solid var(--line); }
   [hidden] { display: none !important; }
-  nav { display: flex; gap: 6px; margin-bottom: 8px; }
-  nav button { padding: 4px 14px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
-  nav button[aria-pressed="true"] { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: var(--on-accent); border-color: transparent; }
-  #jobs { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  nav { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  nav a { padding: 4px 14px; border-radius: 10px; background: var(--card); color: var(--fg); border: 1px solid var(--line); text-decoration: none; }
+  nav a[aria-current="page"] { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: var(--on-accent); border-color: transparent; }
+  nav a:hover { box-shadow: 0 0 0 2px var(--ring); }
+  nav a:active { transform: translateY(1px); }
+  nav .kind { font: 600 10px/1 ui-monospace, monospace; letter-spacing: .06em; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); vertical-align: 1px; }
+  #jobs { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   #jobs h2 { margin: 6px 0 0; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
-  .card { max-width: 720px; width: 100%; padding: 10px 12px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); overflow-wrap: anywhere; }
+  .card { max-width: 720px; width: 100%; min-width: 0; padding: 10px 12px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); overflow-wrap: anywhere; }
   .card.bad { border-color: var(--down); }
   .card.warn { border-color: var(--mock); }
   .card .row { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
@@ -111,13 +115,53 @@
   textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
   button { font: inherit; padding: 0 16px; border-radius: 10px; border: 0; color: var(--on-accent);
            background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+
+  /* Markdown replies (see the markdown block in the script). Paragraph line breaks are kept, as in plain replies. */
+  .md { white-space: pre-line; min-width: 0; }
+  .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
+  .md p, .md ul, .md ol, .md blockquote, .md .scrollx, .md hr { margin: .5em 0; }
+  .md h3, .md h4, .md h5, .md h6 { margin: .8em 0 .3em; line-height: 1.3; }
+  .md h3 { font-size: 1.15em; } .md h4 { font-size: 1.05em; } .md h5, .md h6 { font-size: 1em; }
+  .md ul, .md ol { padding-left: 1.4em; }
+  .md li + li { margin-top: .2em; }
+  .md li > ul, .md li > ol { margin: .2em 0; }
+  .md blockquote { margin-left: 0; margin-right: 0; padding-left: 10px; border-left: 3px solid var(--line); color: var(--muted); }
+  .md hr { border: 0; border-top: 1px solid var(--line); }
+  .md code { font: .9em/1.4 ui-monospace, monospace; padding: 0 3px; border-radius: 4px; background: var(--bg); border: 1px solid var(--line); }
+  .md pre { margin: 0; padding: 8px 10px; white-space: pre; overflow-wrap: normal; width: max-content; min-width: 100%; }
+  .md pre code { padding: 0; border: 0; background: none; font-size: 12.5px; }
+  .md table { border-collapse: collapse; font-size: 13px; white-space: normal; overflow-wrap: normal; }
+  .md th, .md td { padding: 4px 8px; border: 1px solid var(--line); text-align: left; vertical-align: top; min-width: 5em; }
+  .md th { background: var(--card); }
+  .md .al-center { text-align: center; } .md .al-right { text-align: right; }
+  /* Wide or very long content scrolls inside its own region (focusable, so the keyboard can scroll it) instead of
+     widening the page or hiding text. */
+  .scrollx { max-width: 100%; max-height: 60vh; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+  .card .scrollx pre { margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.4 ui-monospace, monospace; }
+
+  /* Button states, shared by every button: a visible hover ring, a pressed look while the mouse is down, a focus ring
+     for keyboard users only, a clearly inert disabled state, and no motion for people who ask for reduced motion. */
+  :root { --ring: color-mix(in srgb, var(--accent-2) 50%, transparent); --press-bg: color-mix(in srgb, var(--accent) 16%, transparent); }
+  button { cursor: pointer; transition: filter .12s ease, box-shadow .12s ease, transform .08s ease, background-color .12s ease; }
+  button:not(:disabled):hover { filter: brightness(1.08); box-shadow: 0 0 0 2px var(--ring); }
+  button:not(:disabled):active { filter: brightness(.9); transform: translateY(1px) scale(.97); box-shadow: 0 0 0 2px var(--ring), inset 0 2px 4px rgba(0, 0, 0, .25); }
+  .note button:not(:disabled):hover, .note button:not(:disabled):active, #inbox .showall:not(:disabled):hover, #inbox .showall:not(:disabled):active { background: var(--press-bg); box-shadow: none; text-decoration: underline; }
+  button:disabled { cursor: not-allowed; opacity: .5; filter: grayscale(.4); box-shadow: none; transform: none; }
+  button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible, .scrollx:focus-visible, pre[tabindex]:focus-visible {
+    outline: 2px solid var(--accent-2); outline-offset: 2px;
+  }
+  nav a { transition: box-shadow .12s ease, transform .08s ease; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
+    button:not(:disabled):active, nav a:active { transform: none; }
+  }
 </style>
 </head>
 <body>
-<header><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" hidden><button type="button" data-tab="chat" aria-pressed="true">Chat</button><button type="button" data-tab="jobs" aria-pressed="false">Jobs <span id="jobsbadge"></span></button></nav><div id="threadbar" hidden><select id="threadsel" aria-label="Thread"></select><button type="button" id="tnew">New</button><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button><label><input type="checkbox" id="tshowarch"> archived</label></div><div id="ports"></div><div id="signin"></div><div id="inbox"></div></header>
+<header><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#chat" data-tab="chat" aria-current="page">Chat</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/status" id="statuslink" title="ORBIT's status as raw JSON: running commit, deploy and port states">Status <span class="kind">JSON</span></a></nav><div id="threadbar" hidden><select id="threadsel" aria-label="Thread"></select><button type="button" id="tnew">New</button><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button><label><input type="checkbox" id="tshowarch"> archived</label></div><div id="ports"></div><div id="signin"></div><div id="inbox"></div></header>
 <main id="log"></main>
 <section id="jobs" hidden aria-live="off"></section>
-<form id="form"><textarea id="input" rows="2" placeholder="Message ORBIT" required></textarea><button>Send</button></form>
+<form id="form"><textarea id="input" rows="2" placeholder="Message ORBIT" aria-label="Message ORBIT" required></textarea><button id="send">Send</button></form>
 <script>
   const history = [];
   const log = document.getElementById("log");
@@ -160,6 +204,7 @@
     const ops = p.kind === "ops_admin" || sysop || vault;
     head.textContent = vault ? `Proposed vault change: ${p.summary} Nothing has been written yet.` : ops ? `Proposed server action: ${p.summary} Nothing has been done yet.` : steer ? `Proposed steer for job ${p.job}. Nothing has been sent yet.` : `Proposed job on routine "${p.routine}". Nothing has launched yet.`;
     const brief = document.createElement("pre");
+    brief.tabIndex = 0;
     brief.textContent = vault ? `${Object.entries(p.display || {}).map(([k, v]) => `${k}: ${v}`).join("\n")}\n\ndigest ${p.digest.slice(0, 16)}` : sysop ? `${p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action}\n\n${(p.warnings || []).map((w) => `! ${w}`).join("\n\n")}\n\ndigest ${p.digest.slice(0, 16)}` : ops ? (p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action) + `\n\ndigest ${p.digest.slice(0, 16)}`  : steer ? p.text : p.brief + (p.context && p.context.length ? `\n\nVault context ORBIT will copy at launch:\n${p.context.map((c) => `- ${c}`).join("\n")}` : "");
     const status = document.createElement("div");
     const dups = (p.duplicates || []).map((d) => Object.assign(document.createElement("div"), { className: "dup", textContent: `Possible duplicate: this brief is ${Math.round(d.similarity * 100)}% similar to job ${d.job} (${d.state}), launched ${d.launchedAt || "recently"}. Check before confirming.` }));
@@ -184,21 +229,22 @@
   }
 
   function add(role, text, tag, tagClass, extra) {
-    const el = document.createElement("div");
-    el.className = `msg ${role}`;
-    el.textContent = text;
+    const node = document.createElement("div");
+    node.className = `msg ${role}`;
+    // A model reply (it has a reply record) is Markdown, built without HTML parsing; everything else is plain text.
+    if (extra?.reply) node.append(renderMarkdown(text, el)); else node.textContent = text;
     if (tag) {
       const t = document.createElement("span");
       t.className = `tag ${tagClass}`;
       t.textContent = tag;
-      el.append(t);
+      node.append(t);
     }
     const inc = extra?.reply?.incomplete;
-    if (inc && inc.length) { const a = document.createElement("div"); a.className = "warn"; a.textContent = `Incomplete reply: ${inc.join("; ")}`; el.append(a); }
+    if (inc && inc.length) { const a = document.createElement("div"); a.className = "warn"; a.textContent = `Incomplete reply: ${inc.join("; ")}`; node.append(a); }
     const acct = extra?.reply?.accounting;
-    if (acct && acct.length) { const a = document.createElement("div"); a.className = "warn"; a.textContent = `Spend accounting: ${acct.join("; ")}`; el.append(a); }
-    if (extra) { showCalls(el, extra.calls); for (const p of extra.proposals ?? []) showProposal(el, p); }
-    log.append(el);
+    if (acct && acct.length) { const a = document.createElement("div"); a.className = "warn"; a.textContent = `Spend accounting: ${acct.join("; ")}`; node.append(a); }
+    if (extra) { showCalls(node, extra.calls); for (const p of extra.proposals ?? []) showProposal(node, p); }
+    log.append(node);
     log.scrollTop = log.scrollHeight;
   }
 
@@ -228,6 +274,7 @@
     document.getElementById("trename").disabled = document.getElementById("tarchive").disabled = !current;
     const input = document.getElementById("input");
     input.disabled = Boolean(current?.archived);
+    document.getElementById("send").disabled = input.disabled || sending;
     input.placeholder = current?.archived ? "This thread is archived. Restore it to continue." : "Message ORBIT";
   }
 
@@ -235,7 +282,7 @@
     const holder = el("div", { className: "cardwrap" });
     if (card.state === "open") { showProposal(holder, card, () => loadThread(current.id)); return holder; }
     const head = el("div", {}, ...cardTitle(card));
-    holder.append(el("div", { className: "proposal closed" }, head, ...(card.brief || card.text ? [el("pre", { textContent: String(card.brief ?? card.text).slice(0, 1200) + (card.context && card.context.length ? `\n\nVault context: ${card.context.join(", ")}` : "") })] : []), ...cardStateNodes(card, el)));
+    holder.append(el("div", { className: "proposal closed" }, head, ...(card.brief || card.text ? [el("pre", { tabIndex: 0, textContent: String(card.brief ?? card.text).slice(0, 1200) + (card.context && card.context.length ? `\n\nVault context: ${card.context.join(", ")}` : "") })] : []), ...cardStateNodes(card, el)));
     return holder;
   }
 
@@ -357,19 +404,28 @@
     const content = input.value.trim();
     if (!content || sending) return;
     input.value = "";
-    if (threadMode === "server") { await sendThreaded(content); refreshStatus(); return; }
-    history.push({ role: "user", content });
-    add("user", content);
+    // Send stays disabled until the reply (or error) is in, so one message cannot be sent twice.
+    const sendButton = document.getElementById("send");
+    sendButton.disabled = true;
     try {
-      const res = await fetch("/chat", { method: "POST", headers: { "content-type": "application/json" },
-                                          body: JSON.stringify({ messages: history.slice(-40) }) });
-      const body = await res.json();
-      if (!res.ok) { add("orbit", body.error, "error", "down"); history.pop(); return; }
-      history.push({ role: "assistant", content: body.reply.value });
-      const mem = body.memory?.length ? ` · memory: ${body.memory.join(", ")}` : "";
-      add("orbit", body.reply.value, `${body.reply.fallback ? "⚠ Fallback model, not ChatGPT · " : ""}${body.reply.provenance} · ${body.reply.source}${mem}`, body.reply.provenance, body);
-    } catch { add("orbit", "ORBIT did not answer.", "error", "down"); history.pop(); }
-    refreshStatus();
+      if (threadMode === "server") { await sendThreaded(content); refreshStatus(); return; }
+      sending = true;
+      history.push({ role: "user", content });
+      add("user", content);
+      try {
+        const res = await fetch("/chat", { method: "POST", headers: { "content-type": "application/json" },
+                                            body: JSON.stringify({ messages: history.slice(-40) }) });
+        const body = await res.json();
+        if (!res.ok) { add("orbit", body.error, "error", "down"); history.pop(); return; }
+        history.push({ role: "assistant", content: body.reply.value });
+        const mem = body.memory?.length ? ` · memory: ${body.memory.join(", ")}` : "";
+        add("orbit", body.reply.value, `${body.reply.fallback ? "⚠ Fallback model, not ChatGPT · " : ""}${body.reply.provenance} · ${body.reply.source}${mem}`, body.reply.provenance, body);
+      } catch { add("orbit", "ORBIT did not answer.", "error", "down"); history.pop(); }
+      refreshStatus();
+    } finally {
+      sending = false;
+      sendButton.disabled = input.disabled;
+    }
   });
 
   document.getElementById("input").addEventListener("keydown", (e) => {
@@ -461,15 +517,19 @@
   const safeLink = (url, text) => /^https:\/\/(claude\.ai|github\.com)\//.test(url || "")
     ? el("a", { href: url, target: "_blank", rel: "noopener noreferrer", textContent: text }) : null;
 
+  const jobsTab = document.getElementById("jobstab");
   function setTab(next) {
     tab = next;
-    for (const b of tabs.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.tab === next));
+    for (const a of tabs.querySelectorAll("a[data-tab]")) { if (a.dataset.tab === next) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); }
     document.getElementById("log").hidden = next !== "chat";
     chatForm.hidden = next !== "chat";
     jobsBox.hidden = next !== "jobs";
     if (next === "jobs") jobsPoller.poll();
   }
-  tabs.addEventListener("click", (e) => { const t = e.target.closest("button")?.dataset.tab; if (t) setTab(t); });
+  // Chat and Jobs are views of this one page (/), addressed as /#chat and /#jobs so they are real links: they can be
+  // opened with the keyboard, bookmarked, and the back button moves between them. Jobs is owner only.
+  const tabFromHash = () => (location.hash === "#jobs" && !jobsTab.hidden ? "jobs" : "chat");
+  window.addEventListener("hashchange", () => setTab(tabFromHash()));
 
   // The orbit-job source commit the runner reported. Unknown is shown as unknown; only a known commit that differs
   // from the commit ORBIT is running is flagged. All text goes in through textContent.
@@ -553,7 +613,7 @@
     const events = el("div", { className: "card" }, ...(j.events.length ? [...j.events].reverse().slice(0, 100).map((ev) =>
       el("div", { className: "ev" }, ...linkify(`${ago(ev.at)} · ${ev.type}${ev.status ? " " + ev.status : ""} · ${ev.via === "git" ? "git" : "API"}${ev.text ? "\n" + ev.text : ""}`, el))) : [el("div", { className: "empty", textContent: "No events yet." })]));
     const summaryBox = j.summary && j.summary.text
-      ? el("details", { className: "card" }, el("summary", { textContent: `Full summary (${j.summary.chars} characters, ${j.summary.state}, via ${j.summary.via})` }), el("pre", { textContent: j.summary.text }))
+      ? el("details", { className: "card" }, el("summary", { textContent: `Full summary (${j.summary.chars} characters, ${j.summary.state}, via ${j.summary.via})` }), mdScroll(el("pre", { textContent: j.summary.text }), "Full summary", el))
       : null;
     const steers = el("div", { className: "card" }, ...(j.steers.length ? [...j.steers].reverse().map((s) =>
       el("div", { className: "ev" }, ...linkify(`#${s.n} · ${ago(s.at)} · ${s.deliveredAt ? "picked up " + ago(s.deliveredAt) : "waiting for the runner"}\n${s.text}`, el))) : [el("div", { className: "empty", textContent: "No steers yet." })]));
@@ -585,7 +645,7 @@
 
   async function renderList() {
     const [jr, pr] = await Promise.all([fetch("/jobs?view=rows"), fetch("/chat/proposals")]);
-    if (!jr.ok) { tabs.hidden = true; setTab("chat"); return; }
+    if (!jr.ok) { jobsTab.hidden = true; setTab("chat"); return; }
     const rows = (await jr.json()).jobs;
     const proposals = pr.ok ? (await pr.json()).proposals : [];
     const attention = rows.filter((r) => ["not-started", "quiet", "launch-failed"].includes(r.health)).length + proposals.length;
@@ -634,6 +694,239 @@
   }
   // </notes>
 
+  // <markdown>
+  // A small Markdown renderer for ORBIT's replies. Reply text is untrusted, so it is never parsed as HTML: every element is
+  // built with `mk` and every piece of text goes in as a string child or textContent, so raw HTML in a reply shows as
+  // literal text and no script or event handler can run. Only https URLs become links (javascript:, data:, vbscript:,
+  // http: and relative URLs stay text). Images are never loaded, so a reply cannot make the browser fetch a tracking
+  // pixel: an https image becomes an ordinary link, any other image its alt text. Wide code blocks and tables sit in
+  // keyboard-focusable scroll regions. Nesting is capped so hostile input cannot recurse deeply. Tests load this block
+  // together with the notes block.
+  const MD_MAX_DEPTH = 6;
+  const MD_SCAN = 4000;   // how far a link, code span or emphasis may reach, so hostile text cannot make rendering quadratic
+  const MD_LIST = /^( *)([-*+]|\d{1,9}[.)])(?:[ \t]+(.*))?$/;
+  const MD_BLOCK = /^ {0,3}(#{1,6}(\s|$)|`{3,}|~{3,}|>|([-*_])([ \t]*\3){2,}[ \t]*$)/;
+  const MD_DELIM = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+  function safeHref(raw) {
+    const s = String(raw ?? "").trim();
+    if (!/^https:\/\//i.test(s)) return null;
+    try { const u = new URL(s); return u.protocol === "https:" && u.hostname ? u.href : null; } catch { return null; }
+  }
+  function mdAnchor(href, kids, mk) {
+    return mk("a", { href, target: "_blank", rel: "noopener noreferrer", referrerPolicy: "no-referrer" }, ...kids);
+  }
+  // A focusable, labelled region that scrolls what does not fit (wide code, wide tables) instead of widening the page.
+  function mdScroll(node, label, mk) {
+    return mk("div", { className: "scrollx", tabIndex: 0, role: "region", ariaLabel: label }, node);
+  }
+  // [text](url "title") starting at s[i] === "[": returns the label, the url and where the link ends, or null.
+  function mdLinkAt(s, i) {
+    let depth = 0, j = i;
+    const stop = Math.min(s.length, i + 1000);
+    for (; j < stop; j++) {
+      if (s[j] === "\\") { j++; continue; }
+      if (s[j] === "[") depth++;
+      else if (s[j] === "]" && --depth === 0) break;
+    }
+    if (j >= stop || s[j + 1] !== "(") return null;
+    const re = /\(\s*<?([^\s()<>]*(?:\([^\s()<>]*\)[^\s()<>]*)*)>?(?:\s+(?:"[^"]*"|'[^']*'))?\s*\)/y;
+    re.lastIndex = j + 1;
+    const m = re.exec(s);
+    return m ? { text: s.slice(i + 1, j), url: m[1], end: re.lastIndex } : null;
+  }
+  // Where the emphasis opened by delimiter `d` at s[i] closes, or -1. Underscores never open or close inside a word.
+  // Whether a position can close does not depend on the opener, so `memo[d]` keeps the last search (the first closer at
+  // or after `from`); a run of unmatched openers then costs one pass, not one pass each.
+  function mdCloser(s, i, d, memo) {
+    const open = i + d.length;
+    const word = /[\p{L}\p{N}]/u;
+    if (open >= s.length || /\s/.test(s[open])) return -1;
+    if (d[0] === "_" && i > 0 && word.test(s[i - 1])) return -1;
+    const from = open + 1;
+    const m = memo[d];
+    let at;
+    if (m && from >= m.from && (m.at < 0 || from <= m.at)) at = m.at;
+    else {
+      at = -1;
+      for (let j = s.indexOf(d, from); j >= 0; j = s.indexOf(d, j + 1)) {
+        if (/\s/.test(s[j - 1]) || s[j - 1] === "\\") continue;
+        if (d.length === 1 && (s[j + 1] === d || s[j - 1] === d)) continue;
+        if (d[0] === "_" && j + d.length < s.length && word.test(s[j + d.length])) continue;
+        at = j; break;
+      }
+      memo[d] = { from, at };
+    }
+    return at >= 0 && at - i <= MD_SCAN ? at : -1;
+  }
+  // Inline Markdown: code spans, links, autolinks, emphasis, strong, strikethrough and escapes. Plain text goes through
+  // linkify (bare https URLs) unless it is already inside a link.
+  function mdInline(src, mk, depth, links) {
+    const s = String(src ?? "");
+    const out = [];
+    let buf = "";
+    const flush = () => { if (buf) { if (links) out.push(...linkify(buf, mk)); else out.push(buf); buf = ""; } };
+    const push = (node) => { flush(); out.push(node); };
+    const deeper = (t, l) => (depth >= MD_MAX_DEPTH ? [t] : mdInline(t, mk, depth + 1, l));
+    const memo = {};
+    let i = 0;
+    while (i < s.length) {
+      const c = s[i];
+      if (c === "\\" && i + 1 < s.length && /[!-/:-@[-`{-~]/.test(s[i + 1])) { buf += s[i + 1]; i += 2; continue; }
+      if (c === "h" && s.startsWith("https://", i)) {
+        const re = /https:\/\/[^\s<>"'`]+/y;
+        re.lastIndex = i;
+        const m = re.exec(s);
+        const url = m ? m[0] : "https://";
+        buf += url; i += url.length; continue;
+      }
+      if (c === "`") {
+        let n = 0;
+        while (s[i + n] === "`") n++;
+        const ticks = "`".repeat(n);
+        let end = -1;
+        for (let j = s.indexOf(ticks, i + n); j >= 0 && j - i <= MD_SCAN; ) {
+          if (s[j + n] !== "`") { end = j; break; }
+          while (s[j] === "`") j++;
+          j = s.indexOf(ticks, j);
+        }
+        if (end < 0) { buf += ticks; i += n; continue; }
+        let code = s.slice(i + n, end).replace(/\n/g, " ");
+        if (/^ .*\S.* $/.test(code)) code = code.slice(1, -1);
+        push(mk("code", { textContent: code }));
+        i = end + n; continue;
+      }
+      if (c === "!" && s[i + 1] === "[") {
+        const l = mdLinkAt(s, i + 1);
+        if (l) {
+          const href = safeHref(l.url);
+          if (href) push(mdAnchor(href, [`Image: ${l.text || href}`], mk)); else buf += l.text;
+          i = l.end; continue;
+        }
+      }
+      if (c === "[") {
+        const l = mdLinkAt(s, i);
+        if (l) {
+          const href = safeHref(l.url);
+          if (href && links) push(mdAnchor(href, deeper(l.text, false), mk));
+          else { flush(); out.push(...deeper(l.text, false)); if (l.url && !href) buf += ` (${l.url})`; }
+          i = l.end; continue;
+        }
+      }
+      if (c === "<") {
+        const re = /<(https:\/\/[^\s<>]+)>/y;
+        re.lastIndex = i;
+        const m = re.exec(s);
+        const href = m && safeHref(m[1]);
+        if (href && links) { push(mdAnchor(href, [m[1]], mk)); i = re.lastIndex; continue; }
+      }
+      const d = s.startsWith("**", i) ? "**" : s.startsWith("__", i) ? "__" : s.startsWith("~~", i) ? "~~" : c === "*" || c === "_" ? c : "";
+      if (d) {
+        const close = mdCloser(s, i, d, memo);
+        if (close > 0) {
+          push(mk(d === "~~" ? "del" : d.length === 2 ? "strong" : "em", {}, ...deeper(s.slice(i + d.length, close), links)));
+          i = close + d.length; continue;
+        }
+        buf += d; i += d.length; continue;
+      }
+      buf += c; i++;
+    }
+    flush();
+    return out;
+  }
+  function mdCells(line) {
+    let l = line.trim();
+    if (l.startsWith("|")) l = l.slice(1);
+    if (l.endsWith("|") && !l.endsWith("\\|")) l = l.slice(0, -1);
+    return l.split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|"));
+  }
+  const mdIsTable = (lines, i) => lines[i].includes("|") && i + 1 < lines.length && lines[i + 1].includes("-") && MD_DELIM.test(lines[i + 1]) && (lines[i + 1].includes("|") || mdCells(lines[i]).length === 1);
+  const mdIndent = (l) => l.match(/^ */)[0].length;
+  // Block Markdown: paragraphs, headings, fenced code, block quotes, lists, tables and rules. `tight` drops the paragraph
+  // wrapper (list items with no blank line).
+  function mdBlocks(lines, mk, depth, tight) {
+    const out = [];
+    const inline = (t) => mdInline(t, mk, depth, true);
+    if (depth >= MD_MAX_DEPTH) return [mk("p", {}, ...inline(lines.join("\n").trim()))];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!line.trim()) { i++; continue; }
+      const fence = line.match(/^ {0,3}(`{3,}|~{3,})\s*([^`\s]*)[^`]*$/);
+      if (fence) {
+        const close = new RegExp(`^ {0,3}${fence[1][0] === "~" ? "~" : "\\x60"}{${fence[1].length},}\\s*$`);
+        const body = [];
+        i++;
+        while (i < lines.length && !close.test(lines[i])) body.push(lines[i++]);
+        i++;
+        const lang = fence[2].replace(/[^\w+-]/g, "").slice(0, 32);
+        out.push(mdScroll(mk("pre", {}, mk("code", { textContent: body.join("\n"), ...(lang ? { className: `lang-${lang}` } : {}) })), lang ? `Code (${lang})` : "Code", mk));
+        continue;
+      }
+      const h = line.match(/^ {0,3}(#{1,6})(?:\s+(.*?))?(?:\s+#+)?\s*$/);
+      if (h) { out.push(mk(`h${Math.min(6, h[1].length + 2)}`, {}, ...inline(h[2] || ""))); i++; continue; }
+      if (/^ {0,3}([-*_])([ \t]*\1){2,}[ \t]*$/.test(line)) { out.push(mk("hr", {})); i++; continue; }
+      if (/^ {0,3}>/.test(line)) {
+        const body = [];
+        while (i < lines.length && /^ {0,3}>/.test(lines[i])) body.push(lines[i++].replace(/^ {0,3}> ?/, ""));
+        out.push(mk("blockquote", {}, ...mdBlocks(body, mk, depth + 1)));
+        continue;
+      }
+      if (mdIsTable(lines, i)) {
+        const head = mdCells(line);
+        const align = mdCells(lines[i + 1]).map((c) => (c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : ""));
+        i += 2;
+        const rows = [];
+        while (i < lines.length && lines[i].trim() && lines[i].includes("|")) rows.push(mdCells(lines[i++]));
+        const cell = (tag, text, k) => mk(tag, align[k] ? { className: `al-${align[k]}` } : {}, ...inline(text));
+        const table = mk("table", {},
+          mk("thead", {}, mk("tr", {}, ...head.map((t, k) => cell("th", t, k)))),
+          mk("tbody", {}, ...rows.map((r) => mk("tr", {}, ...head.map((_, k) => cell("td", r[k] ?? "", k))))));
+        out.push(mdScroll(table, "Table", mk));
+        continue;
+      }
+      const li = line.match(MD_LIST);
+      if (li) {
+        const ordered = /\d/.test(li[2]);
+        const base = li[1].length;
+        const items = [];
+        let width = 0, loose = false;
+        const sibling = (m) => m && m[1].length <= base + 1 && /\d/.test(m[2]) === ordered;
+        while (i < lines.length) {
+          const l = lines[i];
+          const m = l.match(MD_LIST);
+          if (sibling(m)) { items.push([m[3] ?? ""]); width = m[1].length + m[2].length + 1; i++; continue; }
+          if (m && m[1].length <= base + 1) break;
+          if (!l.trim()) {
+            let k = i + 1;
+            while (k < lines.length && !lines[k].trim()) k++;
+            if (k >= lines.length || !(mdIndent(lines[k]) > base + 1 || sibling(lines[k].match(MD_LIST)))) break;
+            loose = true; items.at(-1).push(""); i++; continue;
+          }
+          if (mdIndent(l) > base + 1) { items.at(-1).push(l.slice(Math.min(mdIndent(l), width))); i++; continue; }
+          if (items.at(-1).at(-1).trim() && !MD_BLOCK.test(l)) { items.at(-1).push(l); i++; continue; }
+          break;
+        }
+        const start = ordered ? parseInt(li[2], 10) : 1;
+        out.push(mk(ordered ? "ol" : "ul", ordered && start !== 1 ? { start } : {}, ...items.map((it) => mk("li", {}, ...mdBlocks(it, mk, depth + 1, !loose)))));
+        continue;
+      }
+      const para = [line];
+      i++;
+      while (i < lines.length && lines[i].trim() && !MD_BLOCK.test(lines[i]) && !mdIsTable(lines, i)) {
+        const m = lines[i].match(MD_LIST);
+        if (m && m[3] && (!/\d/.test(m[2]) || parseInt(m[2], 10) === 1)) break;
+        para.push(lines[i++]);
+      }
+      const kids = inline(para.map((p) => p.trim()).join("\n"));
+      if (tight) out.push(...kids); else out.push(mk("p", {}, ...kids));
+    }
+    return out;
+  }
+  function renderMarkdown(text, mk) {
+    return mk("div", { className: "md" }, ...mdBlocks(String(text ?? "").replace(/\r\n?/g, "\n").split("\n"), mk, 0, false));
+  }
+  // </markdown>
+
   // <threads>
   // Pure helpers for the thread view. Stored text is only ever put in with textContent or the safe linkify above; nothing here
   // parses HTML. Tests load this block (with the notes block) on its own.
@@ -676,14 +969,17 @@
     const kids = [`${s.covers} earlier message(s) are summarized for the model (${s.method === "model" ? "model-written" : "mechanical digest"}). All of them are kept and shown above.`];
     const node = mk("div", { className: "compact" }, ...kids);
     if (s.degraded) node.append(mk("div", { className: "warn", textContent: `Degraded: ${s.degraded}` }));
-    const det = mk("details", {}, mk("summary", { textContent: "Summary the model sees" }), mk("pre", { textContent: s.text }));
+    const det = mk("details", {}, mk("summary", { textContent: "Summary the model sees" }), mk("pre", { tabIndex: 0, textContent: s.text }));
     node.append(det);
     return node;
   }
   function renderStoredMessage(m, mk, cardFor) {
     const node = mk("div", { className: `msg ${m.role === "user" ? "user" : "orbit"}` });
     const text = m.status === "pending" ? "Working…" : m.text || (m.error ? "" : m.role === "assistant" ? "(no text)" : "");
-    node.append(...linkify(text, mk));
+    // A finished reply is Markdown (rendered without any HTML parsing, see the markdown block); the user's own text, a
+    // pending placeholder and error text stay plain.
+    if (m.role === "assistant" && m.status !== "pending" && m.text) node.append(renderMarkdown(m.text, mk));
+    else node.append(...linkify(text, mk));
     const mem = m.memory && m.memory.length ? ` · memory: ${m.memory.join(", ")}` : "";
     const tag = m.status === "error" || m.status === "interrupted" ? `${m.status}: ${m.error || ""}` : m.role === "assistant" && m.provenance ? `${m.provenance} · ${m.source}${mem}` : "";
     if (tag) node.append(mk("span", { className: `tag ${m.status === "error" || m.status === "interrupted" ? "down" : m.provenance || ""}`, textContent: m.fallback && m.status === "done" ? `⚠ Fallback model, not ChatGPT · ${tag}` : tag }));
@@ -723,13 +1019,14 @@
   const jobsPoller = makePoller(refreshJobs, () => tab === "jobs" && document.visibilityState === "visible", setInterval, 15000);
   jobsPoller.start();
 
-  // The tabs show only for the owner. /chat/proposals is owner-only and cheap, so it answers that once on load
-  // without touching the jobs list; the badge fills in when the Jobs tab opens.
+  // The Jobs link shows only for the owner. /chat/proposals is owner-only and cheap, so it answers that once on load
+  // without touching the jobs list; the badge fills in when the Jobs tab opens. Chat and the public status link always show.
   (async () => {
     try {
       const pr = await fetch("/chat/proposals");
-      tabs.hidden = !pr.ok;
+      jobsTab.hidden = !pr.ok;
       if (pr.ok) { const n = (await pr.json()).proposals.length; document.getElementById("jobsbadge").textContent = n ? `(${n})` : ""; }
+      if (tabFromHash() !== tab) setTab(tabFromHash());
     } catch { /* stay on Chat */ }
   })();
 
