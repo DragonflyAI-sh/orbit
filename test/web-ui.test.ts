@@ -291,11 +291,14 @@ test("buttons have hover, pressed, keyboard focus and disabled states, and respe
   assert.match(css, /\.note button:not\(:disabled\):hover[^{]*\{[^}]*background:/);
 });
 
-test("Send is disabled while a message is in flight and while the thread is archived", () => {
+test("Send is disabled while a message is in flight, while the thread is archived and while a thread is opening", () => {
   assert.match(html, /<button id="send">Send<\/button>/);
   assert.match(html, /sendButton\.disabled = true;/);
-  assert.match(html, /finally \{\s*sending = false;\s*sendButton\.disabled = input\.disabled;/);
-  assert.match(html, /document\.getElementById\("send"\)\.disabled = input\.disabled \|\| sending;/);
+  // Afterwards the owner's bar decides (it knows about a pending navigation); the stateless chat re-enables directly.
+  assert.match(html, /finally \{\s*sending = false;\s*if \(threadMode === "server"\) renderBar\(\); else sendButton\.disabled = input\.disabled;/);
+  assert.match(html, /document\.getElementById\("send"\)\.disabled = input\.disabled \|\| sending \|\| Boolean\(pending\);/);
+  // Enter or Send during a pending navigation sends nothing and keeps the text (chat-browser.test.ts checks it for real).
+  assert.match(html, /if \(threadMode === "server" && pending\) \{ renderBar\(\); return; \}\s*input\.value = "";/);
 });
 
 // ---- Navigation ---------------------------------------------------------------------------------------------------------
