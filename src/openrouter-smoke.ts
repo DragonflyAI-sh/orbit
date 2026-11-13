@@ -15,8 +15,8 @@ import { join } from "node:path";
 import { ProviderError } from "./chatgpt.ts";
 import { fallbackModel } from "./fallback.ts";
 import type { Item, ModelPort } from "./model.ts";
-import { openrouterConfig, reservationUsd } from "./openrouter.ts";
-import { PROVISION_FILE, spendLedger, toMicro } from "./spend-ledger.ts";
+import { openrouterConfig, reservationUsd, spendCapsOf } from "./openrouter.ts";
+import { PROVISION_FILE, spendLedger } from "./spend-ledger.ts";
 
 export const SMOKE_MAX_CAP_USD = 1;
 export const SMOKE_MAX_OUTPUT_TOKENS = 512;
@@ -43,14 +43,17 @@ export async function runSmoke(argv: string[], env: NodeJS.ProcessEnv, fetcher: 
   if (!argv.includes(CONFIRM_FLAG)) return { ...report, refused: `This spends real money. Run only with Rai's explicit authorisation, and pass ${CONFIRM_FLAG}.` };
   const cfg = readKey ? openrouterConfig(env, readKey) : openrouterConfig(env);
   if (cfg.state !== "ready") return { ...report, refused: `The configuration is not complete: ${cfg.reason}` };
-  if (cfg.dailyCapUsd > SMOKE_MAX_CAP_USD || cfg.totalCapUsd > SMOKE_MAX_CAP_USD) return { ...report, refused: `For the smoke test both ORBIT_OPENROUTER_DAILY_CAP_USD and ORBIT_OPENROUTER_TOTAL_CAP_USD must be at most ${SMOKE_MAX_CAP_USD}.` };
+  // The lifetime cap must be a number here (not off), and a monthly cap, if set, is held to the same limit.
+  if (cfg.dailyCapUsd > SMOKE_MAX_CAP_USD || cfg.totalCapUsd === null || cfg.totalCapUsd > SMOKE_MAX_CAP_USD || (cfg.monthlyCapUsd !== null && cfg.monthlyCapUsd > SMOKE_MAX_CAP_USD)) {
+    return { ...report, refused: `For the smoke test both ORBIT_OPENROUTER_DAILY_CAP_USD and ORBIT_OPENROUTER_TOTAL_CAP_USD (not off) must be at most ${SMOKE_MAX_CAP_USD}, and ORBIT_OPENROUTER_MONTHLY_CAP_USD too if it is set.` };
+  }
   if (cfg.maxOutputTokens > SMOKE_MAX_OUTPUT_TOKENS) return { ...report, refused: `For the smoke test ORBIT_OPENROUTER_MAX_OUTPUT_TOKENS must be at most ${SMOKE_MAX_OUTPUT_TOKENS}.` };
   report.model = cfg.model;
 
   // A fresh, isolated ledger: its own new directory, provisioned with a stated zero opening for THIS test only.
   const dir = mkdtempSync(join(tmpdir(), "orbit-openrouter-smoke-"));
   writeFileSync(join(dir, PROVISION_FILE), JSON.stringify({ openingLifetimeUsd: 0, openingTodayUsd: 0, note: "isolated paid smoke test ledger" }), { mode: 0o600 });
-  const ledger = spendLedger(dir, { dailyMicro: toMicro(cfg.dailyCapUsd), totalMicro: toMicro(cfg.totalCapUsd) });
+  const ledger = spendLedger(dir, spendCapsOf(cfg));
   ledger.open();
 
   // Counts every request and keeps only the numbers of each response's usage (the body itself is not kept or printed).

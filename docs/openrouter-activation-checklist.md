@@ -2,6 +2,7 @@
 
 Status: **not activated, not production-ready.** Everything below was tested only with fakes. Model choice and activation are Rai's decisions.
 Approved parameters: ChatGPT primary, fallback only on typed usage/rate limits, $5/day (UTC), $150 total.
+Correction (Rai, later): the budget is $5/day and **$150 per month**, not lifetime. Configure it with `ORBIT_OPENROUTER_MONTHLY_CAP_USD=150` and an explicit lifetime setting; see `docs/openrouter-spend-caps.md`.
 
 ## Fixed in PR59 (each has a regression test in `test/openrouter-fallback.test.ts`)
 - Mock replies were relabelled "live" when the fallback wrapper was on: the primary's own result now passes through untouched.

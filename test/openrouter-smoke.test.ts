@@ -85,3 +85,15 @@ test("smoke tool: exits 2 and sends nothing without the confirmation flag", () =
   assert.equal(p.status, 2);
   assert.equal(JSON.parse(p.stdout).requests, 0);
 });
+
+test("smoke: with monthly caps, the lifetime cap must still be a number at most the smoke ceiling, and so must the monthly cap", async () => {
+  const cases: Record<string, string>[] = [
+    { ORBIT_OPENROUTER_MONTHLY_CAP_USD: "1", ORBIT_OPENROUTER_TOTAL_CAP_USD: "off" },
+    { ORBIT_OPENROUTER_MONTHLY_CAP_USD: "2", ORBIT_OPENROUTER_TOTAL_CAP_USD: "2" },
+  ];
+  for (const over of cases) {
+    const r = await runSmoke([CONFIRM_FLAG], { ...ENV, ...over }, noNetwork, undefined, () => "k");
+    assert.match(r.refused ?? "", /TOTAL_CAP_USD \(not off\) must be at most 1, and ORBIT_OPENROUTER_MONTHLY_CAP_USD too/, JSON.stringify(over));
+    assert.equal(r.requests, 0);
+  }
+});

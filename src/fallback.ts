@@ -219,8 +219,13 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
         ? ` STALE (last read ${balance.at}): ${balance.text}`
         : ` ${balance.text}`;
     const v = seen.view;
-    const allowance = ` Local OpenRouter allowance as last written (UTC ${v.day}): $${v.spentTodayUsd.toFixed(4)} spent today of $${v.caps.dailyUsd}, $${v.lifetimeUsd.toFixed(4)} of $${v.caps.totalUsd} lifetime, $${v.reservedUsd.toFixed(4)} reserved for calls in flight${v.uncertainRequests ? `, ${v.uncertainRequests} request(s) charged at their upper bound because the cost was unknown` : ""}. This is ORBIT's own count, not a hard spending ceiling.`;
-    return { armed: true, usable: true, text: ` OpenRouter fallback armed: ${client!.model}, used only while ChatGPT is limited.${allowance}${unverified}${bal}` };
+    const month = v.caps.monthlyUsd === null
+      ? `no monthly cap${v.spentMonthUsd === null ? "" : ` ($${v.spentMonthUsd.toFixed(4)} spent in UTC month ${v.month})`}`
+      : `$${(v.spentMonthUsd ?? 0).toFixed(4)} spent in UTC month ${v.month} of $${v.caps.monthlyUsd} (resets ${v.resets.monthlyAt})`;
+    const life = v.caps.totalUsd === null ? `$${v.lifetimeUsd.toFixed(4)} lifetime (no lifetime cap)` : `$${v.lifetimeUsd.toFixed(4)} of $${v.caps.totalUsd} lifetime (never resets)`;
+    const allowance = ` Local OpenRouter allowance as last written (UTC ${v.day}): $${v.spentTodayUsd.toFixed(4)} spent today of $${v.caps.dailyUsd} (resets ${v.resets.dailyAt}), ${month}, ${life}, $${v.reservedUsd.toFixed(4)} reserved for calls in flight (counted against every cap until settled)${v.uncertainRequests ? `, ${v.uncertainRequests} request(s) charged at their upper bound because the cost was unknown` : ""}; $${v.remainingTodayUsd.toFixed(4)} can still be reserved now. This is ORBIT's own count, not a hard spending ceiling.`;
+    const spent = v.exhausted.length ? ` Every paid call is refused for now: the ${v.exhausted.join(" and ")} cap${v.exhausted.length > 1 ? "s are" : " is"} used up.` : "";
+    return { armed: true, usable: true, text: ` OpenRouter fallback armed: ${client!.model}, used only while ChatGPT is limited.${allowance}${spent}${unverified}${bal}` };
   };
 
   const wrapper: FallbackModel = {

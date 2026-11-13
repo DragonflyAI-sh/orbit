@@ -4,10 +4,11 @@
 // together, and can be told to kill itself or hang at a named point inside the ledger's critical section (deterministic fault injection).
 import { existsSync } from "node:fs";
 import { spendLedger } from "../../src/spend-ledger.ts";
+import type { SpendCaps } from "../../src/spend-ledger.ts";
 
 type Spec = {
   dir: string;
-  caps: { dailyMicro: number; totalMicro: number };
+  caps: SpendCaps;
   go: string;
   lockWaitMs?: number;
   ops: ({ op: "reserve"; micro: number; count?: number; settle?: number | null } | { op: "die" } | { op: "view" })[];
