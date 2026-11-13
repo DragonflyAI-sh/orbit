@@ -298,7 +298,9 @@ test("Send is disabled while a message is in flight, while the thread is archive
   assert.match(html, /finally \{\s*sending = false;\s*if \(threadMode === "server"\) renderBar\(\); else sendButton\.disabled = input\.disabled;/);
   assert.match(html, /document\.getElementById\("send"\)\.disabled = input\.disabled \|\| sending \|\| Boolean\(pending\);/);
   // Enter or Send during a pending navigation sends nothing and keeps the text (chat-browser.test.ts checks it for real).
-  assert.match(html, /if \(threadMode === "server" && pending\) \{ renderBar\(\); return; \}\s*input\.value = "";/);
+  // An archived thread takes nothing either, even from a submit that bypasses the disabled controls; both checks come
+  // before the box is cleared.
+  assert.match(html, /if \(threadMode === "server" && pending\) \{ renderBar\(\); return; \}\s*(\/\/[^\n]*\n\s*)?if \(threadMode === "server" && current\?\.archived\) \{ renderBar\(\); return; \}\s*input\.value = "";/);
 });
 
 // ---- Navigation ---------------------------------------------------------------------------------------------------------
