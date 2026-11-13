@@ -4,14 +4,18 @@ import { ProviderError } from "./chatgpt.ts";
 import { instructions } from "./model.ts";
 import type { Item, Step, ToolCall, ToolDef } from "./model.ts";
 import { SpendError, toMicro } from "./spend-ledger.ts";
-import type { SpendLedger } from "./spend-ledger.ts";
+import type { SpendCaps, SpendLedger } from "./spend-ledger.ts";
 
 // OpenRouter as a paid, explicitly identified fallback behind the ChatGPT token-sharing model. This file is only the client: when to use
 // it is src/fallback.ts, and the money rules are src/spend-ledger.ts. docs/openrouter-fallback.md describes the whole feature.
 
 export const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 export const DEFAULT_DAILY_CAP_USD = 5;
+// The LIFETIME cap used when ORBIT_OPENROUTER_TOTAL_CAP_USD is unset and no monthly cap is set (unchanged from before monthly caps
+// existed, so an existing configuration keeps exactly the protection it had). It is not a monthly budget.
 export const DEFAULT_TOTAL_CAP_USD = 150;
+// The word that turns the lifetime cap off. Accepted only together with a monthly cap, and only when written out.
+export const CAP_OFF = "off";
 export const DEFAULT_MAX_OUTPUT_TOKENS = 2048;
 export const HARD_MAX_OUTPUT_TOKENS = 8192;
 // Largest billable-output bound accepted (ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS). It is set from the chosen model's context length,
@@ -55,9 +59,36 @@ export type OpenRouterConfig =
       // Required, no default: without it the reservation could understate a call.
       outputBoundTokens: number;
       timeoutMs: number;
+      // USD per UTC calendar day. Always set.
       dailyCapUsd: number;
-      totalCapUsd: number;
+      // USD per UTC calendar month (ORBIT_OPENROUTER_MONTHLY_CAP_USD); null when not configured.
+      monthlyCapUsd: number | null;
+      // USD lifetime, never resets (ORBIT_OPENROUTER_TOTAL_CAP_USD); null only when explicitly set to "off" with a monthly cap.
+      totalCapUsd: number | null;
     };
+
+// The ledger caps for a ready configuration.
+export const spendCapsOf = (cfg: { dailyCapUsd: number; monthlyCapUsd: number | null; totalCapUsd: number | null }): SpendCaps => ({
+  dailyMicro: toMicro(cfg.dailyCapUsd),
+  ...(cfg.monthlyCapUsd !== null ? { monthlyMicro: toMicro(cfg.monthlyCapUsd) } : {}),
+  ...(cfg.totalCapUsd !== null ? { totalMicro: toMicro(cfg.totalCapUsd) } : {}),
+});
+
+// One spend cap setting. Unset or blank: undefined. A plain non-negative decimal (an exponent is read but then held to MAX_CAP_USD):
+// a number. "off" (any case) is returned as "off" only where `offOk`. Everything else, zero included, is an error text: 0 never means
+// "unlimited" and never means "spend nothing" (to make no paid call at all, set ORBIT_OPENROUTER_ENABLED=0).
+const CAP_NUMBER = /^\+?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/;
+export function capSetting(name: string, raw: string | undefined, offOk: boolean): number | "off" | undefined | { error: string } {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const v = raw.trim();
+  if (v.toLowerCase() === CAP_OFF) return offOk ? "off" : { error: `${name} cannot be off.` };
+  if (!CAP_NUMBER.test(v)) return { error: `${name} must be a plain number of USD${offOk ? ` or ${CAP_OFF}` : ""} (got something else; negative, non-numeric and non-finite values are refused).` };
+  const n = Number(v);
+  if (!Number.isFinite(n)) return { error: `${name} must be a finite number of USD.` };
+  if (n > MAX_CAP_USD) return { error: `The spend caps must be at most ${MAX_CAP_USD} USD (${name}).` };
+  if (n === 0) return { error: `${name} is 0, which is not accepted: a cap is a positive amount. To make no paid call at all, set ORBIT_OPENROUTER_ENABLED=0${offOk ? `; to have no lifetime cap, set it to ${CAP_OFF} together with a monthly cap` : ""}.` };
+  return n;
+}
 
 const num = (v: string | undefined): number | undefined => {
   if (v === undefined || v.trim() === "") return undefined;
@@ -85,10 +116,23 @@ export function openrouterConfig(env: NodeJS.ProcessEnv, readKey: (dir: string) 
   if (!Number.isInteger(outputBound) || outputBound < maxOut || outputBound > HARD_MAX_OUTPUT_BOUND_TOKENS) return bad(`ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS must be a whole number from ORBIT_OPENROUTER_MAX_OUTPUT_TOKENS (${maxOut}) to ${HARD_MAX_OUTPUT_BOUND_TOKENS}.`);
   const timeoutMs = num(env.ORBIT_OPENROUTER_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) return bad("ORBIT_OPENROUTER_TIMEOUT_MS must be a whole number from 1000 to 120000.");
-  const dailyCapUsd = num(env.ORBIT_OPENROUTER_DAILY_CAP_USD) ?? DEFAULT_DAILY_CAP_USD;
-  const totalCapUsd = num(env.ORBIT_OPENROUTER_TOTAL_CAP_USD) ?? DEFAULT_TOTAL_CAP_USD;
-  if (dailyCapUsd > MAX_CAP_USD || totalCapUsd > MAX_CAP_USD) return bad(`The spend caps must be at most ${MAX_CAP_USD} USD.`);
-  if (!(dailyCapUsd > 0) || !(totalCapUsd > 0) || dailyCapUsd > totalCapUsd) return bad("The spend caps must be positive and the daily cap cannot exceed the lifetime cap.");
+  // Spend caps. Daily: default 5. Monthly (UTC calendar month): optional, no default. Lifetime: the long-standing
+  // ORBIT_OPENROUTER_TOTAL_CAP_USD, never relabelled. With no monthly cap it defaults to 150 as before. With a monthly cap it must be
+  // stated (a number, or "off"), so adding a monthly budget never silently brings the old default lifetime cutoff with it.
+  const dailyRaw = capSetting("ORBIT_OPENROUTER_DAILY_CAP_USD", env.ORBIT_OPENROUTER_DAILY_CAP_USD, false);
+  const monthlyRaw = capSetting("ORBIT_OPENROUTER_MONTHLY_CAP_USD", env.ORBIT_OPENROUTER_MONTHLY_CAP_USD, false);
+  const totalRaw = capSetting("ORBIT_OPENROUTER_TOTAL_CAP_USD", env.ORBIT_OPENROUTER_TOTAL_CAP_USD, true);
+  for (const r of [dailyRaw, monthlyRaw, totalRaw]) if (r !== undefined && typeof r === "object") return bad(r.error);
+  const dailyCapUsd = (dailyRaw as number | undefined) ?? DEFAULT_DAILY_CAP_USD;
+  const monthlyCapUsd = (monthlyRaw as number | undefined) ?? null;
+  if (totalRaw === undefined && monthlyCapUsd !== null) {
+    return bad(`ORBIT_OPENROUTER_MONTHLY_CAP_USD is set, so ORBIT_OPENROUTER_TOTAL_CAP_USD (the LIFETIME cap, which never resets) must be set explicitly too: a number of USD, or ${CAP_OFF} for no lifetime cap. Left unset it would default to ${DEFAULT_TOTAL_CAP_USD} USD lifetime, a cutoff a monthly budget does not intend.`);
+  }
+  if (totalRaw === "off" && monthlyCapUsd === null) return bad(`ORBIT_OPENROUTER_TOTAL_CAP_USD can be ${CAP_OFF} only when ORBIT_OPENROUTER_MONTHLY_CAP_USD is set: there is always a cap beyond one day.`);
+  const totalCapUsd = totalRaw === "off" ? null : ((totalRaw as number | undefined) ?? DEFAULT_TOTAL_CAP_USD);
+  if (totalCapUsd !== null && dailyCapUsd > totalCapUsd) return bad("The spend caps must be positive and the daily cap cannot exceed the lifetime cap.");
+  if (monthlyCapUsd !== null && dailyCapUsd > monthlyCapUsd) return bad("The daily cap cannot exceed the monthly cap.");
+  if (monthlyCapUsd !== null && totalCapUsd !== null && monthlyCapUsd > totalCapUsd) return bad("The monthly cap cannot exceed the lifetime cap (the lifetime cap would always bind first).");
   // A cap below the reservation for the largest request would refuse long conversations for good: say so now, not at the first call.
   const largest = reservationUsd(MAX_REQUEST_BYTES, priceIn, priceOut, outputBound);
   if (largest > dailyCapUsd) return bad(`The daily cap (${dailyCapUsd} USD) is below the reservation for the largest request (${largest.toFixed(6)} USD at these prices and ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS).`);
@@ -101,7 +145,7 @@ export function openrouterConfig(env: NodeJS.ProcessEnv, readKey: (dir: string) 
     // Absent or unreadable is the same to the caller.
   }
   if (!key) return bad("The orbit.openrouter credential is not installed.");
-  return { state: "ready", key, model, priceIn, priceOut, maxOutputTokens: maxOut, outputBoundTokens: outputBound, timeoutMs, dailyCapUsd, totalCapUsd };
+  return { state: "ready", key, model, priceIn, priceOut, maxOutputTokens: maxOut, outputBoundTokens: outputBound, timeoutMs, dailyCapUsd, monthlyCapUsd, totalCapUsd };
 }
 
 // The reservation for one call, in USD: every token in at the input price, the whole output bound at the output price. Tokens in are

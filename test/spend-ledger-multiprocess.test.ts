@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { LEDGER_FILE, SpendError, selfIdentity, spendLedger } from "../src/spend-ledger.ts";
+import type { SpendCaps } from "../src/spend-ledger.ts";
 import { provisioned } from "./helpers/ledger.ts";
 
 // B7: real competing child processes on one temporary state directory, with deterministic fault injection (the ledger's `fault` hook
@@ -20,7 +21,7 @@ type Spec = Record<string, unknown> & { ops: unknown[] };
 type Result = { code: number | null; signal: string | null; lines: Record<string, any>[] };
 
 // Starts every worker, waits until all are ready, releases them together, and collects what each printed.
-async function race(d: string, caps: { dailyMicro: number; totalMicro: number }, specs: Spec[]): Promise<Result[]> {
+async function race(d: string, caps: SpendCaps, specs: Spec[]): Promise<Result[]> {
   const go = join(d, `go-${Math.random().toString(16).slice(2)}`);
   const procs = specs.map((s) => {
     const child = spawn(process.execPath, [WORKER, JSON.stringify({ dir: d, caps, go, ...s })], { stdio: ["ignore", "pipe", "pipe"] });
@@ -69,6 +70,21 @@ test("competing processes near the cap: exactly the allowance is admitted, never
   assert.equal(reserved + s.lifetimeMicro, 100_000, "every admitted reservation is in the file, reserved or charged: none lost, none doubled");
   assert.equal(Object.keys(s.reservations).length + s.uncertain.length, 10);
   assert.deepEqual(readdirSync(d).filter((f) => /\.new\.|lock/.test(f)), [], "no temp or lock file left behind");
+});
+
+test("competing processes near a MONTHLY cap (no lifetime cap): exactly the month's allowance is admitted, never more", async () => {
+  const d = dir();
+  const caps = { dailyMicro: 1_000_000, monthlyMicro: 100_000 };
+  provisioned(d, caps, NOW);
+  const rs = await race(d, caps, Array.from({ length: 6 }, () => ({ ops: [{ op: "reserve", micro: 10_000, count: 5 }] })));
+  for (const r of rs) assert.equal(r.code, 0, JSON.stringify(r.lines));
+  const lines = all(rs);
+  assert.equal(lines.filter((l) => l.ok).length, 10, "exactly the monthly cap's worth was admitted");
+  assert.equal(lines.filter((l) => l.err === "monthly_cap").length, 20);
+  assert.equal(lines.filter((l) => l.err && l.err !== "monthly_cap").length, 0, "nothing failed any other way");
+  const s = stateOf(d);
+  const reserved = Object.values<{ micro: number }>(s.reservations).reduce((a, r) => a + r.micro, 0);
+  assert.equal(reserved + s.lifetimeMicro, 100_000, "none lost, none doubled");
 });
 
 test("competing processes settling: no charge is lost and no write is overwritten (the write counter adds up exactly)", async () => {

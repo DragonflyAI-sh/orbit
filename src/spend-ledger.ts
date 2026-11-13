@@ -7,13 +7,23 @@ import { join } from "node:path";
 // docs/openrouter-fallback.md and docs/openrouter-ledger-integrity.md have the full account; this is the short form.
 //
 // Money rules
-//  - A call reserves a conservative upper bound BEFORE it is sent. The reservation counts against both caps until it is settled.
+//  - A call reserves a conservative upper bound BEFORE it is sent. The reservation counts against EVERY cap (daily, monthly, lifetime)
+//    until it is settled, whatever day or month it was made in: a call in flight across midnight or a month boundary occupies budget
+//    in the new period too, so a rollover never frees budget a pending call may still use. When it settles (or is charged as orphaned)
+//    it is charged to the UTC day it was reserved on, once.
 //  - Settling replaces the reservation with the provider's reported cost. A missing, non-numeric or negative cost is ambiguous:
 //    the whole reserved bound stays charged. Nothing is ever refunded on a guess.
 //  - A reservation whose owning process is PROVEN gone (see "Owners") is charged at its bound as "orphaned". Spend is never cleared
 //    automatically, not by a restart and not by a day rollover.
 //  - A file that cannot be read, parsed or validated stops all spending (SpendError "ledger") instead of starting from zero.
-//  - Days are UTC calendar days (YYYY-MM-DD). The lifetime counter is its own number and does not depend on the day table.
+//  - Days are UTC calendar days (YYYY-MM-DD); months are UTC calendar months (YYYY-MM), the sum of their days. The lifetime counter is
+//    its own number and does not depend on the day table.
+//  - Caps: a daily cap always; a monthly cap and a lifetime cap each optional, but at least one of them. Lowering a cap below what is
+//    already spent refuses further calls; it never deletes or rewrites history.
+//  - Monthly spend is rebuilt from the day table. The only spend not in it is an opening balance declared at provisioning; it is placed
+//    in the ledger's creation month (conservative: it was spent at or before then) unless the provision file split it with
+//    openingMonthUsd. A ledger whose day table adds up to MORE than its lifetime total cannot be reconstructed: with a monthly cap
+//    configured that stops all spending (SpendError "ledger").
 //
 // Several processes (single-writer protection, B7)
 //  - Every admit / reserve / settle / release / recovery step is ONE critical section: take the lock, read the file, change it, write
@@ -38,7 +48,7 @@ import { join } from "node:path";
 //    without a ledger, or a ledger whose epoch differs from the marker, stops all spending. See docs/openrouter-ledger-integrity.md
 //    for what local markers can and cannot prove (not continuity after the whole state directory is deleted or restored).
 
-export type SpendErrorCode = "ledger" | "busy" | "daily_cap" | "total_cap" | "bad_amount";
+export type SpendErrorCode = "ledger" | "busy" | "daily_cap" | "monthly_cap" | "total_cap" | "bad_amount";
 export class SpendError extends Error {
   readonly code: SpendErrorCode;
   constructor(code: SpendErrorCode, message: string) {
@@ -66,18 +76,38 @@ type Ledger = {
   reservations: Record<string, Reservation>;
   // Requests charged at their reserved bound because the real cost is unknown. Kept for the owner to read; never removed.
   uncertain: { at: string; day: string; micro: number; why: string }[];
+  // Part of the declared opening balance the owner stated was spent BEFORE the creation month (openingLifetimeUsd - openingMonthUsd).
+  // Absent: none is known to be, so the whole opening balance outside the day table counts in the creation month.
+  priorMonthsMicro?: number;
 };
 type Marker = { schema: 1; epoch: string; createdAt: string };
 
-export type SpendCaps = { dailyMicro: number; totalMicro: number };
+// dailyMicro is required. monthlyMicro (UTC calendar month) and totalMicro (lifetime, never resets) are each optional, but at least one
+// must be given: there is always a cap beyond one day. An absent cap is not enforced; there is no zero-means-unlimited value.
+export type SpendCaps = { dailyMicro: number; monthlyMicro?: number; totalMicro?: number };
+export type CapName = "daily" | "monthly" | "lifetime";
 export type SpendView = {
   day: string;
-  caps: { dailyUsd: number; totalUsd: number };
+  // UTC calendar month, YYYY-MM.
+  month: string;
+  // null: that cap is not configured (not enforced).
+  caps: { dailyUsd: number; monthlyUsd: number | null; totalUsd: number | null };
   spentTodayUsd: number;
+  // Settled and charged spend in this UTC month, opening balance included where it belongs (see above). null only when it cannot be
+  // reconstructed and no monthly cap is configured (with one, that is a ledger failure instead).
+  spentMonthUsd: number | null;
+  // All outstanding reservations; each counts against every cap until it is settled.
   reservedUsd: number;
   lifetimeUsd: number;
+  // What one more call could still reserve right now under ALL configured caps (the smallest headroom).
   remainingTodayUsd: number;
-  remainingTotalUsd: number;
+  // Headroom under that one cap alone; null when the cap is not configured.
+  remainingMonthUsd: number | null;
+  remainingTotalUsd: number | null;
+  // Caps with no headroom left at all: every paid call is refused until the named cap resets (daily, monthly) or is raised (lifetime).
+  exhausted: CapName[];
+  // When the daily and monthly counts start again (UTC). The lifetime count never resets.
+  resets: { dailyAt: string; monthlyAt: string };
   uncertainRequests: number;
 };
 
@@ -86,6 +116,9 @@ export const toUsd = (micro: number): number => micro / 1_000_000;
 const isMicro = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
 const utcDay = (d: Date) => d.toISOString().slice(0, 10);
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
+// Start of the next UTC day and of the next UTC month after `d` (Date.UTC carries December into January of the next year).
+export const nextUtcDay = (d: Date): string => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)).toISOString();
+export const nextUtcMonth = (d: Date): string => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString();
 
 // File names inside the state directory.
 export const LEDGER_FILE = "openrouter-spend.json";
@@ -180,11 +213,15 @@ export function livenessOf(o: ProcId, me: ProcId): Liveness {
 
 const sleepMs = (ms: number) => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-type Opening = { lifetimeMicro: number; todayMicro: number; note: string; recover: boolean };
+type Opening = { lifetimeMicro: number; todayMicro: number; monthMicro?: number; note: string; recover: boolean };
 
 export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () => Date = () => new Date(), opts: SpendOptions = {}): SpendLedger {
-  if (!isMicro(caps.dailyMicro) || !isMicro(caps.totalMicro) || caps.dailyMicro <= 0 || caps.totalMicro <= 0) {
+  const capOk = (n: number | undefined) => n === undefined || (isMicro(n) && n > 0);
+  if (!isMicro(caps.dailyMicro) || caps.dailyMicro <= 0 || !capOk(caps.monthlyMicro) || !capOk(caps.totalMicro)) {
     throw new SpendError("bad_amount", "Spend caps must be positive and no larger than about 9 billion USD.");
+  }
+  if (caps.monthlyMicro === undefined && caps.totalMicro === undefined) {
+    throw new SpendError("bad_amount", "A monthly or a lifetime spend cap is required besides the daily cap.");
   }
   const at = (name: string) => join(dir!, name);
   const file = dir ? at(LEDGER_FILE) : undefined;
@@ -208,6 +245,7 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
     if (o) {
       l.lifetimeMicro = o.lifetimeMicro;
       if (o.todayMicro) l.days[utcDay(now())] = o.todayMicro;
+      if (o.monthMicro !== undefined && o.lifetimeMicro > o.monthMicro) l.priorMonthsMicro = o.lifetimeMicro - o.monthMicro;
       if (o.lifetimeMicro) l.uncertain.push({ at: now().toISOString(), day: utcDay(now()), micro: o.lifetimeMicro, why: `opening balance declared by the owner at ${o.recover ? "RECOVERY after ledger loss" : "provisioning"}: ${o.note}` });
     }
     return l;
@@ -219,6 +257,7 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
     if (l.schema !== 1 && l.schema !== 2) return bad("unknown schema");
     if (l.schema === 2 && (typeof l.epoch !== "string" || !l.epoch || !isMicro(l.seq))) return bad("identity");
     if (!isMicro(l.lifetimeMicro)) return bad("lifetime");
+    if (l.priorMonthsMicro !== undefined && !isMicro(l.priorMonthsMicro)) return bad("opening split");
     if (!l.days || typeof l.days !== "object" || !l.reservations || typeof l.reservations !== "object" || !Array.isArray(l.uncertain)) return bad("shape");
     for (const [d, m] of Object.entries(l.days)) if (!DAY.test(d) || !isMicro(m)) return bad("day entry");
     for (const r of Object.values(l.reservations)) {
@@ -455,6 +494,8 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
   // first one too: {"openingLifetimeUsd": 0, "openingTodayUsd": 0, "note": "..."}. After a loss (a marker exists but the ledger does
   // not) it must also acknowledge the loss, because ORBIT cannot know the spend:
   //   {"acknowledgeLoss": true, "openingLifetimeUsd": 12.5, "openingTodayUsd": 0.3, "note": "from the OpenRouter dashboard"}
+  // Optional "openingMonthUsd" (today <= month <= lifetime) says how much of it was spent in the current UTC month. Without it the whole
+  // opening balance counts against this month's cap (conservative); with it, the rest is recorded as spent in earlier months.
   const readProvision = (marker: Marker | undefined): Opening | undefined => {
     const raw = readText(at(PROVISION_FILE));
     if (raw === undefined) return undefined;
@@ -469,6 +510,10 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
     const life = p.openingLifetimeUsd === undefined ? 0 : usd(p.openingLifetimeUsd);
     const today = p.openingTodayUsd === undefined ? 0 : usd(p.openingTodayUsd);
     if (life === undefined || today === undefined || today > life) return bad("the provision file's opening amounts are not valid (today cannot exceed lifetime)");
+    const month = p.openingMonthUsd === undefined ? undefined : usd(p.openingMonthUsd);
+    if (p.openingMonthUsd !== undefined && (month === undefined || month < today || month > life)) {
+      return bad("the provision file's openingMonthUsd is not valid (it must be a number from openingTodayUsd to openingLifetimeUsd)");
+    }
     const note = typeof p.note === "string" ? p.note.replace(/\s+/g, " ").trim().slice(0, 200) : "no note";
     if (marker) {
       if (p.acknowledgeLoss !== true) {
@@ -480,7 +525,7 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
     if (p.openingLifetimeUsd === undefined || p.openingTodayUsd === undefined) {
       return bad("the provision file must state openingLifetimeUsd and openingTodayUsd (0 only if the key has really spent nothing); a ledger is never created with an assumed empty history");
     }
-    return { lifetimeMicro: life, todayMicro: today, note: note || "no note", recover: Boolean(marker) };
+    return { lifetimeMicro: life, todayMicro: today, ...(month !== undefined ? { monthMicro: month } : {}), note: note || "no note", recover: Boolean(marker) };
   };
 
   const retireProvision = (epoch: string) => {
@@ -580,20 +625,62 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
       return out;
     });
 
-  const outstanding = (l: Ledger, day?: string) => Object.values(l.reservations).filter((r) => !day || r.day === day).reduce((a, r) => a + r.micro, 0);
+  // Every outstanding reservation, whatever day it was made: it counts against each cap of the current period until it is settled.
+  const outstanding = (l: Ledger) => Object.values(l.reservations).reduce((a, r) => a + r.micro, 0);
+
+  // Charged spend in a UTC month: its days, plus the opening balance (the only spend outside the day table) if it belongs there. The
+  // opening balance was spent at or before the ledger's creation, so it is counted in the creation month (all of it, unless the owner
+  // stated how much was earlier: priorMonthsMicro) and, should the clock read an earlier month, there too. Never an undercount.
+  const monthSpent = (l: Ledger, month: string): { micro: number } | { unknown: string } => {
+    let inMonth = 0;
+    let all = 0;
+    for (const [d, m] of Object.entries(l.days)) {
+      all += m;
+      if (d.slice(0, 7) === month) inMonth += m;
+    }
+    const outside = l.lifetimeMicro - all;
+    if (outside < 0) return { unknown: "its per-day spend adds up to more than its lifetime total" };
+    const prior = l.priorMonthsMicro ?? 0;
+    if (prior > outside) return { unknown: "its opening balance split is larger than the opening balance" };
+    if (outside === 0) return { micro: inMonth };
+    const created = Date.parse(l.createdAt);
+    if (!Number.isFinite(created)) return { unknown: "its opening balance cannot be placed in a month because its creation time is unreadable" };
+    const createdMonth = utcDay(new Date(created)).slice(0, 7);
+    return { micro: inMonth + (month < createdMonth ? outside : month === createdMonth ? outside - prior : 0) };
+  };
+  const unreconstructable = (why: string) =>
+    new SpendError("ledger", `The spend ledger's monthly total cannot be reconstructed (${why}), so no paid call is made. Fix or restore the ledger file; it is never reset automatically.`);
 
   function viewOf(l: Ledger): SpendView {
-    const day = utcDay(now());
+    const t = now();
+    const day = utcDay(t);
+    const month = day.slice(0, 7);
     const today = l.days[day] ?? 0;
-    const reservedToday = outstanding(l, day);
+    const out = outstanding(l);
+    const m = monthSpent(l, month);
+    if ("unknown" in m && caps.monthlyMicro !== undefined) throw unreconstructable(m.unknown);
+    const left = (cap: number | undefined, used: number | undefined) => (cap === undefined || used === undefined ? undefined : Math.max(0, cap - used - out));
+    const leftDay = left(caps.dailyMicro, today)!;
+    const leftMonth = left(caps.monthlyMicro, "micro" in m ? m.micro : undefined);
+    const leftTotal = left(caps.totalMicro, l.lifetimeMicro);
+    const exhausted: CapName[] = [];
+    if (leftDay === 0) exhausted.push("daily");
+    if (leftMonth === 0) exhausted.push("monthly");
+    if (leftTotal === 0) exhausted.push("lifetime");
+    const usdOrNull = (n: number | undefined) => (n === undefined ? null : toUsd(n));
     return {
       day,
-      caps: { dailyUsd: toUsd(caps.dailyMicro), totalUsd: toUsd(caps.totalMicro) },
+      month,
+      caps: { dailyUsd: toUsd(caps.dailyMicro), monthlyUsd: usdOrNull(caps.monthlyMicro), totalUsd: usdOrNull(caps.totalMicro) },
       spentTodayUsd: toUsd(today),
-      reservedUsd: toUsd(outstanding(l)),
+      spentMonthUsd: "micro" in m ? toUsd(m.micro) : null,
+      reservedUsd: toUsd(out),
       lifetimeUsd: toUsd(l.lifetimeMicro),
-      remainingTodayUsd: toUsd(Math.max(0, Math.min(caps.dailyMicro - today - reservedToday, caps.totalMicro - l.lifetimeMicro - outstanding(l)))),
-      remainingTotalUsd: toUsd(Math.max(0, caps.totalMicro - l.lifetimeMicro - outstanding(l))),
+      remainingTodayUsd: toUsd(Math.min(leftDay, leftMonth ?? Infinity, leftTotal ?? Infinity)),
+      remainingMonthUsd: usdOrNull(leftMonth),
+      remainingTotalUsd: usdOrNull(leftTotal),
+      exhausted,
+      resets: { dailyAt: nextUtcDay(t), monthlyAt: nextUtcMonth(t) },
       uncertainRequests: l.uncertain.length,
     };
   }
@@ -606,12 +693,22 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
     reserve(maxMicro) {
       if (!isMicro(maxMicro) || maxMicro <= 0) throw new SpendError("bad_amount", "The cost bound for this request is not a positive amount, so it is not sent.");
       return tx(false, (l, touch) => {
-        const day = utcDay(now());
-        if ((l.days[day] ?? 0) + outstanding(l, day) + maxMicro > caps.dailyMicro) {
-          throw new SpendError("daily_cap", `The OpenRouter daily cap of $${toUsd(caps.dailyMicro).toFixed(2)} (UTC day ${day}) would be exceeded.`);
+        const t = now();
+        const day = utcDay(t);
+        const month = day.slice(0, 7);
+        const out = outstanding(l);
+        if ((l.days[day] ?? 0) + out + maxMicro > caps.dailyMicro) {
+          throw new SpendError("daily_cap", `The OpenRouter daily cap of $${toUsd(caps.dailyMicro).toFixed(2)} (UTC day ${day}, resets ${nextUtcDay(t)}) would be exceeded.`);
         }
-        if (l.lifetimeMicro + outstanding(l) + maxMicro > caps.totalMicro) {
-          throw new SpendError("total_cap", `The OpenRouter lifetime cap of $${toUsd(caps.totalMicro).toFixed(2)} would be exceeded.`);
+        if (caps.monthlyMicro !== undefined) {
+          const m = monthSpent(l, month);
+          if ("unknown" in m) throw unreconstructable(m.unknown);
+          if (m.micro + out + maxMicro > caps.monthlyMicro) {
+            throw new SpendError("monthly_cap", `The OpenRouter monthly cap of $${toUsd(caps.monthlyMicro).toFixed(2)} (UTC month ${month}, resets ${nextUtcMonth(t)}) would be exceeded.`);
+          }
+        }
+        if (caps.totalMicro !== undefined && l.lifetimeMicro + out + maxMicro > caps.totalMicro) {
+          throw new SpendError("total_cap", `The OpenRouter lifetime cap of $${toUsd(caps.totalMicro).toFixed(2)} would be exceeded. It never resets.`);
         }
         const id = randomUUID();
         l.reservations[id] = { at: now().toISOString(), day, micro: maxMicro, owner: me };

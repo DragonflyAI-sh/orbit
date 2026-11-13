@@ -26,8 +26,11 @@ All in `/opt/orbit/orbit.env`. Anything missing or invalid makes the fallback `u
 | `ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS` | tokens | `1048576` | same | **required, no default**; >= max output tokens, <= 4,194,304. Must be >= the largest `context_length`/`max_completion_tokens` of every admitted endpoint (the price check prints it) |
 | `ORBIT_OPENROUTER_MAX_OUTPUT_TOKENS` | tokens | `2048` (default) | `256` | 16 to 8192; sent as `max_tokens` |
 | `ORBIT_OPENROUTER_TIMEOUT_MS` | milliseconds | `60000` (default) | `60000` | 1000 to 120000 |
-| `ORBIT_OPENROUTER_DAILY_CAP_USD` | USD per UTC day | `5` | `1` | daily <= lifetime <= 10000; daily must be >= the reservation for the largest request (0.704162 USD at the values above) |
-| `ORBIT_OPENROUTER_TOTAL_CAP_USD` | USD lifetime | `150` | `1` | |
+| `ORBIT_OPENROUTER_DAILY_CAP_USD` | USD per UTC day | `5` | `1` | daily <= monthly <= lifetime <= 10000; daily must be >= the reservation for the largest request (0.704162 USD at the values above); `0` refused |
+| `ORBIT_OPENROUTER_MONTHLY_CAP_USD` | USD per UTC calendar month | `150` | unset (or at most `1`) | optional; when set, the lifetime setting must be explicit; `0` refused |
+| `ORBIT_OPENROUTER_TOTAL_CAP_USD` | USD **lifetime**, never resets | `off` (with the monthly cap) | `1` (a number, not `off`) | default 150 only when no monthly cap is set; `off` only with a monthly cap |
+
+Rai's stated budget is 5 USD per day and 150 USD per **month**, not lifetime: hence `MONTHLY=150` with `TOTAL=off`. Setting only `TOTAL_CAP_USD=150` (the earlier recommendation) would stop the fallback for good once 150 USD had been spent in total. Rules, status text and migration caveats: `docs/openrouter-spend-caps.md`.
 
 Fixed in code, not configurable: `reasoning: {effort: "none"}`, `provider: {max_price, data_collection: "deny", allow_fallbacks: false, require_parameters: true}`, `stream: false`, `temperature: 0.2`, no plugins, no model list.
 
@@ -102,21 +105,22 @@ Afterwards, in every case: revoke the `orbit-smoke` key in the dashboard and `su
    ORBIT_OPENROUTER_MAX_OUTPUT_TOKENS=2048
    ORBIT_OPENROUTER_TIMEOUT_MS=60000
    ORBIT_OPENROUTER_DAILY_CAP_USD=5
-   ORBIT_OPENROUTER_TOTAL_CAP_USD=150
+   ORBIT_OPENROUTER_MONTHLY_CAP_USD=150
+   ORBIT_OPENROUTER_TOTAL_CAP_USD=off
    EOF
    ```
 3. Provision the ledger with the spend so far, read from the dashboard for the production key (lifetime and today, UTC; both 0 for a new key). The file must be readable by the service's dynamic user, so give it the state directory's owner:
    ```
    D=/var/lib/private/orbit
-   printf '%s\n' '{"openingLifetimeUsd": 0, "openingTodayUsd": 0, "note": "new key orbit-fallback; dashboard showed $0 on <YYYY-MM-DD>"}' > /root/openrouter-spend.provision
+   printf '%s\n' '{"openingLifetimeUsd": 0, "openingTodayUsd": 0, "openingMonthUsd": 0, "note": "new key orbit-fallback; dashboard showed $0 on <YYYY-MM-DD>"}' > /root/openrouter-spend.provision
    sudo install -m 0600 -o "$(sudo stat -c %u $D)" -g "$(sudo stat -c %g $D)" /root/openrouter-spend.provision $D/openrouter-spend.provision
    ```
-   A non-zero key history uses the real figures, rounded up. `{}` is refused. A root-only file the service cannot read is treated as absent (status then says "not provisioned").
+   A non-zero key history uses the real figures, rounded up; `openingMonthUsd` (optional) is the part spent in the current UTC month, otherwise the whole opening balance counts against this month's cap. `{}` is refused. A root-only file the service cannot read is treated as absent (status then says "not provisioned").
 4. Restart: `sudo systemctl restart orbit.service` (or chat `ops_propose_restart_orbit` and confirm).
 5. Verify:
    - `sudo journalctl -u orbit.service --since -5min | grep -i openrouter` shows no "could not be opened at startup" line.
    - `sudo ls $D` shows `openrouter-spend.json`, `openrouter-spend.marker` and `openrouter-spend.provision.used-<epoch>`, and no `openrouter-spend.provision`.
-   - `sudo sh -c '. /opt/orbit/orbit.env; curl -fsS "http://$HOST:$PORT/status"' | jq -r '.ports[] | select(.port=="model") | .detail'` contains `OpenRouter fallback armed: deepseek/deepseek-v4-flash` and `$0.0000 spent today of $5`, `$0.0000 of $150 lifetime`, `$0.0000 reserved` (or the declared opening). "Armed" means the configuration is complete and the ledger reads cleanly; it does not mean OpenRouter verified the key, model or prices.
+   - `sudo sh -c '. /opt/orbit/orbit.env; curl -fsS "http://$HOST:$PORT/status"' | jq -r '.ports[] | select(.port=="model") | .detail'` contains `OpenRouter fallback armed: deepseek/deepseek-v4-flash` and `$0.0000 spent today of $5`, `$0.0000 spent in UTC month <YYYY-MM> of $150`, `$0.0000 lifetime (no lifetime cap)`, `$0.0000 reserved` (or the declared opening). "Armed" means the configuration is complete and the ledger reads cleanly; it does not mean OpenRouter verified the key, model or prices.
    - Within about 10 minutes the same detail shows `OpenRouter key (account side, not the local allowance): limit $150.00 ...`. If it says "balance unavailable", the key or network is wrong: **STOP**.
    - ChatGPT replies as before (no "FALLBACK" in normal replies).
 6. **STOP** conditions after enabling: status says `unavailable` or `NOT armed`; any fallback reply without the "FALLBACK, paid" source; dashboard spend above the local lifetime figure; a `provider cost exceeded the reserved bound` entry; a latched ledger fault. Then disable (section 9).

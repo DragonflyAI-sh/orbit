@@ -10,8 +10,8 @@ import { chatgptModel, tokenFile } from "./chatgpt.ts";
 import { proposals as newProposals } from "./agent.ts";
 import { fallbackModel } from "./fallback.ts";
 import { selectModel } from "./model.ts";
-import { openrouterConfig } from "./openrouter.ts";
-import { SpendError, spendLedger, toMicro } from "./spend-ledger.ts";
+import { openrouterConfig, spendCapsOf } from "./openrouter.ts";
+import { SpendError, spendLedger } from "./spend-ledger.ts";
 import { nodes as devicePresence, tailscaleStatus } from "./nodes.ts";
 import { notifier, selectDiscord } from "./notify.ts";
 import { adminOps } from "./ops-admin.ts";
@@ -63,7 +63,7 @@ let openrouterLedger: ReturnType<typeof spendLedger> | undefined;
 let openrouterEffective = openrouter;
 if (openrouter.state === "ready" && stateDir) {
   try {
-    openrouterLedger = spendLedger(stateDir, { dailyMicro: toMicro(openrouter.dailyCapUsd), totalMicro: toMicro(openrouter.totalCapUsd) });
+    openrouterLedger = spendLedger(stateDir, spendCapsOf(openrouter));
     // The one explicit, startup-time initialisation. It charges reservations left by a process that is proven gone and retires a used
     // provision request. It creates a missing ledger ONLY when the owner deliberately asked for it (docs/openrouter-ledger-integrity.md);
     // otherwise a missing ledger stays missing and /status says NOT armed. /status only observes (src/fallback.ts) and never does any of
