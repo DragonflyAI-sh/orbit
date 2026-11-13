@@ -44,17 +44,17 @@ Definitions are from `docs/reviews/openrouter-fallback-audit.md` (backlog IDs B6
 - B7 single-writer lock (F5). **Implemented, tested with real child processes; needs the independent reviews.** Residual: a process killed while holding the momentary break guard, and a lock of an owner that cannot be proven gone (other host, no `/proc`), need a person (documented). Filesystem assumptions (local, honours `link`/`rename`/`fsync`) are untested on the real host.
 - B8 ledger anchoring (N5). **Partly mitigated, NOT solved.** Provisioning and a marker stop a deleted/replaced ledger file from becoming $0. Deleting or restoring the whole state directory still resets the local count; reliable continuity needs an external store, a provider-side cross-check or a key-side limit (owner decision in `docs/openrouter-ledger-integrity.md`).
 - B9 disallowed-tool behaviour (N3) and `job_launch` card text. **Open.** A disallowed tool call fails the turn and the paid call is still charged.
-- B10 price rehearsal. **Open**, blocked on verified public prices.
+- B10 price rehearsal. **Offline part done** (r416): `tools/openrouter-price-check` checks configured prices against saved official endpoint metadata (tested with fixtures; run on 2026-11-13 data). The live part (paid smoke test comparing `usage.cost` with the dashboard) stays open.
 - B11 byte-counted streamed reading (F3). **Implemented, tested with fakes; still needs the independent reviews below.**
 - B12 side-effect-free `status()` (F6a) and "armed" shown while the ledger failed (N7). **Implemented, tested with fakes.** Status reads the ledger file on each call, so it can only be as truthful as that file; B8 (a deleted ledger before this process ever wrote one looks like a first run) remains open.
 - B14 truncated-reply marker. **Implemented for the OpenRouter fallback client only** (ChatGPT replies are unchanged); the wording and placement decision is recorded above.
 Restart durability, concurrency inside one process, caps and UTC rollover have passing tests (fakes only).
 
-## Public model and pricing findings (UNVERIFIED)
-- openrouter.ai was **not reachable** from this session, rechecked 2026-11-12 (curl: proxy 403 to CONNECT for /api/v1/models and the docs; WebFetch: ENOTFOUND). Status: **BLOCKED**, nothing was inferred. Official docs, `/api/v1/models` and `provider.max_price`/`usage.cost` semantics were **not verified**. openrouter.ai must be allowed in the session network settings.
-- Secondary evidence only (web search, 2026-11-12), conflicting across mirrors:
-  - Candidate: `deepseek/deepseek-v4-flash` family, tool calling listed (`tools`, `tool_choice`). Snapshot pages: `deepseek-v4-flash-20260423` (about $0.0679 in / $0.168 out per M tokens), `deepseek-v4-flash-20260731` (OpenRouter page reportedly $0.04 / $0.08; a third-party calculator lists $0.64 out). A distinct `deepseek-v4.1-flash` lists $0.30 / $1.20. Sources: https://openrouter.ai/models/deepseek/deepseek-v4-flash-20260423 , https://openrouter.ai/deepseek/deepseek-v4-flash-20260731 , https://openrouter.ai/models/deepseek/deepseek-v4.1-flash
-  - Output prices differ about 8x between sources: **do not set prices from this list.** Rai must read the exact pinned slug's page, confirm `tools` in supported_parameters, and set `ORBIT_OPENROUTER_PRICE_*` from it (use a dated slug, not a "latest" alias).
+## Public model and pricing findings (official metadata, 2026-11-13; recommendation only)
+- openrouter.ai became reachable from the job environment on 2026-11-13 (HTTP 200, unauthenticated, no key, no inference). The earlier secondary/mirror figures (2026-11-12) are **withdrawn**; do not use them.
+- Exact URLs, retrieval times, official `max_price` / reasoning / `usage.cost` / key-limit semantics, the candidate's tool support, limits and per-endpoint prices, and the reservation-bound check are in **`docs/openrouter-preactivation-evidence.md`** ("External inputs", "Reservation bound", "Price check results").
+- Recommended candidate for Rai's confirmation: `deepseek/deepseek-v4-flash` (V4 Flash 0423; tools and tool_choice; context 1,048,576; endpoint prices 0.05-0.21 in, 0.1652-0.56 out USD per M; no time windows or extra fees). Not selected, not configured.
+- Prices are a snapshot and differ by endpoint: before activation, re-fetch `/api/v1/models/<id>/endpoints` and run `node tools/openrouter-price-check/check.ts <file> --in X --out Y`; set `ORBIT_OPENROUTER_PRICE_*` only to values that pass.
 
 ## Gates before any paid use (all required)
 1. **Two independent security reviews** of the fallback, ledger and tool allowlist: **not done**; this change has had none, and PR review plus mocks are not a substitute.
