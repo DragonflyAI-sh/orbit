@@ -14,6 +14,13 @@ export const DEFAULT_DAILY_CAP_USD = 5;
 export const DEFAULT_TOTAL_CAP_USD = 150;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 2048;
 export const HARD_MAX_OUTPUT_TOKENS = 8192;
+// Largest billable-output bound accepted (ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS). It is set from the chosen model's context length,
+// which today is at most about one million tokens; four times that is a typo guard, not a recommendation.
+export const HARD_MAX_OUTPUT_BOUND_TOKENS = 4_194_304;
+// Fixed reasoning request. OpenRouter documents `effort: "none"` as "Disables reasoning entirely"; the reservation does NOT depend on it
+// (see `outputBoundTokens`), it only keeps the normal cost low. A model whose reasoning is mandatory rejects it (HTTP 400: released,
+// nothing charged), so such a model simply never answers as the fallback.
+export const REASONING = { effort: "none" } as const;
 export const DEFAULT_TIMEOUT_MS = 60_000;
 export const MAX_REQUEST_BYTES = 300_000;
 export const MAX_RESPONSE_BYTES = 1_000_000;
@@ -41,6 +48,12 @@ export type OpenRouterConfig =
       priceIn: number;
       priceOut: number;
       maxOutputTokens: number;
+      // Upper bound on the billable output tokens of one call, reasoning included, whatever a provider does with max_tokens. OpenRouter
+      // says reasoning counts against max_tokens only "on most providers", so max_tokens alone does not bound what is billed. Every
+      // generated token, reasoning or visible, occupies the model's context window, so the owner sets this to the largest
+      // context_length (and max_completion_tokens) of every endpoint the routing can admit; tools/openrouter-price-check checks it.
+      // Required, no default: without it the reservation could understate a call.
+      outputBoundTokens: number;
       timeoutMs: number;
       dailyCapUsd: number;
       totalCapUsd: number;
@@ -67,12 +80,18 @@ export function openrouterConfig(env: NodeJS.ProcessEnv, readKey: (dir: string) 
   for (const p of [priceIn, priceOut]) if (!(p > 0) || p > 1000) return bad("The model price must be a positive number of USD per million tokens, at most 1000.");
   const maxOut = num(env.ORBIT_OPENROUTER_MAX_OUTPUT_TOKENS) ?? DEFAULT_MAX_OUTPUT_TOKENS;
   if (!Number.isInteger(maxOut) || maxOut < 16 || maxOut > HARD_MAX_OUTPUT_TOKENS) return bad(`ORBIT_OPENROUTER_MAX_OUTPUT_TOKENS must be a whole number from 16 to ${HARD_MAX_OUTPUT_TOKENS}.`);
+  const outputBound = num(env.ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS);
+  if (outputBound === undefined) return bad("ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS is not set: the largest number of output tokens (reasoning included) one call can be billed for, from the model's context length. There is no default; without it spend cannot be bounded.");
+  if (!Number.isInteger(outputBound) || outputBound < maxOut || outputBound > HARD_MAX_OUTPUT_BOUND_TOKENS) return bad(`ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS must be a whole number from ORBIT_OPENROUTER_MAX_OUTPUT_TOKENS (${maxOut}) to ${HARD_MAX_OUTPUT_BOUND_TOKENS}.`);
   const timeoutMs = num(env.ORBIT_OPENROUTER_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) return bad("ORBIT_OPENROUTER_TIMEOUT_MS must be a whole number from 1000 to 120000.");
   const dailyCapUsd = num(env.ORBIT_OPENROUTER_DAILY_CAP_USD) ?? DEFAULT_DAILY_CAP_USD;
   const totalCapUsd = num(env.ORBIT_OPENROUTER_TOTAL_CAP_USD) ?? DEFAULT_TOTAL_CAP_USD;
   if (dailyCapUsd > MAX_CAP_USD || totalCapUsd > MAX_CAP_USD) return bad(`The spend caps must be at most ${MAX_CAP_USD} USD.`);
   if (!(dailyCapUsd > 0) || !(totalCapUsd > 0) || dailyCapUsd > totalCapUsd) return bad("The spend caps must be positive and the daily cap cannot exceed the lifetime cap.");
+  // A cap below the reservation for the largest request would refuse long conversations for good: say so now, not at the first call.
+  const largest = reservationUsd(MAX_REQUEST_BYTES, priceIn, priceOut, outputBound);
+  if (largest > dailyCapUsd) return bad(`The daily cap (${dailyCapUsd} USD) is below the reservation for the largest request (${largest.toFixed(6)} USD at these prices and ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS).`);
   const dir = env.CREDENTIALS_DIRECTORY;
   if (!dir) return bad("No credential directory: the orbit.openrouter credential cannot be read.");
   let key = "";
@@ -82,7 +101,15 @@ export function openrouterConfig(env: NodeJS.ProcessEnv, readKey: (dir: string) 
     // Absent or unreadable is the same to the caller.
   }
   if (!key) return bad("The orbit.openrouter credential is not installed.");
-  return { state: "ready", key, model, priceIn, priceOut, maxOutputTokens: maxOut, timeoutMs, dailyCapUsd, totalCapUsd };
+  return { state: "ready", key, model, priceIn, priceOut, maxOutputTokens: maxOut, outputBoundTokens: outputBound, timeoutMs, dailyCapUsd, totalCapUsd };
+}
+
+// The reservation for one call, in USD: every token in at the input price, the whole output bound at the output price. Tokens in are
+// bounded by the request's bytes (no tokenizer emits more than one token per byte) plus 64 for the chat template. Tokens out are bounded
+// by `outputBoundTokens`, NOT by max_tokens, because a provider may not count reasoning against max_tokens. USD per million tokens is
+// micro-USD per token. tools/openrouter-price-check uses the same function, so the offline check and the client cannot drift apart.
+export function reservationUsd(requestBytes: number, priceIn: number, priceOut: number, outputBoundTokens: number): number {
+  return ((requestBytes + 64) * priceIn + outputBoundTokens * priceOut) / 1_000_000;
 }
 
 // Replaces the key and anything shaped like an OpenRouter key, and cuts the text. Provider error text reaches the page, the thread
@@ -211,19 +238,21 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
         model: cfg.model,
         messages: toMessages(system, input),
         ...(tools.length ? { tools: tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } })), tool_choice: "auto" } : {}),
-        // Every billable lever is pinned: output length, the provider's price ceiling, no web search or plugins, no routing to
-        // another model, no provider that keeps or trains on the data, and the cost reported back.
+        // Every billable lever is pinned: output length, reasoning off, the provider's price ceiling, no web search or plugins, no
+        // routing to another model, no provider that keeps or trains on the data. `require_parameters` routes only to providers that
+        // support every parameter sent (max_tokens and reasoning included) instead of ones that would silently ignore them. Usage and
+        // cost are always returned on Chat Completions (`usage: {include: true}` is documented as deprecated with no effect, so it is
+        // not sent). None of this is trusted for the bound: the reservation covers `outputBoundTokens` regardless.
         max_tokens: cfg.maxOutputTokens,
+        reasoning: REASONING,
         stream: false,
         temperature: 0.2,
-        usage: { include: true },
-        provider: { max_price: { prompt: cfg.priceIn, completion: cfg.priceOut }, data_collection: "deny", allow_fallbacks: false },
+        provider: { max_price: { prompt: cfg.priceIn, completion: cfg.priceOut }, data_collection: "deny", allow_fallbacks: false, require_parameters: true },
       });
       const bytes = Buffer.byteLength(body);
       if (bytes > MAX_REQUEST_BYTES) throw fail(`the conversation is too long to send (${bytes} bytes; the limit is ${MAX_REQUEST_BYTES})`);
-      // Upper bound on tokens in: no tokenizer produces more than one token per byte. Out: max_tokens, which covers reasoning too.
-      // USD per million tokens is micro-USD per token.
-      const bound = toMicro((bytes + 64) * cfg.priceIn / 1_000_000 + cfg.maxOutputTokens * cfg.priceOut / 1_000_000);
+      // Upper bound on what this call can be billed: see reservationUsd. Out is the output bound, not max_tokens.
+      const bound = toMicro(reservationUsd(bytes, cfg.priceIn, cfg.priceOut, cfg.outputBoundTokens));
       let reservation: { id: string; micro: number };
       try {
         reservation = ledger.reserve(bound);

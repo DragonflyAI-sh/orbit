@@ -27,6 +27,8 @@ const ENV = {
   ORBIT_OPENROUTER_MODEL: "vendor/cheap-model",
   ORBIT_OPENROUTER_PRICE_IN_USD_PER_MTOK: "0.2",
   ORBIT_OPENROUTER_PRICE_OUT_USD_PER_MTOK: "0.4",
+  // Equal to max_tokens so the reservation arithmetic in these tests is unchanged; test/openrouter-output-bound.test.ts covers the bound.
+  ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS: "2048",
   CREDENTIALS_DIRECTORY: "/creds",
   ORBIT_OPENROUTER_TIMEOUT_MS: "1000",
 };

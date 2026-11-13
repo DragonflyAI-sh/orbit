@@ -56,9 +56,14 @@ Restart durability, concurrency inside one process, caps and UTC rollover have p
 - Recommended candidate for Rai's confirmation: `deepseek/deepseek-v4-flash` (V4 Flash 0423; tools and tool_choice; context 1,048,576; endpoint prices 0.05-0.21 in, 0.1652-0.56 out USD per M; no time windows or extra fees). Not selected, not configured.
 - Prices are a snapshot and differ by endpoint: before activation, re-fetch `/api/v1/models/<id>/endpoints` and run `node tools/openrouter-price-check/check.ts <file> --in X --out Y`; set `ORBIT_OPENROUTER_PRICE_*` only to values that pass.
 
+## Output-bound reservation and runbook (job orbit-202611130045-6b3m; fakes only)
+- G2 fixed: the reservation's output side is the required `ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS` (from the model's context length), not `max_tokens`; requests send `reasoning: {effort: "none"}` and `provider.require_parameters: true`. Tests: `test/openrouter-output-bound.test.ts`.
+- Price check: requires `--output-bound`, applies `require_parameters`, and counts fee blockers only for reachable endpoints (PR #68 review finding 1). Paid smoke test prepared (not run): `tools/openrouter-smoke/smoke.ts`, `test/openrouter-smoke.test.ts`.
+- Operator procedure: `docs/openrouter-activation-runbook.md`. G1-G9 disposition: `docs/openrouter-preactivation-evidence.md`.
+
 ## Gates before any paid use (all required)
 1. **Two independent security reviews** of the fallback, ledger and tool allowlist: **not done**; this change has had none, and PR review plus mocks are not a substitute.
-2. Owner configuration: pinned model id, verified prices, `ORBIT_OPENROUTER_ENABLED=1`; credential `orbit.openrouter` installed by Rai (typed into SSH, not via `!`). Agents never read it.
+2. Owner configuration: pinned model id, verified prices, output bound, `ORBIT_OPENROUTER_ENABLED=1`; credential `orbit.openrouter` installed by Rai (typed into SSH, not via `!`). Agents never read it.
 3. OpenRouter key credit limit at or below $150 set and verified in the dashboard (the only hard cap); account funded minimally.
 4. Rai approves tool scope (incl. `job_launch`) and the data flow (conversation, memory, tool results leave the host).
 5. Deployment by Rai's normal process (not done here); confirm `/status` shows "armed" with the right model and a sane ledger. "Armed" means complete configuration and a ledger that reads cleanly, not that OpenRouter verified the key, model or prices.

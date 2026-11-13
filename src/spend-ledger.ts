@@ -389,7 +389,7 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
     const prefix = `${LOCK_FILE}.break.${dead.tok}.`;
     const top = Math.max(0, ...guardNumbers(prefix));
     if (top > 0) {
-      const g = readLock(`${prefix.slice(0)}${top}`);
+      const g = readLock(`${prefix}${top}`);
       if (g === undefined) return; // just removed by its owner: look again on the next turn
       if (g === "garbled" || livenessOf(g, me) !== "dead") return; // held, or not provably gone: wait
     }
@@ -451,8 +451,9 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
 
   // ---- provisioning, loss and rollback (B8) -----------------------------------------------------------------------------
 
-  // The owner's one-shot request to create a ledger. `{}` is enough for the very first one. After a loss (a marker exists but the
-  // ledger does not) it must say so and state the spend so far, because ORBIT cannot know it:
+  // The owner's one-shot request to create a ledger. Every request states the spend so far (`{}` is refused, PR65 finding 5), the very
+  // first one too: {"openingLifetimeUsd": 0, "openingTodayUsd": 0, "note": "..."}. After a loss (a marker exists but the ledger does
+  // not) it must also acknowledge the loss, because ORBIT cannot know the spend:
   //   {"acknowledgeLoss": true, "openingLifetimeUsd": 12.5, "openingTodayUsd": 0.3, "note": "from the OpenRouter dashboard"}
   const readProvision = (marker: Marker | undefined): Opening | undefined => {
     const raw = readText(at(PROVISION_FILE));
@@ -498,11 +499,17 @@ export function spendLedger(dir: string | undefined, caps: SpendCaps, now: () =>
   const sweepTmp = () => {
     try {
       for (const f of readdirSync(dir!)) {
-        if (f.startsWith(`${LEDGER_FILE}.new.`) || f.startsWith(`${MARKER_FILE}.new.`)) unlinkSync(at(f));
-        else if (f.startsWith(`${LOCK_FILE}.`) && Date.now() - statSync(at(f)).mtimeMs > 60_000) unlinkSync(at(f));
+        // Per file: one that vanished between the listing and its stat or unlink (a concurrent breaker removed it) must not end the
+        // sweep for the files after it (PR #68 review, finding 3).
+        try {
+          if (f.startsWith(`${LEDGER_FILE}.new.`) || f.startsWith(`${MARKER_FILE}.new.`)) unlinkSync(at(f));
+          else if (f.startsWith(`${LOCK_FILE}.`) && Date.now() - statSync(at(f)).mtimeMs > 60_000) unlinkSync(at(f));
+        } catch {
+          // best effort, this file only
+        }
       }
     } catch {
-      // best effort
+      // best effort: the directory could not be listed
     }
   };
 
