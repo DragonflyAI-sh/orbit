@@ -2,7 +2,9 @@ import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { instructions, parseOutput, responsesTools } from "./model.ts";
-import type { Item, Message, ModelPort, Step, ToolDef } from "./model.ts";
+import type { Item, Message, ModelPort, ReplyOptions, Step, ToolDef } from "./model.ts";
+import { deadline, RequestCancelled, RequestTimeout } from "./model-deadline.ts";
+import type { Bounds, Timers } from "./model-deadline.ts";
 import { redact } from "./ops/protocol.ts";
 import type { PortStatus } from "./ports.ts";
 
@@ -31,6 +33,10 @@ const MIN_RENEW_GAP_MS = 60 * 1000;
 const BACKOFF_BASE_MS = 60 * 1000;
 const BACKOFF_MAX_MS = 15 * 60 * 1000;
 const TOKEN_REQUEST_TIMEOUT_MS = 20 * 1000;
+// Bounds on one inference HTTP request (audit D1; see docs/model-request-deadlines.md). The response is a server-sent event stream:
+// headers normally arrive at once and events keep coming while the model works. idleMs matches the stream idle timeout Codex CLI uses
+// against this backend, so a long silent reasoning phase is not cut short; totalMs caps a stream that never ends.
+export const CHATGPT_BOUNDS: Bounds = { headersMs: 120 * 1000, idleMs: 300 * 1000, totalMs: 600 * 1000 };
 
 export type Tokens = {
   access: string;
@@ -195,7 +201,9 @@ export const OVERLOAD_RETRY_MS = 2_000;
 // The code on a refusal ORBIT makes itself during a pause (no request was sent).
 export const PAUSED = "orbit_paused";
 
-export type ProviderErrorKind = "usage_limit" | "rate_limit" | "overloaded" | "auth" | "incomplete" | "failed";
+// "timeout": ORBIT abandoned a request that exceeded its bounds. "cancelled": the caller cancelled it. Neither is a usage or rate limit,
+// so neither pauses calls nor makes the paid fallback eligible (src/fallback.ts admits only usage_limit and rate_limit).
+export type ProviderErrorKind = "usage_limit" | "rate_limit" | "overloaded" | "auth" | "incomplete" | "failed" | "timeout" | "cancelled";
 
 export class ProviderError extends Error {
   readonly kind: ProviderErrorKind;
@@ -341,12 +349,23 @@ export type ChatGPTModel = ModelPort & {
   finishLogin(callbackUrl: string): Promise<Login>;
 };
 
-export type ChatGPTOptions = { fetcher?: Fetch; now?: () => number; sleep?: (ms: number) => Promise<void> };
+// `bounds` and `timers` exist for tests (short deadlines, counted timers); production uses CHATGPT_BOUNDS and the real clock.
+export type ChatGPTOptions = { fetcher?: Fetch; now?: () => number; sleep?: (ms: number) => Promise<void>; bounds?: Partial<Bounds>; timers?: Timers };
+
+// A request-lifetime failure as the provider error callers already handle. The text is ORBIT's own, never provider content.
+export function lifetimeError(err: unknown): unknown {
+  if (err instanceof RequestTimeout) {
+    return new ProviderError("timeout", `ChatGPT ${err.message}, so ORBIT abandoned the request. Nothing from it was used and no tool call from it was run.`, undefined, `timeout_${err.phase}`, undefined, err);
+  }
+  if (err instanceof RequestCancelled) return new ProviderError("cancelled", "The request to ChatGPT was cancelled before it finished. Nothing from it was used.", undefined, "cancelled", undefined, err);
+  return err;
+}
 
 export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOptions = {}): ChatGPTModel {
   const fetcher = options.fetcher ?? fetch;
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const bounds: Bounds = { ...CHATGPT_BOUNDS, ...options.bounds };
   const saved = file.read();
   let login: Login = saved ? { state: "signed-in", email: saved.email, since: new Date(now()).toISOString() } : { state: "signed-out" };
   let pending: { state: string; nonce: string; verifier: string; deadline: number } | undefined;
@@ -465,8 +484,9 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
 
   // Records a failed call when it ends. Times are when calls finished, so the port reflects the latest outcome.
   const record = (err: unknown) => {
-    // A refusal made by the pause itself is not a call: it changes neither the last failure nor the pause.
-    if (err instanceof ProviderError && err.code === PAUSED) return;
+    // A refusal made by the pause itself is not a call: it changes neither the last failure nor the pause. A caller's cancellation
+    // says nothing about the model either.
+    if (err instanceof ProviderError && (err.code === PAUSED || err.kind === "cancelled")) return;
     // A renewal failure is reported by the renewal state, not as an inference failure.
     lastError = { at: at(), detail: err instanceof Error ? err.message : String(err), renewal: err instanceof RenewalError };
     if (err instanceof ProviderError && (err.kind === "usage_limit" || err.kind === "rate_limit")) {
@@ -504,23 +524,43 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
   const retryable = new WeakSet<ProviderError>();
   const OUTPUT_EVENT = /"type"\s*:\s*"response\.(output_item|output_text|content_part|function_call)/;
 
-  // One HTTP request: the stream text on success; a ProviderError for an HTTP error or an error event.
-  const attempt = async (body: string): Promise<string> => {
+  // One HTTP request: the stream text on success; a ProviderError for an HTTP error, an error event, or a request that ran out of time
+  // (kind "timeout") or was cancelled. Each HTTP call (including the one retry after a 401) has its own bounds; whatever exit is taken,
+  // its timers and listeners are cleared and an unfinished body is cancelled. Partial stream text is never returned.
+  const attempt = async (body: string, signal?: AbortSignal): Promise<string> => {
     const used = await fresh();
-    let res = await call(used, body);
-    if (res.status === 401) res = await call(await afterRefusal(used), body);
-    if (!res.ok) {
-      const e = httpProblem(res.status, await res.text().catch(() => ""), now());
-      if (e.kind === "overloaded") retryable.add(e);
-      throw e;
+    let d = deadline(bounds, { timers: options.timers, signal });
+    try {
+      let res = await d.fetch(fetcher, RESPONSES_URL, inferenceInit(used, body));
+      if (res.status === 401) {
+        d.discard(res);
+        d.end();
+        const retry = await afterRefusal(used);
+        d = deadline(bounds, { timers: options.timers, signal });
+        res = await d.fetch(fetcher, RESPONSES_URL, inferenceInit(retry, body));
+      }
+      if (!res.ok) {
+        // The status alone still classifies the error when its body cannot be read in time; a cancellation is still a cancellation.
+        const text = await d.read(res).catch((err) => {
+          if (err instanceof RequestCancelled) throw err;
+          return "";
+        });
+        const e = httpProblem(res.status, text, now());
+        if (e.kind === "overloaded") retryable.add(e);
+        throw e;
+      }
+      const raw = await d.read(res);
+      const problem = streamProblem(raw, now());
+      if (problem) {
+        if (problem.kind === "overloaded" && !OUTPUT_EVENT.test(raw)) retryable.add(problem);
+        throw problem;
+      }
+      return raw;
+    } catch (err) {
+      throw lifetimeError(err);
+    } finally {
+      d.end();
     }
-    const raw = await res.text();
-    const problem = streamProblem(raw, now());
-    if (problem) {
-      if (problem.kind === "overloaded" && !OUTPUT_EVENT.test(raw)) retryable.add(problem);
-      throw problem;
-    }
-    return raw;
   };
 
   // One model request. No call during a limit; one retry after an overload that came before any output.
@@ -530,18 +570,19 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
     if (limit) throw new ProviderError(limit.error.kind, `${limitWhat(limit)}. No call was made. ${limitWhen(limit)}`, limit.estimated ? undefined : limit.until, PAUSED);
   };
 
-  const request = async (body: string): Promise<string> => {
+  const request = async (body: string, signal?: AbortSignal): Promise<string> => {
     refuseIfLimited();
     try {
-      return await attempt(body);
+      return await attempt(body, signal);
     } catch (err) {
       if (!(err instanceof ProviderError && retryable.has(err))) throw err;
       const wait = OVERLOAD_RETRY_MS + Math.floor(Math.random() * 1000);
       await sleep(wait);
+      if (signal?.aborted) throw lifetimeError(new RequestCancelled());
       // Another call may have hit a limit during the wait: the retry obeys it.
       refuseIfLimited();
       try {
-        return await attempt(body);
+        return await attempt(body, signal);
       } catch (again) {
         if (again instanceof ProviderError && again.kind === "overloaded") {
           throw new ProviderError("overloaded", `${again.message.replace(/\.$/, "")} (asked twice, ${Math.round(wait / 1000)} s apart).`, undefined, again.code);
@@ -551,18 +592,18 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
     }
   };
 
-  const call = (tokens: Tokens, body: string) =>
-    fetcher(RESPONSES_URL, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${tokens.access}`,
-        "content-type": "application/json",
-        accept: "text/event-stream",
-        // OpenClaw sends this on token-sharing requests.
-        "x-openai-chatpass-test": "codex-direct",
-      },
-      body,
-    });
+  // The request for one inference call. The deadline adds its own signal.
+  const inferenceInit = (tokens: Tokens, body: string): RequestInit => ({
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${tokens.access}`,
+      "content-type": "application/json",
+      accept: "text/event-stream",
+      // OpenClaw sends this on token-sharing requests.
+      "x-openai-chatpass-test": "codex-direct",
+    },
+    body,
+  });
 
   // What is wrong with the saved login on its face, if anything. Local only, no request to OpenAI.
   const loginProblem = (t: Tokens): "incomplete" | "no-sharing" | undefined => {
@@ -703,7 +744,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
       return readiness();
     },
 
-    async step(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<Step> {
+    async step(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], opts?: ReplyOptions): Promise<Step> {
       const body = JSON.stringify({
         model,
         instructions: instructions(limits, notes, tools.map((t) => `${t.name}: ${t.description}`)),
@@ -713,7 +754,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         store: false,
       });
       try {
-        const raw = await request(body);
+        const raw = await request(body, opts?.signal);
         const step = stepFromStream(raw);
         if (!step.text && !step.calls.length) throw new Error(`response had no text and no tool call (stream events: ${streamShape(raw)})`);
         lastOk = at();
@@ -724,7 +765,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
       }
     },
 
-    async reply(messages: Message[], limits: string[], notes?: string) {
+    async reply(messages: Message[], limits: string[], notes?: string, opts?: ReplyOptions) {
       const body = JSON.stringify({
         model,
         instructions: instructions(limits, notes),
@@ -733,7 +774,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         store: false,
       });
       try {
-        const raw = await request(body);
+        const raw = await request(body, opts?.signal);
         const text = textFromStream(raw);
         if (!text) throw new Error(`response had no text (stream events: ${streamShape(raw)})`);
         lastOk = at();

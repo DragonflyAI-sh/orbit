@@ -181,7 +181,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   // background one, gets the limit as it is. reply() is the other way round (see ReplyOptions in model.ts).
   const step = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], opts?: ReplyOptions): Promise<Step> => {
     if (!primary.step) throw new Error("This model cannot call tools.");
-    return turn(input, limits, notes, tools, () => primary.step!(input, limits, notes, tools), opts?.fallback === true);
+    return turn(input, limits, notes, tools, () => primary.step!(input, limits, notes, tools, opts?.signal ? { signal: opts.signal } : undefined), opts?.fallback === true);
   };
 
   // What status() may say about the paid fallback. READ-ONLY: it looks at the ledger file (never creates, repairs or writes it), at what
@@ -258,7 +258,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
         notes,
         [],
         async () => {
-          primaryReply = await primary.reply(messages, limits, notes);
+          primaryReply = await primary.reply(messages, limits, notes, opts?.signal ? { signal: opts.signal } : undefined);
           return { text: primaryReply.value, calls: [] };
         },
         opts?.fallback !== false,
