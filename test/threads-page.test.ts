@@ -35,7 +35,7 @@ const mk = (tag: string, props?: Record<string, unknown>, ...kids: (Fake | strin
 };
 
 type Mk = (tag: string, props?: Record<string, unknown>, ...kids: (Fake | string)[]) => Fake;
-const lib = new Function(`${grab("notes")}; ${grab("threads")}; return { linkify, threadOption, cardTitle, cardStateNodes, compactionNode, renderStoredMessage };`)() as {
+const lib = new Function(`${grab("notes")}; ${grab("markdown")}; ${grab("threads")}; return { linkify, threadOption, cardTitle, cardStateNodes, compactionNode, renderStoredMessage };`)() as {
   linkify: (t: string, m: Mk) => (Fake | string)[];
   threadOption: (t: unknown) => string;
   cardTitle: (c: unknown) => string[];
