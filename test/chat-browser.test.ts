@@ -45,10 +45,28 @@ let failFor: Record<string, number | "network"> = {};
 // Where POST /threads/:id/messages actually went, in order.
 let sentTo: string[] = [];
 let createDelay = 0, archiveDelay = 0, created = 0;
+// POST /threads/:id/rename: delay before answering, and an optional failure (HTTP status or "network").
+let renameDelay = 0;
+let renameFail: number | "network" | 0 = 0;
+// POST /threads/:id/messages: an optional failure after the delay (the turn is not run).
+let sendFail: number | "network" | 0 = 0, sendDelay = 0;
+// Every request the page made, in order ("METHOD path"), to assert what went out.
+let requests: string[] = [];
+// Requests the fake has not finished answering. Chromium retries a POST once when a reused connection is dropped, so a
+// "network" failure can take two delays; tests wait for the server to go quiet instead of guessing a time.
+let inflight = 0;
+async function quiet(ms = 50) {
+  for (let i = 0; i < 300 && inflight > 0; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(inflight, 0, "the fake server went quiet");
+  await page.waitForFunction("!sending");
+  await page.waitForTimeout(ms);
+}
 
 const meta = (t: Thread) => ({ id: t.id, title: t.title, archived: t.archived, rev: t.rev, busy: t.busy, openCards: t.cards.filter((c) => c.state === "open").length, messageCount: t.messages.length });
 const server = createServer(async (req, res) => {
   const url = new URL(req.url!, "http://x");
+  if (url.pathname.startsWith("/threads")) requests.push(`${req.method} ${url.pathname}`);
+  inflight++; res.on("close", () => inflight--);
   const json = (code: number, body: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
   if (url.pathname === "/") { res.writeHead(200, { "content-type": "text/html" }); return res.end(html); }
   if (url.pathname === "/status") return json(200, { ports: [] });
@@ -83,10 +101,26 @@ const server = createServer(async (req, res) => {
     t.archived = body.archived !== false; t.rev++;
     return json(200, { thread: structuredClone(t) });
   }
+  const rn = url.pathname.match(/^\/threads\/([0-9a-f-]{36})\/rename$/);
+  if (rn && threads[rn[1]!]) {
+    const t = threads[rn[1]!]!;
+    const body = JSON.parse(await new Promise<string>((r) => { let d = ""; req.on("data", (c) => (d += c)); req.on("end", () => r(d)); }) || "{}");
+    const fail = renameFail;
+    // The rename lands on the server at once (as the real store does); only the answer is late.
+    if (!fail) { t.title = body.title; t.rev++; }
+    const snapshot = structuredClone(t);
+    if (renameDelay) await new Promise((r) => setTimeout(r, renameDelay));
+    if (fail === "network") return req.socket.destroy();
+    if (fail) return json(fail, { error: "rename broke" });
+    return json(200, { thread: snapshot });
+  }
   const s = url.pathname.match(/^\/threads\/([0-9a-f-]{36})\/messages$/);
   if (s && threads[s[1]!]) {
     const t = threads[s[1]!]!;
     const body = JSON.parse(await new Promise<string>((r) => { let d = ""; req.on("data", (c) => (d += c)); req.on("end", () => r(d)); }) || "{}");
+    if (sendDelay) await new Promise((r) => setTimeout(r, sendDelay));
+    if (sendFail === "network") { sentTo.push(t.id); return req.socket.destroy(); }
+    if (sendFail) { sentTo.push(t.id); return json(sendFail, { error: "model broke" }); }
     sentTo.push(t.id);
     t.messages.push({ id: `u${t.messages.length}`, role: "user", at: "t", text: body.text }, { id: `r${t.messages.length}`, role: "assistant", at: "t", text: `reply to ${body.text}`, status: "done", provenance: "live", source: "model/x" });
     t.rev++;
@@ -108,6 +142,7 @@ after(async () => { await browser?.close(); server.close(); });
 
 async function open() {
   threads = fresh(); delayFor = {}; staleNext = null; confirms = 0; failFor = {}; sentTo = []; createDelay = 0; archiveDelay = 0; created = 0;
+  renameDelay = 0; renameFail = 0; sendFail = 0; sendDelay = 0; requests = [];
   confirmAnswer = { status: 200, body: { id: "orbit-job-1" } };
   page?.close();
   page = await browser.newPage({ viewport: { width: 800, height: 600 } });
@@ -400,3 +435,151 @@ test("browser: New and Archive navigate like a switch: a later choice wins, and 
   await page.waitForFunction(() => /reply to after archive/.test(document.getElementById("log")!.textContent!));
   assert.deepEqual(sentTo, [after.menu]);
 });
+
+// ---- Mutations (rename, archive, send) that answer after a newer navigation must not steal the selection (review of #75).
+// Rename asks for the title with window.prompt; the test answers it.
+async function rename(title: string) {
+  page.once("dialog", (d: any) => d.accept(title));
+  await page.click("#trename");
+}
+const menuTitle = (id: string) => page.evaluate((i: string) => [...(document.getElementById("threadsel") as HTMLSelectElement).options].find((o) => o.value === i)?.textContent ?? "", id);
+const ctl = () => page.evaluate(() => ({
+  archive: document.getElementById("tarchive")!.textContent,
+  input: (document.getElementById("input") as HTMLInputElement).disabled,
+  send: (document.getElementById("send") as HTMLButtonElement).disabled,
+}));
+
+test("browser: a slow rename of Alpha answering after the reader switched to Beta keeps Beta, and Enter sends to Beta", { skip }, async () => {
+  await open();
+  renameDelay = 300; delayFor[T2] = 30;
+  await rename("Alpha renamed");
+  await page.waitForTimeout(30);
+  await page.selectOption("#threadsel", T2);
+  await settle(400);
+  assert.deepEqual(await bar(), { menu: T2, log: ["beta only message"], stored: T2, status: "" });
+  assert.match(await menuTitle(T1), /Alpha renamed/, "the list still learns the new title");
+  await sendNow("to beta after rename");
+  await page.waitForFunction(() => /reply to to beta after rename/.test(document.getElementById("log")!.textContent!));
+  assert.deepEqual(sentTo, [T2]);
+  assert.ok(requests.includes(`POST /threads/${T2}/messages`) && !requests.includes(`POST /threads/${T1}/messages`), requests.join(", "));
+});
+
+test("browser: a rename answering while a switch is still pending neither ends the switch nor draws the old thread", { skip }, async () => {
+  await open();
+  renameDelay = 100; delayFor[T2] = 400;
+  await rename("Alpha renamed");
+  await page.waitForTimeout(20);
+  await page.selectOption("#threadsel", T2);
+  await page.waitForTimeout(200);
+  // The rename has answered; the switch has not.
+  const mid = await bar();
+  assert.equal(mid.menu, T2);
+  assert.match(mid.status, /Opening Beta/);
+  assert.equal(mid.stored, T1, "the stored selection changes only when Beta is drawn");
+  assert.equal(await page.evaluate(() => (document.getElementById("send") as HTMLButtonElement).disabled), true);
+  await settle(50);
+  assert.deepEqual(await bar(), { menu: T2, log: ["beta only message"], stored: T2, status: "" });
+  await sendNow("to beta");
+  await page.waitForFunction(() => /reply to to beta/.test(document.getElementById("log")!.textContent!));
+  assert.deepEqual(sentTo, [T2]);
+});
+
+test("browser: rename then rapid A-B-A ends on A with the new title; a rename with no navigation is drawn at once", { skip }, async () => {
+  await open();
+  renameDelay = 300; delayFor[T2] = 300;
+  await rename("Alpha renamed");
+  await page.waitForTimeout(20);
+  await page.selectOption("#threadsel", T2);
+  await page.waitForTimeout(20);
+  await page.selectOption("#threadsel", T1);
+  await settle(400);
+  assert.deepEqual(await bar(), { menu: T1, log: ALPHA, stored: T1, status: "" });
+  assert.match(await menuTitle(T1), /Alpha renamed/);
+  await sendNow("to alpha");
+  await page.waitForFunction(() => /reply to to alpha/.test(document.getElementById("log")!.textContent!));
+  assert.deepEqual(sentTo, [T1]);
+  // Plain rename, nothing else happening.
+  renameDelay = 0;
+  await rename("Alpha again");
+  await page.waitForFunction(() => /Alpha again/.test((document.getElementById("threadsel") as HTMLSelectElement).selectedOptions[0]?.textContent ?? ""));
+  assert.equal((await bar()).menu, T1);
+});
+
+for (const fail of [500, "network"] as const) {
+  test(`browser: a delayed rename failure (${fail}) after a switch does not touch Beta; on the same thread it says so`, { skip }, async () => {
+    await open();
+    renameFail = fail; renameDelay = 300;
+    await rename("never");
+    await page.waitForTimeout(20);
+    await page.selectOption("#threadsel", T2);
+    await settle();
+    await quiet();
+    assert.deepEqual(await bar(), { menu: T2, log: ["beta only message"], stored: T2, status: "" });
+    assert.deepEqual(await ctl(), { archive: "Archive", input: false, send: false });
+    // Same thread, no navigation: the failure is reported and the page stays usable.
+    renameDelay = 0;
+    await rename("never again");
+    await quiet();
+    assert.match((await bar()).status, /Could not rename/);
+    assert.deepEqual({ ...(await bar()), status: "" }, { menu: T2, log: ["beta only message"], stored: T2, status: "" });
+    assert.match(await menuTitle(T2), /Beta/);
+  });
+}
+
+for (const fail of [502, "network"] as const) {
+  test(`browser: Archive succeeds but opening the next thread fails (${fail}): the archived state, Restore and the send block hold`, { skip }, async () => {
+    await open();
+    await page.selectOption("#threadsel", T2);
+    await settle();
+    failFor[T1] = fail;
+    await page.click("#tarchive");
+    await settle();
+    await quiet();
+    const s = await bar();
+    assert.deepEqual({ ...s, status: "" }, { menu: T2, log: ["beta only message"], stored: T2, status: "" });
+    assert.match(s.status, /Could not open Alpha/);
+    assert.deepEqual(await ctl(), { archive: "Restore", input: true, send: true });
+    assert.equal(await page.evaluate(() => (document.getElementById("input") as HTMLInputElement).placeholder), "This thread is archived. Restore it to continue.");
+    // Nothing goes out, even through a programmatic submit that bypasses the disabled controls.
+    await page.evaluate(() => { const i = document.getElementById("input") as HTMLInputElement; i.disabled = false; i.value = "sneak"; (document.getElementById("form") as HTMLFormElement).requestSubmit(); });
+    await page.waitForTimeout(50);
+    assert.deepEqual(sentTo, []);
+    // Restore works from here and the thread takes messages again.
+    await page.evaluate(() => { (document.getElementById("input") as HTMLInputElement).value = ""; });
+    await page.click("#tarchive");
+    await settle(50);
+    assert.deepEqual(await ctl(), { archive: "Archive", input: false, send: false });
+    assert.equal(threads[T2]!.archived, false);
+    await sendNow("back on beta");
+    await page.waitForFunction(() => /reply to back on beta/.test(document.getElementById("log")!.textContent!));
+    assert.deepEqual(sentTo, [T2]);
+  });
+}
+
+test("browser: an archive answering after the reader picked another thread does not move them", { skip }, async () => {
+  await open();
+  const T3 = "44444444-4444-4444-8444-444444444444";
+  threads[T3] = { id: T3, title: "Gamma", rev: 1, busy: false, archived: false, cards: [], messages: [{ id: "g1", role: "user", at: "t", text: "gamma only message" }] };
+  await poll();
+  archiveDelay = 300;
+  await page.click("#tarchive");
+  await page.waitForTimeout(30);
+  await page.selectOption("#threadsel", T3);
+  await settle(400);
+  assert.deepEqual(await bar(), { menu: T3, log: ["gamma only message"], stored: T3, status: "" });
+  assert.equal(threads[T1]!.archived, true);
+});
+
+for (const fail of [502, "network"] as const) {
+  test(`browser: a send failing (${fail}) after the reader switched away draws no error into the new thread`, { skip }, async () => {
+    await open();
+    sendFail = fail; sendDelay = 300;
+    await sendNow("to alpha");
+    await page.waitForTimeout(30);
+    await page.selectOption("#threadsel", T2);
+    await settle();
+    await quiet();
+    assert.deepEqual(await bar(), { menu: T2, log: ["beta only message"], stored: T2, status: "" });
+    assert.ok(sentTo.length >= 1 && sentTo.every((id) => id === T1), `sent only to Alpha: ${sentTo}`);
+  });
+}

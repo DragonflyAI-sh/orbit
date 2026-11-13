@@ -274,6 +274,13 @@
   let navGen = 0;
   let pending = null;         // { gen, id (null for New), title } while a navigation has not settled
   let navError = "";
+  // Mutations of the open thread (Rename, Archive's archived state, a send's reply) are not navigations, but they answer
+  // after an await too. `owns(target, gen)` says whether such an answer may still draw: no newer navigation (navGen is
+  // what it was when the request left), none pending, and the thread drawn is still the one the request was about.
+  // Otherwise the answer only refreshes the list (titles, archived flags) and never moves the menu, the log or the
+  // stored selection.
+  const owns = (targetId, gen) => gen === navGen && !pending && current?.id === targetId && shownThreadId === targetId;
+  // For tests (test/chat-browser.test.ts waits on it); the page itself reads `pending`.
   function navPending() { return Boolean(pending); }
   const tsel = document.getElementById("threadsel");
   const readSel = () => { try { return localStorage.getItem(THREAD_KEY); } catch { return null; } };
@@ -381,9 +388,13 @@
     renderBar();
   }
 
+  let listSeq = 0, listShown = 0;  // a list answer older than the one already applied is dropped
   async function loadList() {
+    const seq = ++listSeq;
     const r = await tapi("/threads?archived=1", "GET");
+    if (seq < listShown) return true;
     if (!r.ok) { if (r.status === 403) threadMode = "legacy"; return false; }
+    listShown = seq;
     threadMode = "server";
     threadList = r.data.threads;
     pendingNotice = r.data.notice;
@@ -472,12 +483,22 @@
     renderThread(r.data.thread);
     document.getElementById("input").focus();
   });
+  // Rename is not a navigation: the reader may switch threads while it is in flight, and that switch wins. The target and
+  // the navigation generation are taken before the request; the answer redraws only while `owns` still holds, and only
+  // when it is not older than what is showing. Success or failure, the list is refreshed so the menu has the real title.
   document.getElementById("trename").addEventListener("click", async () => {
-    if (!current) return;
+    if (!current || pending) return;
+    const targetId = current.id, gen = navGen;
     const title = window.prompt("Rename thread", current.title);
     if (!title || !title.trim()) return;
-    const r = await tapi(`/threads/${current.id}/rename`, "POST", { title });
-    if (r.ok) { await loadList(); renderThread(r.data.thread, true); }
+    let r;
+    try { r = await tapi(`/threads/${encodeURIComponent(targetId)}/rename`, "POST", { title }); } catch { r = { ok: false, status: 0, data: {} }; }
+    await listQuietly();
+    if (owns(targetId, gen)) {
+      if (!r.ok) navError = `Could not rename ${current.title} (${r.data.error || (r.status ? `HTTP ${r.status}` : "no connection")}).`;
+      else if (r.data.thread.rev >= current.rev) { navError = ""; renderThread(r.data.thread, true); return; }
+    }
+    renderBar();
   });
   document.getElementById("tarchive").addEventListener("click", async () => {
     if (!current || pending) return;
@@ -493,13 +514,17 @@
     await listQuietly();
     if (gen !== navGen) { renderBar(); return; }
     pending = null;
-    if (restoring) return renderThread(r.data.thread);
+    // Draw the server's answer first, so the page holds the thread's real archived state (Restore, no sending) even if
+    // opening the next thread below fails and this thread stays on screen.
+    if (owns(target.id, gen)) renderThread(r.data.thread, true);
+    if (restoring) return;
     const next = threadList.find((t) => !t.archived);
     if (next) await openThread(next.id); else { current = null; writeSel(null); showEmpty(); }
   });
 
   async function sendThreaded(content) {
     sending = true;
+    let sentToId = null;
     try {
       if (!current) {
         const gen = navGen;
@@ -513,16 +538,24 @@
       log.append(el("div", { className: "msg user", textContent: content }), el("div", { className: "msg orbit", textContent: "Working…" }));
       log.scrollTop = log.scrollHeight;
       const sentTo = current.id;
+      sentToId = sentTo;
       const r = await tapi(`/threads/${sentTo}/messages`, "POST", { text: content });
       // If the reader switched threads while waiting (or a switch is still pending), the reply stays in its own thread and
       // is not drawn over the one they chose.
-      if (current?.id !== sentTo || pending) { await loadList(); renderBar(); return; }
+      if (current?.id !== sentTo || pending) { await listQuietly(); renderBar(); return; }
       if (r.data.thread) renderThread(r.data.thread);
-      else { await loadThread(sentTo); add("orbit", r.data.error || "ORBIT did not answer.", "error", "down"); }
-      if (!r.ok && r.data.error) add("orbit", r.data.error, "error", "down");
-      await loadList();
+      else {
+        await loadThread(sentTo);
+        // loadThread waited: if the reader moved on meanwhile, the error belongs to the thread they left, not this log.
+        if (current?.id === sentTo && !pending) add("orbit", r.data.error || "ORBIT did not answer.", "error", "down");
+      }
+      if (r.data.thread && !r.ok && r.data.error) add("orbit", r.data.error, "error", "down");
+      await listQuietly();
       renderBar();
-    } catch { add("orbit", "ORBIT did not answer.", "error", "down"); }
+    } catch {
+      // No answer at all. Say so only in the thread it was sent to; another thread the reader opened meanwhile is left alone.
+      if (!sentToId || (current?.id === sentToId && !pending)) add("orbit", "ORBIT did not answer.", "error", "down");
+    }
     finally { sending = false; }
   }
 
@@ -533,6 +566,8 @@
     if (!content || sending) return;
     // While a thread is opening, Enter or Send does nothing and the text stays: it must not go to the thread being left.
     if (threadMode === "server" && pending) { renderBar(); return; }
+    // An archived thread takes no messages (the server answers 409); the text stays in the box.
+    if (threadMode === "server" && current?.archived) { renderBar(); return; }
     input.value = "";
     // Send stays disabled until the reply (or error) is in, so one message cannot be sent twice.
     const sendButton = document.getElementById("send");
