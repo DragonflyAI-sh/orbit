@@ -53,6 +53,9 @@
   #threadbar select { flex: 1 1 160px; min-width: 0; padding: 6px 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font: inherit; }
   #threadbar button { padding: 5px 12px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
   #threadbar label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
+  #tstatus { flex: 1 1 100%; font-size: 12px; color: var(--muted); }
+  #tstatus:empty { display: none; }
+  #log[aria-busy="true"] { opacity: 0.6; }
   .banner { align-self: stretch; max-width: 720px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--gold); background: var(--card); font-size: 14px; overflow-wrap: anywhere; }
   .banner button { margin-top: 6px; padding: 4px 12px; display: block; }
   .compact { align-self: stretch; max-width: 720px; padding: 6px 10px; border-radius: 10px; border: 1px dashed var(--line); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
@@ -158,7 +161,7 @@
 </style>
 </head>
 <body>
-<header><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#chat" data-tab="chat" aria-current="page">Chat</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/status" id="statuslink" title="ORBIT's status as raw JSON: running commit, deploy and port states">Status <span class="kind">JSON</span></a></nav><div id="threadbar" hidden><select id="threadsel" aria-label="Thread"></select><button type="button" id="tnew">New</button><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button><label><input type="checkbox" id="tshowarch"> archived</label></div><div id="ports"></div><div id="signin"></div><div id="inbox"></div></header>
+<header><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#chat" data-tab="chat" aria-current="page">Chat</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/status" id="statuslink" title="ORBIT's status as raw JSON: running commit, deploy and port states">Status <span class="kind">JSON</span></a></nav><div id="threadbar" hidden><select id="threadsel" aria-label="Thread"></select><button type="button" id="tnew">New</button><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button><label><input type="checkbox" id="tshowarch"> archived</label><span id="tstatus" role="status" aria-live="polite"></span></div><div id="ports"></div><div id="signin"></div><div id="inbox"></div></header>
 <main id="log"></main>
 <section id="jobs" hidden aria-live="off"></section>
 <form id="form"><textarea id="input" rows="2" placeholder="Message ORBIT" aria-label="Message ORBIT" required></textarea><button id="send">Send</button></form>
@@ -264,6 +267,14 @@
   let sending = false;
   let showArchived = false;
   let barSig = "";
+  // Explicit navigation (picking a thread, New, Archive) beats background refreshes. Each one bumps navGen synchronously
+  // and sets `pending` until its answer is in; only the answer of the latest navigation may draw or report a failure,
+  // a refresh that started before it is dropped, and nothing is sent while one is pending. navError says why the last
+  // navigation failed (the page keeps showing the thread it had).
+  let navGen = 0;
+  let pending = null;         // { gen, id (null for New), title } while a navigation has not settled
+  let navError = "";
+  function navPending() { return Boolean(pending); }
   const tsel = document.getElementById("threadsel");
   const readSel = () => { try { return localStorage.getItem(THREAD_KEY); } catch { return null; } };
   const writeSel = (id) => { try { id ? localStorage.setItem(THREAD_KEY, id) : localStorage.removeItem(THREAD_KEY); } catch { /* per-device convenience only */ } };
@@ -276,20 +287,29 @@
   }
 
   function renderBar() {
-    const rows = threadList.filter((t) => showArchived || !t.archived || t.id === current?.id);
+    // The menu shows where the reader is going (a pending navigation), otherwise the thread that is drawn.
+    const sel = pending?.id ?? current?.id ?? null;
+    const rows = threadList.filter((t) => showArchived || !t.archived || t.id === current?.id || t.id === sel);
     // The options are rebuilt only when they changed, so a poll does not reset the menu while it has focus.
-    const optionsSig = JSON.stringify([current?.id ?? null, rows.map((t) => [t.id, threadOption(t)])]);
+    const optionsSig = JSON.stringify([sel, rows.map((t) => [t.id, threadOption(t)])]);
     if (optionsSig !== barSig) {
       barSig = optionsSig;
-      tsel.replaceChildren(...rows.map((t) => Object.assign(document.createElement("option"), { value: t.id, textContent: threadOption(t), selected: t.id === current?.id })));
+      tsel.replaceChildren(...rows.map((t) => Object.assign(document.createElement("option"), { value: t.id, textContent: threadOption(t), selected: t.id === sel })));
       if (!rows.length) tsel.append(Object.assign(document.createElement("option"), { value: "", textContent: "No threads yet" }));
     }
+    // The signature can match while the menu does not: the reader picked an option and that navigation failed or was
+    // replaced. Put the menu back on the intended thread.
+    if (sel && tsel.value !== sel && rows.some((t) => t.id === sel)) tsel.value = sel;
     document.getElementById("tarchive").textContent = current?.archived ? "Restore" : "Archive";
-    document.getElementById("trename").disabled = document.getElementById("tarchive").disabled = !current;
+    document.getElementById("trename").disabled = document.getElementById("tarchive").disabled = !current || Boolean(pending);
     const input = document.getElementById("input");
-    input.disabled = Boolean(current?.archived);
-    document.getElementById("send").disabled = input.disabled || sending;
-    input.placeholder = current?.archived ? "This thread is archived. Restore it to continue." : "Message ORBIT";
+    input.disabled = Boolean(current?.archived) && !pending;
+    document.getElementById("send").disabled = input.disabled || sending || Boolean(pending);
+    input.placeholder = pending ? `Opening ${pending.title}…` : current?.archived ? "This thread is archived. Restore it to continue." : "Message ORBIT";
+    const status = pending ? `Opening ${pending.title}…` : navError;
+    const statusEl = document.getElementById("tstatus");
+    if (statusEl.textContent !== status) statusEl.textContent = status;
+    log.setAttribute("aria-busy", pending ? "true" : "false");
   }
 
   function renderCard(card, threadId) {
@@ -370,11 +390,15 @@
     document.getElementById("threadbar").hidden = false;
     return true;
   }
+  // Re-fetches the thread that is showing (a poll, a card decision, a send's fallback). Never a navigation: see openThread.
   async function loadThread(id, keepScroll) {
-    const seq = ++loadSeq;
+    const seq = ++loadSeq, gen = navGen;
     const r = await tapi(`/threads/${encodeURIComponent(id)}`, "GET");
+    // The reader navigated since this request left (even if that navigation has not answered yet): drop it.
+    if (gen !== navGen || pending) return true;
     // A newer load, a thread switch or a send drew something since this request left: this answer is stale, drop it.
     if (seq !== loadSeq) return true;
+    if (current?.id !== id) return true;
     if (!r.ok) { if (r.status === 404) { writeSel(null); current = null; } return false; }
     const view = r.data.thread;
     // An answer older than what is showing (a delayed poll) never rolls the thread back.
@@ -383,18 +407,43 @@
     renderThread(view, keepScroll);
     return true;
   }
+  // Opens a thread the reader asked for. Only the latest navigation's answer counts: an earlier one, success or failure,
+  // is ignored, and a background refresh cannot overtake it. On failure the page keeps the thread it was showing, the
+  // menu and the stored selection go back to it, and the bar says what failed. Returns false only for that failure.
+  async function openThread(id) {
+    const gen = ++navGen;
+    navError = "";
+    // Back to the thread already drawn (A, B, then A again before B answered): cancel the pending switch, nothing to fetch.
+    if (current && current.id === id && shownThreadId === id) { pending = null; writeSel(id); renderBar(); return true; }
+    const title = threadList.find((t) => t.id === id)?.title || "the thread";
+    pending = { gen, id, title };
+    renderBar();
+    let r;
+    try { r = await tapi(`/threads/${encodeURIComponent(id)}`, "GET"); } catch { r = { ok: false, status: 0, data: {} }; }
+    if (gen !== navGen) return true;
+    pending = null;
+    if (!r.ok) {
+      if (r.status === 404 && readSel() === id) writeSel(current?.id ?? null);
+      navError = `Could not open ${title} (${r.status ? `HTTP ${r.status}` : "no connection"}).${current ? ` Still showing ${current.title}.` : ""}`;
+      renderBar();
+      return false;
+    }
+    writeSel(id);
+    renderThread(r.data.thread);
+    return true;
+  }
   async function initThreads() {
     if (!(await loadList())) return;
     const wanted = readSel();
     const first = threadList.find((t) => t.id === wanted) || threadList.find((t) => !t.archived);
-    if (first && (await loadThread(first.id))) return;
+    if (first && (await openThread(first.id))) return;
     current = null;
     showEmpty();
   }
   async function pollThreads() {
     try {
       await loadList();
-      if (current) {
+      if (current && !pending) {
         const meta = threadList.find((t) => t.id === current.id);
         // Re-draw when another device changed the thread, or while a confirmed card's live state can still change.
         if (meta && (meta.rev !== current.rev || meta.busy !== current.busy || current.cards.some((c) => c.state === "confirmed"))) await loadThread(current.id, true);
@@ -403,14 +452,24 @@
     } catch { /* the next poll tries again */ }
   }
 
-  tsel.addEventListener("change", () => { if (tsel.value) loadThread(tsel.value); });
+  tsel.addEventListener("change", () => { if (tsel.value) openThread(tsel.value); });
   document.getElementById("tshowarch").addEventListener("change", (e) => { showArchived = e.target.checked; renderBar(); });
+  const listQuietly = async () => { try { await loadList(); } catch { /* the next poll tries again */ } };
   document.getElementById("tnew").addEventListener("click", async () => {
-    const r = await tapi("/threads", "POST", {});
-    if (!r.ok) return;
-    await loadList();
-    renderThread(r.data.thread);
+    const gen = ++navGen;
+    navError = "";
+    pending = { gen, id: null, title: "a new thread" };
+    renderBar();
+    let r;
+    try { r = await tapi("/threads", "POST", {}); } catch { r = { ok: false, status: 0, data: {} }; }
+    // The reader picked another thread meanwhile: that choice stands; the new thread is just in the list.
+    if (gen !== navGen) { await listQuietly(); renderBar(); return; }
+    if (!r.ok) { pending = null; navError = r.data.error || "Could not start a new thread."; renderBar(); return; }
+    await listQuietly();
+    if (gen !== navGen) { renderBar(); return; }
+    pending = null;
     writeSel(r.data.thread.id);
+    renderThread(r.data.thread);
     document.getElementById("input").focus();
   });
   document.getElementById("trename").addEventListener("click", async () => {
@@ -421,22 +480,33 @@
     if (r.ok) { await loadList(); renderThread(r.data.thread, true); }
   });
   document.getElementById("tarchive").addEventListener("click", async () => {
-    if (!current) return;
-    const restoring = current.archived;
-    const r = await tapi(`/threads/${current.id}/archive`, "POST", { archived: !restoring });
-    if (!r.ok) { add("orbit", r.data.error || "Could not archive.", "error", "down"); return; }
-    await loadList();
+    if (!current || pending) return;
+    const target = current, restoring = target.archived;
+    const gen = ++navGen;
+    navError = "";
+    pending = { gen, id: target.id, title: target.title };
+    renderBar();
+    let r;
+    try { r = await tapi(`/threads/${target.id}/archive`, "POST", { archived: !restoring }); } catch { r = { ok: false, status: 0, data: {} }; }
+    if (gen !== navGen) { await listQuietly(); renderBar(); return; }
+    if (!r.ok) { pending = null; navError = r.data.error || (restoring ? "Could not restore." : "Could not archive."); renderBar(); return; }
+    await listQuietly();
+    if (gen !== navGen) { renderBar(); return; }
+    pending = null;
     if (restoring) return renderThread(r.data.thread);
     const next = threadList.find((t) => !t.archived);
-    if (next) await loadThread(next.id); else { current = null; writeSel(null); showEmpty(); }
+    if (next) await openThread(next.id); else { current = null; writeSel(null); showEmpty(); }
   });
 
   async function sendThreaded(content) {
     sending = true;
     try {
       if (!current) {
+        const gen = navGen;
         const made = await tapi("/threads", "POST", {});
         if (!made.ok) { add("orbit", made.data.error || "Could not start a thread.", "error", "down"); return; }
+        // The reader opened a thread while this one was being made: send nothing; the text goes back in the box.
+        if (gen !== navGen) { const input = document.getElementById("input"); if (!input.value) input.value = content; await listQuietly(); renderBar(); return; }
         current = made.data.thread;
         writeSel(current.id);
       }
@@ -444,8 +514,9 @@
       log.scrollTop = log.scrollHeight;
       const sentTo = current.id;
       const r = await tapi(`/threads/${sentTo}/messages`, "POST", { text: content });
-      // If the reader switched threads while waiting, the reply stays in its own thread and is not drawn over this one.
-      if (current?.id !== sentTo) { await loadList(); renderBar(); return; }
+      // If the reader switched threads while waiting (or a switch is still pending), the reply stays in its own thread and
+      // is not drawn over the one they chose.
+      if (current?.id !== sentTo || pending) { await loadList(); renderBar(); return; }
       if (r.data.thread) renderThread(r.data.thread);
       else { await loadThread(sentTo); add("orbit", r.data.error || "ORBIT did not answer.", "error", "down"); }
       if (!r.ok && r.data.error) add("orbit", r.data.error, "error", "down");
@@ -460,6 +531,8 @@
     const input = document.getElementById("input");
     const content = input.value.trim();
     if (!content || sending) return;
+    // While a thread is opening, Enter or Send does nothing and the text stays: it must not go to the thread being left.
+    if (threadMode === "server" && pending) { renderBar(); return; }
     input.value = "";
     // Send stays disabled until the reply (or error) is in, so one message cannot be sent twice.
     const sendButton = document.getElementById("send");
@@ -481,7 +554,7 @@
       refreshStatus();
     } finally {
       sending = false;
-      sendButton.disabled = input.disabled;
+      if (threadMode === "server") renderBar(); else sendButton.disabled = input.disabled;
     }
   });
 
