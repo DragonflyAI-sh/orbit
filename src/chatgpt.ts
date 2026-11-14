@@ -250,18 +250,32 @@ const clean = (s: unknown, max = 200) => {
     .slice(0, max);
 };
 
-// A reset time from the provider: epoch seconds or an ISO date in resets_at, or seconds from now in resets_in_seconds.
-// Only a time in the future and within MAX_RESET_MS counts; anything else (past, zero, absurd, invalid) is treated as
-// no reset time, so ORBIT's own short pause applies.
-function resetFrom(body: ProviderErrorBody, now: number): string | undefined {
+// When the limit ends, from the provider's own timing. Sources, in this order of precedence (the first VALID one wins; an invalid
+// one is skipped, never mixed with another):
+//   1. `resets_at` in the error body: epoch seconds (or milliseconds) or an ISO date. An absolute time is preferred because it
+//      does not drift with transit or queueing delay.
+//   2. `resets_in_seconds` in the error body: seconds from now.
+//   3. The standard HTTP `Retry-After` header (RFC 9110 section 10.2.3): a non-negative integer of seconds, or an IMF-fixdate
+//      such as "Sun, 15 Nov 2026 08:00:00 GMT". Anything else in it (negative, fractional, words, other date forms) is ignored.
+// A value counts only if it is a time strictly in the future and within MAX_RESET_MS. Past, zero, negative, absurd or
+// malformed values give no reset time, so ORBIT's own pause applies (RATE_PAUSE_MS or USAGE_PAUSE_MS). When two valid
+// sources disagree, the higher one in the list wins: ORBIT does not average, pick the earlier, or retry sooner than told.
+const IMF_FIXDATE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+function resetFrom(body: ProviderErrorBody, now: number, retryAfter?: string | null): string | undefined {
+  const valid = (ms: number | undefined) => ms !== undefined && Number.isFinite(ms) && ms > now && ms - now <= MAX_RESET_MS;
   const at = body.resets_at;
   const inS = body.resets_in_seconds;
-  let ms: number | undefined;
-  if (typeof at === "number" && Number.isFinite(at) && at > 0) ms = at < 1e12 ? at * 1000 : at;
-  else if (typeof at === "string") ms = Date.parse(at);
-  else if (typeof inS === "number" && Number.isFinite(inS) && inS > 0) ms = now + inS * 1000;
-  if (ms === undefined || !Number.isFinite(ms) || ms <= now || ms - now > MAX_RESET_MS) return undefined;
-  return new Date(ms).toISOString();
+  const header = typeof retryAfter === "string" ? retryAfter.trim() : "";
+  const candidates: Array<() => number | undefined> = [
+    () => (typeof at === "number" && Number.isFinite(at) && at > 0 ? (at < 1e12 ? at * 1000 : at) : typeof at === "string" ? Date.parse(at) : undefined),
+    () => (typeof inS === "number" && Number.isFinite(inS) && inS > 0 ? now + inS * 1000 : undefined),
+    () => (/^\d{1,9}$/.test(header) ? now + Number(header) * 1000 : IMF_FIXDATE.test(header) ? Date.parse(header) : undefined),
+  ];
+  for (const candidate of candidates) {
+    const ms = candidate();
+    if (valid(ms)) return new Date(ms!).toISOString();
+  }
+  return undefined;
 }
 
 const inWords = (ms: number) => {
@@ -269,14 +283,21 @@ const inWords = (ms: number) => {
   return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
 };
 
-function classify(body: ProviderErrorBody, status: number | undefined, now: number): ProviderError {
+// Usage limit versus rate limit (readiness audit D2). Only the provider's structured `type` and `code` can say a quota is
+// exhausted; the prose message never does. Precedence:
+//   1. A USAGE_LIMIT tag (usage_limit_reached, usage_not_included, insufficient_quota, quota_exceeded, plan_limit): usage limit,
+//      even if a rate-limit tag is also present, since an exhausted quota is the more specific and longer-lived condition.
+//   2. A RATE_LIMIT tag, or any other HTTP 429: a temporary rate limit. Words such as "limit", "usage" or "plan" in the message
+//      ("Rate limit reached for requests", "Too many requests on your plan") do not make it a usage limit. With no valid reset
+//      time it gets the short RATE_PAUSE_MS, not USAGE_PAUSE_MS. Both kinds stay eligible for the authorized paid fallback.
+function classify(body: ProviderErrorBody, status: number | undefined, now: number, retryAfter?: string | null): ProviderError {
   const tag = `${body.type ?? ""} ${body.code ?? ""}`;
   const code = clean(body.code ?? body.type, 60) || undefined;
   // The provider's own sentence, without its closing punctuation: ours follows it.
   const said = clean(body.message).replace(/[.!\s]+$/, "");
-  const resetsAt = resetFrom(body, now);
+  const resetsAt = resetFrom(body, now, retryAfter);
   const when = resetsAt ? ` It resets at ${resetsAt} (in ${inWords(Date.parse(resetsAt) - now)}).` : "";
-  if (USAGE_LIMIT.test(tag) || (status === 429 && /usage|limit|plan/i.test(said))) {
+  if (USAGE_LIMIT.test(tag)) {
     return new ProviderError("usage_limit", `ChatGPT usage limit reached for this plan${said ? `: ${said}` : ""}.${when}`, resetsAt, code);
   }
   if (RATE_LIMIT.test(tag) || status === 429) {
@@ -292,8 +313,9 @@ function classify(body: ProviderErrorBody, status: number | undefined, now: numb
   return new ProviderError("failed", `ChatGPT returned an error${what ? `: ${what}` : ""}.`, resetsAt, code);
 }
 
-// The error an HTTP failure describes. The body is JSON ({error:{...}} or {detail:{...}}) or text.
-export function httpProblem(status: number, text: string, now = Date.now()): ProviderError {
+// The error an HTTP failure describes. The body is JSON ({error:{...}} or {detail:{...}}) or text. `retryAfter` is the response's
+// Retry-After header, if any; it is used only when the body gives no valid reset time (see resetFrom).
+export function httpProblem(status: number, text: string, now = Date.now(), retryAfter?: string | null): ProviderError {
   let body: ProviderErrorBody = {};
   try {
     const parsed = JSON.parse(text) as { error?: ProviderErrorBody | string; detail?: ProviderErrorBody | string; message?: string };
@@ -302,7 +324,7 @@ export function httpProblem(status: number, text: string, now = Date.now()): Pro
   } catch {
     body = { message: text };
   }
-  const e = classify(body, status, now);
+  const e = classify(body, status, now, retryAfter);
   return new ProviderError(e.kind, `HTTP ${status}: ${e.message}`, e.resetsAt, e.code);
 }
 
@@ -545,7 +567,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
           if (err instanceof RequestCancelled) throw err;
           return "";
         });
-        const e = httpProblem(res.status, text, now());
+        const e = httpProblem(res.status, text, now(), res.headers?.get?.("retry-after"));
         if (e.kind === "overloaded") retryable.add(e);
         throw e;
       }
