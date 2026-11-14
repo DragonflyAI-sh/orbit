@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PortStatus, Result } from "./ports.ts";
+import { deadline } from "./model-deadline.ts";
+import type { Bounds, Timers } from "./model-deadline.ts";
 
 export type Message = { role: "user" | "assistant"; content: string };
 
@@ -33,7 +35,9 @@ export type Reply = Result<string> & { fallback?: FallbackInfo; accounting?: str
 // reply() allows the paid fallback unless `fallback: false`. step() (tool-using turns) is the other way round: it never spends the paid
 // fallback unless `fallback: true`, so a new tool-using caller is safe by default. The only callers today are runChat's two interactive
 // owner-chat users (server.ts /chat, thread-service.ts turn), which opt in.
-export type ReplyOptions = { fallback?: boolean };
+// `signal`: the caller's cancellation. A model that supports it abandons the request and fails with a cancellation (never a timeout,
+// never a limit). No caller passes one today; every request is bounded by its own deadlines regardless (src/model-deadline.ts).
+export type ReplyOptions = { fallback?: boolean; signal?: AbortSignal };
 
 export type ModelPort = {
   status(): PortStatus;
@@ -125,15 +129,21 @@ export function parseOutput(output: OutputItem[]): Step {
 // The Responses API wants {type:"function", name, description, parameters}.
 export const responsesTools = (tools: ToolDef[]) => tools.map((t) => ({ type: "function", ...t }));
 
-export function openaiModel(model: string, key: string, fetcher: Fetch = fetch): ModelPort {
+// Bounds on one OpenAI API request (audit D1; docs/model-request-deadlines.md). It is not streamed, so headers come only once the
+// whole answer is ready: the header wait is the total bound.
+export const OPENAI_BOUNDS: Bounds = { headersMs: 600 * 1000, idleMs: 300 * 1000, totalMs: 600 * 1000 };
+
+export function openaiModel(model: string, key: string, fetcher: Fetch = fetch, opts: { bounds?: Partial<Bounds>; timers?: Timers } = {}): ModelPort {
   let lastOk: string | undefined;
   let lastError: { at: string; detail: string } | undefined;
   const impl = `openai/${model}`;
+  const bounds: Bounds = { ...OPENAI_BOUNDS, ...opts.bounds };
 
-  const request = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<Step> => {
+  const request = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], signal?: AbortSignal): Promise<Step> => {
     const at = new Date().toISOString();
+    const d = deadline(bounds, { timers: opts.timers, signal });
     try {
-      const res = await fetcher("https://api.openai.com/v1/responses", {
+      const res = await d.fetch(fetcher, "https://api.openai.com/v1/responses", {
         method: "POST",
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
         body: JSON.stringify({
@@ -143,19 +153,26 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch):
           ...(tools.length ? { tools: responsesTools(tools) } : {}),
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const step = parseOutput(((await res.json()) as { output?: OutputItem[] }).output ?? []);
+      if (!res.ok) {
+        d.discard(res);
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const step = parseOutput((JSON.parse(await d.read(res)) as { output?: OutputItem[] }).output ?? []);
       if (!step.text && !step.calls.length) throw new Error("response had no text");
       lastOk = at;
       return step;
     } catch (err) {
-      lastError = { at, detail: err instanceof Error ? err.message : String(err) };
-      throw err;
+      // A timeout says which bound fired, in ORBIT's words; a cancellation is the caller's and not a model failure.
+      const e = err instanceof Error && err.name === "RequestTimeout" ? new Error(`OpenAI ${err.message}, so ORBIT abandoned the request. Nothing from it was used.`, { cause: err }) : err;
+      if (!(err instanceof Error && err.name === "RequestCancelled")) lastError = { at, detail: e instanceof Error ? e.message : String(e) };
+      throw e;
+    } finally {
+      d.end();
     }
   };
 
   return {
-    step: request,
+    step: (input, limits, notes, tools, o) => request(input, limits, notes, tools, o?.signal),
     status: () => {
       if (lastError && (!lastOk || lastError.at > lastOk)) {
         return { port: "model", state: "down", impl, detail: `Last call failed: ${lastError.detail}`, verifiedAt: lastError.at };
@@ -163,8 +180,8 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch):
       if (lastOk) return { port: "model", state: "live", impl, detail: "Answering.", verifiedAt: lastOk };
       return { port: "model", state: "degraded", impl, detail: "Configured but not exercised yet.", verifiedAt: new Date(0).toISOString() };
     },
-    reply: async (messages, limits, notes) => {
-      const step = await request(messages, limits, notes, []);
+    reply: async (messages, limits, notes, o) => {
+      const step = await request(messages, limits, notes, [], o?.signal);
       if (!step.text) throw new Error("response had no text");
       return { value: step.text, provenance: "live", source: `model/${impl}` };
     },
