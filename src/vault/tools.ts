@@ -91,6 +91,7 @@ export function vaultEdits(deps: { clone: VaultClone; memory: MemoryPort; propos
   const tools: ChatTool[] = [
     {
       name: "vault_policy",
+      readOnly: true,
       description: "Read the vault's own rules from the writable clone: AGENTS.md (the authority), System/conventions.md and System/memory.md, with the AGENTS.md hash. Read-only. Obey it when writing.",
       parameters: obj({}, []),
       run: async (a) => {

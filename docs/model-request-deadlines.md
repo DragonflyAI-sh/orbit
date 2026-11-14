@@ -61,10 +61,10 @@ messages), and the same hang cases on `openaiModel`.
 ## Remaining limitations
 
 - No caller passes a cancellation signal today; there is no user-facing "stop" for a turn. The bounds apply regardless.
-- `runChat` has no whole-turn deadline, and tool execution inside a turn is not bounded here; only model requests are.
+- `runChat` has no whole-turn deadline. Tool execution inside a turn is now bounded separately: see `docs/tool-deadlines.md`.
 - The overload-retry wait (`OVERLOAD_RETRY_MS`) is not interrupted by a cancellation; the cancellation is checked when it ends.
 - The paid OpenRouter fallback does not take the caller's signal; it keeps its own `ORBIT_OPENROUTER_TIMEOUT_MS` bound.
 - ChatGPT response size is not capped (unlike OpenRouter's `readBounded`); the total bound limits how long it can grow.
-- `turn()` returns a thread view taken before its `finally` clears the busy flag, so that returned view says `busy: true` on every
-  outcome; the stored state is correct and the next read shows it free. Pre-existing and unchanged here.
+- (Fixed with the tool deadlines, `docs/tool-deadlines.md`.) `turn()` used to return a thread view taken before its `finally` cleared
+  the busy flag, so that view said `busy: true`; it is now taken after the flag is freed.
 - None of this was exercised against the live provider.

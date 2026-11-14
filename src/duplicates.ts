@@ -55,9 +55,9 @@ export function withDuplicateWarning(tools: ChatTool[], proposals: Proposals, fi
       ? t
       : {
           ...t,
-          run: async (a) => {
+          run: async (a, ctx) => {
             const found = typeof a.brief === "string" ? find(a.brief) : [];
-            const result = await t.run(a);
+            const result = await t.run(a, ctx);
             const v = result.value as { proposalId?: unknown } | null;
             const p = typeof v?.proposalId === "string" ? proposals.peek(v.proposalId) : undefined;
             if (!found.length || !p || p.kind !== "job_launch") return result;

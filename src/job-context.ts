@@ -25,10 +25,10 @@ export function refuseLegacyContext(tools: ChatTool[]): ChatTool[] {
       ? t
       : {
           ...t,
-          run: async (a) => {
+          run: async (a, ctx) => {
             const { context, ...rest } = a;
             if (hasLegacyContext(context)) throw new Error(LEGACY_CONTEXT_ERROR);
-            return t.run(rest);
+            return t.run(rest, ctx);
           },
         },
   );

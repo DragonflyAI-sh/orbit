@@ -6,7 +6,8 @@ export type Tool = {
   // Only read-only tools exist until approvals are built; the server refuses any other.
   readOnly: boolean;
   validate(input: Record<string, unknown>): string | undefined;
-  run(input: Record<string, unknown>): Promise<Result<unknown>>;
+  // `signal`: the caller stopped waiting; a tool that makes requests passes it on so they are aborted.
+  run(input: Record<string, unknown>, opts?: { signal?: AbortSignal }): Promise<Result<unknown>>;
 };
 
 type Fetch = typeof fetch;
@@ -15,8 +16,9 @@ const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 export function githubRepoStatus(fetcher: Fetch = fetch): Tool & { rateRemaining(): string | undefined } {
   let remaining: string | undefined;
-  const get = async (path: string) => {
+  const get = async (path: string, signal?: AbortSignal) => {
     const res = await fetcher(`https://api.github.com${path}`, {
+      ...(signal ? { signal } : {}),
       headers: { accept: "application/vnd.github+json", "user-agent": "orbit (github.com/DragonflyAI-sh/orbit)" },
     });
     remaining = res.headers.get("x-ratelimit-remaining") ?? remaining;
@@ -29,13 +31,14 @@ export function githubRepoStatus(fetcher: Fetch = fetch): Tool & { rateRemaining
     description: "Open PRs and the latest main CI run for a public GitHub repo. Read-only, no credential.",
     readOnly: true,
     validate: (input) => (typeof input.repo === "string" && REPO.test(input.repo) ? undefined : "Needs {repo: \"owner/name\"}."),
-    run: async (input) => {
+    run: async (input, opts) => {
       const repo = String(input.repo);
+      const signal = opts?.signal;
       const [pulls, runs] = await Promise.all([
-        get(`/repos/${repo}/pulls?state=open&per_page=20`) as Promise<
+        get(`/repos/${repo}/pulls?state=open&per_page=20`, signal) as Promise<
           { number: number; title: string; draft: boolean; html_url: string; updated_at: string }[]
         >,
-        get(`/repos/${repo}/actions/runs?branch=main&per_page=1`) as Promise<{
+        get(`/repos/${repo}/actions/runs?branch=main&per_page=1`, signal) as Promise<{
           workflow_runs: { name: string; status: string; conclusion: string | null; head_sha: string; html_url: string; updated_at: string }[];
         }>,
       ]);
@@ -66,13 +69,13 @@ export function toolbox(tools: Tool[], now: () => Date = () => new Date()) {
     get: (name: string) => byName.get(name),
     list: () => tools.map((t) => ({ name: t.name, description: t.description, readOnly: t.readOnly, last: last.get(t.name) })),
 
-    async call(name: string, input: Record<string, unknown>): Promise<Result<unknown>> {
+    async call(name: string, input: Record<string, unknown>, opts?: { signal?: AbortSignal }): Promise<Result<unknown>> {
       const tool = byName.get(name);
       if (!tool) throw new Error(`No tool named ${name}.`);
       const invalid = tool.validate(input);
       if (invalid) throw new Error(invalid);
       try {
-        const result = await tool.run(input);
+        const result = await tool.run(input, opts);
         last.set(name, { at: now().toISOString(), ok: true, detail: "Answered." });
         return result;
       } catch (err) {

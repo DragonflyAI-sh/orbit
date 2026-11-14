@@ -79,6 +79,9 @@ export type Deps = {
   recentContext?: RecentContextPort;
   // The clock for thread cards and the recent-context note. Tests inject one; it must be the clock the proposals use.
   now?: () => Date;
+  // Chat tool execution deadline and abort grace period (docs/tool-deadlines.md). Tests lower them; production uses the defaults.
+  toolDeadlineMs?: number;
+  abortGraceMs?: number;
 };
 
 export function withStaleness(status: PortStatus, now: Date): PortStatus {
@@ -147,6 +150,8 @@ export function buildServer({
   threads = threadStore(undefined),
   recentContext: recentPort = stateRecentContext(jsonStore(undefined, "recent-context", null)),
   now,
+  toolDeadlineMs,
+  abortGraceMs,
 }: Deps): Server {
   const byName = new Map(ports.map((p) => [p.name, p]));
   const fixed = (port: string, impl: string, detail: string): PortStatus => ({
@@ -190,7 +195,7 @@ export function buildServer({
 
   // Threads: the store, the rolling recent-context note, and the service that runs a turn against a thread.
   const recent = recentContext({ port: recentPort, threads, model, now, cardLines: (t) => svc.cardLines(t) });
-  const svc = threadService({ threads, model, proposals, jobs, admin: adminOps, sys: sysOps, recent, now });
+  const svc = threadService({ threads, model, proposals, jobs, admin: adminOps, sys: sysOps, recent, now, toolDeadlineMs, abortGraceMs });
 
   const isOwnerOf = async (req: IncomingMessage) => Boolean(owner) && (await identify(req)) === owner;
   const audit = (port: string, action: string, decision: { allow: boolean; reason: string }) =>
@@ -305,6 +310,8 @@ export function buildServer({
           allow: allowAgent(isOwner),
           // The owner's interactive chat is the one place a tool-using turn may use the paid fallback.
           fallback: true,
+          toolDeadlineMs,
+          abortGraceMs,
         });
         const reply = { value: outcome.text || "(the model returned no text)", provenance: "live" as const, source: replySource(model.status().impl, outcome.fallback, outcome.mixed), ...(outcome.fallback ? { fallback: outcome.fallback } : {}), ...(outcome.accounting?.length ? { accounting: outcome.accounting } : {}), ...(outcome.incomplete?.length ? { incomplete: outcome.incomplete } : {}) };
         const fresh = proposals.list().filter((p) => !before.has(p.id));
