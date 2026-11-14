@@ -276,6 +276,18 @@ const REFUSED = "Session discovery is refused: only the owner can see sessions."
 
 export type SessionRegistry = ReturnType<typeof sessionRegistry>;
 
+type DigestRun = { id: string; relation: string[]; native: { status: "found"; kind: string; state: string; health: string; createdAt: string; lastEventAt: string | null; routine: string | null } | { status: "unavailable" | "not-in-job-store"; detail: string } };
+export type DigestRow = { record: SessionRecord; runs: { state: "read"; total: number; items: DigestRun[]; scope: string; ignoredMalformedRefs?: number } | { state: "unavailable"; detail: string } };
+export type DigestFacts = {
+  observedAt: string;
+  since: string;
+  sources: SourceStatus[];
+  jobs: { state: "live" | "unavailable" | "not-read"; detail?: string };
+  // visible: every visible session read; the rest split it: the caller itself, archived, no message in the window, eligible.
+  counts: { visible: number; excludedSelf: number; archived: number; outsideWindow: number; eligible: number };
+  rows: DigestRow[];
+};
+
 export function sessionRegistry(d: { adapters: SessionAdapter[]; jobs?: JobSource; now?: () => Date }) {
   const now = d.now ?? (() => new Date());
 
@@ -313,7 +325,17 @@ export function sessionRegistry(d: { adapters: SessionAdapter[]; jobs?: JobSourc
     return { k: o.k, id: o.id as string };
   };
 
-  const runRefs = (cards: JobCardRef[]) => {
+  // The job store, read once per answer (the digest shares one read across its rows).
+  const readJobs = (): { byId?: Map<string, Job>; problem?: string } => {
+    if (!d.jobs) return { problem: "jobs are not enabled in this ORBIT" };
+    try {
+      return { byId: new Map(d.jobs.all().map((j) => [j.id, j])) };
+    } catch (e) {
+      return { problem: `the job store could not be read: ${err(e)}` };
+    }
+  };
+
+  const runRefs = (cards: JobCardRef[], jobsRead = readJobs()) => {
     // Only confirmed cards are evidence that a run was launched or steered from this session.
     const byJob = new Map<string, { relation: Set<string>; evidence: { card: string; kind: string; state: string; decidedAt?: string; steerN?: number }[] }>();
     let invalid = 0;
@@ -328,16 +350,7 @@ export function sessionRegistry(d: { adapters: SessionAdapter[]; jobs?: JobSourc
       e.evidence.push({ card: c.cardId, kind: c.kind, state: c.state, ...(c.decidedAt ? { decidedAt: c.decidedAt } : {}), ...(c.steerN !== undefined ? { steerN: c.steerN } : {}) });
       byJob.set(c.job, e);
     }
-    let jobsById: Map<string, Job> | undefined;
-    let jobsProblem: string | undefined;
-    if (!d.jobs) jobsProblem = "jobs are not enabled in this ORBIT";
-    else {
-      try {
-        jobsById = new Map(d.jobs.all().map((j) => [j.id, j]));
-      } catch (e) {
-        jobsProblem = `the job store could not be read: ${err(e)}`;
-      }
-    }
+    const { byId: jobsById, problem: jobsProblem } = jobsRead;
     const all = [...byJob.entries()];
     const items = all.slice(-RUN_REFS_MAX).reverse().map(([id, e]) => {
       const job = jobsById?.get(id);
@@ -433,6 +446,52 @@ export function sessionRegistry(d: { adapters: SessionAdapter[]; jobs?: JobSourc
         transcript: "Not included here. session_read returns a bounded excerpt of the messages.",
         source: { ...status, observedAt: observedAt.toISOString() },
         jobsSource: d.jobs ? { source: "jobs", state: "live", freshness: "ORBIT's job store, read at observation time" } : { source: "jobs", state: "unavailable", detail: "jobs are not enabled in this ORBIT" },
+      };
+    },
+
+    // The facts behind the Assistant's automatic activity digest (src/session-digest.ts, ADR 0001 "Activity digest"). Metadata only:
+    // one pass over the adapters' in-memory entries (no transcript, no archive, no excerpt), then the run cards of at most `rows`
+    // selected sessions and one read of the job store. Visibility is checked before any adapter is touched.
+    digest(viewer: Viewer, p: { rows: number; runsPerRow: number; recentHours: number; exclude?: string[] }): DigestFacts {
+      if (!viewer.isOwner) throw new SessionError("refused", REFUSED);
+      const observedAt = now();
+      const since = new Date(observedAt.getTime() - p.recentHours * 3_600_000).toISOString();
+      const { sources, entries } = observe();
+      const exclude = new Set(p.exclude ?? []);
+      const counts = { visible: 0, excludedSelf: 0, archived: 0, outsideWindow: 0, eligible: 0 };
+      const eligible: Entry[] = [];
+      for (const e of entries) {
+        const r = e.record;
+        if (!visibleTo(r, viewer)) continue;
+        counts.visible++;
+        if (exclude.has(r.id)) counts.excludedSelf++;
+        else if (r.lifecycle !== "open") counts.archived++;
+        else if (r.activity.state === "turn-running" || (r.activity.lastMessageAt !== null && r.activity.lastMessageAt >= since)) eligible.push(e);
+        else counts.outsideWindow++;
+      }
+      counts.eligible = eligible.length;
+      // Active (a reply running) first, then the newest message, then the id: a total order, so the same stores give the same digest.
+      const rank = (r: SessionRecord) => (r.activity.state === "turn-running" ? 0 : 1);
+      eligible.sort((a, b) => rank(a.record) - rank(b.record) || (b.record.activity.lastMessageAt ?? "").localeCompare(a.record.activity.lastMessageAt ?? "") || a.record.id.localeCompare(b.record.id));
+      const picked = eligible.slice(0, p.rows);
+      const jobsRead = picked.length ? readJobs() : {};
+      const rows: DigestRow[] = picked.map((e) => {
+        try {
+          const f = e.facts({ excerpt: 0 });
+          if (!f) return { record: e.record, runs: { state: "unavailable" as const, detail: "the session's cards could not be read" } };
+          const r = runRefs(f.jobCards, jobsRead);
+          return { record: e.record, runs: { state: "read" as const, total: r.total, items: r.items.slice(0, p.runsPerRow).map((i) => ({ id: i.id, relation: i.relation, native: i.native })), scope: f.cardScope, ...(r.ignoredMalformedRefs ? { ignoredMalformedRefs: r.ignoredMalformedRefs } : {}) } };
+        } catch {
+          return { record: e.record, runs: { state: "unavailable" as const, detail: "the session's cards could not be read" } };
+        }
+      });
+      return {
+        observedAt: observedAt.toISOString(),
+        since,
+        sources,
+        jobs: !picked.length ? { state: "not-read" } : jobsRead.problem ? { state: "unavailable", detail: d.jobs ? "the job store could not be read" : "jobs are not enabled in this ORBIT" } : { state: "live" },
+        counts,
+        rows,
       };
     },
 
