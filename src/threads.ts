@@ -163,6 +163,20 @@ export type ThreadMeta = {
   compactedMessages: number;
 };
 
+// What a session's own record says about the jobs it touched: a card that launched or steered a job. Only the card's own fields are
+// used (kind, state, the job it names, the job id its confirmation produced); nothing is inferred from message text.
+export type JobCardRef = { cardId: string; kind: "job_launch" | "job_steer"; state: CardState; createdAt: string; decidedAt?: string; job?: string; steerN?: number };
+export type SessionFacts = { busy: boolean; titleSet: boolean; messageCount: number; lastMessageAt?: string; firstUser?: { at: string; text: string; chars: number }; jobCards?: JobCardRef[] };
+export function jobCardsOf(cards: Card[]): JobCardRef[] {
+  const out: JobCardRef[] = [];
+  for (const c of cards) {
+    if (c.kind !== "job_launch" && c.kind !== "job_steer") continue;
+    const job = c.kind === "job_launch" ? c.outcome?.jobId : (c.job ?? c.outcome?.jobId);
+    out.push({ cardId: c.id, kind: c.kind, state: c.state, createdAt: c.createdAt, ...(c.decidedAt ? { decidedAt: c.decidedAt } : {}), ...(job ? { job } : {}), ...(typeof c.outcome?.steerN === "number" ? { steerN: c.outcome.steerN } : {}) });
+  }
+  return out;
+}
+
 // ---- the store -----------------------------------------------------------------------------------------------------
 
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -456,6 +470,23 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
     },
     setCompactionError(id: string, detail: string): void {
       mutate(id, (t) => void (t.compaction = { lastError: { at: now().toISOString(), detail: maskText(detail).slice(0, 300) } }), false);
+    },
+
+    // ---- read-only facts for the session registry (src/sessions.ts) ----
+    // Bounded and side-effect free: no clone of the transcript, no write, no rev change. `excerpt` caps how much of the first user
+    // message is returned (0 returns none); `cards` adds the cards that point at a job, with the evidence the card itself holds.
+    sessionFacts(id: string, opts: { excerpt?: number; cards?: boolean } = {}): SessionFacts | undefined {
+      const t = threads.get(id);
+      if (!t) return undefined;
+      const first = (opts.excerpt ?? 0) > 0 ? t.messages.find((m) => m.role === "user" && hasContent(m.text)) : undefined;
+      return {
+        busy: busy.has(id),
+        titleSet: t.titleSet === true,
+        messageCount: t.messages.length,
+        lastMessageAt: t.messages.at(-1)?.at,
+        ...(first ? { firstUser: { at: first.at, text: first.text.slice(0, opts.excerpt), chars: first.text.length } } : {}),
+        ...(opts.cards ? { jobCards: jobCardsOf(t.cards) } : {}),
+      };
     },
 
     // ---- the one-time notice about the move to server-side threads ----
