@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { describeFindings, hasVaultFindings, vaultFindings, type Finding } from "./filter.ts";
+import { describeFindings, hasVaultFindings, maskVaultText, vaultFindings, type Finding } from "./filter.ts";
 import { sensitiveCategories } from "./sensitive.ts";
 
 // Pure parts of the vault write tools: the five edit operations, path validation and the write policy. Nothing here touches
@@ -26,8 +26,11 @@ export class VaultError extends Error {
   code: VaultErrorCode;
   // needs_confirmation: why. conflict: which files.
   details: string[];
+  // The message is masked here, at the source, so no refusal can carry a credential-shaped value back to the model, a tool error,
+  // an HTTP body or a log, whatever it quotes (a model-supplied path, a heading, a key): only the matched value is replaced, so
+  // ordinary paths and names stay readable (audit D4). `details` is kept exact; callers that show it mask it themselves.
   constructor(code: VaultErrorCode, message: string, details: string[] = []) {
-    super(message);
+    super(maskVaultText(message));
     this.code = code;
     this.details = details;
   }

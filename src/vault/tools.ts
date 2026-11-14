@@ -3,6 +3,7 @@ import type { MemoryPort } from "../memory.ts";
 import type { VaultClone } from "./clone.ts";
 import { cardDisplay, digestOfEdit, parseEdit, summarize, VaultError } from "./edit.ts";
 import type { VaultEdit } from "./edit.ts";
+import { maskVaultDeep, maskVaultText } from "./filter.ts";
 
 // The vault write tools offered to the owner in chat, and the confirmation path for the protected ones. Direct writes (AGENTS.md
 // section 3) run at once through the clone's pipeline; anything section 4 protects becomes a proposal card that Rai confirms with
@@ -16,7 +17,7 @@ const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s
 
 const failure = (err: unknown): Error => {
   if (err instanceof VaultError) {
-    const files = err.code === "conflict" && err.details.length ? ` Conflicting files: ${err.details.join(", ")}.` : "";
+    const files = err.code === "conflict" && err.details.length ? ` Conflicting files: ${maskVaultText(err.details.join(", "))}.` : "";
     const unverified = err.code === "unverified" ? " It may or may not be on GitHub: do not tell Rai it was saved." : "";
     return new Error(`NOT saved (${err.code}): ${err.message}${files}${unverified}`);
   }
@@ -138,7 +139,7 @@ export function vaultEdits(deps: { clone: VaultClone; memory: MemoryPort; propos
         return { code: 200, body: { committed: true, saved: true, verifiedOnRemote: true, commit: r.commit, files: r.files, logFile: r.logFile } };
       } catch (err) {
         const e = err instanceof VaultError ? err : undefined;
-        return { code: e?.code === "conflict" ? 409 : e ? 422 : 502, body: { error: `Not saved: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400), ...(e ? { code: e.code } : {}), ...(e?.code === "conflict" ? { files: e.details } : {}) } };
+        return { code: e?.code === "conflict" ? 409 : e ? 422 : 502, body: { error: `Not saved: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400), ...(e ? { code: e.code } : {}), ...(e?.code === "conflict" ? { files: maskVaultDeep(e.details) } : {}) } };
       }
     },
   };
