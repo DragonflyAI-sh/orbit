@@ -4,6 +4,8 @@ The Assistant is the page that opens at `/` (and `/#assistant`). It is a single 
 
 Code: `src/assistant-store.ts` (storage, rotation, recovery), `src/assistant-context.ts` (the context bound), routes and wiring in `src/server.ts`, the page in `src/web/index.html` (`<assistant-parts>`, `<status-dot>`, `<routing>` blocks and the Assistant section). The turn itself runs through the same `threadService` (`src/thread-service.ts`) as chat threads, so tools, policy checks, deadlines, proposal cards and confirmations behave identically.
 
+Diagrams of how it works (the page and server sequence, including restarts, and the rolling-memory flowchart): `docs/assistant-architecture.md`.
+
 ## How chat threads work today (for comparison)
 
 Read from the code, not from descriptions:
@@ -33,6 +35,7 @@ Vault retrieval (memory search excerpts), the device summary, the system prompt,
 ```
 <STATE_DIRECTORY>/assistant/
   session.json                 { schema, id: "assistant", createdAt }   written once, never rewritten
+  epoch.json                   { schema, epoch }   the revision epoch, raised at every start (see "Revisions across restarts")
   active/<seq>.json            chunks that may be sent to the model
   archive/<seq>.json           older chunks: kept, never deleted, not sent automatically
 ```
@@ -112,13 +115,23 @@ The archive is never put in the model's context. The page loads it on request, 1
 - Replays: each send carries a random `requestId` stored on its chunk. A browser can silently repeat a POST whose connection dropped (Chromium does); a repeat of a send that already started a turn gets 409 `duplicate` and is not run again. After "ORBIT did not answer", the page reloads the conversation from the server and never resends on its own. Ids are checked against active chunks and chunks archived since the process started.
 - Two ORBIT processes sharing one state directory are not supported (as for chat threads).
 
+## Revisions across restarts
+
+The view's `rev` orders answers: the page draws an answer only if its `rev` is not below the one shown (`aNewer` in the `<assistant-order>` block of `src/web/index.html`, used for polls and for a send's own answer), so a slow or out-of-order answer never rolls the conversation back. `rev` is `epoch × 2^20 + n` (`src/assistant-store.ts`): `n` counts changes in this process from 1, and `epoch` is raised at every start to at least the last stored epoch + 1 and the wall clock in whole seconds, and stored in `epoch.json` before any revision of it is served (raised again after 2^20 changes in one process). Every revision of a later process is above every revision of an earlier one, so:
+
+- a tab open across a restart or deploy takes the new process's state on its next poll, with no reload and no send. That includes tabs still running the page from before this change (PR #83), whose rule was the same comparison against a counter that restarted at 1;
+- a late answer from a process that has since stopped compares lower and is ignored, by the new and the old page alike;
+- nothing stored is reset: chunks, the session identity and the archive are not rewritten. A missing `epoch.json` (a store from before this change) is normal; an unreadable one is reported in `problems` and replaced from the clock.
+
+The view also carries `epoch`, for inspection; the page compares `rev` only. Before this change, `rev` was a counter in memory that started at 1 at every start, and an open tab ignored the new process until that counter caught up with the one it held.
+
 ## Routes (owner only)
 
 All are refused with 403 for anyone but the owner (`decide("assistant", …)`), before anything is read. POSTs are subject to the existing cross-site refusal.
 
 | Route | Does |
 |---|---|
-| `GET /assistant` | The active chunks (tool outputs summarized by size), cards with live state, `busy`, `rev`, `archivedChunks`, what the next turn would be sent (`next`), budgets, `persisted`, `problems` |
+| `GET /assistant` | The active chunks (tool outputs summarized by size), cards with live state, `busy`, `rev` (never lower than any earlier answer, across restarts), `epoch`, `archivedChunks`, what the next turn would be sent (`next`), budgets, `persisted`, `problems` |
 | `GET /assistant/history?before=&limit=` | A page of archived chunks, oldest first, and `more` |
 | `POST /assistant/messages {text, requestId?}` | Runs one turn; returns the view (502 with the view if the model failed; 409 if busy or a duplicate) |
 | `POST /chat/proposals/:id/confirm|cancel` | Existing routes; a card from the Assistant settles in the Assistant (`cardSvc` in `src/server.ts`) |
@@ -136,6 +149,7 @@ All are refused with 403 for anyone but the owner (`decide("assistant", …)`), 
 
 - `test/assistant-store.test.ts`: empty start and fixed identity, separate directory, restart, one turn at a time, interrupted turns, crash recovery of an open chunk, deterministic rotation with no loss or duplication, archive paging and exclusion from context, cards holding rotation and still settling once archived, a chunk found in both directories, unreadable files, masking on disk, bounded chunks for huge outputs/many calls/huge arguments, a randomized check that every plan fits the budget with paired calls and a contiguous newest run, notes cap.
 - `test/assistant-server.test.ts`: owner-only routes and cross-site refusal, server-named singleton, isolation from chat threads in both directions, restart continuity, concurrent sends (one runs, the other 409), model failure, end-to-end bound with huge tool output over many turns with rotation, confirm and cancel of Assistant proposals through the existing routes (single use), expired cards after restart, duplicate request ids.
+- `test/assistant-restart.test.ts`: revisions across restarts. A store and a real server reopened on the same state directory serve revisions above every earlier one (the regression); repeated restarts, several within a second and with the clock set back; a store from before epochs and an unreadable `epoch.json`; an epoch that fills up; memory-only stores. The page's own `aNewer` rule (loaded from the page) and the PR #83 rule both accept the restarted server and reject a late answer from the old process. Send versus poll ordering across a restart; a turn interrupted by a restart is not re-run. In Chromium against the real server behind a stable address: two open tabs keep updating across three restarts without reload or sending, an answer from the old process does not roll a tab back, a poll held back during a send and a send answer held back behind a newer poll are both ignored.
 - `test/assistant-page.test.ts`: status aggregation and routing (pure, always run); in Chromium against a fake server: default page and nav order, explicit `#chat` and `#jobs`, non-owner fallback, status dot transitions (live, degraded, HTTP error, no answer), collapsed panes with visible warnings and a working Confirm, send, 409 and no-answer handling, busy elsewhere, loading archived turns.
 - Existing tests: the nav tests now expect the Assistant link first; the Chat browser tests open `/#chat` explicitly. Nothing else in them changed.
 
@@ -153,6 +167,7 @@ On a deployed ORBIT, as the owner:
 8. After many long turns, check "Load earlier messages" appears and loads older turns marked as not sent; check `<state>/assistant/archive/` holds them.
 9. Restart ORBIT during a reply: after restart the reply shows as interrupted and nothing was repeated.
 10. Check the page at phone width: no horizontal scrolling; Send and the panes are reachable.
+11. Leave two tabs open on the Assistant, restart ORBIT, and send from a third device: both tabs show the new turn within about 10 seconds without reloading (repeat for a second and third restart; full steps in `docs/assistant-architecture.md`).
 
 ## Limits
 
@@ -160,4 +175,5 @@ On a deployed ORBIT, as the owner:
 - A turn's own tool rounds can add up to the existing `runChat` limits on top of the 52,000-character conversation cap.
 - While a confirmable card is pending, the active window can exceed 32,000 characters for up to the proposal lifetime (30 minutes); the prompt bound still holds.
 - Request ids are remembered for active chunks and for chunks archived since the process started; a repeat of a very old send after a restart is not recognized (the browser only repeats within one request).
+- Revision order between processes depends on `epoch.json` (or, without a state directory, the clock). If `epoch.json` is lost and the clock is also set back, or the state directory is restored from a backup with an older `epoch.json`, open tabs ignore the new process until they are reloaded.
 - Not verified in a real deployment or with a real model; see the acceptance steps above.

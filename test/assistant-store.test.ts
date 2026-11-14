@@ -66,7 +66,7 @@ test("the store starts empty, with one fixed identity in its own directory, sepa
   const session = JSON.parse(readFileSync(join(dir, "assistant", "session.json"), "utf8"));
   assert.equal(session.id, ASSISTANT_ID);
   assert.deepEqual(readdirSync(dir), ["assistant"], "nothing is written outside <state>/assistant");
-  assert.deepEqual(readdirSync(join(dir, "assistant")).sort(), ["active", "archive", "session.json"]);
+  assert.deepEqual(readdirSync(join(dir, "assistant")).sort(), ["active", "archive", "epoch.json", "session.json"]);
   // Only the one server-named conversation exists: any other id is unknown.
   assert.equal(s.get("11111111-1111-4111-8111-111111111111"), undefined);
   assert.equal(s.tryBegin("other"), undefined);

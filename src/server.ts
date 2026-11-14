@@ -246,7 +246,10 @@ export function buildServer({
       persisted: assistant.persisted,
       problems: assistant.problems(),
       busy: assistant.isBusy(ASSISTANT_ID),
+      // Never lower than any revision served before, by this process or an earlier one: the page uses it to ignore stale answers
+      // (src/assistant-store.ts, "revisions that survive a restart"). `epoch` is the part that is raised at every start.
       rev: assistant.rev(),
+      epoch: assistant.epoch(),
       archivedChunks: assistant.archivedCount(),
       chunks: assistant.active().map(chunkView),
       // What the model would be sent as history with the next message (the new message itself comes on top).

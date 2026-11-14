@@ -1364,6 +1364,16 @@
   }
   // </assistant-parts>
 
+  // <assistant-order>
+  // Whether a server answer may replace the one drawn. ORBIT's `rev` only ever grows, across restarts and deploys too (it carries an
+  // epoch raised at every start: src/assistant-store.ts), so an answer with a lower `rev` is older than what is drawn (a slow poll,
+  // a delayed answer from a process that has since stopped) and is ignored; an equal or higher one is drawn.
+  function aNewer(shown, incoming) {
+    if (!incoming || typeof incoming.rev !== "number") return false;
+    return !shown || typeof shown.rev !== "number" || incoming.rev >= shown.rev;
+  }
+  // </assistant-order>
+
   // ---- Assistant (owner): one rolling conversation stored on the server, the same on every device. ----
   const alog = document.getElementById("alog");
   const aform = document.getElementById("aform");
@@ -1437,8 +1447,8 @@
     if (seq < ashownSeq) return true;
     if (r.status === 403) { assistantTab.hidden = true; if (tab === "assistant") setTab(tabFromHash()); return false; }
     if (!r.ok || !r.data.assistant) return false;
-    // An answer older than what is drawn (a slow poll) never rolls the conversation back.
-    if (aview && r.data.assistant.rev < aview.rev) return true;
+    // An answer older than what is drawn (a slow poll, or one from before a restart) never rolls the conversation back.
+    if (!aNewer(aview, r.data.assistant)) return true;
     ashownSeq = seq;
     drawAssistant(r.data.assistant, keepScroll !== false);
     return true;
@@ -1475,7 +1485,8 @@
       aBar();
       return;
     }
-    if (r.data.assistant) drawAssistant(r.data.assistant, false); else await aload(false);
+    // The answer to a send is held to the same order as a poll; the optimistic bubbles above are replaced either way.
+    if (r.data.assistant) drawAssistant(aview && !aNewer(aview, r.data.assistant) ? aview : r.data.assistant, false); else await aload(false);
     if (!r.ok) {
       // Refused before anything was stored (busy elsewhere, bad input): the text goes back in the box.
       if ((r.status === 400 || r.status === 403 || (r.status === 409 && !r.data.duplicate)) && !ainput.value) ainput.value = text;

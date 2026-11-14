@@ -10,6 +10,7 @@ import type { Card, CardState, MessagePatch, StoredCall, Thread, ThreadMessage }
 // one per turn, apart from chat threads (<state>/threads/) and from the vault:
 //
 //   <state>/assistant/session.json            identity: { schema, id, createdAt }, written once
+//   <state>/assistant/epoch.json              { schema, epoch }: the revision epoch, raised every time the store is opened
 //   <state>/assistant/active/<seq>.json       chunks the model may be sent
 //   <state>/assistant/archive/<seq>.json      older chunks: kept, never deleted, never sent to the model automatically
 //
@@ -50,6 +51,19 @@ export type Chunk = {
 
 export type Session = { schema: number; id: string; createdAt: string };
 
+// ---- revisions that survive a restart ----
+// The page draws a server answer only if its `rev` is not below the one it shows, so a slow or out-of-order answer never rolls the
+// conversation back. A counter that started again at 1 in every process would make an already-open tab ignore the new process
+// until the counter caught up. So the revision is `epoch * REV_STRIDE + n`: `n` counts changes within this process (from 1), and
+// `epoch` is raised every time the store is opened and kept in epoch.json. Every revision of a later process is therefore above
+// every revision of an earlier one (and above the small plain counters of the version before this one), so an open tab accepts the
+// new process at once, with no change to the page, while a delayed answer from an old process still compares lower and is ignored.
+// `epoch` is at least the wall clock in whole seconds, so a lost or unreadable epoch.json (or no state directory at all) still
+// moves forward. 2^20 changes per epoch; past that the epoch is raised again. The largest revision stays a safe integer until the
+// clock passes the year 2240.
+export const REV_STRIDE = 2 ** 20;
+const EPOCH_SCHEMA = 1;
+
 const SEQ_FILE = /^(\d{12})\.json$/;
 const name = (seq: number) => `${String(seq).padStart(12, "0")}.json`;
 
@@ -70,10 +84,12 @@ export type AssistantStore = ReturnType<typeof assistantStore>;
 
 // `dir` undefined keeps the conversation in memory (tests, or a service without a state directory) and says so through `persisted`.
 // `held(card)` says whether an open card's proposal can still be confirmed; rotation never archives past such a chunk.
-export function assistantStore(dir: string | undefined, opts: { now?: () => Date; held?: (card: Card) => boolean; activeBudget?: number } = {}) {
+export function assistantStore(dir: string | undefined, opts: { now?: () => Date; held?: (card: Card) => boolean; activeBudget?: number; revStride?: number } = {}) {
   const now = opts.now ?? (() => new Date());
   const held = opts.held ?? (() => false);
   const activeBudget = opts.activeBudget ?? ASSISTANT_ACTIVE_BUDGET_CHARS;
+  // Changes per epoch; smaller only in tests.
+  const stride = opts.revStride ?? REV_STRIDE;
   const activeDir = dir ? join(dir, "active") : undefined;
   const archiveDir = dir ? join(dir, "archive") : undefined;
   const problems: string[] = [];
@@ -89,12 +105,24 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
   // card id -> chunk seq, for every active chunk and every chunk archived while this process runs.
   const cardIndex = new Map<string, number>();
   let busy: symbol | undefined;
-  let rev = 1;
+  let epoch = 0;
+  let changes = 1;
   // Request ids of the sends that made the active chunks (and chunks archived while this process runs), and the one the next turn
   // is for.
   const requestIds = new Set<string>();
   let nextRequest: string | undefined;
   let session: Session;
+
+  const epochFile = dir ? join(dir, "epoch.json") : undefined;
+  // Raises the epoch above the last one stored, the current one and the clock, and stores it before any revision of it is served.
+  const raiseEpoch = (stored: number) => {
+    epoch = Math.max(stored + 1, epoch + 1, Math.floor(now().getTime() / 1000));
+    changes = 1;
+    if (epochFile) writeAtomic(epochFile, JSON.stringify({ schema: EPOCH_SCHEMA, epoch }, null, 2));
+  };
+  const bump = () => {
+    if (++changes >= stride) raiseEpoch(epoch);
+  };
 
   const fileOf = (seq: number, where: "active" | "archive") => join(where === "active" ? activeDir! : archiveDir!, name(seq));
   const index = (c: Chunk) => {
@@ -123,6 +151,17 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
         writeAtomic(sessionFile, JSON.stringify(session, null, 2));
       }
     }
+    let stored = 0;
+    try {
+      const e = JSON.parse(readFileSync(epochFile!, "utf8")) as { epoch?: unknown };
+      if (!Number.isSafeInteger(e.epoch) || (e.epoch as number) < 0) throw new Error("no epoch");
+      stored = e.epoch as number;
+    } catch (err) {
+      // Missing (a new store, or one written before epochs): the clock floor starts it. Unreadable: said, and replaced below by a
+      // new epoch from the clock; the file holds only that number, never conversation data.
+      if (existsSync(epochFile!)) problems.push(`epoch.json: ${err instanceof Error ? err.message : "unreadable"}; a new epoch was started from the clock`);
+    }
+    raiseEpoch(stored);
     archived = readdirSync(archiveDir!).flatMap((f) => (SEQ_FILE.test(f) ? [Number(f.slice(0, 12))] : [])).sort((a, b) => a - b);
     const inArchive = new Set(archived);
     for (const f of readdirSync(activeDir!).sort()) {
@@ -166,6 +205,7 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
     }
   } else {
     session = { schema: CHUNK_SCHEMA, id: ASSISTANT_ID, createdAt: now().toISOString() };
+    raiseEpoch(0);
   }
   let nextSeq = Math.max(0, ...archived, ...unreadable, ...active.keys()) + 1;
 
@@ -183,7 +223,7 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
     persist(next, "active");
     active.set(seq, next);
     index(next);
-    rev++;
+    bump();
     return result;
   }
 
@@ -205,7 +245,7 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
     c.updatedAt = now().toISOString();
     if (dir) persist(c, "archive");
     else memArchive.set(seq, structuredClone(c));
-    rev++;
+    bump();
     return result;
   }
 
@@ -255,7 +295,7 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
         fsyncDir(activeDir!);
       }
       archived.sort((a, b) => a - b);
-      rev++;
+      bump();
     }
     return moved;
   }
@@ -272,7 +312,7 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
       createdAt: session.createdAt,
       updatedAt: list.at(-1)?.updatedAt ?? session.createdAt,
       archived: false,
-      rev,
+      rev: epoch * stride + changes,
       messages: list.flatMap((c) => c.messages),
       cards: list.flatMap((c) => c.cards),
     };
@@ -282,7 +322,8 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
     persisted: Boolean(dir),
     problems: () => [...problems],
     session: (): Session => ({ ...session }),
-    rev: () => rev,
+    rev: () => epoch * stride + changes,
+    epoch: () => epoch,
     rotate,
 
     // ---- the TurnStore surface used by src/thread-service.ts ----
@@ -333,7 +374,7 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
       nextRequest = undefined;
       active.set(c.seq, c);
       index(c);
-      rev++;
+      bump();
       return structuredClone(m);
     },
     beginAssistant(id: string): string {
