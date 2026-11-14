@@ -1,6 +1,6 @@
 export type Decision = { allow: boolean; reason: string };
 
-// Fails closed. Reads and chat replies pass; memory, vault writes, the config view, notify, schedule, runs, tools, model sign-in, nodes, jobs, pull-request inspection ("pulls"), server operations, chat threads, the Assistant conversation, session discovery ("sessions", offered only in the Assistant) and chat tool calls ("agent") need the owner; everything else waits for real approvals.
+// Fails closed. Reads and chat replies pass; memory, vault writes, the config view, notify, schedule, runs, tools, model sign-in, nodes, jobs, pull-request inspection ("pulls"), server operations, chat threads, the Assistant conversation, session discovery and bounded reading ("sessions", offered only in the Assistant) and chat tool calls ("agent") need the owner; everything else waits for real approvals.
 const OPEN_ACTIONS = new Set(["describe", "chat"]);
 const OWNER_PORTS = new Set(["memory", "notify", "schedule", "runs", "tools", "model", "nodes", "jobs", "ops", "agent", "threads", "assistant", "vault", "config", "pulls", "sessions"]);
 

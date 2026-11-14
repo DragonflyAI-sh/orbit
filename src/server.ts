@@ -304,7 +304,8 @@ export function buildServer({
     const decision = decide("agent", tool, isOwner);
     audit("agent", tool, decision);
     if (!decision.allow) return decision.reason;
-    // Session discovery: owner only (its own policy port) and only inside the Assistant, even if a chat turn names the tool.
+    // Session discovery and reading (sessions_list, session_inspect, session_read): owner only (its own policy port) and only inside
+    // the Assistant, even if a chat turn names the tool.
     if ((SESSION_TOOL_NAMES as readonly string[]).includes(tool)) {
       const second = decide("sessions", tool, isOwner);
       audit("sessions", tool, second);

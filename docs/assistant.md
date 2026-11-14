@@ -28,7 +28,7 @@ Read from the code, not from descriptions:
 | Rolling recent-work note | read and refreshed | neither read nor refreshed (it is built from chat threads, so it would mix sessions) |
 | Page | thread picker, New, Rename, Archive | none of those; Load earlier messages |
 
-Vault retrieval (memory search excerpts), the device summary, the system prompt, the tool list and the policy checks are the same as for chat (`prepare()` in `src/server.ts`), except that the Assistant alone is also offered the read-only session discovery tools `sessions_list` and `session_inspect` (`docs/adr/0001-session-registry.md`). The Assistant's conversation store is conversation context only; it is not durable memory and does not write to the vault.
+Vault retrieval (memory search excerpts), the device summary, the system prompt, the tool list and the policy checks are the same as for chat (`prepare()` in `src/server.ts`), except that the Assistant alone is also offered the read-only session tools `sessions_list`, `session_inspect` and `session_read` (`docs/adr/0001-session-registry.md`). `session_read` returns a bounded, masked excerpt of another conversation's user and assistant messages (at most 30 messages and 12000 characters per call, with a cursor to continue) as untrusted reference data: never tool outputs or cards, never instructions, and never a claim that the whole session was read. Reading changes nothing in the session read, and does not merge it into the Assistant's context beyond that one tool result. The Assistant's conversation store is conversation context only; it is not durable memory and does not write to the vault.
 
 ## Directory layout
 

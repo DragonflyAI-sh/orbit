@@ -167,6 +167,15 @@ export type ThreadMeta = {
 // used (kind, state, the job it names, the job id its confirmation produced); nothing is inferred from message text.
 export type JobCardRef = { cardId: string; kind: "job_launch" | "job_steer"; state: CardState; createdAt: string; decidedAt?: string; job?: string; steerN?: number };
 export type SessionFacts = { busy: boolean; titleSet: boolean; messageCount: number; lastMessageAt?: string; firstUser?: { at: string; text: string; chars: number }; jobCards?: JobCardRef[] };
+// What session_read (src/sessions.ts) may see of one stored message: the conversational text and its identity, never the tool calls'
+// arguments or outputs, cards, memory paths, error, accounting or fallback details. Only how many calls and cards there were is kept,
+// so a reader knows something was left out.
+export type TranscriptMessage = { id: string; role: "user" | "assistant"; at: string; text: string; status?: MessageStatus; toolCalls: number; cards: number };
+export const transcriptMessage = (m: ThreadMessage): TranscriptMessage => ({ id: m.id, role: m.role, at: m.at, text: typeof m.text === "string" ? m.text : "", ...(m.status ? { status: m.status } : {}), toolCalls: m.calls?.length ?? 0, cards: m.cards?.length ?? 0 });
+// A thread's transcript as of one moment. The store replaces a thread object on every change (copy on write), so the messages seen
+// through one value never change under the reader. `readable` stops before the first reply still being written.
+export type ThreadTranscript = { rev: number; updatedAt: string; archived: boolean; total: number; readable: number; inProgress: boolean; compacted: number; at(i: number): TranscriptMessage | undefined };
+
 export function jobCardsOf(cards: Card[]): JobCardRef[] {
   const out: JobCardRef[] = [];
   for (const c of cards) {
@@ -486,6 +495,26 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
         lastMessageAt: t.messages.at(-1)?.at,
         ...(first ? { firstUser: { at: first.at, text: first.text.slice(0, opts.excerpt), chars: first.text.length } } : {}),
         ...(opts.cards ? { jobCards: jobCardsOf(t.cards) } : {}),
+      };
+    },
+
+    // Read-only transcript access for session_read (src/sessions.ts): one message projected at a time, nothing cloned in full,
+    // written or counted as a change.
+    sessionTranscript(id: string): ThreadTranscript | undefined {
+      const t = threads.get(id);
+      if (!t) return undefined;
+      const msgs = t.messages;
+      const pending = msgs.findIndex((m) => m.status === "pending");
+      const readable = pending < 0 ? msgs.length : pending;
+      return {
+        rev: t.rev,
+        updatedAt: t.updatedAt,
+        archived: t.archived === true,
+        total: msgs.length,
+        readable,
+        inProgress: pending >= 0,
+        compacted: t.summary && hasContent(t.summary.text) ? t.summary.covers : 0,
+        at: (i: number) => (Number.isInteger(i) && i >= 0 && i < readable ? transcriptMessage(msgs[i]!) : undefined),
       };
     },
 
