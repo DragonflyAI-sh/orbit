@@ -3,8 +3,8 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, rea
 import { join } from "node:path";
 import { ASSISTANT_ACTIVE_BUDGET_CHARS, boundChunk, planContext } from "./assistant-context.ts";
 import type { ChunkForm, ContextPlan } from "./assistant-context.ts";
-import { maskCall, maskContent, maskDeep, MAX_MESSAGE_CHARS, safePatch, THREAD_SCHEMA, ThreadError, writeAtomic } from "./threads.ts";
-import type { Card, CardState, MessagePatch, StoredCall, Thread, ThreadMessage } from "./threads.ts";
+import { jobCardsOf, maskCall, maskContent, maskDeep, MAX_MESSAGE_CHARS, safePatch, THREAD_SCHEMA, ThreadError, writeAtomic } from "./threads.ts";
+import type { Card, CardState, JobCardRef, MessagePatch, StoredCall, Thread, ThreadMessage } from "./threads.ts";
 
 // The Assistant: one durable rolling conversation, owned by the server (docs/assistant.md). It is stored as small chunk files,
 // one per turn, apart from chat threads (<state>/threads/) and from the vault:
@@ -50,6 +50,8 @@ export type Chunk = {
 };
 
 export type Session = { schema: number; id: string; createdAt: string };
+// What the session registry reads from the Assistant store (sessionFacts below). `lastMessageAt` covers active chunks only.
+export type AssistantFacts = { createdAt: string; busy: boolean; activeChunks: number; archivedChunks: number; activeMessages: number; lastMessageAt?: string; jobCards: JobCardRef[]; persisted: boolean; problems: number };
 
 // ---- revisions that survive a restart ----
 // The page draws a server answer only if its `rev` is not below the one it shows, so a slow or out-of-order answer never rolls the
@@ -444,6 +446,19 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
       nextRequest = requestId;
     },
     // Active chunks, oldest first (the open one, if a turn is running, last).
+    // Read-only facts for the session registry (src/sessions.ts). Bounded to the active chunks (already in memory); the archive is
+    // never read here. Nothing is cloned, written or counted as a change.
+    sessionFacts(): AssistantFacts {
+      let last: string | undefined;
+      let messages = 0;
+      const jobCards: JobCardRef[] = [];
+      for (const c of sortedActive()) {
+        for (const m of c.messages) if (!last || m.at > last) last = m.at;
+        messages += c.messages.length;
+        jobCards.push(...jobCardsOf(c.cards));
+      }
+      return { createdAt: session.createdAt, busy: Boolean(busy), activeChunks: active.size, archivedChunks: archived.length, activeMessages: messages, lastMessageAt: last, jobCards, persisted: Boolean(dir), problems: problems.length };
+    },
     active: (): Chunk[] => structuredClone(sortedActive()),
     archivedCount: () => archived.length,
     // A page of archived chunks older than `before` (a sequence number; omitted: the newest archived), oldest first. Reads only

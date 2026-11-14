@@ -37,6 +37,7 @@ import type { Threads } from "./threads.ts";
 import { jsonStore } from "./store.ts";
 import { ASSISTANT_ACTIVE_BUDGET_CHARS, ASSISTANT_CARD_LINES_MAX, ASSISTANT_CHUNK_MAX_CHARS, ASSISTANT_CONTEXT_BUDGET_CHARS, ASSISTANT_NOTES_MAX_CHARS, boundNotes, planItems, planMessages } from "./assistant-context.ts";
 import { ASSISTANT_ID, assistantStore } from "./assistant-store.ts";
+import { assistantAdapter, assistantSessionId, chatAdapter, SESSION_TOOL_NAMES, sessionRegistry, sessionTools } from "./sessions.ts";
 import type { Chunk } from "./assistant-store.ts";
 
 export const STALE_AFTER_MS = 5 * 60 * 1000;
@@ -226,6 +227,9 @@ export function buildServer({
     maxCardLines: ASSISTANT_CARD_LINES_MAX,
     context: { items: () => planItems(planTurn()), messages: () => planMessages(planTurn()) },
   });
+  // The session registry (src/sessions.ts, docs/adr/0001-session-registry.md): a read-only view over the Assistant's chunk store,
+  // the chat threads and the job store. Only the Assistant is offered its tools (prepare and allowAgent below).
+  const sessions = sessionRegistry({ adapters: [assistantAdapter(assistant), chatAdapter(threads)], jobs: jobs ? { all: () => jobs.all(), health: (j) => jobs.health(j) } : undefined, now });
   // The service that owns a proposal's card: the Assistant's when its card is there, otherwise the chat threads'.
   const cardSvc = (proposalId: string) => (assistant.threadOfCard(proposalId) ? asvc : svc);
   const chunkView = (c: Chunk) => ({
@@ -263,8 +267,9 @@ export function buildServer({
     console.log(JSON.stringify({ at: new Date().toISOString(), port, action, ...decision }));
 
   // What a reply is given besides the conversation: memory excerpts and the device summary (owner only), the limits to
-  // disclose, and the tools offered. Shared by the legacy /chat route and the thread routes.
-  const prepare = async (isOwner: boolean, query: string) => {
+  // disclose, and the tools offered. Shared by the legacy /chat route, the thread routes and the Assistant. `scope` says which:
+  // session discovery is offered only in the Assistant (policy decision, docs/adr/0001-session-registry.md).
+  const prepare = async (isOwner: boolean, query: string, scope: "chat" | "assistant" = "chat") => {
     let notes: string | undefined;
     let used: string[] = [];
     const memoryDecision = decide("memory", "search", isOwner);
@@ -284,7 +289,7 @@ export function buildServer({
     }
     const current = limits(isOwner);
     const offered = isOwner && model.step
-      ? [...refuseLegacyContext(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? [])]
+      ? [...refuseLegacyContext(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : [])]
       : [];
     if (!offered.length) {
       current.push(
@@ -295,10 +300,17 @@ export function buildServer({
     }
     return { notes, used, current, offered };
   };
-  const allowAgent = (isOwner: boolean) => (tool: string) => {
+  const allowAgent = (isOwner: boolean, scope: "chat" | "assistant" = "chat") => (tool: string) => {
     const decision = decide("agent", tool, isOwner);
     audit("agent", tool, decision);
     if (!decision.allow) return decision.reason;
+    // Session discovery: owner only (its own policy port) and only inside the Assistant, even if a chat turn names the tool.
+    if ((SESSION_TOOL_NAMES as readonly string[]).includes(tool)) {
+      const second = decide("sessions", tool, isOwner);
+      audit("sessions", tool, second);
+      if (!second.allow) return second.reason;
+      return scope === "assistant" ? undefined : `${tool} is refused: session discovery is only offered in the Assistant`;
+    }
     // Vault writes, the config view and pull-request inspection have their own policy port entries, so the owner-only rule is stated for each.
     const port = tool.startsWith("vault_") ? "vault" : tool === "orbit_config_view" ? "config" : (PR_INSPECT_TOOL_NAMES as readonly string[]).includes(tool) ? "pulls" : undefined;
     if (port) {
@@ -489,11 +501,11 @@ export function buildServer({
         const requestId = typeof input.requestId === "string" && /^[A-Za-z0-9-]{8,64}$/.test(input.requestId) ? input.requestId : undefined;
         const duplicate = () => send(res, 409, { error: "This message was already received (the browser repeated the request). It was not run again.", duplicate: true, assistant: assistantView() });
         if (requestId && assistant.seenRequest(requestId)) return duplicate();
-        const prep = await prepare(callerIsOwner, text);
+        const prep = await prepare(callerIsOwner, text, "assistant");
         if (requestId && assistant.seenRequest(requestId)) return duplicate();
         // Set immediately before the turn: nothing is awaited between here and the turn's first write, which takes it.
         assistant.expectRequest(requestId);
-        const out = await asvc.turn(ASSISTANT_ID, text, { notes: boundNotes(prep.notes), memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner), isOwner: callerIsOwner });
+        const out = await asvc.turn(ASSISTANT_ID, text, { notes: boundNotes(prep.notes), memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner, "assistant"), isOwner: callerIsOwner });
         return send(res, out.error ? 502 : 200, { assistant: assistantView(), limits: prep.current, ...(out.error ? { error: out.error } : {}) });
       } catch (err) {
         assistant.expectRequest(undefined);
