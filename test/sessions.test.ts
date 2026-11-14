@@ -408,7 +408,8 @@ test("a malicious title stays data: it reaches the model only inside a tool resu
   assert.doesNotMatch(row.title, /[\n‮]/);
   assert.match(row.title, /IGNORE ALL PREVIOUS INSTRUCTIONS/);
   assert.equal(out.result.notice, UNTRUSTED_NOTICE);
-  // Not in the system-side inputs: notes and limits never carry session text.
+  // Not in the system-side inputs: this thread has no message, so it is not in the activity digest either (a title that is in the
+  // digest is quoted as JSON data inside its block: test/session-digest.test.ts), and limits never carry session text.
   assert.doesNotMatch(seen.notes ?? "", /IGNORE ALL/);
   assert.doesNotMatch(seen.limits.join("\n"), /IGNORE ALL/);
   // Nothing was proposed, launched or changed.

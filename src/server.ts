@@ -38,6 +38,7 @@ import { jsonStore } from "./store.ts";
 import { ASSISTANT_ACTIVE_BUDGET_CHARS, ASSISTANT_CARD_LINES_MAX, ASSISTANT_CHUNK_MAX_CHARS, ASSISTANT_CONTEXT_BUDGET_CHARS, ASSISTANT_NOTES_MAX_CHARS, boundNotes, planItems, planMessages } from "./assistant-context.ts";
 import { ASSISTANT_ID, assistantStore } from "./assistant-store.ts";
 import { assistantAdapter, assistantSessionId, chatAdapter, SESSION_TOOL_NAMES, sessionRegistry, sessionTools } from "./sessions.ts";
+import { sessionDigest } from "./session-digest.ts";
 import type { Chunk } from "./assistant-store.ts";
 
 export const STALE_AFTER_MS = 5 * 60 * 1000;
@@ -298,7 +299,18 @@ export function buildServer({
           : "chat tools are unavailable: the connected model cannot call tools, so you cannot take any action; do not claim to have launched, steered or sent anything",
       );
     }
-    return { notes, used, current, offered };
+    // The session activity digest (src/session-digest.ts, ADR 0001 "Activity digest"): Assistant scope and owner only, checked
+    // through the sessions policy port before the registry is touched. Kept apart from `notes` so the notes cap never cuts it and
+    // it is never stored: it is built again for every turn and is not part of any chunk, memory or transcript.
+    let digest: string | undefined;
+    if (scope === "assistant") {
+      const d = decide("sessions", "digest", isOwner);
+      if (d.allow) {
+        audit("sessions", "digest", d);
+        digest = sessionDigest(sessions, { isOwner });
+      }
+    }
+    return { notes, used, current, offered, digest };
   };
   const allowAgent = (isOwner: boolean, scope: "chat" | "assistant" = "chat") => (tool: string) => {
     const decision = decide("agent", tool, isOwner);
@@ -506,7 +518,7 @@ export function buildServer({
         if (requestId && assistant.seenRequest(requestId)) return duplicate();
         // Set immediately before the turn: nothing is awaited between here and the turn's first write, which takes it.
         assistant.expectRequest(requestId);
-        const out = await asvc.turn(ASSISTANT_ID, text, { notes: boundNotes(prep.notes), memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner, "assistant"), isOwner: callerIsOwner });
+        const out = await asvc.turn(ASSISTANT_ID, text, { notes: [boundNotes(prep.notes), prep.digest].filter(Boolean).join("\n\n") || undefined, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner, "assistant"), isOwner: callerIsOwner });
         return send(res, out.error ? 502 : 200, { assistant: assistantView(), limits: prep.current, ...(out.error ? { error: out.error } : {}) });
       } catch (err) {
         assistant.expectRequest(undefined);
