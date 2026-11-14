@@ -93,6 +93,7 @@ During the gate-4 code reading, an audit sub-step also opened two vault notes th
   - Effect: with no reset time, ORBIT pauses for 15 minutes instead of 1 minute. Paid fallback then answers for about 15 times longer than needed (it stays within caps, but it is unneeded spend).
   - Severity: low to medium. Confidence: medium-high (read in code; not executed).
   - Fix: test the `rate_limit` code before the message-text heuristic, and add a test.
+  - Status (2026-11-14): fixed on branch `orbit/orbit-202611140009-3wq1`. The message-text heuristic is removed; only structured codes mark a usage limit, and `Retry-After` is honored. Tests: `test/chatgpt-rate-vs-usage.test.ts`.
 - **D3: kebab-case names starting with `sk-` are treated as secrets.**
   - Where: `src/vault/filter.ts:194`. The body class includes `-` and there is no word-like guard.
   - Effect: `[[sk-learn-pipeline-migration-notes]]` and a bare `sk-learn-pipeline-migration-notes` are flagged `secret.provider-token`. Writes and context export are refused, and the name is masked. Verified here by calling `vaultFindings`. The path form `Tasks/sk-learn-upgrade-notes.md` passes.
