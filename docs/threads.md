@@ -2,6 +2,8 @@
 
 Chat history used to live in a JavaScript array in the page and was sent to the server as text (the last 40 messages). A refresh, another device or a deploy lost it, and earlier tool calls and results never reached the model. Threads move the history to the server. They are shared by every device, owner only, kept until archived, and never deleted automatically.
 
+The Assistant page (one rolling conversation, `/#assistant`) is separate and described in `docs/assistant.md`; it shares the turn code but not this storage, compaction or the rolling note.
+
 Code: `src/threads.ts` (store), `src/thread-context.ts` (model context, compaction), `src/thread-service.ts` (a turn, cards, live state), `src/recent-context.ts` (rolling note), `src/duplicates.ts` (duplicate-launch warning), routes in `src/server.ts`, page in `src/web/index.html`.
 
 ## Storage and schema

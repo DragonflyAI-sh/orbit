@@ -185,6 +185,7 @@ buildServer({
   sysOps: sys,
   proposals,
   threads: threadStore(stateDir ? join(stateDir, "threads") : undefined),
+  assistantDir: stateDir ? join(stateDir, "assistant") : undefined,
   vaultEdits,
   configView: config,
   // Read-only PR inspection (owner-only chat tools): the repositories are the ones ORBIT_ROUTINE_REPOS names, the token is orbit.github-orbit-prs.

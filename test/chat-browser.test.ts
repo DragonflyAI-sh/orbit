@@ -147,7 +147,7 @@ async function open() {
   page?.close();
   page = await browser.newPage({ viewport: { width: 800, height: 600 } });
   await page.addInitScript(`localStorage.setItem("orbit.thread", ${JSON.stringify(T1)})`);
-  await page.goto(base);
+  await page.goto(`${base}#chat`);
   await page.waitForFunction(() => document.querySelectorAll("#log .msg").length === 4);
   await page.evaluate(() => { (window as any).__notReloaded = true; });
 }
