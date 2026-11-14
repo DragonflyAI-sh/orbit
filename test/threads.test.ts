@@ -543,3 +543,33 @@ test("the legacy /chat route also reports the failing call's own error", async (
   assert.equal(r.data.error, "The model call failed: ChatGPT's servers are overloaded: try later.");
   x.close();
 });
+
+// Chat addresses (/#chat/<id>, docs/threads.md "Addresses") let two tabs use two threads at once. That relies on the server
+// scoping every turn and its busy lock to the thread in the path, never to the caller or the process: checked here.
+test("a reply in progress in one thread does not block, busy-flag or receive another thread's turn", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const model = scripted(async (s) => {
+    const last = s.input.filter((i) => "role" in i && i.role === "user").at(-1) as { content: string } | undefined;
+    if (last?.content === "slow in a") await gate;
+    return say(`answer to ${last?.content}`);
+  });
+  const x = rig({ model });
+  const a = await x.create("A");
+  const b = await x.create("B");
+  const slow = x.send(a.id, "slow in a");
+  await wait(50);
+  assert.equal((await x.api(`/threads/${a.id}`)).data.thread.busy, true);
+  assert.equal((await x.api(`/threads/${b.id}`)).data.thread.busy, false, "the busy flag is per thread");
+  const quick = await x.send(b.id, "quick in b");
+  assert.equal(quick.status, 200, "another thread is not blocked by A's turn");
+  assert.deepEqual(quick.data.thread.messages.map((m: { text: string }) => m.text), ["quick in b", "answer to quick in b"]);
+  assert.equal((await x.send(a.id, "second in a")).status, 409, "A itself still takes one reply at a time");
+  release();
+  const done = await slow;
+  assert.equal(done.status, 200);
+  assert.deepEqual(done.data.thread.messages.map((m: { text: string }) => m.text), ["slow in a", "answer to slow in a"]);
+  const bAfter = (await x.api(`/threads/${b.id}`)).data.thread;
+  assert.deepEqual(bAfter.messages.map((m: { text: string }) => m.text), ["quick in b", "answer to quick in b"], "A's late reply never lands in B");
+  x.close();
+});

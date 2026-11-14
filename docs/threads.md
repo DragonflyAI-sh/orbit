@@ -44,6 +44,36 @@ Every route is owner only (`decide("threads", ...)`, 403 for anyone else, checke
 
 The old `POST /chat` (client-sent history) is kept unchanged for API callers and for the page when the viewer is not the owner; the owner's page does not use it. It stores nothing.
 
+## Addresses
+
+Each thread has its own page address: **`/#chat/<thread id>`** (the canonical form: the lowercase UUID, unencoded). The address is what a tab shows, so two tabs (or two windows) can have two different threads open at once and each keeps its own across a reload. The fragment is never sent to the HTTP server, so nothing changed on the server for the address; the page fetches `GET /threads/:id` and posts to `POST /threads/:id/messages` with the id from the address, as before.
+
+| Address | What the tab does |
+|---|---|
+| `/#chat/<id>` (a link, a typed address, a reload) | Opens that thread. The stored selection is ignored. An uppercase or percent-encoded copy of a real id opens it and the address is rewritten to the canonical form in place. |
+| `/#chat` (plain; the Chat link) | Fallback: if a thread is already open in this tab, keeps it; otherwise opens the thread last opened in this browser (`localStorage` `orbit.thread`, shared by all tabs), else the newest open thread, else the empty state. The address is then **replaced** with that thread's, so Back never lands on an unresolved `#chat`. With no threads, the address stays `#chat` until the first send creates one. |
+| `/#chat/<anything else>` (not a UUID, bad percent-encoding, extra path) | Nothing is fetched. The log and the bar say the address does not name a thread; Send is disabled. |
+
+- **Picking a thread or New** adds a history entry with the new address (only once the thread has opened). Starting a thread by sending from the empty state replaces `#chat`. Archive moves on like a pick.
+- **Back/Forward** open the thread the address names. They never create a thread, and the page's own address updates use `pushState`/`replaceState` (no `hashchange`), so there is no loop.
+- **The address is authoritative for its tab.** Other tabs write the shared stored selection; it is only the plain-`#chat` fallback, and the page has no `storage` listener, so another tab never moves this one.
+- **Missing, deleted or refused threads.** When the address names a thread that answers 404 (also when it is deleted while open: the next poll, within 10 seconds, reports it), 401/403, another error or no answer, the tab shows no thread, says why (with Try again) and sends nothing: a message is never sent to, and no new thread is started in place of, a thread other than the one the address names. Choosing a thread or New recovers. A failed pick from the menu keeps the old behaviour (the thread shown stays, the address stays on it).
+- **Requests are bound to their thread.** Every load, poll and send carries its thread id and the navigation generation it started in; an answer that arrives after the address (or the menu) moved on is dropped and draws nothing (transcript, errors, cards). As before, one tab sends one message at a time (Send stays disabled until the reply is in, whichever thread is shown); another tab is not held up. The late reply stays in its own thread and shows when that thread is opened again. Nothing is resent automatically. Text typed in the box stays with the box (it goes where the address is when Send is pressed).
+- Non-owners (no threads, the legacy page) given a `#chat/<id>` address are told threads are owner only and nothing is sent; plain `#chat` works as before. The Assistant and Jobs addresses are unchanged.
+
+Server side, nothing needed changing: every thread route takes the id from the path (`/threads/:id...`, `src/server.ts`), and the one-reply-at-a-time lock is per thread (`tryBegin(id)` in `src/threads.ts`, used by `turn()` in `src/thread-service.ts`), so two tabs on two threads run two turns at once and a busy thread blocks only itself (`test/threads.test.ts`, "a reply in progress in one thread does not block…"). Two tabs on the **same** thread share it as two devices always did: the second send while a reply runs gets 409.
+
+Tests: `test/chat-address.test.ts` (address parsing always runs; in Chromium against a fake server: direct link, reload, plain `#chat`, canonicalizing, the empty state, pick/New/Back/Forward, invalid, missing, deleted and refused addresses, late history/poll/send answers after the address moved, and two tabs of one browser sending concurrently).
+
+Manual two-tab check (owner, two threads A and B):
+
+1. Open A in tab 1; the address becomes `/#chat/<A>`. Copy it.
+2. Open a second tab at `/#chat`, pick B; its address becomes `/#chat/<B>`.
+3. Send a message in tab 1 and, before it answers, one in tab 2. Each reply appears only in its own tab and thread.
+4. Reload tab 1: it still shows A (although tab 2 opened B last). Reload tab 2: still B.
+5. In tab 2 pick A, then press Back: B again, with no new thread in the menu. Forward: A.
+6. Open `/#chat/not-a-thread` and `/#chat/<a made-up UUID>`: each says why, Send is disabled, and nothing appears in any thread.
+
 ## Concurrency and atomicity
 
 The service is one Node process. Every change to a thread is `mutate(id, fn)`: a synchronous read-modify-write on a copy that is written to disk first and only then replaces the live copy. There is no `await` between the read and the write, so concurrent requests cannot overwrite each other (a rename during a reply is kept), and a failed write changes nothing and returns 500. Two processes sharing one state directory are not supported.
