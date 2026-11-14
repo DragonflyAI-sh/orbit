@@ -1,6 +1,6 @@
 import type { Item, Message, ModelPort } from "./model.ts";
 import { hasContent, maskContent, maskText } from "./threads.ts";
-import type { Summary, Thread, ThreadMessage, Threads } from "./threads.ts";
+import type { StoredCall, Summary, Thread, ThreadMessage, Threads } from "./threads.ts";
 
 // What the model is sent for a thread, and per-thread compaction. Everything comes from the stored thread, never from
 // what the browser sends. docs/threads.md documents the budgets.
@@ -32,6 +32,10 @@ export const dataBlock = (name: string, body: string): string => `<orbit-data na
 
 // The model input for the next turn: messages after the summary, with every tool call followed by its result. A call and its
 // result are stored together and never separated, and call ids are made unique across the whole input.
+
+// How a stored call ended, in words: a call cut off by a deadline or a cancellation is never called "failed" (docs/tool-deadlines.md).
+export const callState = (c: Pick<StoredCall, "ok" | "interrupted" | "outcomeUnknown">): string =>
+  c.outcomeUnknown ? "outcome unknown (not retried)" : c.interrupted && !c.ok ? (c.interrupted === "timeout" ? "timed out, no result" : "cancelled, no result") : c.ok ? "ok" : "failed";
 export function buildItems(t: Thread): Item[] {
   const items: Item[] = [];
   const used = new Set<string>();
@@ -79,7 +83,7 @@ export function summaryNote(t: Thread): string | undefined {
 
 function renderForSummary(m: ThreadMessage): string {
   const lines = [`[${m.role}] ${m.text.slice(0, 1500)}`];
-  for (const c of m.calls ?? []) lines.push(`  tool ${c.name}(${c.arguments.slice(0, 200)}) -> ${c.ok ? "ok" : "failed"}${c.source ? ` [${c.provenance} ${c.source}]` : ""}: ${c.summary.slice(0, 300)}`);
+  for (const c of m.calls ?? []) lines.push(`  tool ${c.name}(${c.arguments.slice(0, 200)}) -> ${callState(c)}${c.source ? ` [${c.provenance} ${c.source}]` : ""}: ${c.summary.slice(0, 300)}`);
   return lines.join("\n");
 }
 
@@ -88,7 +92,7 @@ function renderForSummary(m: ThreadMessage): string {
 // that bound drops is named in the text itself and returned as `lossy`, so a digest never passes for a complete one.
 export function extractiveDigest(prior: string | undefined, older: ThreadMessage[]): { text: string; lossy?: string } {
   const lines = older.map((m) => {
-    const tools = (m.calls ?? []).map((c) => `${c.name}:${c.ok ? "ok" : "failed"}`).join(", ");
+    const tools = (m.calls ?? []).map((c) => `${c.name}:${callState(c)}`).join(", ");
     return `- ${m.role}: ${m.text.replace(/\s+/g, " ").slice(0, 200)}${tools ? ` [tools: ${tools}]` : ""}`;
   });
   const notes: string[] = [];

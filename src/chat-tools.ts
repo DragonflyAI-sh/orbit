@@ -7,11 +7,14 @@ import type { AdminOps } from "./ops-admin.ts";
 import type { SysOps } from "./ops-sys.ts";
 import type { Ops } from "./ops-client.ts";
 import { CONFIG_KEYS, type MutatingAction } from "./ops/admin-protocol.ts";
-import type { SysMutatingAction } from "./ops/sys-protocol.ts";
+import { PLAN_WAIT_MS, type SysMutatingAction } from "./ops/sys-protocol.ts";
 import { LOG_LINES_DEFAULT, LOG_LINES_MAX } from "./ops/protocol.ts";
 import type { Result } from "./ports.ts";
 import type { Toolbox } from "./tools.ts";
 import type { VaultEdits } from "./vault/tools.ts";
+
+// How far the OS-update proposal's tool deadline sits above the plan wait it already has (docs/tool-deadlines.md).
+export const OS_PLAN_DEADLINE_MARGIN_MS = 60_000;
 
 const obj = (properties: Record<string, unknown>, required: string[]) => ({ type: "object", properties, required, additionalProperties: false });
 const str = (description: string) => ({ type: "string", description });
@@ -47,6 +50,7 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
   const tools: ChatTool[] = [
     {
       name: "memory_search",
+      readOnly: true,
       description: "Keyword search over Rai's vault. Returns matching note paths. The result's source says whether the writable clone (fresh, includes ORBIT's own writes) or the read-only server copy (may lag) answered, and how fresh it is.",
       parameters: obj({ query: str("Keywords to search for") }, ["query"]),
       run: async (a) => {
@@ -56,6 +60,7 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
     },
     {
       name: "memory_read",
+      readOnly: true,
       description: "Read one vault note by the path memory_search returned.",
       parameters: obj({ path: str("Note path") }, ["path"]),
       run: async (a) => {
@@ -65,9 +70,10 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
     },
     {
       name: "github_repo_status",
+      readOnly: true,
       description: "Open pull requests and the latest main CI run for a public GitHub repo, read-only.",
       parameters: obj({ repo: str("owner/name") }, ["repo"]),
-      run: (a) => d.toolbox.call("github-repo-status", { repo: need(a, "repo") }),
+      run: (a, ctx) => d.toolbox.call("github-repo-status", { repo: need(a, "repo") }, { signal: ctx?.signal }),
     },
     {
       name: "notify",
@@ -81,6 +87,7 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
   if (config) {
     tools.push({
       name: "orbit_config_view",
+      readOnly: true,
       description: "Read-only view of how ORBIT is configured right now: the allowlisted non-secret orbit.env settings as the running process has them (trigger ids masked), credential names and sizes (never contents), the deployed commit, the jobs Routine definition from the repo, and each port's state. Each section says where it came from or why it is unavailable. It cannot change anything: configuration changes are only ever ops_propose_config_change, confirmed by Rai.",
       parameters: obj({}, []),
       run: async (a) => {
@@ -93,6 +100,7 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
   if (ops) {
     const op = (name: string, action: Parameters<Ops["call"]>[0], description: string): ChatTool => ({
       name,
+      readOnly: true,
       description: `${description} Read-only, from the orbit-ops root helper; nothing is changed or refreshed.`,
       parameters: obj({}, []),
       run: (a) => {
@@ -104,6 +112,7 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
       op("ops_orbit_status", "orbit_status", "Status of the ORBIT service on the server: systemd state, restarts, and the commit it is serving."),
       {
         name: "ops_orbit_logs",
+        readOnly: true,
         description: `The last N lines of the ORBIT service log (default ${LOG_LINES_DEFAULT}, at most ${LOG_LINES_MAX}; long lines are cut and secrets are redacted). Read-only.`,
         parameters: obj({ lines: { type: "integer", minimum: 1, maximum: LOG_LINES_MAX, description: "How many recent lines" } }, []),
         run: (a) => {
@@ -160,6 +169,7 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
       ),
       {
         name: "ops_admin_operations",
+        readOnly: true,
         description: "Server operations Rai has confirmed (restart, deploy, rollback, config change, vault refresh), newest first, with what the helper actually observed: state, whether /status was verified healthy on which commit, and the outcome. Refreshes in-flight ones from the helper first. 'accepted' or 'running' means NOT verified yet.",
         parameters: obj({}, []),
         run: async (a) => {
@@ -176,6 +186,8 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
     // separate actions, three separate confirmations: nothing is bundled.
     const proposeSys = (name: string, action: SysMutatingAction, description: string, schedulable = false): ChatTool => ({
       name,
+      // An OS update proposal waits for the helper's update plan (up to PLAN_WAIT_MS), so it gets a deadline above that wait.
+      ...(action === "install_os_updates" ? { deadlineMs: PLAN_WAIT_MS + OS_PLAN_DEADLINE_MARGIN_MS } : {}),
       description: `${description} This does NOT do it: it creates a proposal that Rai must confirm with a button on the page (a separate confirmation for each action), and a privileged helper then carries it out. If this tool returns an error, no proposal exists: say so, and never claim a proposal or an operation exists unless this tool returned a proposalId. Never say it happened until ops_sys_operations shows 'verified'; 'accepted', 'scheduled', 'running' and 'rebooting' are not success.`,
       parameters: schedulable ? obj({ at: str("Optional. Reboot at this UTC time, YYYY-MM-DDTHH:MM:SS.sssZ, between 2 minutes and 24 hours ahead. Omit to reboot now (after confirmation).") }, []) : obj({}, []),
       run: async (a) => {
@@ -206,6 +218,7 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
       },
       {
         name: "ops_sys_operations",
+        readOnly: true,
         description: "Tier 3 operations Rai has confirmed (OS updates, reboot, Funnel), newest first, with what the helper actually observed: state, verification and evidence. Refreshes in-flight ones from the helper first. 'accepted', 'scheduled', 'running' and 'rebooting' mean NOT verified yet ('scheduled' = not yet fired, still cancellable); 'cancelled' means withdrawn before it fired; 'unverified' means a command ran but nothing could confirm the result.",
         parameters: obj({}, []),
         run: async (a) => {
@@ -221,12 +234,14 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
     tools.push(
       {
         name: "jobs_list",
+        readOnly: true,
         description: "List all ORBIT jobs (cloud runners), newest first: total, then one short row per job. Use job_status for detail.",
         parameters: obj({}, []),
         run: async () => ({ value: compactList(jobs.all(), (j) => jobs.health(j)), provenance: "live", source: "jobs" }),
       },
       {
         name: "job_status",
+        readOnly: true,
         description: "State, health, steers and the last 20 events of one job (it says how many earlier events were left out).",
         parameters: obj({ id: str("Job id") }, ["id"]),
         run: async (a) => {

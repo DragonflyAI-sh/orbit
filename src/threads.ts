@@ -63,6 +63,10 @@ export type StoredCall = {
   source?: string;
   summary: string;
   at: string;
+  // Set when the turn stopped waiting for this call (docs/tool-deadlines.md). `outcomeUnknown`: it may have taken effect.
+  interrupted?: "timeout" | "cancelled";
+  abort?: "requested" | "confirmed";
+  outcomeUnknown?: boolean;
 };
 
 export type DuplicateJob = { job: string; similarity: number; state: string; launchedAt?: string };
@@ -199,7 +203,9 @@ export type Threads = ReturnType<typeof threadStore>;
 export function threadStore(dir: string | undefined, now: () => Date = () => new Date()) {
   const threads = new Map<string, Thread>();
   const cardIndex = new Map<string, string>();
-  const busy = new Set<string>();
+  // The turn that holds each busy thread. Only that turn's own token frees it, so a turn that is already over can never clear
+  // the busy flag of a newer one.
+  const busy = new Map<string, symbol>();
   const problems: string[] = [];
   let noticeAcked: string | undefined;
 
@@ -328,12 +334,21 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
 
     // ---- one turn ----
     // A thread runs one reply at a time. A second request while one is running is refused, not queued, so messages cannot interleave.
-    tryBegin(id: string): boolean {
-      if (!threads.has(id) || busy.has(id)) return false;
-      busy.add(id);
+    // Returns the turn's token, or undefined when the thread is missing or already busy.
+    tryBegin(id: string): symbol | undefined {
+      if (!threads.has(id) || busy.has(id)) return undefined;
+      const token = Symbol(id);
+      busy.set(id, token);
+      return token;
+    },
+    // Frees the thread only if `token` is the turn that holds it. Returns whether it did.
+    end(id: string, token: symbol): boolean {
+      if (busy.get(id) !== token) return false;
+      busy.delete(id);
       return true;
     },
-    end: (id: string) => void busy.delete(id),
+    // Whether `token` is still the turn that holds the thread.
+    holds: (id: string, token: symbol) => busy.get(id) === token,
     isBusy: (id: string) => busy.has(id),
 
     appendUser(id: string, text: string): ThreadMessage {

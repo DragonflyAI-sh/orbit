@@ -1,4 +1,4 @@
-import { runChat } from "./agent.ts";
+import { runChat, TurnInterrupted } from "./agent.ts";
 import type { ChatTool, Proposal, Proposals } from "./agent.ts";
 import type { Jobs } from "./jobs.ts";
 import { replySource } from "./model.ts";
@@ -44,6 +44,11 @@ export function threadService(d: {
   now?: () => Date;
   // Characters of live context before compaction starts. Tests lower it; production uses the documented default.
   budget?: number;
+  // Tool execution deadline and abort grace period (docs/tool-deadlines.md). Tests lower them; production uses the defaults.
+  toolDeadlineMs?: number;
+  abortGraceMs?: number;
+  // Where a tool call that ends after its turn stopped waiting is reported. Logging only; nothing is written to the thread.
+  onLateTool?: (late: { thread: string; name: string; ok: boolean; error?: string }) => void;
 }) {
   const { threads, model, proposals, jobs, admin, sys, recent } = d;
   const now = d.now ?? (() => new Date());
@@ -129,71 +134,92 @@ export function threadService(d: {
     }
   };
 
-  async function turn(id: string, text: string, prep: TurnPrep): Promise<{ thread: ThreadView; error?: string }> {
-    if (!threads.tryBegin(id)) {
+  const onLateTool =
+    d.onLateTool ??
+    ((late: { thread: string; name: string; ok: boolean; error?: string }) =>
+      console.log(JSON.stringify({ at: now().toISOString(), event: "chat_tool_late", thread: late.thread, tool: late.name, ok: late.ok, note: "ended after its turn stopped waiting; nothing was written to the thread" })));
+
+  // `signal` cancels the turn (docs/tool-deadlines.md). No route passes one yet.
+  async function turn(id: string, text: string, prep: TurnPrep, opts: { signal?: AbortSignal } = {}): Promise<{ thread: ThreadView; error?: string }> {
+    const token = threads.tryBegin(id);
+    if (!token) {
       throw new ThreadError(409, threads.get(id) ? "A reply is already in progress in this thread." : "No thread with that id.");
     }
+    let outcome: { error?: string };
     try {
-      if (threads.get(id)!.archived) throw new ThreadError(409, "This thread is archived. Restore it to continue.");
-      reconcile(id);
-      // Older context is summarized first, so the model call below is within budget. A failure here never blocks the reply.
-      await compactThread({ threads, model, id, now, budget: d.budget }).catch(() => {});
-      threads.appendUser(id, text);
-      const mid = threads.beginAssistant(id);
-      const t = threads.get(id)!;
-      const notes = [prep.notes, await recent?.note(), summaryNote(t), t.cards.length ? dataBlock("proposal-cards", `Proposal cards in this thread, from ORBIT's records:\n${cardLines(t).join("\n")}`) : undefined].filter(Boolean).join("\n\n") || undefined;
-      try {
-        let reply: string;
-        let provenance: "live" | "mock";
-        let source: string;
-        let capped = false;
-        let fallback: FallbackInfo | undefined;
-        let accounting: string[] | undefined;
-        let incomplete: string[] | undefined;
-        if (prep.tools.length && model.step) {
-          const outcome = await runChat({
-            model,
-            messages: buildItems(t),
-            limits: prep.limits,
-            notes,
-            tools: prep.tools,
-            allow: prep.allow,
-            // The owner's interactive chat is the one place a tool-using turn may use the paid fallback.
-            fallback: true,
-            onCall: ({ call_id, name, arguments: args, output, record }) => {
-              threads.addCall(id, mid, { callId: call_id, name, arguments: args, output, ok: record.ok, provenance: record.provenance, source: record.source, summary: record.summary, at: now().toISOString() });
-              const pid = proposalIdOf(output);
-              const p = pid ? proposals.peek(pid) : undefined;
-              if (p) threads.addCard(id, mid, cardOf(p));
-            },
-          });
-          reply = outcome.text || "(the model returned no text)";
-          provenance = "live";
-          fallback = outcome.fallback;
-          source = replySource(model.status().impl, fallback, outcome.mixed);
-          capped = outcome.capped;
-          accounting = outcome.accounting;
-          incomplete = outcome.incomplete;
-        } else {
-          const r = await model.reply(buildMessages(t), prep.limits, notes);
-          reply = r.value;
-          provenance = r.provenance;
-          source = r.source;
-          fallback = r.fallback;
-          accounting = r.accounting;
-          incomplete = r.incomplete;
-        }
-        threads.patchMessage(id, mid, { text: reply, status: "done", provenance, source, memory: prep.memory, ...(capped ? { capped } : {}), ...(fallback ? { fallback } : {}), ...(accounting?.length ? { accounting } : {}), ...(incomplete?.length ? { incomplete } : {}) });
-        recent?.consider(id, { isOwner: prep.isOwner });
-        return { thread: view(id)! };
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        // The user's message and every call that completed stay on record; the reply is marked as failed.
-        threads.patchMessage(id, mid, { status: "error", error: `The model call failed: ${detail}` });
-        return { thread: view(id)!, error: `The model call failed: ${detail}` };
-      }
+      outcome = await held(id, text, prep, opts, token);
     } finally {
-      threads.end(id);
+      threads.end(id, token);
+    }
+    // Taken after the thread is freed, so the view the caller gets says `busy: false`.
+    return { thread: view(id)!, ...outcome };
+  }
+
+  async function held(id: string, text: string, prep: TurnPrep, opts: { signal?: AbortSignal }, token: symbol): Promise<{ error?: string }> {
+    if (threads.get(id)!.archived) throw new ThreadError(409, "This thread is archived. Restore it to continue.");
+    reconcile(id);
+    // Older context is summarized first, so the model call below is within budget. A failure here never blocks the reply.
+    await compactThread({ threads, model, id, now, budget: d.budget }).catch(() => {});
+    threads.appendUser(id, text);
+    const mid = threads.beginAssistant(id);
+    const t = threads.get(id)!;
+    const notes = [prep.notes, await recent?.note(), summaryNote(t), t.cards.length ? dataBlock("proposal-cards", `Proposal cards in this thread, from ORBIT's records:\n${cardLines(t).join("\n")}`) : undefined].filter(Boolean).join("\n\n") || undefined;
+    try {
+      let reply: string;
+      let provenance: "live" | "mock";
+      let source: string;
+      let capped = false;
+      let fallback: FallbackInfo | undefined;
+      let accounting: string[] | undefined;
+      let incomplete: string[] | undefined;
+      if (prep.tools.length && model.step) {
+        const outcome = await runChat({
+          model,
+          messages: buildItems(t),
+          limits: prep.limits,
+          notes,
+          tools: prep.tools,
+          allow: prep.allow,
+          // The owner's interactive chat is the one place a tool-using turn may use the paid fallback.
+          fallback: true,
+          toolDeadlineMs: d.toolDeadlineMs,
+          abortGraceMs: d.abortGraceMs,
+          signal: opts.signal,
+          onLate: (late) => onLateTool({ thread: id, ...late }),
+          onCall: ({ call_id, name, arguments: args, output, record }) => {
+            // Only the turn that holds the thread writes to it.
+            if (!threads.holds(id, token)) throw new Error("This turn no longer holds the thread.");
+            threads.addCall(id, mid, { callId: call_id, name, arguments: args, output, ok: record.ok, provenance: record.provenance, source: record.source, summary: record.summary, at: now().toISOString(), ...(record.interrupted ? { interrupted: record.interrupted } : {}), ...(record.abort ? { abort: record.abort } : {}), ...(record.outcomeUnknown ? { outcomeUnknown: true } : {}) });
+            const pid = proposalIdOf(output);
+            const p = pid ? proposals.peek(pid) : undefined;
+            if (p) threads.addCard(id, mid, cardOf(p));
+          },
+        });
+        reply = outcome.text || "(the model returned no text)";
+        provenance = "live";
+        fallback = outcome.fallback;
+        source = replySource(model.status().impl, fallback, outcome.mixed);
+        capped = outcome.capped;
+        accounting = outcome.accounting;
+        incomplete = outcome.incomplete;
+      } else {
+        const r = await model.reply(buildMessages(t), prep.limits, notes, opts.signal ? { signal: opts.signal } : undefined);
+        reply = r.value;
+        provenance = r.provenance;
+        source = r.source;
+        fallback = r.fallback;
+        accounting = r.accounting;
+        incomplete = r.incomplete;
+      }
+      threads.patchMessage(id, mid, { text: reply, status: "done", provenance, source, memory: prep.memory, ...(capped ? { capped } : {}), ...(fallback ? { fallback } : {}), ...(accounting?.length ? { accounting } : {}), ...(incomplete?.length ? { incomplete } : {}) });
+      recent?.consider(id, { isOwner: prep.isOwner });
+      return {};
+    } catch (err) {
+      // A tool call cut off by its deadline or a cancellation is not a model failure: say exactly what is known about it.
+      const error = err instanceof TurnInterrupted ? err.message : `The model call failed: ${err instanceof Error ? err.message : String(err)}`;
+      // The user's message and every call that completed (or was cut off) stay on record; the reply is marked as not completed.
+      threads.patchMessage(id, mid, { status: "error", error });
+      return { error };
     }
   }
 

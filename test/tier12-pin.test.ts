@@ -47,12 +47,14 @@ test("tier 1 and tier 2 implementation, units, installers and docs are byte-iden
 
 // Re-pinned for general tools part 1: memory_search/memory_read refresh the vault clone first, and the vault write tools and
 // orbit_config_view are added after the memory tools. Nothing in the tier 1/2/3 tool blocks changed.
+// Re-pinned for chat tool deadlines (docs/tool-deadlines.md): the read-only tools are marked `readOnly: true` and github_repo_status
+// passes the call's abort signal to its requests. No tool's arguments, policy, proposal or confirmation path changed.
 test("shared integration: chat-tools.ts is identical to main outside the tier 3 block", () => {
   const lines = bytes("src/chat-tools.ts").toString("utf8").split("\n");
   const start = lines.indexOf("  const sys = d.sys;");
   const end = lines.indexOf("  const jobs = d.jobs;");
   assert.ok(start > 0 && end > start, "the tier 3 block is still delimited by the same two lines");
-  assert.equal(sha(lines.slice(0, start).concat(lines.slice(end)).join("\n")), "5e3795e60063566b005ee55c6e1ea21890f42613b052e939d3caf82a3e2fac51");
+  assert.equal(sha(lines.slice(0, start).concat(lines.slice(end)).join("\n")), "30d5f41930f0ce2d4cb7e99b14cc0cd208e5b316c763e3024579808a6f346c2f");
 });
 
 test("the tier 1/2 admin action list gained nothing, and tier 3 actions never appear in tier 1/2 code", () => {

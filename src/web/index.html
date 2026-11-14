@@ -190,8 +190,8 @@
     box.append(`Tool calls (${calls.length}):`);
     for (const c of calls) {
       const row = document.createElement("div");
-      const src = c.ok ? `${c.provenance} · ${c.source}` : "failed";
-      row.textContent = `${c.ok ? "✓" : "✗"} ${c.name}(${JSON.stringify(c.args).slice(0, 120)}) [${src}] ${c.summary.slice(0, 160)}`;
+      const src = callState(c);
+      row.textContent = `${c.ok ? "✓" : c.outcomeUnknown ? "?" : "✗"} ${c.name}(${JSON.stringify(c.args).slice(0, 120)}) [${src}] ${c.summary.slice(0, 160)}`;
       box.append(row);
     }
     el.append(box);
@@ -1093,6 +1093,15 @@
   // </markdown>
 
   // <threads>
+  // How a tool call ended. A call ORBIT stopped waiting for is never shown as "failed": if it may have had an effect, its outcome is
+  // unknown (docs/tool-deadlines.md).
+  function callState(c) {
+    if (c.ok) return `${c.provenance} · ${c.source}${c.interrupted ? " · completed after the deadline" : ""}`;
+    if (c.outcomeUnknown) return "outcome unknown, not retried";
+    if (c.interrupted) return c.interrupted === "timeout" ? "timed out, no result" : "cancelled, no result";
+    return "failed";
+  }
+
   // Pure helpers for the thread view. Stored text is only ever put in with textContent or the safe linkify above; nothing here
   // parses HTML. Tests load this block (with the notes block) on its own.
   const CARD_STATE_TEXT = { open: "Waiting for your click", confirmed: "Confirmed", cancelled: "Cancelled", expired: "Expired: nothing was done", refused: "Refused: nothing was done" };
@@ -1162,7 +1171,7 @@
     if (m.incomplete && m.incomplete.length) warn("incomplete", `Incomplete reply: ${m.incomplete.join("; ")}`);
     if (m.accounting && m.accounting.length) warn("accounting", `Spend accounting: ${m.accounting.join("; ")}`);
     if (m.calls && m.calls.length) {
-      const rows = m.calls.map((c) => `${c.ok ? "✓" : "✗"} ${c.name}(${String(c.arguments).slice(0, 120)}) [${c.ok ? `${c.provenance} · ${c.source}` : "failed"}] ${String(c.summary).slice(0, 160)}`);
+      const rows = m.calls.map((c) => `${c.ok ? "✓" : c.outcomeUnknown ? "?" : "✗"} ${c.name}(${String(c.arguments).slice(0, 120)}) [${callState(c)}] ${String(c.summary).slice(0, 160)}`);
       parts.push({ key: "calls", sig: JSON.stringify(rows), build: () => mk("span", { className: "calls" }, `Tool calls (${rows.length}):`, ...rows.map((r) => mk("div", { textContent: r }))) });
     }
     for (const id of m.cards || []) { const c = cardSpec && cardSpec(id); if (c) parts.push({ key: `card:${id}`, sig: c.sig, build: c.build }); }
