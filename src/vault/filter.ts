@@ -256,6 +256,19 @@ function urlCredentialHits(text: string, out: Hit[]): void {
   }
 }
 
+// The "sk-" family has a hyphen in its body class, so an ordinary kebab-case name that happens to start with "sk-"
+// ("sk-learn-pipeline-migration-notes", a wikilink to it, a path holding it) would match. Generated keys are random runs that fail
+// the word-like test; a body that reads as ordinary words (judged after the known sub-prefix) is a name, not a key (audit D3). Only
+// this family gets the guard: the other prefixes have no "-" in their body class or are not word-shaped.
+const SK_PREFIX = /^sk-(?:ant-|proj-|live-|or-v1-)?/;
+function providerHits(text: string, out: Hit[]): void {
+  for (const m of text.matchAll(PROVIDER)) {
+    const sk = SK_PREFIX.exec(m[0]);
+    if (sk && wordLikeRun(m[0].slice(sk[0].length))) continue;
+    out.push({ rule: "secret.provider-token", start: m.index ?? 0, end: (m.index ?? 0) + m[0].length, replacement: "[redacted token]" });
+  }
+}
+
 function plainHits(text: string, re: RegExp, rule: FilterRule, replacement: (s: string) => string, out: Hit[]): void {
   for (const m of text.matchAll(re)) out.push({ rule, start: m.index ?? 0, end: (m.index ?? 0) + m[0].length, replacement: replacement(m[0]) });
 }
@@ -265,7 +278,7 @@ function plainHits(text: string, re: RegExp, rule: FilterRule, replacement: (s: 
 function scan(text: string): Hit[] {
   const hits: Hit[] = [];
   privateKeyHits(text, hits);
-  plainHits(text, PROVIDER, "secret.provider-token", () => "[redacted token]", hits);
+  providerHits(text, hits);
   plainHits(text, JWT, "secret.jwt", () => "[redacted jwt]", hits);
   bearerHits(text, hits);
   urlCredentialHits(text, hits);
