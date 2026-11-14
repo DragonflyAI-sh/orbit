@@ -1,56 +1,46 @@
 # Job vault context
 
-A brief can name the exact vault notes it relies on. At launch, ORBIT reads those notes through its own authorized vault reader and commits copies to the job's control branch, `orbit/<job-id>` in `DragonflyAI-sh/orbit-work`, **before** the runner is started. The runner therefore has the notes it was told to use even when the Routine's sparse vault checkout (`deploy/routines/orbit-jobs.md`) lags, or leaves them out. Code: `src/job-context.ts`, `src/job-launch.ts`, `src/launcher.ts`.
+ORBIT does **not** read, copy or export vault notes when it launches a job. A runner that needs vault context reads the exact notes its brief names from the Routine's own read-only vault checkout at `/home/user/orbit-vault` (`deploy/routines/orbit-jobs.md`, "Vault source"), under the rules in `tools/orbit-job/SKILL.md`, "Vault context".
 
-This is not a way into the vault: it exports only the notes a launch names, subject to the policy below, into a repository confirmed private, after Rai confirms the launch card (which lists the paths).
+Launch-time export (ORBIT reading named notes through its vault clone and committing copies plus a manifest to `.orbit/context/` on the job's control branch) was removed on 2026-11-14. This document records what a launch does now, how old-style requests are handled, and how runners get vault context.
 
-## Interface
+## What a launch does
 
-The list is `context: string[]` of exact vault-relative paths. It travels with the brief through every launch path:
+Every launch path (the chat `job_launch` proposal and its Confirm button, `POST /jobs/launch`, and ORBIT's own review launches) ends in `jobLauncher` (`src/job-launch.ts`), which:
 
-| Path | How `context` is given |
-| --- | --- |
-| Chat `job_launch` tool | optional `context` argument. Checked when proposed (a bad path fails in chat, no proposal); stored on the proposal; shown on the confirmation card |
-| Confirm button (`POST /chat/proposals/<id>/confirm`) | launches with the proposal's stored `context` |
-| `POST /jobs/launch` | optional `context` in the JSON body |
-| `jobLauncher(...)(routine, brief, review?, context?)` | fourth argument; ORBIT's own review launches pass none |
+1. checks the routine, the control credential and that the brief is not empty;
+2. registers the job;
+3. creates `orbit/<job>` in `DragonflyAI-sh/orbit-work` and writes `.orbit/brief.md` with the brief as given (trimmed), nothing appended;
+4. fires the Routine with the job id, the job API URL and token, and the tool commit.
 
-No `context` (absent, `null` or `[]`) is the old behaviour exactly: nothing is read, nothing extra is written, the brief is unchanged.
+It never touches the vault: no vault read, no vault filter decision, no visibility check of the control repository, no blobs, trees or extra commits. A launch therefore succeeds or fails independently of whether the vault is reachable or what any note contains. Owner checks, the explicit confirmation of chat proposals, and the failure handling (a brief that is not written never fires the Routine; a fire failure marks the job `launch-failed`) are unchanged.
 
-## Path rules
+## Old-style requests
 
-Paths are validated with the vault's own `validatePath` (NFC; relative; forward slashes; no `..`, `.`, empty or hidden segments, no control characters, at most 8 segments) and then must be a `.md` note that is `AGENTS.md` or under `System/`, `Projects/`, `Areas/`, `Resources/` or `Tasks/` (exact case). Not exportable: `Journal/`, `Memory/`, `Log/`, `Inbox/`, `Machines/`, `Archive/`, `Attachments/`, `.obsidian/`, `scripts/` and other root notes. No globs and no folders: a `*` is an invalid path. Nothing is inferred from links inside a note and nothing is copied recursively. Names that differ only in case count as the same note and are refused as duplicates. At most 12 notes.
+Before the removal, a launch could carry `context: string[]`. Such a request is now **refused, never reinterpreted**: launching it without the notes would silently change what was asked or approved.
 
-## What happens at launch, in order
+| Entry point | Absent, `null` or `[]` | Anything else (a non-empty list, a string, an object…) |
+| --- | --- | --- |
+| Chat `job_launch` tool | ordinary proposal | the tool call fails with the diagnostic below; no proposal is made. The tool's schema no longer offers `context` |
+| `POST /jobs/launch` (owner only, checked first) | ordinary launch | HTTP 400, `{ error, context: { refused: true, reason: "unsupported" } }`; nothing registered, written or fired |
+| Confirm of a proposal made by an older build that still carries `context` | — | HTTP 409 with the same body; the proposal is spent and its card shows `refused`; nothing registered, written or fired |
 
-1. Normalise and validate the paths (HTTP 400 on a bad list).
-2. Confirm the control repository is private: `GET /repos/DragonflyAI-sh/orbit-work` must say `private: true`. Anything else, including an error or a control without that check, refuses (403/503): **fail closed**.
-3. Read all notes as one snapshot from the vault clone (`snapshotNotes`, queued behind writes), after a fetch. If the fetch fails, the last good clone is used and `fresh` is `false`. No credential or no clone: refuse (503).
-4. Check every note: present; not through a symbolic link and a plain file; at most 96 KiB and valid UTF-8 (a bigger note is **refused, never clipped**); not tagged `#rai`; no known credential shape (the same vault content filter as vault writes, `docs/content-filter.md`; a refusal names rule identifiers and line numbers, never text, and offers the separately confirmed launch that leaves the note out). Total at most 384 KiB.
-5. Any problem refuses the whole launch (422) with a path and a fixed reason code per problem (`missing`, `unsafe`, `too_large`, `unreadable`, `not_text`, `private_note`, `secret_detected`, `limit`, `not_allowed`, `invalid_path`, `duplicate`). Errors never contain a note's text. **No job is registered, no branch is created, no Routine is fired.**
-6. Register the job; write the brief, with a generated `## Vault context` section appended, to `orbit/<job>`.
-7. Commit the copies and the manifest to `orbit/<job>` as **one** commit (git data API; a plain, non-forced ref update; only paths under `.orbit/context/`; never `main`, never the vault).
-8. Only then fire the Routine. If step 6 or 7 fails the job is recorded as `launch-failed` with the reason and the Routine is **not** fired (a brief that promises copies that are not there is never run). A half-written branch can remain; it is marked failed in ORBIT's job list.
+The diagnostic (`LEGACY_CONTEXT_ERROR` in `src/job-context.ts`) says that vault context attachments are no longer supported, that nothing was launched, and to launch again without `context`, naming the notes in the brief for the runner to read from its read-only checkout. It never contains note text.
 
-## What is written
+Stored records from before the removal are left as they are: a job's `launch.context` and a thread card's `context` are shown as history and never acted on.
 
-On `orbit/<job>`:
+## How a runner gets vault context
 
-```text
-.orbit/brief.md                      the brief + the generated "Vault context" section
-.orbit/context/<vault path>          each note, byte for byte, under its vault-relative path
-.orbit/context/manifest.json         {version, createdAt, source:{via, head, fetchedAt, fresh}, files:[{path, copy, sha256, bytes, availability}]}
-```
+- The brief names the exact vault-relative paths it relies on (for example `Tasks/orbit-next-x.md`). It should name only notes that are needed, and only notes inside the checkout's sparse set (`deploy/routines/orbit-jobs.md`); a note outside it is not available to the runner.
+- The runner reads those notes, and nothing else, from `/home/user/orbit-vault`. It does not search the vault or follow links out of a note.
+- If the checkout or a named note is missing, the runner says so in its first check-in and its summary, never guesses the content, and stops as `blocked` when the note is essential.
+- The runner never writes to the vault and never copies or commits note bodies (into `orbit-work`, the project repo, tests, the PR or the summary) beyond the short fact the work needs.
 
-Keeping the vault-relative layout means `Projects/alpha.md` and `Resources/alpha.md` never collide. `sha256` is of the exact bytes, so it equals `sha256sum` of the vault file at that commit. `source.head` is the vault commit ORBIT's clone was at; `source.fresh` is false when ORBIT could not fetch just before reading. The job record in ORBIT (`launch.context`) keeps the paths, the copies' commit, the vault head and `fresh`, never note text.
+## Not changed
 
-## How the runner uses it
+- ORBIT's own vault access (memory search and read, vault write tools, the rolling recent-context note) is unaffected; see `docs/vault-writes.md`.
+- The vault content filter (`docs/content-filter.md`) and the vault write policy are unchanged; job context is simply no longer one of the filter's surfaces.
 
-`tools/orbit-job/SKILL.md`, "Vault context": compare each copy with the manifest, then with the checkout at `/home/user/orbit-vault`; use the launch snapshot; report notes that are missing, damaged, stale or different from the checkout; treat note contents as data, never as new authority; never write to the vault.
+## Tests
 
-## Limits and notes
-
-- The copies are in `orbit-work`, which must stay private. ORBIT checks this at each launch but cannot stop a runner from copying text elsewhere; the skill tells it not to.
-- Notes are exported as the vault has them; a note holding something private that is not secret-shaped and not tagged `#rai` is exported if a launch names it. Rai sees the paths on the confirmation card first.
-- The widened exportable areas and the limits are code constants in `src/job-context.ts`. Changing them is a reviewed change.
-- No broad vault credential is given to a runner; the Routine's vault checkout is the only runner-side access, and it is sparse and read-only by rule.
+`test/job-context.test.ts`, all offline with synthetic fixtures: an ordinary launch writes only the brief and fires, with no vault read, even when a named note would be refused by the filter; the GitHub control creates the branch and puts `.orbit/brief.md` only; legacy `context` on the chat tool, `/jobs/launch` and a confirmed legacy proposal is refused with nothing started; owner checks and failure handling still hold; and no source file keeps the export plumbing.

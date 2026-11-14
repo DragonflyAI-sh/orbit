@@ -24,10 +24,6 @@ export function credential(env: NodeJS.ProcessEnv, name: string): string | undef
 export type GitRecord = { head?: string; started: boolean; toolCommit?: string; summary?: { status: string; text: string } };
 export type ControlRepo = {
   pushBrief(job: string, brief: string): Promise<{ branch: string; commit: string }>;
-  // Commits the given files (paths already under .orbit/context/) to orbit/<job> in ONE commit; never to main or another branch.
-  pushContext?(job: string, files: { path: string; content: string }[]): Promise<{ commit: string }>;
-  // True only when GitHub says the control repository is private. Anything else (public, internal, an error) is false at the caller.
-  isPrivate?(): Promise<boolean>;
   // What the runner wrote on orbit/<job>, read from git. Undefined when the branch does not exist.
   readJob?(job: string): Promise<GitRecord | undefined>;
 };
@@ -64,31 +60,6 @@ export function githubControl(token: string, repo = CONTROL_REPO, fetcher: Fetch
         body: JSON.stringify({ message: `brief for ${job}`, content: Buffer.from(brief).toString("base64"), branch }),
       })) as { commit: { sha: string } };
       return { branch, commit: put.commit.sha };
-    },
-
-    async isPrivate() {
-      const r = (await call("")) as { private?: unknown; visibility?: unknown };
-      return r.private === true && (r.visibility === undefined || r.visibility === "private");
-    },
-
-    // One commit on the existing job branch through the git data API: blobs, a tree on top of the branch's tree, a commit, and a
-    // plain (non-forced) ref update. Every path must sit under .orbit/context/, so this can never touch the brief, steers or code.
-    async pushContext(job, files) {
-      const branch = `orbit/${job}`;
-      for (const f of files) {
-        if (!f.path.startsWith(".orbit/context/") || f.path.split("/").some((s) => s === ".." || s === "." || s === "")) throw new Error("context file outside .orbit/context/");
-      }
-      const ref = (await call(`/git/ref/heads/${branch}`)) as { object: { sha: string } };
-      const base = (await call(`/git/commits/${ref.object.sha}`)) as { tree: { sha: string } };
-      const tree: { path: string; mode: "100644"; type: "blob"; sha: string }[] = [];
-      for (const f of files) {
-        const blob = (await call("/git/blobs", { method: "POST", body: JSON.stringify({ content: Buffer.from(f.content).toString("base64"), encoding: "base64" }) })) as { sha: string };
-        tree.push({ path: f.path, mode: "100644", type: "blob", sha: blob.sha });
-      }
-      const newTree = (await call("/git/trees", { method: "POST", body: JSON.stringify({ base_tree: base.tree.sha, tree }) })) as { sha: string };
-      const commit = (await call("/git/commits", { method: "POST", body: JSON.stringify({ message: `vault context for ${job}`, tree: newTree.sha, parents: [ref.object.sha] }) })) as { sha: string };
-      await call(`/git/refs/heads/${branch}`, { method: "PATCH", body: JSON.stringify({ sha: commit.sha, force: false }) });
-      return { commit: commit.sha };
     },
 
     async readJob(job) {

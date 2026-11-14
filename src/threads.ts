@@ -82,7 +82,7 @@ export type Card = {
   routine?: string;
   brief?: string;
   briefMasked?: boolean;
-  // Vault notes ORBIT will copy to the job at launch (job_launch cards).
+  // Legacy (job_launch cards stored by an older build): the vault notes that build was to copy at launch. Never set any more.
   context?: string[];
   job?: string;
   text?: string;

@@ -72,7 +72,7 @@ Checkout is git **cone mode**, whose patterns are directory names, not file patt
 - Why not a plain folder list: `["System/","Projects/","Resources/","Tasks/"]` is also valid, but in cone mode it checks out those folders **recursively**, including every `Resources/` subfolder (531 files in the vault when measured), so the odd list was kept to leave subfolders out.
 - Not what the paths read as: a non-cone checkout (`git sparse-checkout set --no-cone`) with the same paths would check out exactly the six `orbit-next`-style paths. That would be narrower than the configuration Rai chose; it is reported here as a discrepancy with the wording, not applied. Changing the live configuration is Rai's decision.
 
-Because the checkout lags the vault and leaves out most of it, a brief that relies on a note lists its exact path, and ORBIT copies that note into the job at launch (`docs/job-context.md`). A note named by a brief but absent from the checkout is therefore still available as `.orbit/context/<path>`.
+This checkout is the **only** way a runner sees the vault. ORBIT does not read or copy vault notes at launch (launch-time export was removed; `docs/job-context.md`). A brief that relies on a note names its exact path, and the runner reads it from `/home/user/orbit-vault` under the skill's rules. Because the checkout lags the vault and leaves out most of it, a named note can be absent: the runner then reports it as missing and never guesses its content. A brief should therefore only rely on notes inside the checked-out set above; widening the sparse paths is a live configuration change for Rai to make, not something a job or ORBIT does.
 
 ## Recreate it
 
@@ -91,3 +91,4 @@ Because the checkout lags the vault and leaves out most of it, a brief that reli
 - 2026-11-08 pin replaced by `Tool commit` from the fire text (PR #28); connectors cleared; schedule removed; `--tool-commit` passed to `orbit-job start` (PR #29).
 - 2026-11-08 every step made self-contained for separate shells (commit re-read from `~/.orbit-tool-commit`, tool run by its home path).
 - 2026-11-12 `phairow/orbit-vault` added as a third, read-only source with sparse paths (cone-mode semantics observed and recorded above); launch-time vault context copies (`docs/job-context.md`).
+- 2026-11-14 launch-time vault context copies removed; the read-only checkout is the only runner-side vault access (`docs/job-context.md`). No change to the live configuration was needed for this.

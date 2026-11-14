@@ -10,6 +10,8 @@ Job: `orbit-202611130644-epou`. Base: `DragonflyAI-sh/orbit` main at **`51c1ae3e
 
 A PASS never means production works: no gate here was verified live by this runner.
 
+> **Later change (2026-11-14):** launch-time vault context export was removed (`docs/job-context.md`). The rows below that cite context export, `prepareContext`, `pushContext` or the post-deploy context end-to-end check describe code that no longer exists; that live check is no longer needed. They are kept as the record of this audit.
+
 This audit adds tests and this document only. It changes no production code. It is not one of the two independent reviews that sensitive changes need.
 
 ## How it was checked
