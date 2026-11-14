@@ -3,8 +3,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Identify } from "./identity.ts";
 import { jobLauncher } from "./job-launch.ts";
-import { withContextPaths } from "./job-context.ts";
-import type { ContextReader } from "./job-context.ts";
+import { hasLegacyContext, LEGACY_CONTEXT_ERROR, refuseLegacyContext } from "./job-context.ts";
 import { jobRow, toolCommitStatus } from "./job-view.ts";
 import type { Job, Jobs } from "./jobs.ts";
 import type { ControlRepo, Routine } from "./launcher.ts";
@@ -67,8 +66,6 @@ export type Deps = {
   jobs?: Jobs;
   publicJobUrl?: string;
   control?: ControlRepo;
-  // ORBIT's authorized vault reader for launch-time context copies (src/job-context.ts). Absent: a launch that names vault context is refused.
-  contextReader?: ContextReader;
   routines?: Map<string, Routine>;
   commit: string;
   owner?: string;
@@ -140,7 +137,6 @@ export function buildServer({
   jobs,
   publicJobUrl,
   control,
-  contextReader,
   routines = new Map(),
   commit,
   owner,
@@ -190,7 +186,7 @@ export function buildServer({
   });
 
   // The one launch path: the /jobs/launch route and a confirmed chat proposal both end here (ORBIT's own review launches use jobLauncher directly).
-  const launchJob = jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit, contextReader });
+  const launchJob = jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit });
 
   // Threads: the store, the rolling recent-context note, and the service that runs a turn against a thread.
   const recent = recentContext({ port: recentPort, threads, model, now, cardLines: (t) => svc.cardLines(t) });
@@ -222,7 +218,7 @@ export function buildServer({
     }
     const current = limits(isOwner);
     const offered = isOwner && model.step
-      ? [...withContextPaths(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : [])), proposals), ...(prInspect ?? [])]
+      ? [...refuseLegacyContext(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? [])]
       : [];
     if (!offered.length) {
       current.push(
@@ -460,7 +456,9 @@ export function buildServer({
       if (!(await owned("jobs", "launch"))) return;
       const input = await body();
       if (!input) return;
-      const result = await launchJob(String(input.routine ?? ""), typeof input.brief === "string" ? input.brief : "", undefined, input.context as string[] | undefined);
+      // Launch-time vault context export was removed (src/job-context.ts): a body that still names notes is refused, never launched without them.
+      if (hasLegacyContext(input.context)) return send(res, 400, { error: LEGACY_CONTEXT_ERROR, context: { refused: true, reason: "unsupported" } });
+      const result = await launchJob(String(input.routine ?? ""), typeof input.brief === "string" ? input.brief : "", undefined);
       return send(res, result.code, result.body);
     }
     // Open proposals from chat, so they can be confirmed or cancelled after the reply has scrolled away.
@@ -557,7 +555,14 @@ export function buildServer({
         svc.settle(proposal.id, result);
         return send(res, result.code, result.body);
       }
-      const result = await launchJob(proposal.routine, proposal.brief, undefined, proposal.context);
+      // A proposal made by an older build may still carry a vault context list. It is refused (the card shows "refused"), never
+      // launched without the notes that were shown when it was proposed.
+      if (hasLegacyContext((proposal as { context?: unknown }).context)) {
+        const refused = { code: 409, body: { error: LEGACY_CONTEXT_ERROR, context: { refused: true, reason: "unsupported" } } };
+        svc.settle(proposal.id, refused);
+        return send(res, refused.code, refused.body);
+      }
+      const result = await launchJob(proposal.routine, proposal.brief, undefined);
       svc.settle(proposal.id, result);
       return send(res, result.code, result.body);
     }

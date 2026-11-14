@@ -20,8 +20,8 @@ export type Steer = { n: number; text: string; at: string; deliveredAt?: string 
 export type Launch = { routine: string; at: string; branch?: string; briefCommit?: string; sessionId?: string; sessionUrl?: string; failedAt?: string; error?: string;
   // Distinct words of the brief, for the duplicate-launch warning (src/duplicates.ts). Not the brief itself.
   briefWords?: string;
-  // Vault context copied to the control branch at launch (src/job-context.ts): the paths, the commit that holds the copies, the
-  // vault commit they were read at, and whether the vault fetch was fresh. Never the notes' text.
+  // Legacy, read only: job records from before launch-time vault context export was removed may still hold the paths that were copied,
+  // the commit that held the copies, the vault commit and the fetch freshness. Nothing writes this any more.
   context?: { paths: string[]; commit?: string; vaultHead?: string; fresh: boolean } };
 // Where the PR's title came from, so a fallback is never mistaken for the runner's own.
 export type TitleSource = "pr-title-section" | "summary-first-line" | "job-routine";

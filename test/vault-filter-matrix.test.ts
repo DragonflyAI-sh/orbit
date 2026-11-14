@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { prepareContext } from "../src/job-context.ts";
-import type { ContextReader, NoteResult } from "../src/job-context.ts";
 import { cloneMemory, vaultMemory } from "../src/memory.ts";
 import { VaultError, parseEdit } from "../src/vault/edit.ts";
 import type { VaultEdit } from "../src/vault/edit.ts";
@@ -10,7 +8,7 @@ import { call, rig, say, scripted } from "./threads-fixture.ts";
 import { makeFixture } from "./vault-fixture.ts";
 
 // The regression matrix: the same fixtures run across every surface the content filter touches (reads and tool output stored in a
-// thread, what the conversation says, vault writes, confirmation cards and proposals, job context export). A change to the filter
+// thread, what the conversation says, vault writes, confirmation cards and proposals). Job context export was removed, so it is no longer a surface. A change to the filter
 // that fixes one surface and breaks another fails here. Every secret-shaped value is assembled at run time from a seeded generator;
 // no literal in this file is, or looks like, a usable credential.
 let seed = 0x7a3c19;
@@ -157,35 +155,4 @@ test("cards and proposals: a job brief and a protected vault edit show long name
   const tool = ve.tools.find((q) => q.name === "vault_replace_text")!;
   await assert.rejects(tool.run({ path: "System/memory.md", find: "# Memory rules", replace: `# Memory rules\n${k}` }), (e: unknown) => e instanceof Error && /secret/i.test(e.message) && !e.message.includes(k.slice(4, 16)));
   x.close();
-});
-
-// ---- 5. job context ---------------------------------------------------------------------------------------------------------------
-
-const reader = (notes: Record<string, string>): ContextReader => ({
-  snapshot: async (paths) => ({ head: "a".repeat(40), fetchedAt: "2026-11-12T01:00:00.000Z", fresh: true, notes: new Map(paths.map((p): [string, NoteResult] => [p, { content: notes[p] ?? "" }])) }),
-});
-
-test("job context: ordinary and unknown notes export whole and unmasked; a known secret refuses the whole launch with rule, line and a recovery", async () => {
-  const notes: Record<string, string> = {};
-  const paths: string[] = [];
-  for (const [name, text] of BENIGN) {
-    const p = `Tasks/${LONG}-${name.replace(/\W+/g, "-")}.md`;
-    notes[p] = text.replace(/\n/g, "\r\n");
-    paths.push(p);
-  }
-  const ok = await prepareContext(paths, { reader: reader(notes), isPrivate: async () => true });
-  assert.equal(ok.ok, true, JSON.stringify(ok));
-  if (ok.ok) for (const f of ok.files) assert.equal(f.content, notes[f.path], "exported byte for byte, CRLF included");
-  for (const [name, rule, known] of KNOWN) {
-    const p = `Tasks/${LONG}-leaky.md`;
-    const r = await prepareContext([p], { reader: reader({ [p]: withContext(known) }), isPrivate: async () => true });
-    assert.equal(r.ok, false, name);
-    if (r.ok) continue;
-    assert.equal(r.code, 422);
-    assert.match(r.error, new RegExp(`${rule.replace(".", "\\.")} at line \\d+`), name);
-    assert.ok(r.error.includes(p), "the long path is shown, not [redacted]");
-    assert.ok(!r.error.includes(valueOf(known)), "value not echoed");
-    assert.match(r.error, /separate launch/, "offers the separately confirmed recovery");
-    assert.match(r.error, /nothing was exported or omitted/);
-  }
 });

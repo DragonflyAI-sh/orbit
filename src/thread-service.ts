@@ -109,7 +109,7 @@ export function threadService(d: {
     const base = { id: p.id, state: "open" as const, createdAt: p.createdAt, expiresAt: p.expiresAt };
     if (p.kind === "job_launch") {
       const brief = maskContent(p.brief);
-      return { ...base, kind: p.kind, routine: p.routine, brief, ...(brief !== p.brief ? { briefMasked: true } : {}), ...(p.context?.length ? { context: p.context.map(maskVaultText) } : {}), ...(p.duplicates?.length ? { duplicates: p.duplicates } : {}) };
+      return { ...base, kind: p.kind, routine: p.routine, brief, ...(brief !== p.brief ? { briefMasked: true } : {}), ...(p.duplicates?.length ? { duplicates: p.duplicates } : {}) };
     }
     if (p.kind === "job_steer") return { ...base, kind: p.kind, job: p.job, text: maskContent(p.text) };
     // A vault edit card shows exactly what will run (cardDisplay refuses text the vault filter would mask), so it is masked by the

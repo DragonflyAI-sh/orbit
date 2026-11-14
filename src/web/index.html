@@ -208,7 +208,7 @@
     head.textContent = vault ? `Proposed vault change: ${p.summary} Nothing has been written yet.` : ops ? `Proposed server action: ${p.summary} Nothing has been done yet.` : steer ? `Proposed steer for job ${p.job}. Nothing has been sent yet.` : `Proposed job on routine "${p.routine}". Nothing has launched yet.`;
     const brief = document.createElement("pre");
     brief.tabIndex = 0;
-    brief.textContent = vault ? `${Object.entries(p.display || {}).map(([k, v]) => `${k}: ${v}`).join("\n")}\n\ndigest ${p.digest.slice(0, 16)}` : sysop ? `${p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action}\n\n${(p.warnings || []).map((w) => `! ${w}`).join("\n\n")}\n\ndigest ${p.digest.slice(0, 16)}` : ops ? (p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action) + `\n\ndigest ${p.digest.slice(0, 16)}`  : steer ? p.text : p.brief + (p.context && p.context.length ? `\n\nVault context ORBIT will copy at launch:\n${p.context.map((c) => `- ${c}`).join("\n")}` : "");
+    brief.textContent = vault ? `${Object.entries(p.display || {}).map(([k, v]) => `${k}: ${v}`).join("\n")}\n\ndigest ${p.digest.slice(0, 16)}` : sysop ? `${p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action}\n\n${(p.warnings || []).map((w) => `! ${w}`).join("\n\n")}\n\ndigest ${p.digest.slice(0, 16)}` : ops ? (p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action) + `\n\ndigest ${p.digest.slice(0, 16)}`  : steer ? p.text : p.brief + (p.context && p.context.length ? "\n\n! This proposal names vault context from an older ORBIT build. Launch-time vault context is no longer supported, so confirming it will be refused; ask for a new launch that names the notes in the brief." : "");
     const status = document.createElement("div");
     const dups = (p.duplicates || []).map((d) => Object.assign(document.createElement("div"), { className: "dup", textContent: `Possible duplicate: this brief is ${Math.round(d.similarity * 100)}% similar to job ${d.job} (${d.state}), launched ${d.launchedAt || "recently"}. Check before confirming.` }));
     // The answer replaces the buttons; a keyboard user who pressed one lands on the answer instead of the page body.
@@ -324,7 +324,7 @@
     // After Confirm/Cancel, reload the same thread (if it is still the one showing) without moving the reader.
     if (card.state === "open") { showProposal(holder, card, () => { if (current?.id === threadId) loadThread(threadId, true); }); return holder; }
     const head = el("div", {}, ...cardTitle(card));
-    holder.append(el("div", { className: "proposal closed" }, head, ...(card.brief || card.text ? [el("pre", { tabIndex: 0, textContent: String(card.brief ?? card.text).slice(0, 1200) + (card.context && card.context.length ? `\n\nVault context: ${card.context.join(", ")}` : "") })] : []), ...cardStateNodes(card, el)));
+    holder.append(el("div", { className: "proposal closed" }, head, ...(card.brief || card.text ? [el("pre", { tabIndex: 0, textContent: String(card.brief ?? card.text).slice(0, 1200) + (card.context && card.context.length ? `\n\nVault context (legacy launch-time export, no longer supported): ${card.context.join(", ")}` : "") })] : []), ...cardStateNodes(card, el)));
     return holder;
   }
 

@@ -1,14 +1,14 @@
 # Vault content filter
 
-`src/vault/filter.ts` recognises and masks **known credential shapes** in text that is vault content or travels with it. It is a convenience and preflight layer: it keeps well-known secret formats out of notes, job-context exports and stored conversation history, so that ordinary work is not tripped up by downstream protections. It is **not** a security boundary and does not try to be one.
+`src/vault/filter.ts` recognises and masks **known credential shapes** in text that is vault content or travels with it. It is a convenience and preflight layer: it keeps well-known secret formats out of notes and stored conversation history, so that ordinary work is not tripped up by downstream protections. It is **not** a security boundary and does not try to be one.
 
 ## Policy: unknown content passes
 
 Rai's priority for this heuristic is usability. So:
 
 - A shape the filter does not recognise **passes**. Unknown, weakly suspicious, long, random-looking, hex, base64 or "passphrase-looking" text is not blocked for being any of those things.
-- Known credential shapes stay blocked (writes, context export, cards) and masked (stored history, cards, display).
-- Passing is not permission. Whether an action is allowed is decided elsewhere and is unchanged: owner-only confirmation, digest-bound cards, the `#rai` and protected-area rules, path rules, size limits, the sensitive-personal-detail confirmation (its semantics were restored by the PR #66 follow-up; see that section), the job-context privacy checks, and every downstream scanner (CI gitleaks, the tier-1 redaction of ops output). This filter never loosens those, and no switch turns the filter off.
+- Known credential shapes stay blocked (writes, cards) and masked (stored history, cards, display).
+- Passing is not permission. Whether an action is allowed is decided elsewhere and is unchanged: owner-only confirmation, digest-bound cards, the `#rai` and protected-area rules, path rules, size limits, the sensitive-personal-detail confirmation (its semantics were restored by the PR #66 follow-up; see that section), and every downstream scanner (CI gitleaks, the tier-1 redaction of ops output). This filter never loosens those, and no switch turns the filter off.
 
 ## Four separate concerns
 
@@ -17,7 +17,7 @@ Rai's priority for this heuristic is usability. So:
 | Credential **recognition** | `src/vault/filter.ts` (`vaultFindings`, `hasVaultFindings`) | Which spans of a text are a known credential shape, as a rule id and line. |
 | **Masking** | `src/vault/filter.ts` (`maskVaultText`, `maskVaultDeep`, `maskJsonStrings`, `maskStoredText`), `src/threads.ts` (`maskContent`, `maskCall`) | Replaces the matched value only. Names, paths, prose, layout and line endings are kept. |
 | Sensitive **personal detail** policy | `src/vault/sensitive.ts` (`sensitiveCategories`) | Whether inserted text looks like a new category of personal detail that Rai must approve (health, money, ...). Routes a write to a confirmation card; never blocks or masks. |
-| Action **authorization** | `src/vault/edit.ts` (`classify`, `cardDisplay`, `digestOfEdit`), `src/vault/tools.ts`, `src/vault/clone.ts`, `src/job-context.ts` | Whether a write, proposal or launch may run: direct vs protected, owner-only confirmation, digest, re-validation at run time. |
+| Action **authorization** | `src/vault/edit.ts` (`classify`, `cardDisplay`, `digestOfEdit`), `src/vault/tools.ts`, `src/vault/clone.ts` | Whether a write, proposal or launch may run: direct vs protected, owner-only confirmation, digest, re-validation at run time. |
 
 ## Root cause
 
@@ -92,7 +92,6 @@ This is not universal secret detection and is not expanded here. Coverage claims
 | Surface | Behaviour |
 | --- | --- |
 | Vault write admission (`clone.write`, `secretFindings`) | Refuses when a known shape is in what the edit adds (or the Log line), with rule and line; nothing written or redacted. Ordinary text is written byte for byte. |
-| Job-context export (`prepareContext`) | Refuses the whole launch on a known shape, with rule, line and the recovery; otherwise exports whole and unmasked (CRLF included). Never clips, never omits. |
 | Confirmation cards (`cardDisplay`, `thread-service`) | A protected change that contains a known shape is refused at proposal time (with rule and card line); otherwise the card shows the exact change and the digest covers it. Brief and steer cards are masked by value, and a masked brief says so (`briefMasked`). |
 | Stored history, titles, summaries, tool results | Masked by value with `maskContent` / `maskCall`; ops tools keep tier-1 masking. |
 | Reads (`memory_read` etc.) | The model receives the note as read; what is stored and shown is masked by value. |
@@ -161,7 +160,7 @@ Done by the PR #66 follow-up job (implementation only):
 
 - [x] Root cause explained (above), existing failures reproduced before the fix (corpus run; the matrix fails 5 of 6 on the previous commit).
 - [x] Implementation: known-pattern filter, value-only layout-preserving masking, content masking of history and tool output, sensitive-detail policy separated and narrowed, refusals with rule, location and recovery.
-- [x] Regression suite across reads/tool output, conversation history, writes, cards/proposals and job context (`test/vault-filter-matrix.test.ts`), plus unit tests (`test/vault-filter.test.ts`), the policy tests and the corpus-tool privacy test.
+- [x] Regression suite across reads/tool output, conversation history, writes, cards/proposals and job context, since removed (`test/vault-filter-matrix.test.ts`), plus unit tests (`test/vault-filter.test.ts`), the policy tests and the corpus-tool privacy test.
 - [x] Privacy-preserving corpus procedure and report with old/new comparison (above).
 - [x] Typecheck, full test suite and (where available) the CI secret scan run before finishing; see the job summary for the exact commands and results.
 
@@ -175,4 +174,4 @@ Not done, and not authorized by this job (remaining gates for closing the issue)
 
 ## Tests
 
-`test/vault-filter-matrix.test.ts` (the matrix across surfaces), `test/vault-filter.test.ts` (recognition, permissive-unknown, masking, CRLF, continuation, JSON strings, refusals, cards), `test/vault-pr66-followup.test.ts` (the PR #66 review blockers: stored-summary masking end to end, health confirmation semantics, AWS-secret vs path, the supported and unsupported table), `test/vault-filter-regressions.test.ts` and `test/vault-pr61-followup.test.ts` (sensitive-detail policy and approval routing), `test/vault-filter-corpus-tool.test.ts` (the tool leaks nothing), plus the write path in `test/vault-write.test.ts` and `test/vault-edit.test.ts` and context export in `test/job-context.test.ts`.
+`test/vault-filter-matrix.test.ts` (the matrix across surfaces), `test/vault-filter.test.ts` (recognition, permissive-unknown, masking, CRLF, continuation, JSON strings, refusals, cards), `test/vault-pr66-followup.test.ts` (the PR #66 review blockers: stored-summary masking end to end, health confirmation semantics, AWS-secret vs path, the supported and unsupported table), `test/vault-filter-regressions.test.ts` and `test/vault-pr61-followup.test.ts` (sensitive-detail policy and approval routing), `test/vault-filter-corpus-tool.test.ts` (the tool leaks nothing), plus the write path in `test/vault-write.test.ts` and `test/vault-edit.test.ts`. Job-context export was removed (`docs/job-context.md`), so it is no longer a filter surface.
