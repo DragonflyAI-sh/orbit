@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { ASSISTANT_ACTIVE_BUDGET_CHARS, boundChunk, planContext } from "./assistant-context.ts";
 import type { ChunkForm, ContextPlan } from "./assistant-context.ts";
-import { jobCardsOf, maskCall, maskContent, maskDeep, MAX_MESSAGE_CHARS, safePatch, THREAD_SCHEMA, ThreadError, writeAtomic } from "./threads.ts";
-import type { Card, CardState, JobCardRef, MessagePatch, StoredCall, Thread, ThreadMessage } from "./threads.ts";
+import { jobCardsOf, maskCall, maskContent, maskDeep, MAX_MESSAGE_CHARS, safePatch, THREAD_SCHEMA, ThreadError, transcriptMessage, writeAtomic } from "./threads.ts";
+import type { Card, CardState, JobCardRef, MessagePatch, StoredCall, Thread, ThreadMessage, TranscriptMessage } from "./threads.ts";
 
 // The Assistant: one durable rolling conversation, owned by the server (docs/assistant.md). It is stored as small chunk files,
 // one per turn, apart from chat threads (<state>/threads/) and from the vault:
@@ -50,6 +50,15 @@ export type Chunk = {
 };
 
 export type Session = { schema: number; id: string; createdAt: string };
+// One chunk as session_read (src/sessions.ts) sees it: the message projection, cut before a reply still being written, or why it could
+// not be read. `fromDisk` and `bytes` say what reading it cost.
+export type ChunkRead =
+  | { ok: true; seq: number; where: "active" | "archive"; messages: TranscriptMessage[]; inProgress: boolean; fromDisk: boolean; bytes: number }
+  | { ok: false; seq: number; where: "active" | "archive"; reason: "unreadable" | "too-large" | "missing"; fromDisk: boolean; bytes: number };
+// The Assistant's transcript as of one moment: every chunk number in conversation order (archived, unreadable and active), and a
+// loader that reads one chunk. Active chunks come from memory; an archived chunk is one bounded file read.
+export type AssistantTranscript = { rev: number; activeChunks: number; archivedChunks: number; unreadableChunks: number; segments: number[]; load(seq: number, maxBytes: number): ChunkRead };
+
 // What the session registry reads from the Assistant store (sessionFacts below). `lastMessageAt` covers active chunks only.
 export type AssistantFacts = { createdAt: string; busy: boolean; activeChunks: number; archivedChunks: number; activeMessages: number; lastMessageAt?: string; jobCards: JobCardRef[]; persisted: boolean; problems: number };
 
@@ -458,6 +467,64 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
         jobCards.push(...jobCardsOf(c.cards));
       }
       return { createdAt: session.createdAt, busy: Boolean(busy), activeChunks: active.size, archivedChunks: archived.length, activeMessages: messages, lastMessageAt: last, jobCards, persisted: Boolean(dir), problems: problems.length };
+    },
+    // Read-only transcript access for session_read (src/sessions.ts). Nothing is cloned in full, written, indexed or counted as a
+    // change, and no card is expired (archivePage does that; this does not use it). Active chunk objects are replaced on every change,
+    // never edited in place, so the snapshot taken here stays consistent while the reader walks it, even if the chunk is archived.
+    sessionTranscript(): AssistantTranscript {
+      const snap = new Map(active);
+      const archivedNow = new Set(archived);
+      const unreadableNow = new Set(unreadable);
+      const project = (seq: number, where: "active" | "archive", c: Chunk, fromDisk: boolean, bytes: number): ChunkRead => {
+        const msgs = Array.isArray(c.messages) ? c.messages : [];
+        const pending = msgs.findIndex((m) => m.status === "pending");
+        return { ok: true, seq, where, messages: (pending < 0 ? msgs : msgs.slice(0, pending)).map(transcriptMessage), inProgress: pending >= 0, fromDisk, bytes };
+      };
+      const fromArchive = (seq: number, maxBytes: number): ChunkRead => {
+        if (!dir) {
+          const c = memArchive.get(seq);
+          return c ? project(seq, "archive", c, false, 0) : { ok: false, seq, where: "archive", reason: "missing", fromDisk: false, bytes: 0 };
+        }
+        let fd: number;
+        try {
+          fd = openSync(fileOf(seq, "archive"), "r");
+        } catch {
+          return { ok: false, seq, where: "archive", reason: "missing", fromDisk: true, bytes: 0 };
+        }
+        try {
+          const size = fstatSync(fd).size;
+          if (size > maxBytes) return { ok: false, seq, where: "archive", reason: "too-large", fromDisk: true, bytes: 0 };
+          // At most maxBytes + 1 are read, whatever the file grows to meanwhile.
+          const buf = Buffer.alloc(maxBytes + 1);
+          let got = 0;
+          for (let n = 1; n > 0 && got < buf.length; got += n) n = readSync(fd, buf, got, buf.length - got, got);
+          if (got > maxBytes) return { ok: false, seq, where: "archive", reason: "too-large", fromDisk: true, bytes: got };
+          try {
+            const c = JSON.parse(buf.subarray(0, got).toString("utf8")) as Chunk;
+            if (c.seq !== seq || !Array.isArray(c.messages)) throw new Error("not a chunk");
+            return project(seq, "archive", c, true, got);
+          } catch {
+            return { ok: false, seq, where: "archive", reason: "unreadable", fromDisk: true, bytes: got };
+          }
+        } finally {
+          closeSync(fd);
+        }
+      };
+      return {
+        rev: epoch * stride + changes,
+        activeChunks: snap.size,
+        archivedChunks: archivedNow.size,
+        unreadableChunks: unreadableNow.size,
+        segments: [...new Set([...archivedNow, ...unreadableNow, ...snap.keys()])].sort((a, b) => a - b),
+        load: (seq: number, maxBytes: number): ChunkRead => {
+          const c = snap.get(seq);
+          if (c) return project(seq, "active", c, false, 0);
+          if (unreadableNow.has(seq)) return { ok: false, seq, where: "active", reason: "unreadable", fromDisk: false, bytes: 0 };
+          // Archived now, or archived since the snapshot (a rotation renames the file; its number never changes).
+          if (archivedNow.has(seq) || archived.includes(seq)) return fromArchive(seq, maxBytes);
+          return { ok: false, seq, where: "archive", reason: "missing", fromDisk: false, bytes: 0 };
+        },
+      };
     },
     active: (): Chunk[] => structuredClone(sortedActive()),
     archivedCount: () => archived.length,
