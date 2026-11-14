@@ -321,6 +321,9 @@
   let navGen = 0;
   let pending = null;         // { gen, id (null for New), title } while a navigation has not settled
   let navError = "";
+  // Why the thread the address names is not shown (bad address, missing, refused, not loadable). While it is set no thread
+  // is open, the log says why, and nothing is sent: a message never goes to a thread other than the one the address names.
+  let routeBlock = "";
   // Mutations of the open thread (Rename, Archive's archived state, a send's reply) are not navigations, but they answer
   // after an await too. `owns(target, gen)` says whether such an answer may still draw: no newer navigation (navGen is
   // what it was when the request left), none pending, and the thread drawn is still the one the request was about.
@@ -332,6 +335,44 @@
   const tsel = document.getElementById("threadsel");
   const readSel = () => { try { return localStorage.getItem(THREAD_KEY); } catch { return null; } };
   const writeSel = (id) => { try { id ? localStorage.setItem(THREAD_KEY, id) : localStorage.removeItem(THREAD_KEY); } catch { /* per-device convenience only */ } };
+  // The stored selection is shared by every tab of this browser and is only the fallback for plain #chat. The address
+  // (#chat/<id>) is what this tab shows; another tab writing the stored selection never moves it (no storage listener).
+  const onChatAddress = () => location.hash === "#chat" || location.hash.startsWith("#chat/");
+  // Puts this tab's address on a thread (or plain #chat for none). Only while the address is a Chat one, so loading
+  // threads behind the Assistant never changes the address. push adds a history entry (an explicit choice: picking a
+  // thread, New); otherwise the entry is replaced (resolving plain #chat, canonicalizing). Plain #chat is always replaced.
+  function setChatAddress(id, push) {
+    if (!onChatAddress()) return;
+    const want = chatHash(id);
+    if (location.hash === want) return;
+    try { window.history[push && location.hash !== "#chat" ? "pushState" : "replaceState"](null, "", want); } catch { /* the address just does not follow */ }
+  }
+  const shortId = (id) => String(id).slice(0, 80);
+  function showBlocked(text) {
+    pending = null; current = null; shownThreadId = null; routeBlock = text;
+    log.replaceChildren(el("div", { className: "banner", role: "alert" }, text,
+      el("button", { type: "button", textContent: "Try again", onclick: () => (threadMode === null ? initThreads() : applyChatAddress()) })));
+    renderBar();
+  }
+  // Applies the address to Chat: on load (after the list), and on every hashchange while Chat shows.
+  function applyChatAddress() {
+    const t = chatTarget(location.hash);
+    if (t.kind === "invalid") { navGen++; showBlocked(`This address does not name a thread ("${shortId(t.raw)}"). Nothing is sent from it: pick a thread or start a New one.`); return; }
+    if (threadMode !== "server") {
+      if (t.kind === "thread") { navGen++; showBlocked(threadMode === "legacy" ? "Threads are owner only, so this thread cannot be opened here. Nothing is sent from this address." : "ORBIT's threads could not be loaded, so this thread is not open. Nothing is sent until it is."); }
+      else if (routeBlock) { routeBlock = ""; log.replaceChildren(); renderBar(); }
+      return;
+    }
+    if (t.kind === "thread") {
+      if (current?.id === t.id && shownThreadId === t.id && !pending) { setChatAddress(t.id, false); return; }
+      openThread(t.id, "address");
+      return;
+    }
+    // Plain #chat: stay on the thread already open (the address is filled in), otherwise open the default one.
+    if (pending) return;
+    if (current && shownThreadId === current.id && !routeBlock) { setChatAddress(current.id, false); return; }
+    openDefault();
+  }
 
   async function tapi(path, method, body) {
     const res = await fetch(path, method === "GET" ? undefined : { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) });
@@ -344,23 +385,25 @@
     // The menu shows where the reader is going (a pending navigation), otherwise the thread that is drawn.
     const sel = pending?.id ?? current?.id ?? null;
     const rows = threadList.filter((t) => showArchived || !t.archived || t.id === current?.id || t.id === sel);
+    // No thread open (a blocked address): the menu says so instead of showing a thread that is not open.
+    if (!sel && rows.length) rows.unshift(null);
     // The options are rebuilt only when they changed, so a poll does not reset the menu while it has focus.
-    const optionsSig = JSON.stringify([sel, rows.map((t) => [t.id, threadOption(t)])]);
+    const optionsSig = JSON.stringify([sel, rows.map((t) => (t ? [t.id, threadOption(t)] : null))]);
     if (optionsSig !== barSig) {
       barSig = optionsSig;
-      tsel.replaceChildren(...rows.map((t) => Object.assign(document.createElement("option"), { value: t.id, textContent: threadOption(t), selected: t.id === sel })));
+      tsel.replaceChildren(...rows.map((t) => (t ? Object.assign(document.createElement("option"), { value: t.id, textContent: threadOption(t), selected: t.id === sel }) : Object.assign(document.createElement("option"), { value: "", textContent: "No thread open", selected: true }))));
       if (!rows.length) tsel.append(Object.assign(document.createElement("option"), { value: "", textContent: "No threads yet" }));
     }
     // The signature can match while the menu does not: the reader picked an option and that navigation failed or was
     // replaced. Put the menu back on the intended thread.
-    if (sel && tsel.value !== sel && rows.some((t) => t.id === sel)) tsel.value = sel;
+    if (sel && tsel.value !== sel && rows.some((t) => t?.id === sel)) tsel.value = sel;
     document.getElementById("tarchive").textContent = current?.archived ? "Restore" : "Archive";
     document.getElementById("trename").disabled = document.getElementById("tarchive").disabled = !current || Boolean(pending);
     const input = document.getElementById("input");
-    input.disabled = Boolean(current?.archived) && !pending;
+    input.disabled = (Boolean(current?.archived) || Boolean(routeBlock)) && !pending;
     document.getElementById("send").disabled = input.disabled || sending || Boolean(pending);
-    input.placeholder = pending ? `Opening ${pending.title}…` : current?.archived ? "This thread is archived. Restore it to continue." : "Message ORBIT";
-    const status = pending ? `Opening ${pending.title}…` : navError;
+    input.placeholder = pending ? `Opening ${pending.title}…` : routeBlock ? "No thread is open: pick one or start a New one." : current?.archived ? "This thread is archived. Restore it to continue." : "Message ORBIT";
+    const status = pending ? `Opening ${pending.title}…` : routeBlock || navError;
     const statusEl = document.getElementById("tstatus");
     if (statusEl.textContent !== status) statusEl.textContent = status;
     log.setAttribute("aria-busy", pending ? "true" : "false");
@@ -403,6 +446,7 @@
     const switched = shownThreadId !== view.id;
     const atBottom = nearBottom();
     current = view;
+    routeBlock = "";
     if (switched) { log.replaceChildren(); shownThreadId = view.id; }
     const byId = new Map(view.cards.map((c) => [c.id, c]));
     const cardSpec = (id) => { const c = byId.get(id); return c ? { sig: JSON.stringify(c), build: () => renderCard(c, view.id) } : null; };
@@ -427,10 +471,11 @@
 
   let pendingNotice = null;
   function noticeBanner(n) {
-    return el("div", { className: "banner", role: "note" }, n.text, el("button", { type: "button", textContent: "Got it", onclick: async () => { await tapi("/threads/notice/ack", "POST"); pendingNotice = null; if (current) renderThread(current, true); else showEmpty(); } }));
+    return el("div", { className: "banner", role: "note" }, n.text, el("button", { type: "button", textContent: "Got it", onclick: async () => { await tapi("/threads/notice/ack", "POST"); pendingNotice = null; if (current) renderThread(current, true); else if (!routeBlock) showEmpty(); } }));
   }
   function showEmpty() {
     shownThreadId = null;
+    routeBlock = "";
     log.replaceChildren(...(pendingNotice ? [noticeBanner(pendingNotice)] : []), el("div", { className: "compact", textContent: "No thread is open. Send a message to start one; it is saved on ORBIT's server." }));
     renderBar();
   }
@@ -457,7 +502,8 @@
     // A newer load, a thread switch or a send drew something since this request left: this answer is stale, drop it.
     if (seq !== loadSeq) return true;
     if (current?.id !== id) return true;
-    if (!r.ok) { if (r.status === 404) { writeSel(null); current = null; } return false; }
+    // The thread is gone (deleted on the server): say so and send nothing, rather than starting a new thread on the next send.
+    if (!r.ok) { if (r.status === 404) { if (readSel() === id) writeSel(null); showBlocked(`Thread ${id} no longer exists on ORBIT's server. Nothing is sent from this address: pick a thread or start a New one.`); } return false; }
     const view = r.data.thread;
     // An answer older than what is showing (a delayed poll) never rolls the thread back.
     if (current && current.id === view.id && shownThreadId === view.id && view.rev < current.rev) return true;
@@ -468,12 +514,16 @@
   // Opens a thread the reader asked for. Only the latest navigation's answer counts: an earlier one, success or failure,
   // is ignored, and a background refresh cannot overtake it. On failure the page keeps the thread it was showing, the
   // menu and the stored selection go back to it, and the bar says what failed. Returns false only for that failure.
-  async function openThread(id) {
+  // `how` says who asked: "menu" (a pick in this page: success adds a history entry with the new address), "default"
+  // (plain #chat resolved: the address is replaced) or "address" (the address named it: a link, a reload, Back/Forward).
+  // The address is authoritative, so when an "address" open fails the old thread is not kept usable: the log says why
+  // and nothing is sent (showBlocked). A failed "menu" pick keeps the thread shown, as before, and the address stays on it.
+  async function openThread(id, how = "menu") {
     const gen = ++navGen;
     navError = "";
     // Back to the thread already drawn (A, B, then A again before B answered): cancel the pending switch, nothing to fetch.
-    if (current && current.id === id && shownThreadId === id) { pending = null; writeSel(id); renderBar(); return true; }
-    const title = threadList.find((t) => t.id === id)?.title || "the thread";
+    if (current && current.id === id && shownThreadId === id) { pending = null; writeSel(id); setChatAddress(id, how === "menu"); renderBar(); return true; }
+    const title = threadList.find((t) => t.id === id)?.title || (how === "address" ? `thread ${id}` : "the thread");
     pending = { gen, id, title };
     renderBar();
     let r;
@@ -481,22 +531,39 @@
     if (gen !== navGen) return true;
     pending = null;
     if (!r.ok) {
+      if (how === "address") {
+        if (r.status === 404 && readSel() === id) writeSel(null);
+        showBlocked(r.status === 404 ? `No thread ${id} exists on ORBIT's server (it may have been deleted). Nothing is sent from this address: pick a thread or start a New one.`
+          : r.status === 401 || r.status === 403 ? `You cannot open thread ${id} (HTTP ${r.status}): threads are owner only. Nothing is sent from this address.`
+          : `Could not open thread ${id} (${r.status ? `HTTP ${r.status}` : "no connection"}). Nothing is sent until it opens.`);
+        return false;
+      }
       if (r.status === 404 && readSel() === id) writeSel(current?.id ?? null);
       navError = `Could not open ${title} (${r.status ? `HTTP ${r.status}` : "no connection"}).${current ? ` Still showing ${current.title}.` : ""}`;
       renderBar();
       return false;
     }
     writeSel(id);
+    setChatAddress(id, how === "menu");
     renderThread(r.data.thread);
     return true;
   }
-  async function initThreads() {
-    if (!(await loadList())) return;
+  // Plain #chat: the thread last opened in this browser (any tab), else the newest open thread, else nothing. The address
+  // is then replaced with that thread's, so a reload or a copied link keeps it.
+  async function openDefault() {
     const wanted = readSel();
     const first = threadList.find((t) => t.id === wanted) || threadList.find((t) => !t.archived);
-    if (first && (await openThread(first.id))) return;
+    if (first && (await openThread(first.id, "default"))) return;
+    if (pending || current) return;
     current = null;
     showEmpty();
+  }
+  async function initThreads() {
+    let ok = false;
+    try { ok = await loadList(); } catch { /* no connection: below */ }
+    // Plain #chat (or another page) for the owner: the default thread. Anything the address names: applyChatAddress.
+    if (ok && chatTarget(location.hash).kind === "none") { await openDefault(); return; }
+    applyChatAddress();
   }
   async function pollThreads() {
     try {
@@ -504,7 +571,8 @@
       if (current && !pending) {
         const meta = threadList.find((t) => t.id === current.id);
         // Re-draw when another device changed the thread, or while a confirmed card's live state can still change.
-        if (meta && (meta.rev !== current.rev || meta.busy !== current.busy || current.cards.some((c) => c.state === "confirmed"))) await loadThread(current.id, true);
+        // A thread missing from the list (the list includes archived ones) is re-fetched too, so a deletion is reported.
+        if (!meta || (meta.rev !== current.rev || meta.busy !== current.busy || current.cards.some((c) => c.state === "confirmed"))) await loadThread(current.id, true);
       }
       renderBar();
     } catch { /* the next poll tries again */ }
@@ -527,6 +595,7 @@
     if (gen !== navGen) { renderBar(); return; }
     pending = null;
     writeSel(r.data.thread.id);
+    setChatAddress(r.data.thread.id, true);
     renderThread(r.data.thread);
     document.getElementById("input").focus();
   });
@@ -566,7 +635,7 @@
     if (owns(target.id, gen)) renderThread(r.data.thread, true);
     if (restoring) return;
     const next = threadList.find((t) => !t.archived);
-    if (next) await openThread(next.id); else { current = null; writeSel(null); showEmpty(); }
+    if (next) await openThread(next.id); else { current = null; writeSel(null); setChatAddress(null, false); showEmpty(); }
   });
 
   async function sendThreaded(content) {
@@ -581,6 +650,7 @@
         if (gen !== navGen) { const input = document.getElementById("input"); if (!input.value) input.value = content; await listQuietly(); renderBar(); return; }
         current = made.data.thread;
         writeSel(current.id);
+        setChatAddress(current.id, false);
       }
       log.append(el("div", { className: "msg user", textContent: content }), el("div", { className: "msg orbit", textContent: "Working…" }));
       log.scrollTop = log.scrollHeight;
@@ -611,6 +681,10 @@
     const input = document.getElementById("input");
     const content = input.value.trim();
     if (!content || sending) return;
+    // The address decides where a message goes. A blocked or invalid address, or one naming a thread that is not the one
+    // open, sends nothing and the text stays (this cannot happen through the page's own controls; it guards the invariant).
+    const addr = chatTarget(location.hash);
+    if (routeBlock || addr.kind === "invalid" || (addr.kind === "thread" && (threadMode !== "server" || current?.id !== addr.id))) { renderBar(); return; }
     // While a thread is opening, Enter or Send does nothing and the text stays: it must not go to the thread being left.
     if (threadMode === "server" && pending) { renderBar(); return; }
     // An archived thread takes no messages (the server answers 409); the text stays in the box.
@@ -749,13 +823,28 @@
   const assistantTab = document.getElementById("assistanttab");
   // <routing>
   function pageFor(hash, jobsAvailable, assistantAvailable) {
-    if (hash === "#chat") return "chat";
+    if (hash === "#chat" || hash.startsWith("#chat/")) return "chat";
     if (hash === "#jobs" && jobsAvailable) return "jobs";
     return assistantAvailable ? "assistant" : "chat";
   }
+  // Chat addresses one thread as #chat/<thread id> (the canonical form: lowercase, unencoded). Plain #chat (or "#chat/")
+  // names none. Anything else after "#chat/" is invalid: it is reported, never fetched, opened or sent to. The id is
+  // percent-decoded and lowercased first, so an encoded or uppercase copy of a real id still works (and is canonicalized).
+  const CHAT_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  function chatTarget(hash) {
+    if (!hash.startsWith("#chat/") || hash === "#chat/") return { kind: "none" };
+    const raw = hash.slice("#chat/".length);
+    let id;
+    try { id = decodeURIComponent(raw).toLowerCase(); } catch { return { kind: "invalid", raw }; }
+    return CHAT_THREAD_ID.test(id) ? { kind: "thread", id } : { kind: "invalid", raw };
+  }
+  const chatHash = (id) => (id ? `#chat/${encodeURIComponent(id)}` : "#chat");
   // </routing>
   const tabFromHash = () => pageFor(location.hash, !jobsTab.hidden, !assistantTab.hidden);
+  // A changed address (a link, typing it, Back or Forward) is applied to Chat; the page's own address updates use
+  // pushState/replaceState, which fire no hashchange, so they cannot loop.
   window.addEventListener("hashchange", () => setTab(tabFromHash()));
+  window.addEventListener("hashchange", () => { if (tab === "chat") applyChatAddress(); });
 
   // The orbit-job source commit the runner reported. Unknown is shown as unknown; only a known commit that differs
   // from the commit ORBIT is running is flagged. All text goes in through textContent.

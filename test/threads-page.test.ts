@@ -125,7 +125,7 @@ test("the thread code never parses HTML and keeps per-device state in a guarded 
 test("the page restores the selection and history after a refresh, from the server, and lists, opens, creates, renames and archives threads", () => {
   assert.match(html, /async function initThreads\(\)/);
   assert.match(html, /const wanted = readSel\(\);/);
-  assert.match(html, /openThread\(first\.id\)/);
+  assert.match(html, /openThread\(first\.id, "default"\)/);
   for (const route of ['"/threads?archived=1"', "`/threads/${encodeURIComponent(id)}`", '"/threads", "POST"', "/rename", "/archive", "/messages", "/threads/notice/ack"]) assert.ok(html.includes(route), route);
   assert.match(html, /makePoller\(pollThreads, /, "shared threads refresh on a guarded poller");
 });
