@@ -310,7 +310,7 @@ const links = [...nav.matchAll(/<a ([^>]*)>([\s\S]*?)<\/a>/g)].map((m) => ({ att
 
 test("navigation is real links to the page's views and the status endpoint, nothing invented", () => {
   assert.match(nav, /aria-label="ORBIT pages"/);
-  assert.deepEqual(links.map((l) => l.href), ["/#chat", "/#jobs", "/status"]);
+  assert.deepEqual(links.map((l) => l.href), ["/#assistant", "/#chat", "/#jobs", "/status"]);
   assert.equal(nav.includes("<button"), false, "no button pretends to be navigation");
   // Each destination is a GET route the server really has: "/" serves this page (Chat and Jobs are its views), and
   // "/status" answers with JSON, which the link says.
@@ -327,9 +327,10 @@ test("navigation is real links to the page's views and the status endpoint, noth
 test("the Jobs link shows only for the owner and the views follow the address", () => {
   const jobs = links.find((l) => l.href === "/#jobs")!;
   assert.match(jobs.attrs, /\bhidden\b/, "hidden until the owner check passes");
-  assert.match(links.find((l) => l.href === "/#chat")!.attrs, /aria-current="page"/);
+  // The Assistant is the first link and the default page (docs/assistant.md); test/assistant-page.test.ts checks the routing itself.
+  assert.match(links.find((l) => l.href === "/#assistant")!.attrs, /aria-current="page"/);
   assert.match(html, /jobsTab\.hidden = !pr\.ok;/);
-  assert.match(html, /const tabFromHash = \(\) => \(location\.hash === "#jobs" && !jobsTab\.hidden \? "jobs" : "chat"\);/);
+  assert.match(html, /const tabFromHash = \(\) => pageFor\(location\.hash, !jobsTab\.hidden, !assistantTab\.hidden\);/);
   assert.match(html, /window\.addEventListener\("hashchange", \(\) => setTab\(tabFromHash\(\)\)\);/);
   assert.match(html, /if \(a\.dataset\.tab === next\) a\.setAttribute\("aria-current", "page"\); else a\.removeAttribute\("aria-current"\);/);
 });

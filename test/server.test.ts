@@ -303,13 +303,13 @@ test("every navigation link on the page leads to a real GET route that answers, 
     const html = await page.text();
     const nav = html.match(/<nav id="tabs"[^>]*>[\s\S]*?<\/nav>/)?.[0] ?? "";
     const hrefs = [...nav.matchAll(/<a [^>]*href="([^"]+)"/g)].map((m) => m[1]!);
-    assert.deepEqual(hrefs, ["/#chat", "/#jobs", "/status"]);
+    assert.deepEqual(hrefs, ["/#assistant", "/#chat", "/#jobs", "/status"]);
     for (const href of hrefs) {
       const url = new URL(href, base);
       const res = await fetch(url);
       assert.equal(res.status, 200, href);
       const type = res.headers.get("content-type") ?? "";
-      if (url.pathname === "/") assert.match(type, /text\/html/, "Chat and Jobs are views of the page itself");
+      if (url.pathname === "/") assert.match(type, /text\/html/, "Assistant, Chat and Jobs are views of the page itself");
       else assert.match(type, /application\/json/, "the status link is the JSON endpoint, and the page says so");
       await res.arrayBuffer();
     }

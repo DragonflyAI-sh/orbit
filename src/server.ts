@@ -35,6 +35,9 @@ import { threadService } from "./thread-service.ts";
 import { MAX_MESSAGE_CHARS, isThreadId, threadStore, ThreadError } from "./threads.ts";
 import type { Threads } from "./threads.ts";
 import { jsonStore } from "./store.ts";
+import { ASSISTANT_ACTIVE_BUDGET_CHARS, ASSISTANT_CARD_LINES_MAX, ASSISTANT_CHUNK_MAX_CHARS, ASSISTANT_CONTEXT_BUDGET_CHARS, ASSISTANT_NOTES_MAX_CHARS, boundNotes, planItems, planMessages } from "./assistant-context.ts";
+import { ASSISTANT_ID, assistantStore } from "./assistant-store.ts";
+import type { Chunk } from "./assistant-store.ts";
 
 export const STALE_AFTER_MS = 5 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -77,6 +80,8 @@ export type Deps = {
   threads?: Threads;
   // Where the rolling recent-context note is kept. Absent means memory only. Never the live vault.
   recentContext?: RecentContextPort;
+  // Where the Assistant's rolling conversation is stored (<state>/assistant). Absent means memory only, which a restart empties.
+  assistantDir?: string;
   // The clock for thread cards and the recent-context note. Tests inject one; it must be the clock the proposals use.
   now?: () => Date;
   // Chat tool execution deadline and abort grace period (docs/tool-deadlines.md). Tests lower them; production uses the defaults.
@@ -148,6 +153,7 @@ export function buildServer({
   proposals = newProposals(),
   watch,
   threads = threadStore(undefined),
+  assistantDir,
   recentContext: recentPort = stateRecentContext(jsonStore(undefined, "recent-context", null)),
   now,
   toolDeadlineMs,
@@ -196,6 +202,58 @@ export function buildServer({
   // Threads: the store, the rolling recent-context note, and the service that runs a turn against a thread.
   const recent = recentContext({ port: recentPort, threads, model, now, cardLines: (t) => svc.cardLines(t) });
   const svc = threadService({ threads, model, proposals, jobs, admin: adminOps, sys: sysOps, recent, now, toolDeadlineMs, abortGraceMs });
+
+  // The Assistant (docs/assistant.md): one server-owned rolling conversation in its own chunk store, run by the same turn code as
+  // chat threads but with a bounded context and no compaction. It does not feed or read the chat threads' rolling note.
+  const clock = now ?? (() => new Date());
+  const assistant = assistantStore(assistantDir, { now, held: (card) => Boolean(proposals.peek(card.id)) && new Date(card.expiresAt) > clock() });
+  const planTurn = () => {
+    const plan = assistant.plan(assistant.currentTurn());
+    assistant.recordContext(plan);
+    return plan;
+  };
+  const asvc = threadService({
+    threads: assistant,
+    model,
+    proposals,
+    jobs,
+    admin: adminOps,
+    sys: sysOps,
+    now,
+    toolDeadlineMs,
+    abortGraceMs,
+    compact: false,
+    maxCardLines: ASSISTANT_CARD_LINES_MAX,
+    context: { items: () => planItems(planTurn()), messages: () => planMessages(planTurn()) },
+  });
+  // The service that owns a proposal's card: the Assistant's when its card is there, otherwise the chat threads'.
+  const cardSvc = (proposalId: string) => (assistant.threadOfCard(proposalId) ? asvc : svc);
+  const chunkView = (c: Chunk) => ({
+    seq: c.seq,
+    id: c.id,
+    createdAt: c.createdAt,
+    state: c.state,
+    ...(c.context ? { context: c.context } : {}),
+    messages: c.messages.map(({ calls, ...m }) => ({ ...m, ...(calls ? { calls: calls.map(({ output, ...x }) => ({ ...x, outputChars: output.length })) } : {}) })),
+    cards: c.cards.map((card) => ({ ...card, live: asvc.liveOf(card) })),
+  });
+  const assistantView = () => {
+    asvc.reconcile(ASSISTANT_ID);
+    const plan = assistant.plan();
+    return {
+      session: assistant.session(),
+      title: "Assistant",
+      persisted: assistant.persisted,
+      problems: assistant.problems(),
+      busy: assistant.isBusy(ASSISTANT_ID),
+      rev: assistant.rev(),
+      archivedChunks: assistant.archivedCount(),
+      chunks: assistant.active().map(chunkView),
+      // What the model would be sent as history with the next message (the new message itself comes on top).
+      next: { included: plan.included, omitted: plan.omitted, historyChars: plan.historyChars },
+      budgets: { unit: "characters", activeChars: ASSISTANT_ACTIVE_BUDGET_CHARS, chunkMaxChars: ASSISTANT_CHUNK_MAX_CHARS, contextChars: ASSISTANT_CONTEXT_BUDGET_CHARS, notesMaxChars: ASSISTANT_NOTES_MAX_CHARS },
+    };
+  };
 
   const isOwnerOf = async (req: IncomingMessage) => Boolean(owner) && (await identify(req)) === owner;
   const audit = (port: string, action: string, decision: { allow: boolean; reason: string }) =>
@@ -398,6 +456,49 @@ export function buildServer({
       }
     }
 
+    // ---- The Assistant (owner only, every route). There is exactly one conversation and the server names it: no route takes an id
+    // or a path from the browser. docs/assistant.md describes the storage and the context bound.
+    if (url.pathname === "/assistant" || url.pathname === "/assistant/history" || url.pathname === "/assistant/messages") {
+      const route = url.pathname.slice("/assistant".length) || "/";
+      const method = route === "/messages" ? "POST" : "GET";
+      if (req.method !== method) return send(res, 405, { error: `Use ${method} for this route.` });
+      if (!(await owned("assistant", route === "/" ? "open" : route.slice(1)))) return;
+      const callerIsOwner = await isOwnerOf(req);
+      try {
+        if (route === "/") return send(res, 200, { assistant: assistantView() });
+        if (route === "/history") {
+          const before = Number(url.searchParams.get("before"));
+          const limit = Math.min(20, Math.max(1, Number(url.searchParams.get("limit")) || 10));
+          const page = assistant.archivePage(Number.isSafeInteger(before) && before > 0 ? before : undefined, limit);
+          return send(res, 200, { chunks: page.chunks.map(chunkView), more: page.more });
+        }
+        const input = await body();
+        if (!input) return;
+        const text = typeof input.text === "string" ? input.text.trim() : "";
+        if (!text || text.length > MAX_MESSAGE_CHARS) return send(res, 400, { error: `Send {text}: 1-${MAX_MESSAGE_CHARS} characters.` });
+        const decision = decide("channel", "chat", false);
+        audit("channel", "chat", decision);
+        if (!decision.allow) return send(res, 403, { error: decision.reason });
+        // Refused before any vault search or model call when a reply is already running (another tab or device): nothing is queued.
+        if (assistant.isBusy(ASSISTANT_ID)) return send(res, 409, { error: "A reply is already in progress in the Assistant (maybe from another tab or device). Nothing was sent; wait for it and send again.", assistant: assistantView() });
+        // The page sends an id with each send. A browser can silently repeat a POST whose connection dropped; a repeat of a send
+        // that already started a turn is refused, never run twice.
+        const requestId = typeof input.requestId === "string" && /^[A-Za-z0-9-]{8,64}$/.test(input.requestId) ? input.requestId : undefined;
+        const duplicate = () => send(res, 409, { error: "This message was already received (the browser repeated the request). It was not run again.", duplicate: true, assistant: assistantView() });
+        if (requestId && assistant.seenRequest(requestId)) return duplicate();
+        const prep = await prepare(callerIsOwner, text);
+        if (requestId && assistant.seenRequest(requestId)) return duplicate();
+        // Set immediately before the turn: nothing is awaited between here and the turn's first write, which takes it.
+        assistant.expectRequest(requestId);
+        const out = await asvc.turn(ASSISTANT_ID, text, { notes: boundNotes(prep.notes), memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner), isOwner: callerIsOwner });
+        return send(res, out.error ? 502 : 200, { assistant: assistantView(), limits: prep.current, ...(out.error ? { error: out.error } : {}) });
+      } catch (err) {
+        assistant.expectRequest(undefined);
+        if (err instanceof ThreadError) return send(res, err.code, { error: err.message, ...(err.code === 409 ? { assistant: assistantView() } : {}) });
+        return send(res, 500, { error: "Could not save the Assistant conversation. Nothing more was changed." });
+      }
+    }
+
     if (url.pathname === "/notifications" && req.method === "GET") {
       if (!(await owned("notify", "inbox"))) return;
       return send(res, 200, { inbox: notify.inbox(), recent: notify.recent() });
@@ -493,12 +594,12 @@ export function buildServer({
       const open = proposals.peek(proposalMatch[1]);
       if (!open) {
         // A proposal shown in a thread keeps its card: it says what became of it instead of a bare 404.
-        const known = svc.missing(proposalMatch[1]);
+        const known = cardSvc(proposalMatch[1]).missing(proposalMatch[1]);
         if (known) return send(res, known.code, known.body);
       }
       // Single use has two guards that must agree: the proposal store's take() and the thread card's open -> confirmed/cancelled
       // compare-and-set. Both are synchronous, so of any number of concurrent requests exactly one gets past them.
-      const claimed = (id: string, to: "confirmed" | "cancelled"): boolean => svc.claim(id, to);
+      const claimed = (id: string, to: "confirmed" | "cancelled"): boolean => cardSvc(id).claim(id, to);
       const alreadyUsed = () => send(res, 409, { error: "This proposal was already used. Nothing was done again." });
       if (open?.kind === "ops_admin" && confirming) {
         // A server operation is confirmed against the digest of the exact action and settings shown on the card. A missing or
@@ -512,7 +613,7 @@ export function buildServer({
         if (!claimed(taken.id, "confirmed")) return alreadyUsed();
         audit("ops", `confirm:${taken.action}`, { allow: true, reason: `owner confirmed proposal ${taken.id} (digest ${taken.digest.slice(0, 12)})` });
         const result = await adminOps.confirm(taken);
-        svc.settle(taken.id, result);
+        cardSvc(taken.id).settle(taken.id, result);
         return send(res, result.code, result.body);
       }
       if (open?.kind === "ops_sys" && confirming) {
@@ -527,7 +628,7 @@ export function buildServer({
         if (!claimed(taken.id, "confirmed")) return alreadyUsed();
         audit("ops", `confirm:${taken.action}`, { allow: true, reason: `owner confirmed proposal ${taken.id} (digest ${taken.digest.slice(0, 12)})` });
         const result = await sysOps.confirm(taken);
-        svc.settle(taken.id, result);
+        cardSvc(taken.id).settle(taken.id, result);
         return send(res, result.code, result.body);
       }
       if (open?.kind === "vault_edit" && confirming) {
@@ -543,7 +644,7 @@ export function buildServer({
         if (!claimed(taken.id, "confirmed")) return alreadyUsed();
         audit("vault", `confirm:${taken.action}`, { allow: true, reason: `owner confirmed proposal ${taken.id} (digest ${taken.digest.slice(0, 12)})` });
         const result = await vaultEdits.confirm(taken);
-        svc.settle(taken.id, result);
+        cardSvc(taken.id).settle(taken.id, result);
         return send(res, result.code, result.body);
       }
       const proposal = proposals.take(proposalMatch[1]);
@@ -559,18 +660,18 @@ export function buildServer({
       if (proposal.kind === "job_steer") {
         const steer = jobs.steer(proposal.job, proposal.text);
         const result = steer ? { code: 201, body: { steered: proposal.job, steer } } : { code: 404, body: { error: "That job no longer exists." } };
-        svc.settle(proposal.id, result);
+        cardSvc(proposal.id).settle(proposal.id, result);
         return send(res, result.code, result.body);
       }
       // A proposal made by an older build may still carry a vault context list. It is refused (the card shows "refused"), never
       // launched without the notes that were shown when it was proposed.
       if (hasLegacyContext((proposal as { context?: unknown }).context)) {
         const refused = { code: 409, body: { error: LEGACY_CONTEXT_ERROR, context: { refused: true, reason: "unsupported" } } };
-        svc.settle(proposal.id, refused);
+        cardSvc(proposal.id).settle(proposal.id, refused);
         return send(res, refused.code, refused.body);
       }
       const result = await launchJob(proposal.routine, proposal.brief, undefined);
-      svc.settle(proposal.id, result);
+      cardSvc(proposal.id).settle(proposal.id, result);
       return send(res, result.code, result.body);
     }
     if (jobs && url.pathname === "/jobs" && req.method === "POST") {

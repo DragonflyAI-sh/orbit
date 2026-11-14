@@ -84,6 +84,26 @@
   .proposal button { padding: 4px 12px; margin-right: 6px; }
   .proposal button.cancel { background: var(--card); color: var(--fg); border: 1px solid var(--line); }
   [hidden] { display: none !important; }
+  /* The Chat thread bar belongs to the Chat page only. */
+  body:not([data-tab="chat"]) #threadbar { display: none !important; }
+  /* Overall status: green only when every /status entry is exactly "live"; anything else, or no answer, is red. */
+  #health { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; background: var(--card); }
+  #health .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--red-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--red-dot) 25%, transparent); }
+  #health.ok .dot { background: var(--green-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--green-dot) 25%, transparent); }
+  #health:hover { box-shadow: 0 0 0 2px var(--ring); }
+  :root { --green-dot: #1f9d55; --red-dot: #d23c3c; }
+  #alog { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  #alog .older { align-self: center; padding: 4px 14px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
+  .ctxline { align-self: stretch; max-width: 720px; font-size: 12px; color: var(--muted); border-top: 1px dashed var(--line); padding-top: 4px; overflow-wrap: anywhere; }
+  .msg.outctx { opacity: .75; }
+  .msg details { margin-top: 6px; font-size: 12px; color: var(--muted); white-space: normal; }
+  .msg details summary { cursor: pointer; min-height: 24px; }
+  .msg details .rows div { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .bounded { margin-top: 6px; font-size: 12px; color: var(--mock); }
+  #astatus { padding: 0 16px; font-size: 13px; color: var(--muted); }
+  #astatus:empty { display: none; }
+  #astatus.bad { color: var(--down); font-weight: 600; }
+  @media (max-width: 480px) { #alog { padding: 12px; } #health .label { display: none; } }
   nav { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
   nav a { padding: 4px 14px; border-radius: 10px; background: var(--card); color: var(--fg); border: 1px solid var(--line); text-decoration: none; }
   nav a[aria-current="page"] { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: var(--on-accent); border-color: transparent; }
@@ -161,17 +181,23 @@
 </style>
 </head>
 <body>
-<header><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#chat" data-tab="chat" aria-current="page">Chat</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/status" id="statuslink" title="ORBIT's status as raw JSON: running commit, deploy and port states">Status <span class="kind">JSON</span></a></nav><div id="threadbar" hidden><select id="threadsel" aria-label="Thread"></select><button type="button" id="tnew">New</button><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button><label><input type="checkbox" id="tshowarch"> archived</label><span id="tstatus" role="status" aria-live="polite"></span></div><div id="ports"></div><div id="signin"></div><div id="inbox"></div></header>
-<main id="log"></main>
+<header><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1><a id="health" href="/status" title="Status unknown: ORBIT's status has not been read yet. Open the status page." aria-label="Overall status: unknown, not all live. Open the status page."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></a></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#chat" data-tab="chat">Chat</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/status" id="statuslink" title="ORBIT's status as raw JSON: running commit, deploy and port states">Status <span class="kind">JSON</span></a></nav><div id="threadbar" hidden><select id="threadsel" aria-label="Thread"></select><button type="button" id="tnew">New</button><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button><label><input type="checkbox" id="tshowarch"> archived</label><span id="tstatus" role="status" aria-live="polite"></span></div><div id="ports"></div><div id="signin"></div><div id="inbox"></div></header>
+<main id="log" hidden></main>
+<main id="alog" aria-label="Assistant conversation"></main>
 <section id="jobs" hidden aria-live="off"></section>
-<form id="form"><textarea id="input" rows="2" placeholder="Message ORBIT" aria-label="Message ORBIT" required></textarea><button id="send">Send</button></form>
+<form id="form" hidden><textarea id="input" rows="2" placeholder="Message ORBIT" aria-label="Message ORBIT" required></textarea><button id="send">Send</button></form>
+<div id="astatus" role="status" aria-live="polite"></div>
+<form id="aform"><textarea id="ainput" rows="2" placeholder="Message the Assistant" aria-label="Message the Assistant" required></textarea><button id="asend">Send</button></form>
 <script>
   const history = [];
   const log = document.getElementById("log");
 
   async function refreshStatus() {
     try {
-      const s = await (await fetch("/status")).json();
+      const res = await fetch("/status");
+      const s = res.ok ? await res.json() : null;
+      renderHealth(s);
+      if (!s) return;
       const box = document.getElementById("ports");
       box.replaceChildren(...s.ports.map((p) => {
         const el = document.createElement("span");
@@ -180,8 +206,29 @@
         el.title = p.detail;
         return el;
       }));
-    } catch { /* the next refresh tries again */ }
+    } catch { renderHealth(null); /* the next refresh tries again */ }
   }
+
+  // <status-dot>
+  // The overall status from /status: green ("ok") only when there is at least one entry and every entry's state is exactly
+  // "live". Any other state, a missing or malformed answer, an error, or no answer yet is red, never green. Tests load this block.
+  function aggregateStatus(s) {
+    const ports = s && Array.isArray(s.ports) ? s.ports : null;
+    if (!ports || !ports.length) return { ok: false, label: "Status unknown", detail: "ORBIT's status could not be read, so it is not known to be all live." };
+    const bad = ports.filter((p) => !p || p.state !== "live");
+    if (!bad.length) return { ok: true, label: "All live", detail: `All ${ports.length} status entries are live.` };
+    const names = bad.map((p) => `${p && typeof p.port === "string" ? p.port : "unknown"}: ${p && typeof p.state === "string" ? p.state : "unknown"}`);
+    return { ok: false, label: `${bad.length} not live`, detail: `Not all live. ${names.join(", ")}.` };
+  }
+  function renderHealth(s) {
+    const a = aggregateStatus(s);
+    const link = document.getElementById("health");
+    link.className = a.ok ? "ok" : "bad";
+    link.querySelector(".label").textContent = a.label;
+    link.title = `${a.detail} Open the status page.`;
+    link.setAttribute("aria-label", `Overall status: ${a.ok ? "all live" : a.label}. ${a.detail} Open the status page.`);
+  }
+  // </status-dot>
 
   function showCalls(el, calls) {
     if (!calls?.length) return;
@@ -671,7 +718,8 @@
   const jobsBox = document.getElementById("jobs");
   const tabs = document.getElementById("tabs");
   const chatForm = document.getElementById("form");
-  let tab = "chat";
+  let tab = "assistant";
+  let assistantPoller = null;  // set once the Assistant block below has loaded
   let openJob = null;      // job id whose detail is showing
   const el = (tag, props, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
   const ago = (iso) => {
@@ -685,15 +733,28 @@
   const jobsTab = document.getElementById("jobstab");
   function setTab(next) {
     tab = next;
+    document.body.dataset.tab = next;
     for (const a of tabs.querySelectorAll("a[data-tab]")) { if (a.dataset.tab === next) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); }
     document.getElementById("log").hidden = next !== "chat";
     chatForm.hidden = next !== "chat";
     jobsBox.hidden = next !== "jobs";
+    document.getElementById("alog").hidden = document.getElementById("aform").hidden = document.getElementById("astatus").hidden = next !== "assistant";
     if (next === "jobs") jobsPoller.poll();
+    if (next === "assistant" && assistantPoller) assistantPoller.poll();
   }
-  // Chat and Jobs are views of this one page (/), addressed as /#chat and /#jobs so they are real links: they can be
-  // opened with the keyboard, bookmarked, and the back button moves between them. Jobs is owner only.
-  const tabFromHash = () => (location.hash === "#jobs" && !jobsTab.hidden ? "jobs" : "chat");
+  // Assistant, Chat and Jobs are views of this one page (/), addressed as /#assistant, /#chat and /#jobs so they are real
+  // links: they can be opened with the keyboard, bookmarked, and the back button moves between them. The root (no hash, or a
+  // hash that names no page) opens the Assistant. Assistant and Jobs are owner only: when the server refuses them their links
+  // hide and those addresses fall back to Chat (Jobs while it is not known yet: the Assistant, until the owner check answers).
+  const assistantTab = document.getElementById("assistanttab");
+  // <routing>
+  function pageFor(hash, jobsAvailable, assistantAvailable) {
+    if (hash === "#chat") return "chat";
+    if (hash === "#jobs" && jobsAvailable) return "jobs";
+    return assistantAvailable ? "assistant" : "chat";
+  }
+  // </routing>
+  const tabFromHash = () => pageFor(location.hash, !jobsTab.hidden, !assistantTab.hidden);
   window.addEventListener("hashchange", () => setTab(tabFromHash()));
 
   // The orbit-job source commit the runner reported. Unknown is shown as unknown; only a known commit that differs
@@ -810,7 +871,7 @@
 
   async function renderList() {
     const [jr, pr] = await Promise.all([fetch("/jobs?view=rows"), fetch("/chat/proposals")]);
-    if (!jr.ok) { jobsTab.hidden = true; setTab("chat"); return; }
+    if (!jr.ok) { jobsTab.hidden = true; setTab(tabFromHash()); return; }
     const rows = (await jr.json()).jobs;
     const proposals = pr.ok ? (await pr.json()).proposals : [];
     const attention = rows.filter((r) => ["not-started", "quiet", "launch-failed"].includes(r.health)).length + proposals.length;
@@ -1258,6 +1319,188 @@
     } catch { /* stay on Chat */ }
   })();
 
+
+  // <assistant-parts>
+  // The Assistant shows a stored message with the chat page's own parts (messageParts), except that tool calls and resource usage
+  // are each in a collapsible pane, closed by default. Warnings (incomplete reply, spend accounting), errors and proposal cards are
+  // never inside a pane, so a required confirmation is never hidden. Tests load this block with the threads block.
+  function usageRows(m, chunk) {
+    const rows = [];
+    if (m.provenance) rows.push(`Answered by: ${m.provenance} · ${m.source || "unknown source"}`);
+    if (m.fallback) rows.push(`Fallback model (paid): ${m.fallback.model}${typeof m.fallback.costUsd === "number" ? ` · cost $${m.fallback.costUsd.toFixed(4)}` : " · cost not reported"}`);
+    rows.push(`Tool calls: ${(m.calls || []).length}${m.capped ? " (round limit reached)" : ""}`);
+    const ctx = chunk && chunk.context;
+    if (ctx) {
+      const shortened = (ctx.included || []).filter((i) => i.form !== "full");
+      rows.push(`Context sent: ${ctx.historyChars + ctx.currentChars} of ${ctx.budgetChars} characters (${(ctx.included || []).length} earlier turn(s) of history, ${ctx.currentChars} for this message)`);
+      if (shortened.length) rows.push(`Shortened for the model: ${shortened.map((i) => `turn ${i.seq} (${i.form})`).join(", ")}`);
+      if ((ctx.omitted || []).length) rows.push(`Active turns not sent (over budget): ${ctx.omitted.join(", ")}`);
+    }
+    if (m.memory && m.memory.length) rows.push(`Vault notes read: ${m.memory.join(", ")}`);
+    if (m.accounting && m.accounting.length) rows.push(`Spend accounting: ${m.accounting.join("; ")}`);
+    if (m.incomplete && m.incomplete.length) rows.push(`Incomplete: ${m.incomplete.join("; ")}`);
+    return rows;
+  }
+  function assistantParts(m, mk, cardSpec, chunk, form) {
+    const parts = messageParts(m, mk, cardSpec).filter((p) => p.key !== "calls");
+    const at = parts.findIndex((p) => p.key.startsWith("card:"));
+    const extra = [];
+    if (m.calls && m.calls.length) {
+      const rows = m.calls.map((c) => `${c.ok ? "✓" : c.outcomeUnknown ? "?" : "✗"} ${c.name}(${String(c.arguments).slice(0, 200)}) [${callState(c)}] ${String(c.summary).slice(0, 300)}${typeof c.outputChars === "number" ? ` · ${c.outputChars} characters of output` : ""}`);
+      const unknown = m.calls.filter((c) => c.outcomeUnknown).length;
+      const label = `Tool output (${rows.length} call${rows.length === 1 ? "" : "s"}${unknown ? `, ${unknown} with unknown outcome` : ""})`;
+      extra.push({ key: "calls", sig: JSON.stringify(rows), build: () => mk("details", { className: "toolpane" }, mk("summary", { textContent: label }), mk("div", { className: "rows" }, ...rows.map((r) => mk("div", { textContent: r })))) });
+    }
+    if (m.role === "assistant" && m.status !== "pending") {
+      const rows = usageRows(m, chunk);
+      extra.push({ key: "usage", sig: JSON.stringify(rows), build: () => mk("details", { className: "usagepane" }, mk("summary", { textContent: "Resource usage" }), mk("div", { className: "rows" }, ...rows.map((r) => mk("div", { textContent: r })))) });
+    }
+    if (m.role === "assistant" && form && form !== "full") {
+      const t = form === "clipped" ? "In the model's context this turn is shortened: long tool outputs or text are cut. It is stored in full." : form === "calls-omitted" ? "In the model's context this turn's tool calls are replaced by a one-line note. It is stored in full." : "This turn is too large for the model's context and is sent only as a placeholder. It is stored in full.";
+      extra.push({ key: "bounded", sig: t, build: () => mk("div", { className: "bounded", textContent: t }) });
+    }
+    if (at < 0) return [...parts, ...extra];
+    return [...parts.slice(0, at), ...extra, ...parts.slice(at)];
+  }
+  // </assistant-parts>
+
+  // ---- Assistant (owner): one rolling conversation stored on the server, the same on every device. ----
+  const alog = document.getElementById("alog");
+  const aform = document.getElementById("aform");
+  const ainput = document.getElementById("ainput");
+  const asendButton = document.getElementById("asend");
+  const astatus = document.getElementById("astatus");
+  const ameta = new WeakMap();
+  let aview = null;            // the server's last answer
+  const aseen = new Map();     // seq -> chunk view: active chunks, and archived ones the reader loaded (or saw rotate out)
+  let amore = null;            // whether older archived chunks remain to load (null: not asked yet)
+  let asending = false;
+  let aloadSeq = 0, ashownSeq = 0;
+  let aerror = "";
+  const aNearBottom = () => alog.scrollHeight - alog.scrollTop - alog.clientHeight < 80;
+  function setAStatus(text, bad) { astatus.textContent = text; astatus.className = bad ? "bad" : ""; astatus.setAttribute("role", bad ? "alert" : "status"); }
+  function aBar() {
+    const busy = Boolean(aview && aview.busy);
+    asendButton.disabled = asending || busy || !aview;
+    ainput.placeholder = busy && !asending ? "A reply is in progress (maybe on another device)…" : "Message the Assistant";
+    if (aerror) setAStatus(aerror, true);
+    else setAStatus(asending ? "Waiting for the reply…" : busy ? "A reply is in progress on another tab or device. Send is paused until it finishes." : "", false);
+  }
+  function drawAssistant(view, keepScroll) {
+    const atBottom = aNearBottom();
+    const first = !aview;
+    aview = view;
+    const activeSeqs = new Set(view.chunks.map((c) => c.seq));
+    for (const c of view.chunks) aseen.set(c.seq, c);
+    const included = new Map(view.next.included.map((i) => [i.seq, i.form]));
+    const chunks = [...aseen.values()].sort((a, b) => a.seq - b.seq);
+    const specs = [];
+    const older = view.archivedChunks > 0 && amore !== false;
+    if (older) specs.push({ key: "older", sig: String(view.archivedChunks), build: () => el("button", { type: "button", className: "older", textContent: `Load earlier messages (${view.archivedChunks} archived turn(s))`, onclick: loadOlder }) });
+    let dividerDone = false, outAbove = false;
+    for (const c of chunks) {
+      const inCtx = included.has(c.seq) || c.state === "open";
+      if (!inCtx) outAbove = true;
+      if (!dividerDone && inCtx && outAbove) {
+        specs.push({ key: "ctxline", sig: String(view.next.historyChars), build: () => el("div", { className: "ctxline", role: "note", textContent: "Above: archived turns, or turns over the context budget. They are kept and shown, but not sent to the model. Below: the turns the model is sent with your next message." }) });
+      }
+      if (inCtx) dividerDone = true;
+      const byId = new Map(c.cards.map((x) => [x.id, x]));
+      const cardSpec = (id) => {
+        const card = byId.get(id);
+        if (!card) return null;
+        return { sig: JSON.stringify(card), build: () => {
+          if (card.state !== "open") return renderCard(card, null);
+          const holder = el("div", { className: "cardwrap" });
+          showProposal(holder, card, () => aload(true));
+          return holder;
+        } };
+      };
+      for (const m of c.messages) {
+        const parts = assistantParts(m, el, cardSpec, c, included.get(c.seq));
+        const cls = `${messageClass(m)}${inCtx ? "" : " outctx"}`;
+        const update = (node) => { if (node.className !== cls) node.className = cls; reconcileChildren(node, parts, ameta, carryOver); };
+        specs.push({ key: `am:${m.id}`, sig: JSON.stringify([cls, activeSeqs.has(c.seq), parts.map((p) => [p.key, p.sig])]), build: () => { const node = el("div"); update(node); return node; }, update });
+      }
+    }
+    if (!chunks.length) specs.push({ key: "empty", sig: "", build: () => el("div", { className: "compact", textContent: "The Assistant conversation is empty. It is one conversation, saved on ORBIT's server and the same on all your devices." }) });
+    if (!view.persisted) specs.push({ key: "mem", sig: "", build: () => el("div", { className: "compact warn", textContent: "ORBIT has no state directory, so this conversation is kept in memory only and a restart empties it." }) });
+    if (view.problems && view.problems.length) specs.push({ key: "problems", sig: JSON.stringify(view.problems), build: () => el("div", { className: "compact warn", textContent: `Some stored files could not be read and were left as they are: ${view.problems.join("; ")}` }) });
+    reconcileChildren(alog, specs, ameta, carryOver);
+    if (first || !keepScroll || atBottom) alog.scrollTop = alog.scrollHeight;
+    aBar();
+  }
+  async function aload(keepScroll) {
+    const seq = ++aloadSeq;
+    let r;
+    try { r = await tapi("/assistant", "GET"); } catch { return false; }
+    if (seq < ashownSeq) return true;
+    if (r.status === 403) { assistantTab.hidden = true; if (tab === "assistant") setTab(tabFromHash()); return false; }
+    if (!r.ok || !r.data.assistant) return false;
+    // An answer older than what is drawn (a slow poll) never rolls the conversation back.
+    if (aview && r.data.assistant.rev < aview.rev) return true;
+    ashownSeq = seq;
+    drawAssistant(r.data.assistant, keepScroll !== false);
+    return true;
+  }
+  async function loadOlder() {
+    const oldest = Math.min(...aseen.keys());
+    let r;
+    try { r = await tapi(`/assistant/history?before=${Number.isFinite(oldest) ? oldest : ""}&limit=10`, "GET"); } catch { r = { ok: false, status: 0, data: {} }; }
+    if (!r.ok) { aerror = `Could not load earlier messages (${r.status ? `HTTP ${r.status}` : "no connection"}).`; aBar(); return; }
+    const top = alog.scrollHeight - alog.scrollTop;
+    for (const c of r.data.chunks) aseen.set(c.seq, c);
+    amore = r.data.more;
+    aerror = "";
+    if (aview) drawAssistant(aview, true);
+    alog.scrollTop = alog.scrollHeight - top;
+  }
+  async function asend(text) {
+    asending = true;
+    aerror = "";
+    aBar();
+    alog.append(el("div", { className: "msg user", textContent: text }), el("div", { className: "msg orbit", textContent: "Working…" }));
+    alog.scrollTop = alog.scrollHeight;
+    // One id per send: if the browser repeats the request after a dropped connection, ORBIT refuses the repeat instead of running it.
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    const requestId = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    let r;
+    try { r = await tapi("/assistant/messages", "POST", { text, requestId }); } catch { r = null; }
+    asending = false;
+    if (!r) {
+      // No answer at all: the message may or may not have reached ORBIT. It is never sent again automatically.
+      aerror = "ORBIT did not answer. Your message may or may not have been received; it was not sent again. The conversation below is reloaded from the server.";
+      await aload(false);
+      aBar();
+      return;
+    }
+    if (r.data.assistant) drawAssistant(r.data.assistant, false); else await aload(false);
+    if (!r.ok) {
+      // Refused before anything was stored (busy elsewhere, bad input): the text goes back in the box.
+      if ((r.status === 400 || r.status === 403 || (r.status === 409 && !r.data.duplicate)) && !ainput.value) ainput.value = text;
+      aerror = r.data.error || `The message failed (HTTP ${r.status}).`;
+    }
+    aBar();
+  }
+  aform.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = ainput.value.trim();
+    if (!text || asending || (aview && aview.busy)) { aBar(); return; }
+    ainput.value = "";
+    asendButton.disabled = true;
+    try { await asend(text); } finally { aBar(); }
+  });
+  ainput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); aform.requestSubmit(); }
+  });
+  // Refreshes every 10 seconds while the Assistant is showing and the page is visible (another device's messages, a reply in
+  // progress, card states). Never two at once, and never while this page's own send is waiting.
+  assistantPoller = makePoller(() => aload(true), () => tab === "assistant" && !asending && document.visibilityState === "visible", setInterval, 10000);
+  assistantPoller.start();
+  setTab(tabFromHash());
+  // Asked once on load whatever page is showing, so a viewer who is not the owner loses the Assistant link at once.
+  if (tab !== "assistant") aload();
   refreshStatus();
   initThreads();
   // Another device's messages and card changes show up within 10 seconds while the Chat tab is visible. Never two polls at once.

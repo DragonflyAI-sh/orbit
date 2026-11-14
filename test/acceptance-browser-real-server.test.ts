@@ -54,7 +54,7 @@ async function setup() {
 async function openPage(base: string, threadId: string) {
   const page = await browser.newPage({ viewport: { width: 900, height: 600 } });
   await page.addInitScript(`localStorage.setItem("orbit.thread", ${JSON.stringify(threadId)})`);
-  await page.goto(base);
+  await page.goto(`${base}#chat`);
   await page.waitForFunction((id: string) => (document.getElementById("threadsel") as HTMLSelectElement)?.value === id, threadId);
   return page;
 }

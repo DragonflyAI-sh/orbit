@@ -19,6 +19,8 @@ For the owner, the model can call ORBIT's own actions during a reply (up to 5 ro
 
 Chat is stored on the server as threads, shared by every device, owner only, kept until archived (nothing is deleted). The page lists, opens, creates, renames and archives threads, restores the selection after a refresh, and shows proposal cards with their final state and the job or operation id. The model's context is built from the stored thread, including earlier tool calls and results, with per-thread compaction and a rolling recent-work note. Storage, routes, concurrency, migration, budgets, the recent-context interface and the proposal lifecycle are in `docs/threads.md`.
 
+The page opens on the **Assistant** (`/`, `/#assistant`): one server-owned rolling conversation, the same on every device, stored as small per-turn chunk files in `<state>/assistant/` with an active window and a kept archive, and sent to the model under a hard character budget with no summarization. Chat stays at `/#chat`, unchanged. Layout, budgets, archive policy, concurrency and crash behaviour: `docs/assistant.md`.
+
 ## Server operations (`orbit-ops`)
 
 Seven read-only chat tools (`ops_orbit_status`, `ops_orbit_logs`, `ops_deploy_state`, `ops_host_health`, `ops_tailscale_status`, `ops_vault_sync`, `ops_credentials`) ask a small root helper behind `/run/orbit-ops.sock` (group `orbit-ops`, mode 0660). Fixed named actions only, bounded and redacted, credentials by name/size/date only, no per-read confirmation. It is installed by `deploy/install.sh`, not by a normal deploy: see `docs/orbit-ops.md` for the exact commands, protections and verification.

@@ -2,7 +2,7 @@ import { runChat, TurnInterrupted } from "./agent.ts";
 import type { ChatTool, Proposal, Proposals } from "./agent.ts";
 import type { Jobs } from "./jobs.ts";
 import { replySource } from "./model.ts";
-import type { FallbackInfo, ModelPort } from "./model.ts";
+import type { FallbackInfo, Item, Message, ModelPort } from "./model.ts";
 import type { AdminOps } from "./ops-admin.ts";
 import type { SysOps } from "./ops-sys.ts";
 import type { RecentContextRefresher } from "./recent-context.ts";
@@ -33,8 +33,15 @@ export type ThreadView = Omit<Thread, "messages" | "cards"> & { messages: Messag
 
 export type ThreadService = ReturnType<typeof threadService>;
 
+// What a turn needs from its store. The chat thread store (src/threads.ts) is one; the Assistant's chunk store
+// (src/assistant-store.ts) is the other, so both run the same turn, tool, card and confirmation code.
+export type TurnStore = Pick<
+  Threads,
+  "get" | "isBusy" | "tryBegin" | "end" | "holds" | "appendUser" | "beginAssistant" | "addCall" | "patchMessage" | "addCard" | "threadOfCard" | "card" | "transitionCard" | "recordOutcome"
+>;
+
 export function threadService(d: {
-  threads: Threads;
+  threads: TurnStore;
   model: ModelPort;
   proposals: Proposals;
   jobs?: Jobs;
@@ -49,6 +56,13 @@ export function threadService(d: {
   abortGraceMs?: number;
   // Where a tool call that ends after its turn stopped waiting is reported. Logging only; nothing is written to the thread.
   onLateTool?: (late: { thread: string; name: string; ok: boolean; error?: string }) => void;
+  // How the model input is built from the stored conversation. Absent: the whole thread after its summary (chat threads).
+  // The Assistant passes its bounded chunk context (src/assistant-context.ts) and turns compaction off.
+  context?: { items(t: Thread): Item[]; messages(t: Thread): Message[] };
+  // false: never summarize older messages (the Assistant keeps a bounded window instead). Default true.
+  compact?: boolean;
+  // At most this many proposal cards (the newest) are described to the model. Absent: all of them (chat threads).
+  maxCardLines?: number;
 }) {
   const { threads, model, proposals, jobs, admin, sys, recent } = d;
   const now = d.now ?? (() => new Date());
@@ -159,11 +173,12 @@ export function threadService(d: {
     if (threads.get(id)!.archived) throw new ThreadError(409, "This thread is archived. Restore it to continue.");
     reconcile(id);
     // Older context is summarized first, so the model call below is within budget. A failure here never blocks the reply.
-    await compactThread({ threads, model, id, now, budget: d.budget }).catch(() => {});
+    // Only a chat thread store compacts (the Assistant passes compact: false and never reaches this with its own store).
+    if (d.compact !== false) await compactThread({ threads: threads as Threads, model, id, now, budget: d.budget }).catch(() => {});
     threads.appendUser(id, text);
     const mid = threads.beginAssistant(id);
     const t = threads.get(id)!;
-    const notes = [prep.notes, await recent?.note(), summaryNote(t), t.cards.length ? dataBlock("proposal-cards", `Proposal cards in this thread, from ORBIT's records:\n${cardLines(t).join("\n")}`) : undefined].filter(Boolean).join("\n\n") || undefined;
+    const notes = [prep.notes, await recent?.note(), summaryNote(t), t.cards.length ? dataBlock("proposal-cards", `Proposal cards in this thread, from ORBIT's records:\n${(d.maxCardLines ? cardLines(t).slice(-d.maxCardLines) : cardLines(t)).join("\n")}`) : undefined].filter(Boolean).join("\n\n") || undefined;
     try {
       let reply: string;
       let provenance: "live" | "mock";
@@ -175,7 +190,7 @@ export function threadService(d: {
       if (prep.tools.length && model.step) {
         const outcome = await runChat({
           model,
-          messages: buildItems(t),
+          messages: d.context ? d.context.items(t) : buildItems(t),
           limits: prep.limits,
           notes,
           tools: prep.tools,
@@ -203,7 +218,7 @@ export function threadService(d: {
         accounting = outcome.accounting;
         incomplete = outcome.incomplete;
       } else {
-        const r = await model.reply(buildMessages(t), prep.limits, notes, opts.signal ? { signal: opts.signal } : undefined);
+        const r = await model.reply(d.context ? d.context.messages(t) : buildMessages(t), prep.limits, notes, opts.signal ? { signal: opts.signal } : undefined);
         reply = r.value;
         provenance = r.provenance;
         source = r.source;
@@ -225,6 +240,7 @@ export function threadService(d: {
 
   return {
     view,
+    liveOf,
     cardLines,
     turn,
     reconcile,

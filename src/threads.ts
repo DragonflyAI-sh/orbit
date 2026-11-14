@@ -176,7 +176,8 @@ export class ThreadError extends Error {
   }
 }
 
-function writeAtomic(file: string, data: string): void {
+// Shared with the Assistant's chunk store (src/assistant-store.ts).
+export function writeAtomic(file: string, data: string): void {
   const tmp = `${file}.${randomUUID()}.tmp`;
   const fd = openSync(tmp, "w", 0o600);
   try {
@@ -195,6 +196,18 @@ function writeAtomic(file: string, data: string): void {
     }
     throw err;
   }
+}
+
+export type MessagePatch = Partial<Omit<ThreadMessage, "id" | "role" | "at" | "calls">>;
+
+// The masking and bounds every message patch gets before it is stored. Shared with the Assistant's chunk store.
+export function safePatch(patch: MessagePatch): MessagePatch {
+  const safe = { ...patch };
+  if (typeof safe.text === "string") safe.text = maskContent(safe.text).slice(0, MAX_MESSAGE_CHARS);
+  if (typeof safe.error === "string") safe.error = maskText(safe.error).slice(0, 1000);
+  if (Array.isArray(safe.accounting)) safe.accounting = safe.accounting.slice(0, 5).map((a) => maskText(String(a)).slice(0, 300));
+  if (Array.isArray(safe.incomplete)) safe.incomplete = safe.incomplete.slice(0, 5).map((a) => maskText(String(a)).slice(0, 300));
+  return safe;
 }
 
 export type Threads = ReturnType<typeof threadStore>;
@@ -378,16 +391,11 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
       });
     },
 
-    patchMessage(id: string, messageId: string, patch: Partial<Omit<ThreadMessage, "id" | "role" | "at" | "calls">>): void {
+    patchMessage(id: string, messageId: string, patch: MessagePatch): void {
       mutate(id, (t) => {
         const m = t.messages.find((x) => x.id === messageId);
         if (!m) throw new ThreadError(404, "No such message.");
-        const safe = { ...patch };
-        if (typeof safe.text === "string") safe.text = maskContent(safe.text).slice(0, MAX_MESSAGE_CHARS);
-        if (typeof safe.error === "string") safe.error = maskText(safe.error).slice(0, 1000);
-        if (Array.isArray(safe.accounting)) safe.accounting = safe.accounting.slice(0, 5).map((a) => maskText(String(a)).slice(0, 300));
-        if (Array.isArray(safe.incomplete)) safe.incomplete = safe.incomplete.slice(0, 5).map((a) => maskText(String(a)).slice(0, 300));
-        Object.assign(m, safe);
+        Object.assign(m, safePatch(patch));
       });
     },
 
