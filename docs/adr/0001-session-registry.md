@@ -200,7 +200,7 @@ Example (shortened):
     { "type": "message", "id": "9b1e...", "role": "user", "at": "2026-11-14T09:02:11.000Z", "text": "Add tests", "chars": { "from": 0, "to": 9, "total": 9 }, "complete": true, "digest": "5f0c2a..." },
     { "type": "message", "id": "c47d...", "role": "assistant", "at": "2026-11-14T09:02:15.000Z", "text": "Tests added to the plan.", "chars": { "from": 0, "to": 24, "total": 24 }, "complete": true, "digest": "e81b9d...", "omitted": { "toolCalls": 1 } }
   ],
-  "truncated": true, "stoppedBy": "limit", "nextCursor": "eyJiIjoi...",
+  "truncated": true, "stoppedBy": "limit", "nextCursor": "<opaque cursor>",
   "coverage": { "storedMessages": 4, "reachedStart": false, "reachedEnd": true, "inProgress": false, "wholeSession": "Not claimed. ..." },
   "revision": { "store": "chat-threads", "rev": 9, "updatedAt": "2026-11-14T09:02:15.000Z" }
 }
