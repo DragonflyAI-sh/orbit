@@ -63,6 +63,9 @@ export function threadService(d: {
   compact?: boolean;
   // At most this many proposal cards (the newest) are described to the model. Absent: all of them (chat threads).
   maxCardLines?: number;
+  // The session id of a thread of this store (`chat:<uuid>`, or `assistant:assistant` for the Assistant). When set, a proposal made in
+  // a turn is bound to that origin before its card is stored, and a proposal already bound to another conversation gets no card here.
+  origin?: (threadId: string) => string;
 }) {
   const { threads, model, proposals, jobs, admin, sys, recent } = d;
   const now = d.now ?? (() => new Date());
@@ -207,7 +210,7 @@ export function threadService(d: {
             threads.addCall(id, mid, { callId: call_id, name, arguments: args, output, ok: record.ok, provenance: record.provenance, source: record.source, summary: record.summary, at: now().toISOString(), ...(record.interrupted ? { interrupted: record.interrupted } : {}), ...(record.abort ? { abort: record.abort } : {}), ...(record.outcomeUnknown ? { outcomeUnknown: true } : {}) });
             const pid = proposalIdOf(output);
             const p = pid ? proposals.peek(pid) : undefined;
-            if (p) threads.addCard(id, mid, cardOf(p));
+            if (p && (!d.origin || proposals.bind(p.id, d.origin(id)))) threads.addCard(id, mid, cardOf(p));
           },
         });
         reply = outcome.text || "(the model returned no text)";

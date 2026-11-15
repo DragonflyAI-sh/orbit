@@ -32,6 +32,7 @@ import { configView } from "./config-view.ts";
 import { decide } from "./policy.ts";
 import { jsonStore } from "./store.ts";
 import { threadStore } from "./threads.ts";
+import { workFile, workSessions } from "./work-sessions.ts";
 import { join } from "node:path";
 import { watcher } from "./watch.ts";
 import { githubRepoStatus, toolbox } from "./tools.ts";
@@ -186,6 +187,8 @@ buildServer({
   proposals,
   threads: threadStore(stateDir ? join(stateDir, "threads") : undefined),
   assistantDir: stateDir ? join(stateDir, "assistant") : undefined,
+  // Work sessions and run links: <state>/work-sessions.json (docs/adr/0002-work-sessions.md).
+  workSessions: workSessions(workFile(stateDir)),
   vaultEdits,
   configView: config,
   // Read-only PR inspection (owner-only chat tools): the repositories are the ones ORBIT_ROUTINE_REPOS names, the token is orbit.github-orbit-prs.

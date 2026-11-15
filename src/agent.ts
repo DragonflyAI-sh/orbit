@@ -318,7 +318,10 @@ export type ProposalAction =
   // A vault edit AGENTS.md section 4 protects. The exact validated edit stays with src/vault/tools.ts; the proposal carries what Rai
   // is shown, the reasons it needs him, and a digest of the exact edit and reasons.
   | { kind: "vault_edit"; action: string; summary: string; display: Record<string, string>; digest: string; reasons: string[] };
-export type Proposal = ProposalAction & { id: string; createdAt: string; expiresAt: string };
+// `origin`: the conversation (session id, `chat:<uuid>` or `assistant:assistant`) whose turn made the proposal, bound by the thread service
+// from the server's own turn context when the card is stored (src/work-sessions.ts). Never taken from a tool's arguments: propose()
+// drops any `origin` an action carries. Absent: not known (for example the legacy /chat route, which stores no card).
+export type Proposal = ProposalAction & { id: string; createdAt: string; expiresAt: string; origin?: string };
 
 export const PROPOSAL_TTL_MS = 30 * 60 * 1000;
 const MAX_PROPOSALS = 20;
@@ -333,7 +336,8 @@ export function proposals(now: () => Date = () => new Date()) {
       sweep();
       while (open.size >= MAX_PROPOSALS) open.delete(open.keys().next().value!);
       const at = now();
-      const p: Proposal = { ...action, id: randomUUID(), createdAt: at.toISOString(), expiresAt: new Date(at.getTime() + ttlMs).toISOString() };
+      const { origin: _ignored, ...clean } = action as ProposalAction & { origin?: unknown };
+      const p: Proposal = { ...clean, id: randomUUID(), createdAt: at.toISOString(), expiresAt: new Date(at.getTime() + ttlMs).toISOString() } as Proposal;
       open.set(p.id, p);
       return p;
     },
@@ -341,6 +345,18 @@ export function proposals(now: () => Date = () => new Date()) {
     peek(id: string): Proposal | undefined {
       sweep();
       return open.get(id);
+    },
+    // Binds the proposal to the conversation it was made in, once. True when it is now (or already was) bound to `origin`; false when
+    // it is gone or bound to another conversation, so a proposal can never be shown, and later confirmed, as another session's.
+    bind(id: string, origin: string): boolean {
+      sweep();
+      const p = open.get(id);
+      if (!p) return false;
+      if (p.origin === undefined) {
+        open.set(id, { ...p, origin });
+        return true;
+      }
+      return p.origin === origin;
     },
     // Removes the proposal: a confirm or a cancel can happen once.
     take(id: string): Proposal | undefined {
