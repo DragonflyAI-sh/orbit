@@ -152,6 +152,14 @@ Bounded reading (slice 2), same setup, also not performed on a live host by this
 12. While a chat reply is still being written, ask the Assistant to read that chat: the reply in progress is not included and `coverage.inProgress` is `true`.
 13. Ask the Assistant to read its own conversation from the start (`assistant:assistant`, `from: start`): archived chunks are read at most three files per call (`io.archiveFilesRead`), and each message carries its chunk number.
 
+First read and continuation (cursor contract), same setup, also not performed on a live host by this change. Synthetic data only:
+
+14. In a new chat titled "Memory test — Copper Finch", send "Memory test. Please remember: release code CF-7319, release window Thursday at 14:20 UTC, packaging violet." Then send "Correction: the release window is now Friday at 16:40 UTC. Everything else stays the same." Mention no budget.
+15. In the Assistant, ask: "What are the current release window, release code and packaging in the Copper Finch memory test chat? Read the chat itself." The reply gives Friday at 16:40 UTC, CF-7319 and violet, names that chat (`chat:<uuid>`) as the source, and says Thursday at 14:20 UTC was superseded by the correction. In the Tool output pane, the first `session_read` succeeds whether its `cursor` was left out, `null` or empty; no `invalid-cursor` error appears.
+16. Ask: "Read it again from the start, one message per page." Each call passes the previous `nextCursor` verbatim; every output is whole JSON (no "… (truncated)"), and the pages end with `nextCursor: null`.
+17. Ask: "What is the approved budget there?" The reply says no budget was found in the messages it read from that chat, which is not a claim that no budget exists anywhere, and it does not invent one.
+18. In an ordinary chat thread, ask about Copper Finch: it has no session tools, says it cannot read other conversations, and quotes none of the values.
+
 ## Unknowns and limits
 
 - **Activity** is the newest stored message and the busy flag. A rename or archive changes `updatedAt` but is not activity. The Assistant's last message and message count cover active chunks only; cards in archived chunks are not read, so a job launched from an old, archived Assistant turn is not listed as its run.
@@ -178,12 +186,12 @@ Bounded reading (slice 2), same setup, also not performed on a live host by this
 | Argument | Meaning | Default / bounds |
 |---|---|---|
 | `id` | A session id exactly as `sessions_list` returned it: `chat:<uuid>` or `assistant:assistant`. Reserved kinds answer "no source"; a job id is refused as malformed ("jobs are runs") | required |
-| `from` | `end`: the newest messages, then pages backward. `start`: the first message, then pages forward. With a cursor, the cursor's direction is used; a different `from` is refused | `end` |
+| `from` | `end`: the newest messages, then pages backward. `start`: the first message, then pages forward. With a cursor, the cursor's direction is used; a different `from` is refused. `null` means left out | `end` |
 | `limit` | Items (messages, message parts or gaps) per page | 10, at most 30 (`READ_LIMIT_*`) |
 | `maxChars` | Characters of message text per page, measured as the **JSON-serialized** length (a quote, backslash or line break counts as the two characters the model receives) | 4000, from 500 to 12000 (`READ_CHARS_*`) |
-| `cursor` | `nextCursor` of the previous page of the same session | |
+| `cursor` | Left out, `null` or `""`: the first page. Otherwise `nextCursor` of the previous page of the same session, exactly as returned | first page |
 
-The answer: `notice` (the untrusted-data notice, below), `observedAt`, `session` (`id`, `kind`, `title`, `lifecycle`, `source`, `self` when it is the Assistant itself), `from`, `ordering`, `bounds`, `messages`, `returned` (`messages`, `gaps`, `chars`), `truncated`, `stoppedBy` (`end`, `limit`, `maxChars` or `archive-io`), `nextCursor` (`null` at the edge), `coverage`, `revision`, `io` and `source`.
+The answer: `notice` (the untrusted-data notice, below), `observedAt`, `session` (`id`, `kind`, `title`, `lifecycle`, `source`, `self` when it is the Assistant itself), `from`, `ordering`, `bounds`, `messages`, `returned` (`messages`, `gaps`, `chars`), `truncated`, `stoppedBy` (`end`, `limit`, `maxChars`, `output-size` or `archive-io`), `nextCursor` (`null` at the edge), `coverage`, `revision`, `io` and `source`.
 
 Each item in `messages` is oldest first within the page:
 
@@ -219,9 +227,22 @@ A message that does not fit the remaining room is handled explicitly, never clip
 - Going backward, only an empty page takes a part (so newer messages on the page are never followed by half of an older one); the following pages continue that message forward in text order, then go on to older messages.
 - Every page returns at least one item, and the empty-page rule always takes at least one character (`maxChars` >= 500 and a character serializes to at most 6), so paging always ends. Parts never split a surrogate pair. A 20000-character message (the store's cap) at `maxChars: 500` takes at most about 80 pages.
 
+### First read, continuation and errors
+
+The contract the tool schema, its description, the agent dispatch and the registry share (tested through the model-facing tool definitions and `runChat` in `test/session-cursor-contract.test.ts`):
+
+- **First page.** `cursor` left out, `null` or `""` all mean "no cursor". Some model transports send every declared property and fill unused ones with `null` or an empty value; before this was explicit, such a first read was refused as an invalid cursor with the advice "start again without a cursor", which the model believed it had done, so the retry failed identically. `null` for `from`, `limit` or `maxChars` likewise means the default. Any other value is not reset to the first page: a non-string, or a nonempty string that does not decode, is refused. The schema still declares `cursor` as an optional string, required only `id`, and ORBIT sends tool schemas unchanged (no `strict` flag) to the primary model; the paid fallback is never offered the session tools.
+- **Continuation.** Pass `nextCursor` exactly as returned, with the same `id`; leave `from` out (the cursor carries the direction). Page sizes are per call and not carried in the cursor. Every answer fits the agent's tool-output limit (`MAX_OUTPUT_CHARS`, 8000): the page's items get what the answer's other fields leave (measured at their largest sizes), and a page that hits that budget before `maxChars` stops with `stoppedBy: "output-size"`. Before, a page near `maxChars` 4000 to 12000 could exceed the limit, and the agent clipped the output, which cut the JSON and could drop or shorten `nextCursor`.
+- **Errors** start with their kind and say what to do; none names another session or quotes stored text:
+  - `invalid-cursor:` malformed, shortened, altered, another session's or the other direction's cursor, or a `from` that conflicts with the cursor. Nothing was read. Pass the cursor verbatim, or leave it out for the first page; do not retry the same cursor.
+  - `stale-cursor:` the session changed where the cursor points. Nothing was returned. Restart from the first page (same `id` and `from`, no cursor) at most once in the turn, and do not combine pages from before with pages after.
+  - An unavailable source is an answer, not an error: `available: false` with the source's state and `recovery` (do not repeat the call in this turn; leave facts from it unverified).
+  - "No visible session with that id." for a missing, deleted or invisible session (unchanged).
+- **Bounds on retrying.** ORBIT does not retry or read further on its own. A turn is capped at `MAX_ROUNDS` model rounds (src/agent.ts), so a model that repeats a failing call stops there. The error texts ask for at most one restart; they cannot guarantee what a model does.
+
 ### Cursors
 
-A cursor is base64url JSON `{b, h}`: `b` is `{v, s: session id, d: direction, g: segment, i: message index or null (a segment edge), m: that message's id, o: characters of it already returned, x: digest of its text when o > 0}`, and `h` a checksum of `b`. It is refused (one fixed "not valid for this session and direction" message) when it is malformed, longer than 600 characters, altered, for another session or for the other direction. For a missing or invisible session the answer is "No visible session with that id." before the cursor is looked at. Page sizes (`limit`, `maxChars`) may change between pages. The checksum makes accidental or casual edits fail; it is not a secret, and a forged cursor still only reaches the same owner-visible session the caller could read directly.
+A cursor is base64url JSON `{b, h}`: `b` is `{v, s: session id, d: direction, g: segment, i: message index or null (a segment edge), m: that message's id, o: characters of it already returned, x: digest of its text when o > 0}`, and `h` a checksum of `b`. It is refused (one fixed `invalid-cursor: the cursor is not valid for this session and direction ...` message) when it is malformed, longer than 600 characters, altered, for another session or for the other direction. For a missing or invisible session the answer is "No visible session with that id." before the cursor is looked at. Page sizes (`limit`, `maxChars`) may change between pages. The checksum makes accidental or casual edits fail; it is not a secret, and a forged cursor still only reaches the same owner-visible session the caller could read directly.
 
 ### Concurrent change, staleness and restarts
 
@@ -231,7 +252,7 @@ A cursor is base64url JSON `{b, h}`: `b` is `{v, s: session id, d: direction, g:
 - **Rotation** (active chunks archived) keeps chunk numbers and message ids, so a cursor stays valid across it; tested in both directions.
 - **Compaction** (a chat summary) removes no message: all stored messages are read; the summary itself is not returned.
 - **Archive** (a chat archived) only flips a flag: the chat stays readable, `session.lifecycle` says `archived`.
-- **Stale cursor.** On every continuation the cursor's message is checked: it must still be at its position with the same id, and when the read is part-way through it, its text must still have the same digest. Otherwise the call fails with "The session changed where this cursor points (...)" and nothing is returned, so nothing is skipped or repeated silently: read again without a cursor. Settled message text is not changed by ORBIT (only replies in progress are patched), so in practice this fires only when a file was edited by hand.
+- **Stale cursor.** On every continuation the cursor's message is checked: it must still be at its position with the same id, and when the read is part-way through it, its text must still have the same digest. Otherwise the call fails with "stale-cursor: the session changed where this cursor points (...)" and nothing is returned, so nothing is skipped or repeated silently: read the first page again, once. Settled message text is not changed by ORBIT (only replies in progress are patched), so in practice this fires only when a file was edited by hand.
 - **Restart.** Thread ids, chunk numbers and message ids are persisted, so a cursor from before a restart continues after it. A thread whose file was removed before a restart is "not found".
 
 ### What is read, and source IO

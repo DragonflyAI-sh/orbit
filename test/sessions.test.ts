@@ -200,7 +200,8 @@ test("pagination: complete, without duplicates, stable under concurrent new sess
   // A cursor only works for the query that made it, and a forged one is refused.
   assert.throws(() => s.registry.list(OWNER_VIEW, { kinds: ["chat"], limit: 10, lifecycle: "archived", cursor: p1.nextCursor! }), /cursor is not valid/);
   assert.throws(() => s.registry.list(OWNER_VIEW, { kinds: ["chat"], order: "created", cursor: p1.nextCursor! }), /cursor is not valid/);
-  for (const forged of ["", "!!!", "../../etc", Buffer.from(JSON.stringify({ v: 1, fp: "x", o: "recent", k: "2026-01-01T00:00:00.000Z", id: "chat:../../x" })).toString("base64url"), "A".repeat(1000)]) {
+  // ("" means no cursor, the first page: tested in session-cursor-contract.test.ts.)
+  for (const forged of ["!!!", "../../etc", Buffer.from(JSON.stringify({ v: 1, fp: "x", o: "recent", k: "2026-01-01T00:00:00.000Z", id: "chat:../../x" })).toString("base64url"), "A".repeat(1000)]) {
     assert.throws(() => s.registry.list(OWNER_VIEW, { kinds: ["chat"], cursor: forged }), /cursor is not valid/);
   }
 });

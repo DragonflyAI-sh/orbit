@@ -244,7 +244,8 @@ test("cursors: malformed, altered, cross-session and wrong-direction cursors are
   // The other direction.
   invalid(`chat:${a.id}`, { cursor: cur, from: "end" });
   // Junk, too long, non-base64url, non-string.
-  for (const bad of ["", "x", "!!!", "a".repeat(700), Buffer.from("{}").toString("base64url"), 42 as any, null as any]) invalid(`chat:${a.id}`, { cursor: bad });
+  // ("" and null are not here: they mean "no cursor", the first page; see test/session-cursor-contract.test.ts.)
+  for (const bad of ["x", " ", "!!!", "a".repeat(700), Buffer.from("{}").toString("base64url"), 42 as any, {} as any, [] as any]) invalid(`chat:${a.id}`, { cursor: bad });
   // Altered: the session id swapped inside the body (the checksum no longer matches), or the position changed.
   const outer = JSON.parse(Buffer.from(cur, "base64url").toString("utf8"));
   const swapped = Buffer.from(JSON.stringify({ ...outer, b: outer.b.replace(a.id, b.id) })).toString("base64url");
