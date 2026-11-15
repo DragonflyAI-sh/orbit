@@ -37,7 +37,10 @@ import type { Threads } from "./threads.ts";
 import { jsonStore } from "./store.ts";
 import { ASSISTANT_ACTIVE_BUDGET_CHARS, ASSISTANT_CARD_LINES_MAX, ASSISTANT_CHUNK_MAX_CHARS, ASSISTANT_CONTEXT_BUDGET_CHARS, ASSISTANT_NOTES_MAX_CHARS, boundNotes, planItems, planMessages } from "./assistant-context.ts";
 import { ASSISTANT_ID, assistantStore } from "./assistant-store.ts";
-import { assistantAdapter, assistantSessionId, chatAdapter, SESSION_TOOL_NAMES, sessionRegistry, sessionTools } from "./sessions.ts";
+import { assistantAdapter, assistantSessionId, chatAdapter, chatSessionId, SESSION_TOOL_NAMES, sessionRegistry, sessionTools, workAdapter } from "./sessions.ts";
+import { isOriginId, workFile, WorkError, workSessions as newWorkSessions } from "./work-sessions.ts";
+import type { Origin, RunLink, WorkSessions } from "./work-sessions.ts";
+import type { Proposal } from "./agent.ts";
 import { sessionDigest } from "./session-digest.ts";
 import type { Chunk } from "./assistant-store.ts";
 
@@ -84,6 +87,8 @@ export type Deps = {
   recentContext?: RecentContextPort;
   // Where the Assistant's rolling conversation is stored (<state>/assistant). Absent means memory only, which a restart empties.
   assistantDir?: string;
+  // Work sessions and run links (src/work-sessions.ts, docs/adr/0002-work-sessions.md). Absent means memory only, which a restart empties.
+  workSessions?: WorkSessions;
   // The clock for thread cards and the recent-context note. Tests inject one; it must be the clock the proposals use.
   now?: () => Date;
   // Chat tool execution deadline and abort grace period (docs/tool-deadlines.md). Tests lower them; production uses the defaults.
@@ -156,6 +161,7 @@ export function buildServer({
   watch,
   threads = threadStore(undefined),
   assistantDir,
+  workSessions: workArg,
   recentContext: recentPort = stateRecentContext(jsonStore(undefined, "recent-context", null)),
   now,
   toolDeadlineMs,
@@ -203,7 +209,8 @@ export function buildServer({
 
   // Threads: the store, the rolling recent-context note, and the service that runs a turn against a thread.
   const recent = recentContext({ port: recentPort, threads, model, now, cardLines: (t) => svc.cardLines(t) });
-  const svc = threadService({ threads, model, proposals, jobs, admin: adminOps, sys: sysOps, recent, now, toolDeadlineMs, abortGraceMs });
+  // `origin`: a proposal made in a turn is bound to that turn's conversation (server context, never model text) before its card is stored.
+  const svc = threadService({ threads, model, proposals, jobs, admin: adminOps, sys: sysOps, recent, now, toolDeadlineMs, abortGraceMs, origin: chatSessionId });
 
   // The Assistant (docs/assistant.md): one server-owned rolling conversation in its own chunk store, run by the same turn code as
   // chat threads but with a bounded context and no compaction. It does not feed or read the chat threads' rolling note.
@@ -226,13 +233,57 @@ export function buildServer({
     abortGraceMs,
     compact: false,
     maxCardLines: ASSISTANT_CARD_LINES_MAX,
+    origin: () => assistantSessionId(),
     context: { items: () => planItems(planTurn()), messages: () => planMessages(planTurn()) },
   });
   // The session registry (src/sessions.ts, docs/adr/0001-session-registry.md): a read-only view over the Assistant's chunk store,
   // the chat threads and the job store. Only the Assistant is offered its tools (prepare and allowAgent below).
-  const sessions = sessionRegistry({ adapters: [assistantAdapter(assistant), chatAdapter(threads)], jobs: jobs ? { all: () => jobs.all(), health: (j) => jobs.health(j) } : undefined, now });
+  const jobsReader = jobs ? { all: () => jobs.all(), health: (j: Job) => jobs.health(j) } : undefined;
+  const work = workArg ?? newWorkSessions(workFile(undefined), clock);
+  const sessions = sessionRegistry({ adapters: [assistantAdapter(assistant), chatAdapter(threads), workAdapter(work, jobsReader)], jobs: jobsReader, work, now });
   // The service that owns a proposal's card: the Assistant's when its card is there, otherwise the chat threads'.
   const cardSvc = (proposalId: string) => (assistant.threadOfCard(proposalId) ? asvc : svc);
+
+  // Where a launch proposal was made (docs/adr/0002-work-sessions.md, "Origin"). Two server-side records, both written from the turn's own
+  // context: the conversation that stores the proposal's card, and the origin bound on the proposal when that card was stored. Nothing
+  // from the request body or the model is used. When both exist they must agree; when neither does, the origin is unknown.
+  const originOf = (p: Proposal): Origin | { conflict: true } => {
+    const tid = threads.threadOfCard(p.id);
+    const fromCard = assistant.threadOfCard(p.id) ? assistantSessionId() : tid ? chatSessionId(tid) : undefined;
+    if (fromCard && p.origin !== undefined && p.origin !== fromCard) return { conflict: true };
+    const session = fromCard ?? p.origin;
+    return session && isOriginId(session) ? { session, basis: "server-turn" } : { session: null, basis: "unknown", why: "no conversation stored this proposal (for example the legacy /chat route stores no card)" };
+  };
+  const linkView = (l: RunLink | undefined) => (l ? { workSession: l.workSession, attachment: l.attachment, ...(l.retryOf ? { retryOf: l.retryOf } : {}), origin: l.origin.session, launch: l.launch } : undefined);
+  const safeLink = (proposalId: string) => {
+    try {
+      return linkView(work.linkOf(proposalId));
+    } catch {
+      return undefined;
+    }
+  };
+  // Metadata repair from a reconciled link onto its card, only where the card is confirmed and no result was ever recorded on it.
+  const repairCard = (l: RunLink) => {
+    const store = assistant.threadOfCard(l.proposal) ? assistant : threads.threadOfCard(l.proposal) ? threads : undefined;
+    const card = store?.card(l.proposal);
+    if (!card || card.state !== "confirmed" || card.outcome) return;
+    const st = l.launch.state;
+    if (st === "launching") return;
+    const result = l.launch.job
+      ? { code: st === "launched" ? 202 : st === "ambiguous" ? 504 : 502, body: { id: l.launch.job, ...(l.launch.detail ? { error: l.launch.detail } : {}) } }
+      : { code: 503, body: { error: l.launch.detail ?? "Not launched." } };
+    cardSvc(l.proposal).settle(l.proposal, result);
+  };
+  // Reconciliation at start (nothing is in flight yet): links left `launching` or `ambiguous` by a crash or a failed write are compared
+  // with the job store and their metadata repaired. Never launches, retries or approves anything; never changes a job.
+  try {
+    for (const l of work.reconcile(jobsReader)) {
+      repairCard(l);
+      console.log(JSON.stringify({ at: clock().toISOString(), event: "work_link_reconciled", proposal: l.proposal, workSession: l.workSession, state: l.launch.state, job: l.launch.job ?? null }));
+    }
+  } catch (e) {
+    console.log(JSON.stringify({ at: clock().toISOString(), event: "work_reconcile_failed", detail: e instanceof Error ? e.message.slice(0, 200) : "error" }));
+  }
   const chunkView = (c: Chunk) => ({
     seq: c.seq,
     id: c.id,
@@ -623,7 +674,9 @@ export function buildServer({
       if (!open) {
         // A proposal shown in a thread keeps its card: it says what became of it instead of a bare 404.
         const known = cardSvc(proposalMatch[1]).missing(proposalMatch[1]);
-        if (known) return send(res, known.code, known.body);
+        // A repeated confirmation is answered from the records (and the work link, if one was recorded): nothing runs again.
+        const run = known ? safeLink(proposalMatch[1]) : undefined;
+        if (known) return send(res, known.code, run ? { ...(known.body as object), work: run } : known.body);
       }
       // Single use has two guards that must agree: the proposal store's take() and the thread card's open -> confirmed/cancelled
       // compare-and-set. Both are synchronous, so of any number of concurrent requests exactly one gets past them.
@@ -675,6 +728,70 @@ export function buildServer({
         cardSvc(taken.id).settle(taken.id, result);
         return send(res, result.code, result.body);
       }
+      if (open?.kind === "job_launch" && confirming) {
+        // A launch confirmation (docs/adr/0002-work-sessions.md). Everything that can refuse it without spending the proposal runs first:
+        // the origin check, the work-session store, and an optional attachment to an existing work session (owner's request body only;
+        // never the model). Then take() and the card's compare-and-set make it single use, the link is written (`launching`) before any
+        // external step, the job is registered carrying the link in the same write, and the launcher's result is recorded on both.
+        if (!jobs) return send(res, 503, { error: "Jobs are not enabled." });
+        const input = await body();
+        if (!input) return;
+        const origin = originOf(open);
+        if ("conflict" in origin) return send(res, 409, { error: "This proposal's recorded conversation does not match the conversation that stores its card. Nothing was done." });
+        let plan;
+        try {
+          work.check();
+          plan = work.plan(input.attach, origin, jobsReader);
+        } catch (e) {
+          if (e instanceof WorkError) return send(res, e.code, { error: e.message });
+          throw e;
+        }
+        const taken = proposals.take(open.id);
+        if (!taken || taken.kind !== "job_launch") {
+          const known = cardSvc(open.id).missing(open.id);
+          return known ? send(res, known.code, { ...(known.body as object), ...(safeLink(open.id) ? { work: safeLink(open.id) } : {}) }) : send(res, 404, gone);
+        }
+        if (!claimed(taken.id, "confirmed")) return alreadyUsed();
+        if (hasLegacyContext((taken as { context?: unknown }).context)) {
+          const refused = { code: 409, body: { error: LEGACY_CONTEXT_ERROR, context: { refused: true, reason: "unsupported" } } };
+          cardSvc(taken.id).settle(taken.id, refused);
+          return send(res, refused.code, refused.body);
+        }
+        let link: RunLink;
+        try {
+          link = work.begin(taken.id, origin, plan);
+        } catch (e) {
+          const refused = { code: 503, body: { error: `Not launched: the work-session record could not be written (${e instanceof WorkError ? e.message : "write failed"}). Nothing was sent to a runner.` } };
+          cardSvc(taken.id).settle(taken.id, refused);
+          return send(res, refused.code, refused.body);
+        }
+        let result: { code: number; body: unknown };
+        try {
+          result = await launchJob(taken.routine, taken.brief, undefined, { proposal: taken.id, workSession: link.workSession, origin: origin.session });
+        } catch (e) {
+          // The launcher threw: whether a job was registered or fired is not known here. The job store is read (never retried) and
+          // the link says what it shows: no job means nothing was sent; a job without a fire result is ambiguous.
+          let after: RunLink | undefined;
+          try {
+            work.reconcile(jobsReader, taken.id);
+            after = work.linkOf(taken.id);
+          } catch {
+            after = undefined;
+          }
+          result = { code: 500, body: { error: `The launch did not complete normally (${e instanceof Error ? e.message.slice(0, 200) : "error"}). It was not retried.`, ...(after?.launch.job ? { job: { id: after.launch.job } } : {}), outcome: after?.launch.state ?? "unknown" } };
+          cardSvc(taken.id).settle(taken.id, result);
+          return send(res, result.code, { ...(result.body as object), work: linkView(after) ?? { workSession: link.workSession, launch: { state: "unknown" } } });
+        }
+        let recorded: RunLink | undefined;
+        try {
+          recorded = work.settle(taken.id, result);
+        } catch {
+          // The link stays `launching`; the job carries its link, so the next start reconciles it from the job store.
+          recorded = undefined;
+        }
+        cardSvc(taken.id).settle(taken.id, result);
+        return send(res, result.code, { ...(result.body as object), work: linkView(recorded) ?? { ...linkView(link), note: "The launch result could not be written to the work-session record; it is reconciled from the job store at the next start." } });
+      }
       const proposal = proposals.take(proposalMatch[1]);
       if (!proposal) return send(res, 404, gone);
       if (proposalMatch[2] === "cancel") {
@@ -698,9 +815,11 @@ export function buildServer({
         cardSvc(proposal.id).settle(proposal.id, refused);
         return send(res, refused.code, refused.body);
       }
-      const result = await launchJob(proposal.routine, proposal.brief, undefined);
-      cardSvc(proposal.id).settle(proposal.id, result);
-      return send(res, result.code, result.body);
+      // Launch confirmations are handled above (with their work link). A launch proposal that reaches here was not open when the route
+      // looked, so it is refused rather than launched without its link.
+      const refused = { code: 409, body: { error: "Not confirmed: this launch proposal was not open when the confirmation arrived. Nothing was launched." } };
+      cardSvc(proposal.id).settle(proposal.id, refused);
+      return send(res, refused.code, refused.body);
     }
     if (jobs && url.pathname === "/jobs" && req.method === "POST") {
       if (!(await owned("jobs", "register"))) return;

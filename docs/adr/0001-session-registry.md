@@ -2,6 +2,8 @@
 
 Status: accepted for slice 1 (discovery), slice 2 (bounded reading, `session_read`, see "Bounded reading" below) and slice 3 (the automatic activity digest in Assistant turns, see "Activity digest (slice 3)" below; code `src/session-digest.ts` and `registry.digest`, tests `test/session-digest.test.ts`). Code: `src/sessions.ts`, the read-only accessors `sessionFacts` and `sessionTranscript` in `src/threads.ts` and `src/assistant-store.ts`, wiring in `src/server.ts` (`sessions`, `prepare(..., scope)`, `allowAgent(..., scope)`), the policy port in `src/policy.ts`. Tests: `test/sessions.test.ts` (slice 1), `test/session-read.test.ts` (slice 2).
 
+Slice 4 (work sessions, run links and origin tracking through proposal, confirmation and launch; the `work` session kind) is ADR 0002, `docs/adr/0002-work-sessions.md`. It adds a kind and fields; nothing in this ADR's contracts is removed.
+
 ## Context (what exists, read from the code)
 
 ORBIT holds three kinds of record that matter here, each in its own store:
@@ -163,6 +165,7 @@ Bounded reading (slice 2), same setup, also not performed on a live host by this
 
 - **Bounded reading**: built in slice 2 as `session_read` (below). It does not use `archivePage`, which expires stale open cards as it reads.
 - **Activity digest**: built in slice 3 as a per-turn digest inside the Assistant's reference material (below), not as a scheduled job. A scheduled digest delivered as a notification still needs the scheduler and its own decision.
+- **Run links**: built in slice 4 (ADR 0002): the job records the confirmed proposal, work session and origin (`Job.work`), and work sessions group runs.
 - **Workflow integration**: a workflow store with `workflow:<id>` sessions/definitions and a `producedBy` field on runs. The registry gains an adapter; ids and the run contract do not change. Recording the launching session on the job itself (instead of reading cards) would also cover archived Assistant turns.
 - **Other kinds** (`task`, `research`): only when a real store exists; an adapter is the only change needed.
 

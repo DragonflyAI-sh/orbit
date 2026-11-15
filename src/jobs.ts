@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Notifier } from "./notify.ts";
 import type { PortStatus } from "./ports.ts";
 import type { Store } from "./store.ts";
+import type { JobWorkLink } from "./work-sessions.ts";
 
 // Jobs run by Claude cloud runners. ORBIT registers a job, hands the runner a token that works for that job only,
 // queues steers for it, and receives its events. The git record in orbit-work stays the source of truth.
@@ -42,6 +43,10 @@ export type Job = {
   review?: ReviewOf;
   reviewJob?: ReviewOutcome;
   launch?: Launch;
+  // Set at registration, in the same write, when the job comes from a confirmed proposal (src/work-sessions.ts): the proposal, the work
+  // session and the origin conversation. Ids only. Absent on jobs from other paths and on every job registered before this field
+  // (legacy: unlinked, never backfilled).
+  work?: JobWorkLink;
   // The commit the runner reports it copied orbit-job from, taken from its start. Absent on older jobs: unknown, not a mismatch.
   toolCommit?: string;
   // Set when ORBIT starts opening the project PR; once set, ORBIT never opens another.
@@ -91,12 +96,13 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
 
   return {
     // Registers a job and returns its token. Registering an existing id again returns a fresh token for it.
-    register(id: string, ttlMs = DEFAULT_TTL_MS): { job: Job; token: string } | { error: string } {
+    // `work` is recorded only on a new job (an existing id keeps what it has).
+    register(id: string, ttlMs = DEFAULT_TTL_MS, extra: { work?: JobWorkLink } = {}): { job: Job; token: string } | { error: string } {
       if (!JOB_ID.test(id)) return { error: "Job ids are letters, digits, dot, underscore and dash, up to 64 characters." };
       const at = now();
       const expiresAt = new Date(at.getTime() + ttlMs).toISOString();
       const existing = find(id);
-      const job: Job = existing ? { ...existing, expiresAt } : { id, createdAt: at.toISOString(), expiresAt, state: "registered", events: [], steers: [] };
+      const job: Job = existing ? { ...existing, expiresAt } : { id, createdAt: at.toISOString(), expiresAt, state: "registered", events: [], steers: [], ...(extra.work ? { work: extra.work } : {}) };
       save(existing ? list().map((j) => (j.id === id ? job : j)) : [...list(), job]);
       return { job, token: `${id}.${sign(id, expiresAt)}` };
     },

@@ -2,6 +2,7 @@ import type { Job, Jobs } from "./jobs.ts";
 import type { ControlRepo, Routine } from "./launcher.ts";
 import { briefWords } from "./duplicates.ts";
 import type { Notifier } from "./notify.ts";
+import type { JobWorkLink } from "./work-sessions.ts";
 
 // The one launch path: write the brief to orbit-work, register the job, fire the Routine. The /jobs/launch route,
 // a confirmed chat proposal and ORBIT's own review launches all end here.
@@ -19,14 +20,16 @@ export function toolCommit(commit: string | undefined): string {
 export type LaunchResult = { code: number; body: unknown };
 // A launch never reads the vault and never writes anything but the brief to the control branch: launch-time vault context export was
 // removed (src/job-context.ts). A runner that needs notes reads the ones its brief names from its own read-only vault checkout.
-export type JobLauncher = (routineName: string, briefText: string, review?: NonNullable<Job["review"]>) => Promise<LaunchResult>;
+// `work`: the confirmed proposal's work-session link (src/work-sessions.ts), written on the job in the same write that registers it, so a
+// restart can tell which confirmation produced which job. Absent for the /jobs/launch route and review launches.
+export type JobLauncher = (routineName: string, briefText: string, review?: NonNullable<Job["review"]>, work?: JobWorkLink) => Promise<LaunchResult>;
 
 export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines?: Map<string, Routine>; notify: Notifier; publicJobUrl?: string; commit?: string }): JobLauncher {
   const { jobs, control, notify, publicJobUrl } = deps;
   const commit = toolCommit(deps.commit);
   const routines = deps.routines ?? new Map<string, Routine>();
   const withHealth = (job: Job) => ({ ...job, health: jobs!.health(job) });
-  return async (routineName, briefText, review) => {
+  return async (routineName, briefText, review, work) => {
     if (!jobs) return { code: 503, body: { error: "Jobs are not enabled." } };
     const routine = routines.get(routineName);
     if (!routine) return { code: 400, body: { error: `Unknown routine. Configured: ${[...routines.keys()].join(", ") || "none"}.` } };
@@ -34,7 +37,7 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
     if (!briefText.trim()) return { code: 400, body: { error: "A launch needs a brief." } };
     const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);
     const id = `${routine.name}-${stamp}-${Math.random().toString(36).slice(2, 6)}`;
-    const registered = jobs.register(id);
+    const registered = jobs.register(id, undefined, work ? { work } : {});
     if ("error" in registered) return { code: 400, body: { error: registered.error } };
     if (review) jobs.setReview(id, review);
     const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString(), briefWords: briefWords(briefText) };
