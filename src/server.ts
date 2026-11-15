@@ -43,6 +43,7 @@ import type { Origin, RunLink, WorkSessions } from "./work-sessions.ts";
 import type { Proposal } from "./agent.ts";
 import { sessionDigest } from "./session-digest.ts";
 import type { Chunk } from "./assistant-store.ts";
+import { resolutionSummary } from "./model-capability.ts";
 import { AttachmentError, attachmentStore, isAttachmentId, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments.ts";
 import type { AttachmentRef, Attachments } from "./attachments.ts";
 import { JPEG_MAX_BYTES, normalizeJpeg } from "./jpeg.ts";
@@ -439,7 +440,7 @@ export function buildServer({
     }
 
     if (req.method === "GET" && url.pathname === "/status") {
-      return send(res, 200, { commit, deploy: deploy(), ports: statuses() });
+      return send(res, 200, { commit, deploy: deploy(), ports: statuses(), photos: photoStatus(model) });
     }
 
     if (req.method === "POST" && url.pathname === "/chat") {
@@ -1053,4 +1054,12 @@ export function buildServer({
 
     return send(res, 404, { error: "Not found" });
   });
+}
+
+// Photo capability for /status: what the running process would do with a photo now, and why. Model id, capability, source and
+// freshness only: no evidence prose, no credentials. orbit_config_view has the full resolution for the owner.
+export function photoStatus(model: ModelPort) {
+  const s = model.images?.();
+  if (!s) return { ok: false, capability: "unknown", blocking: "blocked locally: the connected model adapter does not take photos" };
+  return { ok: s.ok, capability: s.capability ?? (s.ok ? "supported" : "unknown"), ...(s.resolution ? resolutionSummary(s.resolution) : {}), blocking: s.ok ? undefined : `blocked locally: ${s.detail.slice(0, 300)}` };
 }

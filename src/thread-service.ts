@@ -194,18 +194,23 @@ export function threadService(d: {
     const notes = [prep.notes, await recent?.note(), summaryNote(t), t.cards.length ? dataBlock("proposal-cards", `Proposal cards in this thread, from ORBIT's records:\n${(d.maxCardLines ? cardLines(t).slice(-d.maxCardLines) : cardLines(t)).join("\n")}`) : undefined].filter(Boolean).join("\n\n") || undefined;
     // Photos (docs/photos.md): load the bounded set this request may carry, and refuse rather than drop photos the model cannot take.
     const photoNotes: string[] = [];
+    // Set once photos passed ORBIT's own check and go out with the request: a failure after that is the provider's, not a local block.
+    let photosSent = false;
     const photoInput = <T extends Item>(items: T[]): T[] => {
       if (!hasPhotos(items)) return items;
       const support = model.images?.() ?? { ok: false, detail: "the connected model does not take photos" };
       if (!support.ok) {
         const stripped = withoutPhotos(items);
-        if (stripped.current) throw new PhotoRefusal(`This message has ${stripped.current} photo${stripped.current === 1 ? "" : "s"}, but they cannot be analyzed: ${support.detail}. The photos are stored with the message; nothing was sent to the model.`);
-        if (stripped.removed) photoNotes.push(`The model answered without seeing ${stripped.removed} earlier photo(s): ${support.detail}.`);
+        // One sentence end, whatever the detail ends with (the block Rai saw had a doubled period).
+        const why = support.detail.replace(/[.\s]+$/, "");
+        if (stripped.current) throw new PhotoRefusal(`This message has ${stripped.current} photo${stripped.current === 1 ? "" : "s"}, but they cannot be analyzed: ${why}. The photos are stored with the message; nothing was sent to the model.`);
+        if (stripped.removed) photoNotes.push(`The model answered without seeing ${stripped.removed} earlier photo(s): ${why}.`);
         return stripped.items;
       }
       const plan = withPhotos(items, (aid) => d.photos?.(id, aid));
       if (plan.currentMissing) throw new PhotoRefusal(`${plan.currentMissing} photo(s) of this message could not be loaded from ORBIT's storage, so nothing was sent to the model.`);
       if (plan.missing) photoNotes.push(`${plan.missing} earlier photo(s) could not be loaded from storage and were not sent.`);
+      photosSent = hasPhotos(plan.items);
       return plan.items;
     };
     try {
@@ -261,7 +266,10 @@ export function threadService(d: {
       return {};
     } catch (err) {
       // A tool call cut off by its deadline or a cancellation is not a model failure: say exactly what is known about it.
-      const error = err instanceof TurnInterrupted || err instanceof PhotoRefusal ? err.message : `The model call failed: ${err instanceof Error ? err.message : String(err)}`;
+      const error =
+        err instanceof TurnInterrupted || err instanceof PhotoRefusal
+          ? err.message
+          : `The model call failed${photosSent ? " after ORBIT's own photo check passed and the photos were sent to the provider (this is not ORBIT's local capability block)" : ""}: ${err instanceof Error ? err.message : String(err)}`;
       // The user's message and every call that completed (or was cut off) stay on record; the reply is marked as not completed.
       threads.patchMessage(id, mid, { status: "error", error });
       return { error };

@@ -260,7 +260,8 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     images(): ImageSupport {
       const own = primary.images?.() ?? { ok: false, detail: "the connected model does not take photos" };
       const l = active();
-      if (own.ok && l) return { ok: false, detail: `${why(l)}; until then replies come from the OpenRouter fallback, which is not given photos in this build` };
+      // The model's own capability stays in the answer (resolution), and the block says it is the fallback's, not the model's.
+      if (own.ok && l) return { ok: false, capability: own.capability, ...(own.resolution ? { resolution: own.resolution } : {}), detail: `ORBIT blocked the photos locally, before any request: ${why(l)}; until then replies come from the OpenRouter fallback, which is not given photos in this build (the configured model itself takes photos: ${own.detail})` };
       return own;
     },
 

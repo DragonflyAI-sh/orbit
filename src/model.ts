@@ -4,6 +4,8 @@ import type { PortStatus, Result } from "./ports.ts";
 import { deadline } from "./model-deadline.ts";
 import type { Bounds, Timers } from "./model-deadline.ts";
 import { redact } from "./ops/protocol.ts";
+import { bundledCapability, capabilityResolver, openaiDiscovery, operatorSource } from "./model-capability.ts";
+import type { Backend, ImageCapability, OperatorState, Resolution, ResolverOptions } from "./model-capability.ts";
 
 // `images`: photos attached to a user message (docs/photos.md). Built from stored attachment refs (`id` only); src/photo-context.ts
 // loads the processed bytes (`data`, base64 JPEG) for the bounded set that is actually sent. A provider adapter must turn every image
@@ -45,7 +47,8 @@ export type Reply = Result<string> & { fallback?: FallbackInfo; accounting?: str
 export type ReplyOptions = { fallback?: boolean; signal?: AbortSignal };
 
 // Whether this model can be sent photos. `ok: false` says why in words the owner can act on.
-export type ImageSupport = { ok: boolean; detail: string; capability?: "supported" | "unsupported" | "unknown" };
+// `resolution`: how the answer was reached (source, freshness, conflicts), for diagnostics. Absent for the mock.
+export type ImageSupport = { ok: boolean; detail: string; capability?: ImageCapability; resolution?: Resolution };
 
 export type ModelPort = {
   status(): PortStatus;
@@ -156,28 +159,30 @@ export function responsesInput(items: Item[]): unknown[] {
   });
 }
 
-// Which configured OpenAI models ORBIT treats as taking photo input (docs/photos.md, "Model capability"). This is a table in ORBIT's
-// code, not a check made with the provider. Three answers, kept distinct:
-//   supported:   OpenAI documents image input for the model on the Responses API. Photos are sent as input_image parts.
-//   unsupported: OpenAI documents the model as text-only. Photos are refused with that reason.
-//   unknown:     ORBIT has no evidence either way. Photos are refused rather than sent to a model that might ignore them.
-// Entries are exact model ids or documented families, never a guess from a name: "gpt-6-astra" is listed by itself (OpenAI's model
-// page for it lists text and image input), which does not make any other gpt-6 model supported. The model id comes only from
-// ORBIT_MODEL (the operator's configuration); nothing in a message can change what is looked up here.
-export type ImageCapability = "supported" | "unsupported" | "unknown";
-const VISION_FAMILIES = /^(gpt-4o|gpt-4\.1|gpt-4\.5|gpt-5|o3(?!-mini)|o4-mini|codex-mini)/i;
-const VISION_EXACT = new Set(["gpt-6-astra"]);
-const TEXT_ONLY = /^(gpt-3\.5|o1-mini|o3-mini)/i;
-export function imageCapability(model: string): ImageCapability {
-  if (VISION_EXACT.has(model) || VISION_FAMILIES.test(model)) return "supported";
-  if (TEXT_ONLY.test(model)) return "unsupported";
-  return "unknown";
+// Photo capability (docs/photos.md, "Model capability") is resolved per backend by src/model-capability.ts: provider metadata when the
+// backend has a usable contract, then the trusted operator file, then ORBIT's bundled registry of exact ids, else unknown. The model id
+// comes only from ORBIT_MODEL (the operator's configuration); nothing in a message can change what is looked up.
+export type { ImageCapability } from "./model-capability.ts";
+// The bundled registry's answer alone (no provider metadata, no operator file). For tests and documentation; the request path uses images().
+export function imageCapability(model: string, backend: Backend = "chatgpt-token-sharing"): ImageCapability {
+  return bundledCapability(backend, model)?.capability ?? "unknown";
 }
-export function imageSupport(model: string): ImageSupport {
-  const capability = imageCapability(model);
-  if (capability === "supported") return { ok: true, capability, detail: `${model} is in ORBIT's list of OpenAI models that take image input (not verified with the provider by ORBIT).` };
-  if (capability === "unsupported") return { ok: false, capability, detail: `the configured model ${model} does not take image input (OpenAI documents it as text-only), so photos are not sent to it` };
-  return { ok: false, capability, detail: `ORBIT does not know that the configured model ${model} takes image input, so photos are not sent to it` };
+// What images() answers for one resolution. A refusal's detail never ends in a period: the caller adds its own sentence end.
+export function supportFrom(r: Resolution): ImageSupport {
+  if (r.capability === "supported") {
+    const name = `${r.configuredModel}${r.alias ? ` (alias of ${r.model})` : ""}`;
+    return { ok: true, capability: r.capability, resolution: r, detail: `${name} takes image input according to ORBIT's ${r.source === "provider" ? "provider metadata" : r.source === "operator" ? "trusted operator declaration" : "bundled registry"} (${r.freshness})` };
+  }
+  return { ok: false, capability: r.capability, resolution: r, detail: (r.blocking ?? "ORBIT blocked the photos locally").replace(/[.\s]+$/, "") };
+}
+// The answer for a backend with no provider metadata and no operator file: the bundled registry, else unknown.
+export function imageSupport(model: string, backend: Backend = "chatgpt-token-sharing"): ImageSupport {
+  return supportFrom(capabilityResolver({ backend, model, log: () => {} }).resolve());
+}
+// Options shared by both adapters for capability resolution.
+export type CapabilityOptions = { operatorFile?: string; operator?: () => OperatorState; now?: () => number; ttlMs?: number; retryMs?: number; timeoutMs?: number; log?: ResolverOptions["log"] };
+export function resolverOptions(c: CapabilityOptions | undefined): Omit<ResolverOptions, "backend" | "model"> {
+  return { operator: c?.operator ?? operatorSource(c?.operatorFile), now: c?.now, ttlMs: c?.ttlMs, retryMs: c?.retryMs, timeoutMs: c?.timeoutMs, log: c?.log };
 }
 
 // Bounds on one OpenAI API request (audit D1; docs/model-request-deadlines.md). It is not streamed, so headers come only once the
@@ -201,7 +206,9 @@ export function openaiProblem(status: number, text: string, withPhotos = false):
   return `HTTP ${status}: OpenAI returned an error${what ? `: ${what}` : ""}.${withPhotos ? " The request carried photos; nothing from it was used." : ""}`;
 }
 
-export function openaiModel(model: string, key: string, fetcher: Fetch = fetch, opts: { bounds?: Partial<Bounds>; timers?: Timers } = {}): ModelPort {
+export function openaiModel(model: string, key: string, fetcher: Fetch = fetch, opts: { bounds?: Partial<Bounds>; timers?: Timers; capabilities?: CapabilityOptions } = {}): ModelPort {
+  // GET /v1/models/{id} in the background (maintain()), never during a reply and never with a photo.
+  const capability = capabilityResolver({ backend: "openai-api", model, discover: openaiDiscovery(key, fetcher), ...resolverOptions(opts.capabilities) });
   let lastOk: string | undefined;
   let lastError: { at: string; detail: string } | undefined;
   const impl = `openai/${model}`;
@@ -245,7 +252,8 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch, 
   };
 
   return {
-    images: () => imageSupport(model),
+    images: () => supportFrom(capability.resolve()),
+    maintain: () => capability.refresh(),
     step: (input, limits, notes, tools, o) => request(input, limits, notes, tools, o?.signal),
     status: () => {
       if (lastError && (!lastOk || lastError.at > lastOk)) {
@@ -263,13 +271,14 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch, 
 }
 
 // An OpenAI API key (systemd credential orbit.openai) wins; otherwise ORBIT signs in with ChatGPT like OpenClaw does.
+// ORBIT_MODEL_CAPABILITIES: absolute path of the trusted operator declaration file (docs/photos.md). Set by hand in orbit.env.
 export function selectModel(env: NodeJS.ProcessEnv, chatgpt?: (model: string) => ModelPort): ModelPort {
   const model = env.ORBIT_MODEL;
   const dir = env.CREDENTIALS_DIRECTORY;
   if (!model) return mockModel("No model is configured (ORBIT_MODEL unset), so replies are mock.");
   try {
     const key = readFileSync(join(dir ?? "", "orbit.openai"), "utf8").trim();
-    if (dir && key) return openaiModel(model, key);
+    if (dir && key) return openaiModel(model, key, fetch, { capabilities: { operatorFile: env.ORBIT_MODEL_CAPABILITIES || undefined } });
   } catch {
     // No API key installed; fall through to ChatGPT sign-in.
   }

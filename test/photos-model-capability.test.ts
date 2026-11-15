@@ -110,9 +110,15 @@ test("capability: gpt-6-astra is supported by its exact id; other gpt-6 names st
   // The families that were already supported still are.
   for (const m of ["gpt-5.1-codex", "gpt-4o-mini", "gpt-4.1", "o3", "o4-mini", "codex-mini-latest"]) assert.equal(imageCapability(m), "supported", m);
   assert.equal(imageCapability("some-local-alias"), "unknown");
-  // Both real adapters answer from the same table.
-  assert.deepEqual(chatgptAdapter("gpt-6-astra").model.images!(), astra);
-  assert.deepEqual(openaiAdapter("gpt-6-astra").model.images!(), astra);
+  // Both real adapters resolve it, each for its own backend, from the bundled registry until provider metadata says otherwise.
+  const viaChatgpt = chatgptAdapter("gpt-6-astra").model.images!();
+  const viaApi = openaiAdapter("gpt-6-astra").model.images!();
+  assert.equal(viaChatgpt.ok, true);
+  assert.equal(viaChatgpt.resolution!.backend, "chatgpt-token-sharing");
+  assert.equal(viaChatgpt.resolution!.source, "bundled");
+  assert.equal(viaApi.ok, true);
+  assert.equal(viaApi.resolution!.backend, "openai-api");
+  assert.equal(viaApi.resolution!.provider.state, "pending");
   assert.equal(chatgptAdapter("gpt-6-nova").model.images!().ok, false);
 });
 
@@ -123,7 +129,8 @@ test("regression: the block Rai saw is reproduced for an unknown model, and gone
   const id = await r.upload(`/threads/${t.id}/attachments`, smallJpeg(1, 64, 48));
   const res = await r.api(`/threads/${t.id}/messages`, "POST", { text: "What is in this photo?", attachments: [id] });
   assert.equal(res.status, 502);
-  assert.equal(res.data.error, "This message has 1 photo, but they cannot be analyzed: ORBIT does not know that the configured model gpt-6-nova takes image input, so photos are not sent to it. The photos are stored with the message; nothing was sent to the model.");
+  assert.equal(res.data.error, "This message has 1 photo, but they cannot be analyzed: ORBIT blocked the photos locally, before any request: it does not know that the configured model gpt-6-nova takes image input on ChatGPT token sharing (this route has no provider capability metadata, no operator declaration, not in ORBIT's bundled registry). The photos are stored with the message; nothing was sent to the model.");
+  assert.doesNotMatch(res.data.error, /\.\./, "never a doubled period");
   assert.equal(unknown.bodies.length, 0, "nothing reached the provider");
 
   const astra = chatgptAdapter("gpt-6-astra");

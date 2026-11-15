@@ -55,7 +55,7 @@ function readDeploy(): unknown {
 // systemd sets STATE_DIRECTORY from StateDirectory=orbit. Without it, state is in memory and /status says so.
 const stateDir = process.env.STATE_DIRECTORY;
 const chatgpt: { current?: ReturnType<typeof chatgptModel> } = {};
-const primaryModel = selectModel(process.env, (name) => (chatgpt.current = chatgptModel(name, tokenFile(stateDir))));
+const primaryModel = selectModel(process.env, (name) => (chatgpt.current = chatgptModel(name, tokenFile(stateDir), { capabilities: { operatorFile: process.env.ORBIT_MODEL_CAPABILITIES || undefined } })));
 // The OpenRouter fallback is off unless ORBIT_OPENROUTER_ENABLED=1 and its model, prices and orbit.openrouter credential are all set.
 // Disabled, the primary model is used as it is, untouched.
 const openrouter = openrouterConfig(process.env);
@@ -94,7 +94,7 @@ const proposals = newProposals();
 const admin = adminOps({ client: adminClient(), store: jsonStore(stateDir, "ops-admin", []), notify, proposals });
 const owner = process.env.ORBIT_OWNER || undefined;
 const vaultEdits = vault ? newVaultEdits({ clone: vault, memory, proposals }) : undefined;
-const config = configView({ env: process.env, ops, commit, vaultPolicy: vault ? () => vault.policyCheck() : undefined });
+const config = configView({ env: process.env, ops, commit, vaultPolicy: vault ? () => vault.policyCheck() : undefined, photos: () => model.images?.() });
 // Startup: sync the vault clone once now (the tick's refresh shares this run) so the vault AGENTS.md is hashed and compared with the
 // baseline the coded rules were written against; drift or an unavailable AGENTS.md is logged here and shown in the config view.
 if (vault && vault.credentialPresent()) {
