@@ -510,10 +510,12 @@ export function buildServer({
           if (!t) return send(res, 404, { error: "No thread with that id." });
           if (t.archived) return send(res, 409, { error: "This thread is archived. Restore it to attach photos." });
         }
-        const refuse = (code: number, error: string, kind: string) => {
-          console.log(JSON.stringify({ at: new Date().toISOString(), event: "attachment_refused", scope: threadId ? "chat" : "assistant", kind }));
+        // The log line names the kind of refusal and, for a file that failed the JPEG check, the parser's fixed reason (for example
+        // "a quantization table is missing" or "signature:heic"). It never holds bytes, sizes of the content, filenames or captions.
+        const refuse = (code: number, error: string, kind: string, reason?: string) => {
+          console.log(JSON.stringify({ at: new Date().toISOString(), event: "attachment_refused", scope: threadId ? "chat" : "assistant", kind, ...(reason ? { reason } : {}) }));
           res.setHeader("connection", "close");
-          return send(res, code, { error });
+          return send(res, code, { error, kind });
         };
         const declared = Number(req.headers["content-length"]);
         if (Number.isFinite(declared) && declared > JPEG_MAX_BYTES) return refuse(413, `The photo is larger than ${JPEG_MAX_BYTES} bytes. ORBIT's page shrinks photos before upload; nothing was stored.`, "size");
@@ -530,7 +532,7 @@ export function buildServer({
           return refuse(400, "The upload did not complete. Nothing was stored.", "aborted");
         }
         const checked = normalizeJpeg(Buffer.concat(parts));
-        if (!checked.ok) return refuse(checked.kind === "size" ? 413 : checked.kind === "format" ? 415 : 422, checked.error, checked.kind);
+        if (!checked.ok) return refuse(checked.kind === "size" ? 413 : checked.kind === "format" ? 415 : 422, checked.error, checked.kind, checked.reason);
         try {
           const { meta, reused } = attachments.put(scope, checked.bytes, { width: checked.width, height: checked.height });
           console.log(JSON.stringify({ at: new Date().toISOString(), event: "attachment_stored", scope: threadId ? "chat" : "assistant", id: meta.id, bytes: meta.bytes, width: meta.width, height: meta.height, reused }));

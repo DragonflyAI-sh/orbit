@@ -207,3 +207,47 @@ export function withMetadata(jpeg: Buffer, opts: { exif?: boolean; xmp?: boolean
 export const pattern = (seed = 0) => (x: number, y: number): [number, number, number] => [(x * 3 + seed * 40) & 255, (y * 2 + seed * 17) & 255, ((x + y) * (seed + 1)) & 255];
 
 export const smallJpeg = (seed = 0, w = 48, h = 32, o: EncodeOpts = {}) => encodeJpeg(w, h, pattern(seed), o);
+
+// ---- marker-layout helpers (for real encoder output too) ----------------------------------------------------------------------
+
+// The marker segments before the first scan, and the rest of the file from that scan's SOS on.
+export function headerSegments(jpeg: Buffer): { segs: Buffer[]; rest: Buffer } {
+  const segs: Buffer[] = [];
+  let p = 2;
+  while (jpeg[p] === 0xff && jpeg[p + 1] !== 0xda) {
+    const len = jpeg.readUInt16BE(p + 2);
+    segs.push(jpeg.subarray(p, p + 2 + len));
+    p += 2 + len;
+  }
+  return { segs, rest: jpeg.subarray(p) };
+}
+
+// Rewrites the header of a JPEG into other layouts that ITU T.81 allows and real encoders use:
+// - dqtAfterSof: every quantization table segment moves to just after the frame header (allowed: a table only has to be in place
+//   before the first scan that uses it, T.81 B.2.2);
+// - merge: all quantization tables into one DQT segment and all Huffman tables into one DHT segment.
+// Only the order and grouping of segments change; every table and every scan byte stays the same.
+export function relayout(jpeg: Buffer, o: { dqtAfterSof?: boolean; merge?: boolean }): Buffer {
+  const { segs, rest } = headerSegments(jpeg);
+  let dqt = segs.filter((s) => s[1] === 0xdb);
+  let dht = segs.filter((s) => s[1] === 0xc4);
+  const isSof = (s: Buffer) => s[1]! >= 0xc0 && s[1]! <= 0xc2;
+  if (o.merge) {
+    const join = (m: number, list: Buffer[]) => (list.length ? [seg(m, Buffer.concat(list.map((s) => s.subarray(4))))] : []);
+    dqt = join(0xdb, dqt);
+    dht = join(0xc4, dht);
+  }
+  const other = segs.filter((s) => s[1] !== 0xdb && s[1] !== 0xc4 && !isSof(s));
+  const sof = segs.find(isSof)!;
+  const order = o.dqtAfterSof ? [...other, ...dht, sof, ...dqt] : [...other, ...dqt, sof, ...dht];
+  return Buffer.concat([jpeg.subarray(0, 2), ...order, rest]);
+}
+
+// Removes every header segment with the given marker (for example all quantization tables).
+export function withoutSegments(jpeg: Buffer, marker: number): Buffer {
+  const { segs, rest } = headerSegments(jpeg);
+  return Buffer.concat([jpeg.subarray(0, 2), ...segs.filter((s) => s[1] !== marker), rest]);
+}
+
+// The marker bytes (second byte of each FFxx) before the first scan, for asserting layouts.
+export const layoutOf = (jpeg: Uint8Array) => headerSegments(Buffer.from(jpeg)).segs.map((s) => s[1]!);

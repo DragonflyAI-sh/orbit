@@ -62,7 +62,58 @@
     return null;
   }
 
-  class PhotoError extends Error {}
+  // A failure with the stage it happened in: "read" (the selected file), "decode" (the browser could not open it), "encode" (the
+  // canvas did not give a usable JPEG), "check" (the JPEG it gave is not one ORBIT can store) or "upload". The stage is shown with
+  // the message and kept as a bounded diagnostic; it never carries image bytes, file names or paths.
+  class PhotoError extends Error {
+    constructor(message, stage) { super(message); this.stage = stage || "read"; }
+  }
+
+  // Structural check of the JPEG the canvas produced, before it is uploaded: start-of-image, an 8-bit baseline, extended or
+  // progressive Huffman frame with 1 or 3 components and the expected size, every quantization table the frame names defined before
+  // the first scan (they may come before or after the frame header, ITU T.81 B.2.2), Huffman tables before the first scan, a scan,
+  // and end-of-image. Only marker segments are walked; the server decodes every block again. Returns {ok, encoding} or {ok:false,
+  // error} with a fixed, non-content reason.
+  function inspectJpeg(b, expect) {
+    const bad = (error) => ({ ok: false, error });
+    if (!b || b.length < 4 || b[0] !== 0xff || b[1] !== 0xd8) return bad("no start-of-image marker");
+    if (b[b.length - 2] !== 0xff || b[b.length - 1] !== 0xd9) return bad("no end-of-image marker");
+    const quant = new Set();
+    let frame = null;
+    let huffman = 0;
+    let p = 2;
+    for (;;) {
+      if (p + 4 > b.length || b[p] !== 0xff) return bad("a segment is cut off");
+      const m = b[p + 1];
+      const len = (b[p + 2] << 8) | b[p + 3];
+      if (len < 2 || p + 2 + len > b.length) return bad("a segment is cut off");
+      const seg = b.subarray(p + 4, p + 2 + len);
+      if (m === 0xdb) {
+        for (let q = 0; q < seg.length; q += 65) {
+          if (seg[q] >> 4) return bad("a 16-bit quantization table");
+          quant.add(seg[q] & 15);
+        }
+      } else if (m === 0xc4) {
+        huffman++;
+      } else if (m === 0xc0 || m === 0xc1 || m === 0xc2) {
+        if (frame) return bad("more than one frame");
+        frame = { precision: seg[0], h: (seg[1] << 8) | seg[2], w: (seg[3] << 8) | seg[4], tqs: [], encoding: m === 0xc2 ? "progressive" : "baseline" };
+        for (let k = 0; k < seg[5]; k++) frame.tqs.push(seg[8 + 3 * k]);
+        if (frame.precision !== 8 || (seg[5] !== 1 && seg[5] !== 3)) return bad("not an 8-bit greyscale or colour JPEG");
+      } else if (m >= 0xc3 && m <= 0xcf && m !== 0xc4) {
+        return bad("an encoding ORBIT does not store (arithmetic, lossless or hierarchical)");
+      } else if (m === 0xda) {
+        if (!frame) return bad("image data comes before the frame header");
+        if (frame.tqs.some((t) => !quant.has(t))) return bad("a quantization table is missing");
+        if (!huffman) return bad("a Huffman table is missing");
+        if (expect && (frame.w !== expect.width || frame.h !== expect.height)) return bad("the size does not match the canvas");
+        return { ok: true, encoding: frame.encoding, width: frame.w, height: frame.h };
+      } else if (m === 0xd9) {
+        return bad("no image data");
+      }
+      p += 2 + len;
+    }
+  }
 
   const FORMAT_HELP = {
     heic: "This photo is HEIC/HEIF and this browser cannot convert it. On iPhone, pick it from the Photos library with this button (iOS normally hands the page a JPEG copy), or set Settings > Camera > Formats to Most Compatible. Nothing was uploaded.",
@@ -109,15 +160,16 @@
   // Turns one selected file into an upload-ready JPEG Blob. Throws PhotoError with a message for the user.
   async function processFile(file, opts = {}) {
     const L = Object.assign({}, LIMITS, opts);
-    if (!file || !file.size) throw new PhotoError("The file is empty. Nothing was uploaded.");
+    if (!file || !file.size) throw new PhotoError("The file is empty. Nothing was uploaded.", "read");
     if (file.size > L.maxInputBytes) throw new PhotoError(`The file is ${(file.size / 1048576).toFixed(0)} MB; files over ${L.maxInputBytes / 1048576} MB are not processed. Nothing was uploaded.`);
     const head = new Uint8Array(await file.slice(0, 65536).arrayBuffer());
+    // The format comes from the file's own leading bytes, never from its name or the MIME type the browser reports.
     const kind = sniff(head);
-    if (kind === "svg" || kind === "pdf" || kind === "unknown") throw new PhotoError(FORMAT_HELP[kind]);
+    if (kind === "svg" || kind === "pdf" || kind === "unknown") throw new PhotoError(FORMAT_HELP[kind], "read");
     const hs = headerSize(head, kind);
     if (hs && hs.w * hs.h > L.maxSourcePixels) throw new PhotoError(`The image is ${hs.w}×${hs.h} pixels, larger than this page decodes (${L.maxSourcePixels / 1e6} megapixels). Nothing was uploaded.`);
     const img = await decode(file);
-    if (!img || !img.width || !img.height) throw new PhotoError(FORMAT_HELP[kind] || `This browser could not decode the ${kind.toUpperCase()} file. Save it as JPEG and attach that. Nothing was uploaded.`);
+    if (!img || !img.width || !img.height) throw new PhotoError(FORMAT_HELP[kind] || `This browser could not decode the ${kind.toUpperCase()} file. Save it as JPEG and attach that. Nothing was uploaded.`, "decode");
     let canvas = null;
     try {
       if (img.width * img.height > L.maxSourcePixels) throw new PhotoError(`The image is ${img.width}×${img.height} pixels, larger than this page decodes. Nothing was uploaded.`);
@@ -142,21 +194,28 @@
           const blob = await encode(canvas, q);
           attempts++;
           if (!best || blob.size < best.blob.size) best = { blob, width: w, height: h, quality: q };
-          if (blob.size <= L.targetBytes) return finish({ blob, width: w, height: h, quality: q }, attempts, file, img);
+          if (blob.size <= L.targetBytes) return finish({ blob, width: w, height: h, quality: q }, attempts, file, img, kind);
         }
         if (Math.max(w, h) <= 400) break;
       }
-      if (!best || best.blob.size > L.hardBytes) throw new PhotoError(`The photo is still ${best ? Math.round(best.blob.size / 1024) : "?"} KB after shrinking, above the ${Math.round(L.hardBytes / 1024)} KB limit. Nothing was uploaded.`);
-      return finish(best, attempts, file, img);
+      if (!best || best.blob.size > L.hardBytes) throw new PhotoError(`The photo is still ${best ? Math.round(best.blob.size / 1024) : "?"} KB after shrinking, above the ${Math.round(L.hardBytes / 1024)} KB limit. Nothing was uploaded.`, "encode");
+      return finish(best, attempts, file, img, kind);
     } finally {
       if (canvas) { canvas.width = 0; canvas.height = 0; }
       img.close();
     }
   }
-  async function finish(r, attempts, file, img) {
-    const head = new Uint8Array(await r.blob.slice(0, 3).arrayBuffer());
-    if (r.blob.type !== "image/jpeg" || head[0] !== 0xff || head[1] !== 0xd8) throw new PhotoError("The browser did not produce a JPEG. Nothing was uploaded.");
-    return { blob: r.blob, width: r.width, height: r.height, quality: r.quality, attempts, inputBytes: file.size, sourceWidth: img.width, sourceHeight: img.height };
+  // The encoded result is judged by its bytes: it must be a JPEG (never HEIC or anything else relabelled) and pass inspectJpeg.
+  // Nothing is uploaded otherwise, and the original is never sent instead.
+  async function finish(r, attempts, file, img, kind) {
+    const bytes = new Uint8Array(await r.blob.arrayBuffer());
+    const out = sniff(bytes.subarray(0, 64));
+    if (out !== "jpeg") throw new PhotoError(`This browser produced ${out === "unknown" ? "an unrecognised format" : out.toUpperCase()} instead of a JPEG when converting the photo. Try another browser, or save the photo as JPEG and attach that. Nothing was uploaded.`, "encode");
+    const check = inspectJpeg(bytes, { width: r.width, height: r.height });
+    if (!check.ok) throw new PhotoError(`This browser produced a JPEG that ORBIT cannot store (${check.error}). Try another browser, or save the photo as JPEG and attach that. Nothing was uploaded.`, "check");
+    // Upload exactly the checked bytes, labelled by what they are.
+    const blob = new Blob([bytes], { type: "image/jpeg" });
+    return { blob, width: r.width, height: r.height, quality: r.quality, attempts, inputBytes: file.size, sourceWidth: img.width, sourceHeight: img.height, input: kind, encoding: check.encoding };
   }
 
   // A small worker pool: at most `n` tasks at once.
@@ -182,7 +241,8 @@
     let seq = 0;
     let note = "";
     const changed = () => { render(); if (onChange) onChange(); };
-    const statusText = (it) => it.status === "processing" ? "Processing…" : it.status === "queued" ? "Waiting…" : it.status === "uploading" ? "Uploading…" : it.status === "ready" ? "Ready" : `Failed: ${it.error}`;
+    const STAGE = { read: "reading the file", decode: "opening the photo", encode: "converting to JPEG", check: "checking the JPEG", upload: "upload" };
+    const statusText = (it) => it.status === "processing" ? "Processing…" : it.status === "queued" ? "Waiting…" : it.status === "uploading" ? "Uploading…" : it.status === "ready" ? "Ready" : `Failed (${STAGE[it.stage] || "processing"}): ${it.error}`;
     function render() {
       root.hidden = !items.length && !note;
       const nodes = items.map((it, i) => {
@@ -193,6 +253,7 @@
         kids.push(mk("button", { type: "button", className: "phx", textContent: "×", title: "Remove", ariaLabel: `Remove ${label}`, onclick: () => remove(it) }));
         const box = mk("div", { className: `ph ${it.status}` }, ...kids);
         box.dataset.status = it.status;
+        if (it.status === "failed" && it.stage) box.dataset.stage = it.stage;
         return box;
       });
       if (note) nodes.push(mk("div", { className: "phnote", role: "status", textContent: note }));
@@ -216,7 +277,7 @@
       } else {
         it.status = "failed";
         it.stage = "upload";
-        it.error = (data && data.error) || (res ? `upload failed (HTTP ${res.status})` : "no connection");
+        it.error = (data && typeof data.error === "string" && data.error) || (res ? `upload failed (HTTP ${res.status})` : "no connection");
       }
       changed();
     }
@@ -234,12 +295,14 @@
         it.blob = out.blob;
         it.width = out.width;
         it.height = out.height;
+        it.input = out.input;
+        it.encoding = out.encoding;
         if (it.preview) URL.revokeObjectURL(it.preview);
         it.preview = URL.createObjectURL(out.blob);
       } catch (e) {
         if (!items.includes(it)) return;
         it.status = "failed";
-        it.stage = "process";
+        it.stage = e instanceof PhotoError ? e.stage : "decode";
         it.error = e instanceof PhotoError ? e.message : "The photo could not be processed. Nothing was uploaded.";
         changed();
         return;
@@ -280,6 +343,8 @@
       foreign: () => items.some((it) => it.status === "ready" && it.scope !== scope()),
       ids: () => items.map((it) => it.id),
       previews: () => items.map((it) => it.preview),
+      // Bounded, non-content diagnostics per photo: status, failing stage, detected input format and produced JPEG encoding.
+      diagnostics: () => items.map((it) => ({ status: it.status, stage: it.status === "failed" ? it.stage || null : null, input: it.input || null, encoding: it.encoding || null })),
       clear() {
         for (const it of items) { if (it.preview) URL.revokeObjectURL(it.preview); it.blob = null; it.file = null; }
         items = [];
@@ -289,5 +354,5 @@
     };
   }
 
-  global.OrbitPhotos = { LIMITS, sniff, headerSize, processFile, createTray, PhotoError };
+  global.OrbitPhotos = { LIMITS, sniff, headerSize, inspectJpeg, processFile, createTray, PhotoError };
 })(window);
