@@ -284,5 +284,6 @@ test("the Responses API gets real image parts after the text, in order; OpenRout
   assert.equal(imageSupport("o3-mini").ok, false, "o3-mini takes no image input");
   const no = imageSupport("gpt-3.5-turbo");
   assert.equal(no.ok, false);
-  assert.match(no.detail, /does not know/);
+  assert.match(no.detail, /does not take image input/);
+  assert.match(imageSupport("some-unlisted-model").detail, /does not know/);
 });
