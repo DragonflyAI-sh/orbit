@@ -93,7 +93,7 @@ test("a JPEG over the byte limit, over the edge limit, or a decompression bomb h
   assert.equal(ok(normalizeJpeg(encodeJpeg(1600, 16, pattern(1)))).width, 1600);
 });
 
-test("truncated, corrupted, progressive and malformed JPEGs are rejected, never stored as they are", () => {
+test("truncated, corrupted, mislabelled and malformed JPEGs are rejected, never stored as they are", () => {
   const good = smallJpeg(4, 64, 64, { subsample: true });
   const sos = good.indexOf(Buffer.from([0xff, 0xda]));
   const truncated = good.subarray(0, sos + 40);
@@ -104,12 +104,19 @@ test("truncated, corrupted, progressive and malformed JPEGs are rejected, never 
   const garbled = Buffer.from(good);
   for (let i = sos + 20; i < garbled.length - 30; i++) garbled[i] = 0x55;
   assert.equal(normalizeJpeg(garbled).ok, false);
-  // Progressive SOF2.
+  // A baseline file relabelled as progressive (SOF2) has sequential scan parameters, which a progressive frame does not allow.
+  // (Real progressive files are accepted and tested in test/photos-decode.test.ts.)
   const prog = Buffer.from(good);
   prog[prog.indexOf(Buffer.from([0xff, 0xc0])) + 1] = 0xc2;
   const p = normalizeJpeg(prog);
   assert.equal(p.ok, false);
-  if (!p.ok) assert.match(p.error, /baseline/);
+  if (!p.ok) assert.equal(p.kind, "corrupt");
+  // Arithmetic coding (SOF9) is still refused.
+  const arith = Buffer.from(good);
+  arith[arith.indexOf(Buffer.from([0xff, 0xc0])) + 1] = 0xc9;
+  const ar = normalizeJpeg(arith);
+  assert.equal(ar.ok, false);
+  if (!ar.ok) assert.match(ar.error, /arithmetic-coded/);
   // No end-of-image marker.
   assert.equal(normalizeJpeg(good.subarray(0, good.length - 2)).ok, false);
   // A scan that references an undefined Huffman table.

@@ -161,7 +161,7 @@ test("phone flow in the Assistant: pick, preview, remove, retry a failed upload,
   await page.waitForFunction(() => document.querySelectorAll('#atray .ph[data-status="ready"], #atray .ph[data-status="failed"]').length === 10);
   // One failed: Send stays disabled and says why; Retry brings it to ready.
   assert.equal(await page.locator('#atray .ph[data-status="failed"]').count(), 1);
-  assert.match(await page.textContent('#atray .ph[data-status="failed"] .phstatus'), /Failed: disk hiccup/);
+  assert.match(await page.textContent('#atray .ph[data-status="failed"] .phstatus'), /Failed \(upload\): disk hiccup/);
   assert.equal(await page.isDisabled("#asend"), true);
   assert.match(await page.textContent("#astatus"), /1 photo\(s\) failed\. Retry or remove them to send/);
   await page.click('#atray .ph[data-status="failed"] .phretry');

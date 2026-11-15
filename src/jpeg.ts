@@ -1,19 +1,20 @@
 // Server-side check and normalization of an uploaded photo (docs/photos.md). Pure TypeScript, no native or npm dependency.
 //
 // The browser converts every photo to a baseline JPEG before upload (src/web/photos.js). This module does not trust that: it reads the
-// bytes themselves (never the filename, MIME type or any client metadata) and accepts only a baseline (or extended sequential) Huffman
-// JPEG with 8-bit samples, one or three components, bounded dimensions and size, whose every entropy-coded block decodes without error.
+// bytes themselves (never the filename, MIME type or any client metadata) and accepts only a baseline, extended sequential or
+// progressive Huffman JPEG with 8-bit samples, one or three components, bounded dimensions and size, whose every entropy-coded block
+// decodes without error.
 // The stored copy is rebuilt from the decoded structure: quantization tables, frame header, Huffman tables, restart interval and the
 // scans, under a fixed metadata-free JFIF header. Every APPn segment (EXIF, GPS, XMP, ICC, maker notes), every comment and anything
 // after the end-of-image marker are dropped, so even a client that bypasses the page cannot store metadata or an unprocessed original.
-// Progressive, arithmetic-coded, lossless, hierarchical and 12-bit JPEGs, and every other format, are rejected rather than converted.
+// Arithmetic-coded, lossless, hierarchical and 12-bit JPEGs, and every other format, are rejected rather than converted.
 
 // The hard limits. The browser aims far below them (1600 px longest edge, about 500 KB).
 export const JPEG_MAX_BYTES = 1_048_576;
 export const JPEG_MAX_EDGE = 1600;
 export const JPEG_MAX_PIXELS = JPEG_MAX_EDGE * JPEG_MAX_EDGE;
 
-export type JpegResult = { ok: true; bytes: Buffer; width: number; height: number; components: number } | { ok: false; error: string; kind: "format" | "size" | "dimensions" | "corrupt" };
+export type JpegResult = { ok: true; bytes: Buffer; width: number; height: number; components: number } | { ok: false; error: string; kind: "format" | "size" | "dimensions" | "corrupt"; reason?: string };
 
 // A fixed JFIF APP0: version 1.01, no density units, 1:1 aspect, no thumbnail. It carries nothing about the photo or the device.
 const JFIF = Buffer.from([0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
@@ -40,6 +41,9 @@ export function sniff(b: Uint8Array): string | undefined {
   if (head.startsWith("<")) return head.includes("<svg") || head.startsWith("<?xml") ? "svg" : "markup";
   return undefined;
 }
+
+// Bounds the work a progressive file can ask for: every scan is a full pass over its blocks. Common encoders write 6–12 scans.
+const MAX_SCANS = 64;
 
 const fail = (kind: Extract<JpegResult, { ok: false }>["kind"], error: string): JpegResult => ({ ok: false, kind, error });
 
@@ -71,10 +75,18 @@ function buildHuffman(counts: Uint8Array, values: Uint8Array): Huffman {
 
 type Component = { id: number; h: number; v: number; tq: number };
 
+// One scan: its components (with the tables it uses and their size in blocks), and for progressive frames the spectral band
+// (ss..se) and successive-approximation bits (ah, al). A baseline scan is ss=0, se=63, ah=al=0.
+type ScanComp = { c: Component; dc?: Huffman; ac?: Huffman; blocksW: number; blocksH: number; nonzero?: Uint8Array };
+type ScanSpec = { comps: ScanComp[]; progressive: boolean; ss: number; se: number; ah: number; al: number };
+
 // Entropy-decodes one scan starting at `pos` and returns where its data ends (the next marker that is not a restart marker).
-// Every block is decoded: DC and AC Huffman codes, coefficient magnitudes, run lengths, restart markers in order. Coefficient
-// values are not kept and no pixels are produced; a scan that decodes completely is a scan a decoder can render.
-function decodeScan(buf: Buffer, pos: number, comps: { c: Component; dc: Huffman; ac: Huffman; blocksW: number; blocksH: number }[], frame: { width: number; height: number; hmax: number; vmax: number }, restart: number): number {
+// Every block is decoded: DC and AC Huffman codes, coefficient magnitudes, run lengths, end-of-band runs and refinement bits
+// (ITU T.81 Annex F for sequential, Annex G for progressive), restart markers in order. Coefficient values are not kept and no
+// pixels are produced; for progressive refinement only which coefficients are non-zero is tracked, because that decides how many
+// correction bits follow. A scan that decodes completely is a scan a decoder can render.
+function decodeScan(buf: Buffer, pos: number, scan: ScanSpec, frame: { width: number; height: number; hmax: number; vmax: number }, restart: number): number {
+  const { comps, progressive, ss, se, ah } = scan;
   let i = pos;
   let bits = 0;
   let nbits = 0;
@@ -115,26 +127,95 @@ function decodeScan(buf: Buffer, pos: number, comps: { c: Component; dc: Huffman
     }
     throw new Corrupt("the image data has an invalid Huffman code");
   };
-  const block = (dc: Huffman, ac: Huffman) => {
-    const t = decode(dc);
+  // Sequential (baseline / extended) block: DC difference then the AC run-length codes.
+  const sequential = (s: ScanComp) => {
+    const t = decode(s.dc!);
     if (t > 11) throw new Corrupt("a DC coefficient is out of range");
     receive(t);
     for (let k = 1; k < 64; ) {
-      const rs = decode(ac);
+      const rs = decode(s.ac!);
       const r = rs >> 4;
-      const s = rs & 15;
-      if (s === 0) {
+      const n = rs & 15;
+      if (n === 0) {
         if (r !== 15) break;
         k += 16;
         if (k > 64) throw new Corrupt("an AC run goes past the end of a block");
         continue;
       }
-      if (s > 10) throw new Corrupt("an AC coefficient is out of range");
+      if (n > 10) throw new Corrupt("an AC coefficient is out of range");
       k += r;
       if (k > 63) throw new Corrupt("an AC run goes past the end of a block");
-      receive(s);
+      receive(n);
       k++;
     }
+  };
+  // Progressive: DC first pass, DC refinement (one bit), AC first pass and AC refinement, with end-of-band runs (T.81 G.1.2).
+  let eobrun = 0;
+  const dcFirst = (s: ScanComp) => {
+    const t = decode(s.dc!);
+    if (t > 11) throw new Corrupt("a DC coefficient is out of range");
+    receive(t);
+  };
+  const acFirst = (s: ScanComp, b: number) => {
+    if (eobrun > 0) { eobrun--; return; }
+    for (let k = ss; k <= se; ) {
+      const rs = decode(s.ac!);
+      const r = rs >> 4;
+      const n = rs & 15;
+      if (n === 0) {
+        if (r < 15) {
+          eobrun = (1 << r) - 1 + (r ? receive(r) : 0);
+          return;
+        }
+        k += 16;
+        if (k > se + 1) throw new Corrupt("an AC run goes past the end of a band");
+        continue;
+      }
+      if (n > 10) throw new Corrupt("an AC coefficient is out of range");
+      k += r;
+      if (k > se) throw new Corrupt("an AC run goes past the end of a band");
+      receive(n);
+      s.nonzero![b * 64 + k] = 1;
+      k++;
+    }
+  };
+  const acRefine = (s: ScanComp, b: number) => {
+    const nz = s.nonzero!;
+    const at = b * 64;
+    let k = ss;
+    if (eobrun === 0) {
+      for (; k <= se; k++) {
+        const rs = decode(s.ac!);
+        let r = rs >> 4;
+        const n = rs & 15;
+        if (n === 0 && r < 15) {
+          eobrun = (1 << r) + (r ? receive(r) : 0);
+          break;
+        }
+        if (n !== 0) {
+          if (n !== 1) throw new Corrupt("a refinement coefficient is out of range");
+          bit(); // sign of the newly non-zero coefficient
+        }
+        // Skip r zero-history coefficients, reading a correction bit for every non-zero one passed on the way.
+        for (; k <= se; k++) {
+          if (nz[at + k]) bit();
+          else if (--r < 0) break;
+        }
+        if (n !== 0) {
+          if (k > se) throw new Corrupt("an AC run goes past the end of a band");
+          nz[at + k] = 1;
+        }
+      }
+    }
+    if (eobrun > 0) {
+      for (; k <= se; k++) if (nz[at + k]) bit();
+      eobrun--;
+    }
+  };
+  const block = (s: ScanComp, b: number) => {
+    if (!progressive) return sequential(s);
+    if (ss === 0) return ah === 0 ? dcFirst(s) : void bit();
+    return ah === 0 ? acFirst(s, b) : acRefine(s, b);
   };
 
   const single = comps.length === 1;
@@ -144,16 +225,15 @@ function decodeScan(buf: Buffer, pos: number, comps: { c: Component; dc: Huffman
   let rst = 0;
   for (let m = 0; m < total; m++) {
     if (restart && m > 0 && m % restart === 0) {
-      // Byte-align and expect the next restart marker, in sequence.
+      // Byte-align and expect the next restart marker, in sequence. An end-of-band run never crosses a restart.
       nbits = 0;
+      eobrun = 0;
       if (buf[i] !== 0xff || buf[i + 1] !== 0xd0 + rst) throw new Corrupt("a restart marker is missing or out of order");
       i += 2;
       rst = (rst + 1) & 7;
     }
-    for (const s of comps) {
-      const n = single ? 1 : s.c.h * s.c.v;
-      for (let b = 0; b < n; b++) block(s.dc, s.ac);
-    }
+    if (single) block(comps[0]!, m);
+    else for (const s of comps) for (let b = 0; b < s.c.h * s.c.v; b++) block(s, 0);
   }
   // After the last block only padding bits (all ones) may remain in the current byte; then the next marker must follow.
   if (nbits && (bits & ((1 << nbits) - 1)) !== (1 << nbits) - 1) throw new Corrupt("the image data has stray bits after the last block");
@@ -170,17 +250,24 @@ export function normalizeJpeg(input: Uint8Array, limits: { maxBytes?: number; ma
   if (input.length > maxBytes) return fail("size", `The photo is ${input.length} bytes; the limit is ${maxBytes} bytes after processing.`);
   const kind = sniff(input);
   if (kind !== "jpeg") {
+    const reason = `signature:${kind ?? "unknown"}`;
     const what = kind === "heic" ? "a HEIC/HEIF photo" : kind === "svg" || kind === "markup" ? "SVG or other markup (active content)" : kind ? `a ${kind.toUpperCase()} file` : "not a recognised image";
-    return fail("format", `Only processed JPEG photos are stored; this upload is ${what}. ORBIT's page converts photos in the browser before uploading; nothing was stored.`);
+    return { ...fail("format", `Only processed JPEG photos are stored; this upload is ${what}. ORBIT's page converts photos in the browser before uploading; nothing was stored.`), reason } as JpegResult;
   }
   const buf = Buffer.from(input.buffer, input.byteOffset, input.length);
   const out: Buffer[] = [Buffer.from([0xff, 0xd8]), JFIF];
   const dc = new Map<number, Huffman>();
   const ac = new Map<number, Huffman>();
   const quant = new Set<number>();
-  let frame: { width: number; height: number; comps: Component[]; hmax: number; vmax: number } | undefined;
+  let frame: { width: number; height: number; comps: Component[]; hmax: number; vmax: number; progressive: boolean } | undefined;
+  let sofAt = -1; // where the frame header sits in `out`
   let restart = 0;
+  let scans = 0;
   const scanned = new Set<number>();
+  // Progressive bookkeeping: per component, the successive-approximation bit last coded for each coefficient (-1: not yet coded),
+  // and which coefficients are already non-zero in each block (needed to decode refinement scans).
+  const approx = new Map<number, Int8Array>();
+  const nonzero = new Map<number, Uint8Array>();
   let pos = 2;
   try {
     for (;;) {
@@ -209,7 +296,12 @@ export function normalizeJpeg(input: Uint8Array, limits: { maxBytes?: number; ma
           quant.add(tq);
           p += 65;
         }
-        out.push(whole);
+        // ITU T.81 lets a quantization table be defined after the frame header, as long as it is in place before the first scan
+        // that uses it (B.2.2, Tqi), and some encoders write it there. The stored copy puts tables defined before the first scan
+        // ahead of the frame header, the layout every decoder expects; their order among themselves is kept, so the result is
+        // the same tables.
+        if (frame && scans === 0) out.splice(sofAt++, 0, whole);
+        else out.push(whole);
         continue;
       }
       if (marker === 0xc4) {
@@ -226,7 +318,7 @@ export function normalizeJpeg(input: Uint8Array, limits: { maxBytes?: number; ma
         out.push(whole);
         continue;
       }
-      if (marker === 0xc0 || marker === 0xc1) {
+      if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
         if (frame) throw new Corrupt("the file has more than one frame");
         if (seg.length < 6) throw new Corrupt("the frame header is cut off");
         if (seg[0] !== 8) throw new Corrupt("only 8-bit JPEG photos are accepted");
@@ -246,8 +338,9 @@ export function normalizeJpeg(input: Uint8Array, limits: { maxBytes?: number; ma
           if (h < 1 || h > 2 || v < 1 || v > 2 || tq > 3 || comps.some((c) => c.id === id)) throw new Corrupt("the frame's components are malformed");
           comps.push({ id, h, v, tq });
         }
-        frame = { width, height, comps, hmax: Math.max(...comps.map((c) => c.h)), vmax: Math.max(...comps.map((c) => c.v)) };
-        if (comps.some((c) => !quant.has(c.tq))) throw new Corrupt("a quantization table is missing");
+        frame = { width, height, comps, hmax: Math.max(...comps.map((c) => c.h)), vmax: Math.max(...comps.map((c) => c.v)), progressive: marker === 0xc2 };
+        // The quantization tables it names are checked at each scan, not here (see the DQT note above).
+        sofAt = out.length;
         out.push(whole);
         continue;
       }
@@ -259,37 +352,69 @@ export function normalizeJpeg(input: Uint8Array, limits: { maxBytes?: number; ma
       }
       if (marker === 0xda) {
         if (!frame) throw new Corrupt("image data comes before the frame header");
+        if (++scans > MAX_SCANS) throw new Corrupt(`the image has more than ${MAX_SCANS} scans`);
         const ns = seg[0]!;
         if (!ns || ns > 4 || seg.length !== 4 + 2 * ns) throw new Corrupt("a scan header is malformed");
         const f = frame;
-        const comps = [];
+        const ss = seg[1 + 2 * ns]!;
+        const se = seg[2 + 2 * ns]!;
+        const ah = seg[3 + 2 * ns]! >> 4;
+        const al = seg[3 + 2 * ns]! & 15;
+        if (!f.progressive) {
+          if (ss !== 0 || se !== 63 || ah !== 0 || al !== 0) throw new Corrupt("a sequential scan has progressive parameters");
+        } else {
+          // T.81 G.1.1.1: a DC scan (ss=0, se=0) may interleave components; an AC band (1 <= ss <= se <= 63) has one component.
+          // A refinement scan (ah > 0) refines by exactly one bit: ah = al + 1.
+          if (ss === 0 ? se !== 0 : se < ss || se > 63 || ns !== 1) throw new Corrupt("a progressive scan's band is malformed");
+          if (al > 13 || (ah !== 0 && ah !== al + 1)) throw new Corrupt("a progressive scan's approximation bits are malformed");
+        }
+        const comps: ScanComp[] = [];
         for (let k = 0; k < ns; k++) {
           const c = f.comps.find((x) => x.id === seg[1 + 2 * k]);
           const td = seg[2 + 2 * k]! >> 4;
           const ta = seg[2 + 2 * k]! & 15;
-          if (!c || scanned.has(c.id)) throw new Corrupt("a scan names an unknown or repeated component");
+          if (!c || comps.some((x) => x.c === c) || (!f.progressive && scanned.has(c.id))) throw new Corrupt("a scan names an unknown or repeated component");
+          if (!quant.has(c.tq)) throw new Corrupt("a quantization table is missing");
+          // Which Huffman tables a scan needs: sequential both; progressive DC first pass the DC table; AC passes the AC table;
+          // a DC refinement pass none.
+          const needDc = !f.progressive || (ss === 0 && ah === 0);
+          const needAc = !f.progressive || ss > 0;
           const d = dc.get(td);
           const a = ac.get(ta);
-          if (!d || !a) throw new Corrupt("a scan uses a Huffman table that is not defined");
+          if ((needDc && !d) || (needAc && !a)) throw new Corrupt("a scan uses a Huffman table that is not defined");
           const cw = Math.ceil((f.width * c.h) / f.hmax);
           const ch = Math.ceil((f.height * c.v) / f.vmax);
-          comps.push({ c, dc: d, ac: a, blocksW: Math.ceil(cw / 8), blocksH: Math.ceil(ch / 8) });
+          const blocksW = Math.ceil(cw / 8);
+          const blocksH = Math.ceil(ch / 8);
+          if (f.progressive) {
+            let ap = approx.get(c.id);
+            if (!ap) approx.set(c.id, (ap = new Int8Array(64).fill(-1)));
+            // An AC band needs the DC first pass of its component; each coefficient's first pass has ah=0, each refinement
+            // continues exactly where the previous pass for that coefficient stopped.
+            if (ss > 0 && ap[0] === -1) throw new Corrupt("an AC scan comes before its component's DC scan");
+            for (let q = ss; q <= se; q++) {
+              if (ah === 0 ? ap[q] !== -1 : ap[q] !== ah) throw new Corrupt("a progressive scan repeats or skips approximation bits");
+              ap[q] = al;
+            }
+            if (ss > 0 && !nonzero.has(c.id)) nonzero.set(c.id, new Uint8Array(blocksW * blocksH * 64));
+          }
+          comps.push({ c, dc: d, ac: a, blocksW, blocksH, nonzero: nonzero.get(c.id) });
         }
-        if (seg[1 + 2 * ns] !== 0 || seg[2 + 2 * ns] !== 63 || seg[3 + 2 * ns] !== 0) throw new Corrupt("only baseline (sequential) scans are accepted");
         if (ns > 1 && comps.reduce((n, s) => n + s.c.h * s.c.v, 0) > 10) throw new Corrupt("a scan has too many blocks per unit");
-        const end = decodeScan(buf, pos, comps, f, restart);
+        const end = decodeScan(buf, pos, { comps, progressive: f.progressive, ss, se, ah, al }, f, restart);
         out.push(whole, buf.subarray(pos, end));
         for (const s of comps) scanned.add(s.c.id);
         pos = end;
         continue;
       }
-      if (marker >= 0xc2 && marker <= 0xcf) {
-        return fail("format", "Only baseline JPEG photos are accepted (this one is progressive, arithmetic-coded or lossless). ORBIT's page re-encodes photos before upload; nothing was stored.");
+      if (marker >= 0xc3 && marker <= 0xcf) {
+        return fail("format", "Only baseline or progressive Huffman JPEG photos are accepted (this one is arithmetic-coded, lossless or hierarchical). ORBIT's page re-encodes photos before upload; nothing was stored.");
       }
       throw new Corrupt(`an unsupported JPEG segment (0xFF${marker.toString(16).toUpperCase()}) was found`);
     }
   } catch (err) {
-    if (err instanceof Corrupt) return fail("corrupt", `The photo could not be decoded: ${err.message}. Nothing was stored.`);
+    // `reason` is the fixed parser message (no image content), for the refusal log.
+    if (err instanceof Corrupt) return { ...fail("corrupt", `The photo could not be decoded: ${err.message}. Nothing was stored.`), reason: err.message } as JpegResult;
     if (err instanceof RangeError) return fail("corrupt", "The photo could not be decoded: a segment is cut off. Nothing was stored.");
     throw err;
   }
