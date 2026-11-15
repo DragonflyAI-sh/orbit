@@ -182,6 +182,11 @@ export const safeAttachments = (refs: AttachmentRef[] | undefined): AttachmentRe
   refs?.length ? refs.slice(0, 10).map((r) => ({ id: r.id, type: r.type, bytes: r.bytes, width: r.width, height: r.height })) : undefined;
 // A thread's transcript as of one moment. The store replaces a thread object on every change (copy on write), so the messages seen
 // through one value never change under the reader. `readable` stops before the first reply still being written.
+// A user message that carries photos, as photo discovery (src/photo-access.ts) sees it: identity, time, its text (the caption, already
+// masked by the store) and the ordered attachment ids. Never the bytes.
+export type PhotoMessage = { id: string; at: string; text: string; ids: string[] };
+export const photoMessagesOf = (msgs: readonly ThreadMessage[]): PhotoMessage[] =>
+  msgs.filter((m) => m.role === "user" && m.attachments?.length).map((m) => ({ id: m.id, at: m.at, text: typeof m.text === "string" ? m.text : "", ids: m.attachments!.map((a) => a.id) }));
 export type ThreadTranscript = { rev: number; updatedAt: string; archived: boolean; total: number; readable: number; inProgress: boolean; compacted: number; at(i: number): TranscriptMessage | undefined };
 
 export function jobCardsOf(cards: Card[]): JobCardRef[] {
@@ -505,6 +510,13 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
         ...(first ? { firstUser: { at: first.at, text: first.text.slice(0, opts.excerpt), chars: first.text.length } } : {}),
         ...(opts.cards ? { jobCards: jobCardsOf(t.cards) } : {}),
       };
+    },
+
+    // Read-only photo discovery (src/photo-access.ts): the thread's title, archive state and its user messages with photos. Nothing is
+    // cloned in full or changed. Undefined for a thread that does not exist.
+    photoSource(id: string): { title: string; archived: boolean; messages: PhotoMessage[] } | undefined {
+      const t = threads.get(id);
+      return t ? { title: t.title, archived: t.archived === true, messages: photoMessagesOf(t.messages) } : undefined;
     },
 
     // Read-only transcript access for session_read (src/sessions.ts): one message projected at a time, nothing cloned in full,

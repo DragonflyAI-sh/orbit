@@ -10,7 +10,7 @@ import { buildItems, buildMessages, compactThread, dataBlock, summaryNote, summa
 import { maskContent, maskDeep, maskText, ThreadError } from "./threads.ts";
 import { maskVaultText } from "./vault/filter.ts";
 import type { AttachmentRef } from "./attachments.ts";
-import { hasPhotos, withoutPhotos, withPhotos } from "./photo-context.ts";
+import { hasPhotos, MODEL_IMAGE_BYTES_MAX, MODEL_IMAGES_MAX, withoutPhotos, withPhotos } from "./photo-context.ts";
 import type { Card, CardState, StoredCall, Thread, ThreadMessage, Threads } from "./threads.ts";
 
 // Runs one chat turn against a stored thread and shapes threads for the page. The server owns the policy checks and the
@@ -196,6 +196,8 @@ export function threadService(d: {
     const photoNotes: string[] = [];
     // Set once photos passed ORBIT's own check and go out with the request: a failure after that is the provider's, not a local block.
     let photosSent = false;
+    // What the request already carries, so photos a tool supplies later in this reply stay within the same per-request bounds.
+    let carried = { images: 0, bytes: 0 };
     const photoInput = <T extends Item>(items: T[]): T[] => {
       if (!hasPhotos(items)) return items;
       const support = model.images?.() ?? { ok: false, detail: "the connected model does not take photos" };
@@ -211,6 +213,7 @@ export function threadService(d: {
       if (plan.currentMissing) throw new PhotoRefusal(`${plan.currentMissing} photo(s) of this message could not be loaded from ORBIT's storage, so nothing was sent to the model.`);
       if (plan.missing) photoNotes.push(`${plan.missing} earlier photo(s) could not be loaded from storage and were not sent.`);
       photosSent = hasPhotos(plan.items);
+      carried = { images: plan.sent, bytes: plan.sentBytes };
       return plan.items;
     };
     try {
@@ -235,6 +238,14 @@ export function threadService(d: {
           abortGraceMs: d.abortGraceMs,
           signal: opts.signal,
           onLate: (late) => onLateTool({ thread: id, ...late }),
+          // Photos a tool loads (photos_inspect, src/photo-access.ts) go through the same capability check and bounds as the turn's own.
+          media: {
+            support: () => model.images?.() ?? { ok: false, detail: "the connected model does not take photos" },
+            images: carried.images,
+            bytes: carried.bytes,
+            maxImages: MODEL_IMAGES_MAX,
+            maxBytes: MODEL_IMAGE_BYTES_MAX,
+          },
           onCall: ({ call_id, name, arguments: args, output, record }) => {
             // Only the turn that holds the thread writes to it.
             if (!threads.holds(id, token)) throw new Error("This turn no longer holds the thread.");
