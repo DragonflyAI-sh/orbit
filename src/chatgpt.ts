@@ -1,8 +1,9 @@
 import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { imageSupport, instructions, parseOutput, responsesInput, responsesTools } from "./model.ts";
-import type { Item, Message, ModelPort, ReplyOptions, Step, ToolDef } from "./model.ts";
+import { instructions, parseOutput, resolverOptions, responsesInput, responsesTools, supportFrom } from "./model.ts";
+import type { CapabilityOptions, Item, Message, ModelPort, ReplyOptions, Step, ToolDef } from "./model.ts";
+import { capabilityResolver } from "./model-capability.ts";
 import { deadline, RequestCancelled, RequestTimeout } from "./model-deadline.ts";
 import type { Bounds, Timers } from "./model-deadline.ts";
 import { redact } from "./ops/protocol.ts";
@@ -372,7 +373,11 @@ export type ChatGPTModel = ModelPort & {
 };
 
 // `bounds` and `timers` exist for tests (short deadlines, counted timers); production uses CHATGPT_BOUNDS and the real clock.
-export type ChatGPTOptions = { fetcher?: Fetch; now?: () => number; sleep?: (ms: number) => Promise<void>; bounds?: Partial<Bounds>; timers?: Timers };
+export type ChatGPTOptions = { fetcher?: Fetch; now?: () => number; sleep?: (ms: number) => Promise<void>; bounds?: Partial<Bounds>; timers?: Timers; capabilities?: CapabilityOptions };
+
+// Why this backend has no provider capability metadata (docs/photos.md). ORBIT does not call an endpoint it has no contract for.
+export const CHATGPT_NO_METADATA =
+  "ORBIT's ChatGPT token-sharing route (api.openai.com/v1/responses with a ChatGPT token) has no documented model metadata endpoint; the model catalog Codex CLI reads (with input_modalities) is served by a different backend, chatgpt.com/backend-api/codex/models, which ORBIT's login does not use";
 
 // A request-lifetime failure as the provider error callers already handle. The text is ORBIT's own, never provider content.
 export function lifetimeError(err: unknown): unknown {
@@ -389,6 +394,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const bounds: Bounds = { ...CHATGPT_BOUNDS, ...options.bounds };
   const saved = file.read();
+  const capability = capabilityResolver({ backend: "chatgpt-token-sharing", model, noDiscovery: CHATGPT_NO_METADATA, ...resolverOptions(options.capabilities) });
   let login: Login = saved ? { state: "signed-in", email: saved.email, since: new Date(now()).toISOString() } : { state: "signed-out" };
   let pending: { state: string; nonce: string; verifier: string; deadline: number } | undefined;
   let lastOk: string | undefined;
@@ -766,7 +772,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
       return readiness();
     },
 
-    images: () => imageSupport(model),
+    images: () => supportFrom(capability.resolve()),
 
     async step(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], opts?: ReplyOptions): Promise<Step> {
       const body = JSON.stringify({

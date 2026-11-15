@@ -302,7 +302,7 @@ test("fallback through the server: a photo turn while ChatGPT is limited fails w
   const id = (await r.upload(`/threads/${t.id}/attachments`, smallJpeg(1))).data.attachment.id;
   const res = await r.api(`/threads/${t.id}/messages`, "POST", { text: "look", attachments: [id] });
   assert.equal(res.status, 502);
-  assert.match(res.data.error, /cannot be analyzed: ChatGPT usage limit/);
+  assert.match(res.data.error, /cannot be analyzed: ORBIT blocked the photos locally, before any request: ChatGPT usage limit/);
   assert.equal(res.data.thread.messages[0].attachments[0].id, id);
   assert.equal(w.requests.length, 1, "only the priming text call reached OpenRouter");
 });

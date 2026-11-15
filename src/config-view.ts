@@ -5,6 +5,7 @@ import type { Ops } from "./ops-client.ts";
 import { displayConfig, CONFIG_KEYS } from "./ops/admin-protocol.ts";
 import type { ConfigChanges } from "./ops/admin-protocol.ts";
 import type { PortStatus, Result } from "./ports.ts";
+import type { ImageSupport } from "./model.ts";
 import { maskDeep, maskText } from "./threads.ts";
 import { CREDENTIAL_NAME } from "./vault/clone.ts";
 import type { PolicyCheck } from "./vault/policy-check.ts";
@@ -34,6 +35,8 @@ export type ConfigViewDeps = {
   repoRoot?: string;
   // How the vault's AGENTS.md compares with the baseline the coded write rules were written against. Absent without a vault clone.
   vaultPolicy?: () => PolicyCheck;
+  // The model's photo capability answer with its full resolution (src/model-capability.ts). Absent without a model.
+  photos?: () => ImageSupport | undefined;
   now?: () => Date;
 };
 
@@ -115,6 +118,18 @@ export function configView(deps: ConfigViewDeps): (ports: PortStatus[]) => Promi
     }
   };
 
+  const photoCapability = (): Section<unknown> => {
+    const source = "the model adapter's capability resolver (provider metadata, then the operator declaration file, then ORBIT's bundled registry; docs/photos.md)";
+    if (!deps.photos) return { state: "unavailable", source, reason: "No model adapter was given to the config view." };
+    try {
+      const s = deps.photos();
+      if (!s) return { state: "unavailable", source, reason: "The connected model adapter does not take photos." };
+      return { state: "ok", source, value: { photosAllowed: s.ok, capability: s.capability, detail: s.detail, resolution: s.resolution } };
+    } catch (err) {
+      return unavailable(source, err);
+    }
+  };
+
   return async (ports) => {
     const [credentials, deployState] = await Promise.all([viaOps("credentials"), viaOps("deploy_state")]);
     const value = {
@@ -126,6 +141,7 @@ export function configView(deps: ConfigViewDeps): (ports: PortStatus[]) => Promi
       deployedCommit: { runningProcess: commit, tier1DeployState: deployState },
       routine: routine(),
       vaultPolicy: vaultPolicy(),
+      photoCapability: photoCapability(),
       ports: { state: "ok" as const, source: "each port's own status()", value: ports.map((p) => ({ port: p.port, state: p.state, impl: p.impl, detail: maskText(p.detail).slice(0, 300), verifiedAt: p.verifiedAt })) },
     };
     return { value: maskDeep(value), provenance: "live", source: "config-view (env: running process; credentials & deploy: tier 1 ops; routine: repo file; ports: live status)" };
