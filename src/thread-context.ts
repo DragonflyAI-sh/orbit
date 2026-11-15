@@ -48,7 +48,8 @@ export function buildItems(t: Thread): Item[] {
   for (const m of t.messages.slice(coveredCount(t))) {
     if (m.status === "pending") continue;
     if (m.role === "user") {
-      items.push({ role: "user", content: m.text });
+      // Photo references only; src/photo-context.ts loads the bounded set that is sent.
+      items.push({ role: "user", content: m.text, ...(m.attachments?.length ? { images: m.attachments.map((a) => ({ id: a.id })) } : {}) });
       continue;
     }
     for (const c of m.calls ?? []) {
@@ -65,8 +66,8 @@ export function buildItems(t: Thread): Item[] {
 export function buildMessages(t: Thread): Message[] {
   return t.messages
     .slice(coveredCount(t))
-    .filter((m) => m.status !== "pending" && m.text.trim() && m.status !== "error")
-    .map((m) => ({ role: m.role, content: m.text }));
+    .filter((m) => m.status !== "pending" && (m.text.trim() || m.attachments?.length) && m.status !== "error")
+    .map((m) => ({ role: m.role, content: m.text, ...(m.role === "user" && m.attachments?.length ? { images: m.attachments.map((a) => ({ id: a.id })) } : {}) }));
 }
 
 // The summary as a data block for the model's reference material (empty when the thread has none).
@@ -82,7 +83,7 @@ export function summaryNote(t: Thread): string | undefined {
 // ---- compaction ------------------------------------------------------------------------------------------------------
 
 function renderForSummary(m: ThreadMessage): string {
-  const lines = [`[${m.role}] ${m.text.slice(0, 1500)}`];
+  const lines = [`[${m.role}] ${m.text.slice(0, 1500)}${m.attachments?.length ? ` [${m.attachments.length} photo(s) attached; not part of this summary]` : ""}`];
   for (const c of m.calls ?? []) lines.push(`  tool ${c.name}(${c.arguments.slice(0, 200)}) -> ${callState(c)}${c.source ? ` [${c.provenance} ${c.source}]` : ""}: ${c.summary.slice(0, 300)}`);
   return lines.join("\n");
 }
@@ -93,7 +94,7 @@ function renderForSummary(m: ThreadMessage): string {
 export function extractiveDigest(prior: string | undefined, older: ThreadMessage[]): { text: string; lossy?: string } {
   const lines = older.map((m) => {
     const tools = (m.calls ?? []).map((c) => `${c.name}:${callState(c)}`).join(", ");
-    return `- ${m.role}: ${m.text.replace(/\s+/g, " ").slice(0, 200)}${tools ? ` [tools: ${tools}]` : ""}`;
+    return `- ${m.role}: ${m.text.replace(/\s+/g, " ").slice(0, 200)}${m.attachments?.length ? ` [${m.attachments.length} photo(s)]` : ""}${tools ? ` [tools: ${tools}]` : ""}`;
   });
   const notes: string[] = [];
   let head = "";

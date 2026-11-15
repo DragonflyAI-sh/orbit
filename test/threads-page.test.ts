@@ -116,8 +116,8 @@ test("the thread code never parses HTML and keeps per-device state in a guarded 
   assert.doesNotMatch(code, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|DOMParser|createContextualFragment/);
   assert.match(code, /try \{ return localStorage\.getItem\(THREAD_KEY\)/);
   assert.match(code, /catch \{ return null; \}/);
-  // The history is the server's: the thread submit path sends only the new text.
-  assert.match(code, /\/messages`, "POST", \{ text: content \}/);
+  // The history is the server's: the thread submit path sends only the new text (and the ids of photos sent with it, docs/photos.md).
+  assert.match(code, /\/messages`, "POST", photoIds\.length \? \{ text: content, attachments: photoIds \} : \{ text: content \}\)/);
   const threaded = html.slice(start, html.indexOf('if (threadMode === "server") { await sendThreaded'));
   assert.doesNotMatch(threaded, /history\.(push|slice)|JSON\.stringify\(\{ messages/);
 });

@@ -3,8 +3,9 @@ import { closeSync, existsSync, fsyncSync, fstatSync, mkdirSync, openSync, readd
 import { join } from "node:path";
 import { ASSISTANT_ACTIVE_BUDGET_CHARS, boundChunk, planContext } from "./assistant-context.ts";
 import type { ChunkForm, ContextPlan } from "./assistant-context.ts";
-import { jobCardsOf, maskCall, maskContent, maskDeep, MAX_MESSAGE_CHARS, safePatch, THREAD_SCHEMA, ThreadError, transcriptMessage, writeAtomic } from "./threads.ts";
+import { jobCardsOf, maskCall, maskContent, maskDeep, MAX_MESSAGE_CHARS, safeAttachments, safePatch, THREAD_SCHEMA, ThreadError, transcriptMessage, writeAtomic } from "./threads.ts";
 import type { Card, CardState, JobCardRef, MessagePatch, StoredCall, Thread, ThreadMessage, TranscriptMessage } from "./threads.ts";
+import type { AttachmentRef } from "./attachments.ts";
 
 // The Assistant: one durable rolling conversation, owned by the server (docs/assistant.md). It is stored as small chunk files,
 // one per turn, apart from chat threads (<state>/threads/) and from the vault:
@@ -374,11 +375,12 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
     isBusy: (id: string) => id === ASSISTANT_ID && Boolean(busy),
 
     // A new turn: a new chunk, written before anything else happens, with the next sequence number.
-    appendUser(id: string, text: string): ThreadMessage {
+    appendUser(id: string, text: string, attachments?: AttachmentRef[]): ThreadMessage {
       checkId(id);
       if (openChunk()) throw new ThreadError(409, "A reply is already in progress in the Assistant.");
       const at = now().toISOString();
-      const m: ThreadMessage = { id: randomUUID(), role: "user", at, text: maskContent(text).slice(0, MAX_MESSAGE_CHARS) };
+      const refs = safeAttachments(attachments);
+      const m: ThreadMessage = { id: randomUUID(), role: "user", at, text: maskContent(text).slice(0, MAX_MESSAGE_CHARS), ...(refs ? { attachments: refs } : {}) };
       const c: Chunk = { schema: CHUNK_SCHEMA, id: randomUUID(), seq: nextSeq, createdAt: at, updatedAt: at, rev: 1, state: "open", messages: [m], cards: [], ...(nextRequest ? { requestId: nextRequest } : {}) };
       persist(c, "active");
       nextSeq++;

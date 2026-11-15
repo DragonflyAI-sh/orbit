@@ -230,7 +230,12 @@ type ChatMessage =
 export function toMessages(system: string, input: Item[]): ChatMessage[] {
   const out: ChatMessage[] = [{ role: "system", content: system }];
   for (const it of input) {
-    if ("role" in it) out.push({ role: it.role, content: it.content });
+    if ("role" in it) {
+      // The fallback is not given photos (src/fallback.ts removes or refuses them first). Should one arrive anyway, the request is refused
+      // here rather than sent without it.
+      if (it.images?.length) throw new Error("The OpenRouter fallback does not take photos in this build; the request was not sent.");
+      out.push({ role: it.role, content: it.content });
+    }
     else if (it.type === "function_call") {
       const call = { id: it.call_id, type: "function" as const, function: { name: it.name, arguments: it.arguments } };
       const last = out.at(-1);

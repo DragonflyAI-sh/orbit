@@ -9,6 +9,8 @@ import type { RecentContextRefresher } from "./recent-context.ts";
 import { buildItems, buildMessages, compactThread, dataBlock, summaryNote, summaryUnusable } from "./thread-context.ts";
 import { maskContent, maskDeep, maskText, ThreadError } from "./threads.ts";
 import { maskVaultText } from "./vault/filter.ts";
+import type { AttachmentRef } from "./attachments.ts";
+import { hasPhotos, withoutPhotos, withPhotos } from "./photo-context.ts";
 import type { Card, CardState, StoredCall, Thread, ThreadMessage, Threads } from "./threads.ts";
 
 // Runs one chat turn against a stored thread and shapes threads for the page. The server owns the policy checks and the
@@ -23,6 +25,8 @@ export type TurnPrep = {
   allow?: (tool: string) => string | undefined;
   // The verified owner check of the request that started this turn, carried to everything the turn triggers (the rolling note).
   isOwner: boolean;
+  // Photos sent with this message, already bound to it in the attachment store (docs/photos.md). Stored on the user message as refs.
+  attachments?: AttachmentRef[];
 };
 
 export type Live = { source: "jobs" | "ops-admin" | "ops-sys"; found: boolean; state?: string; health?: string; detail?: string; url?: string; delivered?: boolean };
@@ -32,6 +36,9 @@ export type MessageView = Omit<ThreadMessage, "calls"> & { calls?: (Omit<StoredC
 export type ThreadView = Omit<Thread, "messages" | "cards"> & { messages: MessageView[]; cards: CardView[]; busy: boolean; summaryUnusable?: true };
 
 export type ThreadService = ReturnType<typeof threadService>;
+
+// A turn refused because of its photos (the model takes none, or a photo could not be loaded). Nothing was sent to the model.
+class PhotoRefusal extends Error {}
 
 // What a turn needs from its store. The chat thread store (src/threads.ts) is one; the Assistant's chunk store
 // (src/assistant-store.ts) is the other, so both run the same turn, tool, card and confirmation code.
@@ -66,6 +73,9 @@ export function threadService(d: {
   // The session id of a thread of this store (`chat:<uuid>`, or `assistant:assistant` for the Assistant). When set, a proposal made in
   // a turn is bound to that origin before its card is stored, and a proposal already bound to another conversation gets no card here.
   origin?: (threadId: string) => string;
+  // The processed bytes of one photo of a thread of this store, or undefined (docs/photos.md). Each store passes a loader bound to its
+  // own conversation scope, so a request is only ever given photos of the conversation it belongs to. Absent: no photos are loaded.
+  photos?: (threadId: string, attachmentId: string) => Buffer | undefined;
 }) {
   const { threads, model, proposals, jobs, admin, sys, recent } = d;
   const now = d.now ?? (() => new Date());
@@ -178,10 +188,26 @@ export function threadService(d: {
     // Older context is summarized first, so the model call below is within budget. A failure here never blocks the reply.
     // Only a chat thread store compacts (the Assistant passes compact: false and never reaches this with its own store).
     if (d.compact !== false) await compactThread({ threads: threads as Threads, model, id, now, budget: d.budget }).catch(() => {});
-    threads.appendUser(id, text);
+    threads.appendUser(id, text, prep.attachments);
     const mid = threads.beginAssistant(id);
     const t = threads.get(id)!;
     const notes = [prep.notes, await recent?.note(), summaryNote(t), t.cards.length ? dataBlock("proposal-cards", `Proposal cards in this thread, from ORBIT's records:\n${(d.maxCardLines ? cardLines(t).slice(-d.maxCardLines) : cardLines(t)).join("\n")}`) : undefined].filter(Boolean).join("\n\n") || undefined;
+    // Photos (docs/photos.md): load the bounded set this request may carry, and refuse rather than drop photos the model cannot take.
+    const photoNotes: string[] = [];
+    const photoInput = <T extends Item>(items: T[]): T[] => {
+      if (!hasPhotos(items)) return items;
+      const support = model.images?.() ?? { ok: false, detail: "the connected model does not take photos" };
+      if (!support.ok) {
+        const stripped = withoutPhotos(items);
+        if (stripped.current) throw new PhotoRefusal(`This message has ${stripped.current} photo${stripped.current === 1 ? "" : "s"}, but they cannot be analyzed: ${support.detail}. The photos are stored with the message; nothing was sent to the model.`);
+        if (stripped.removed) photoNotes.push(`The model answered without seeing ${stripped.removed} earlier photo(s): ${support.detail}.`);
+        return stripped.items;
+      }
+      const plan = withPhotos(items, (aid) => d.photos?.(id, aid));
+      if (plan.currentMissing) throw new PhotoRefusal(`${plan.currentMissing} photo(s) of this message could not be loaded from ORBIT's storage, so nothing was sent to the model.`);
+      if (plan.missing) photoNotes.push(`${plan.missing} earlier photo(s) could not be loaded from storage and were not sent.`);
+      return plan.items;
+    };
     try {
       let reply: string;
       let provenance: "live" | "mock";
@@ -193,7 +219,7 @@ export function threadService(d: {
       if (prep.tools.length && model.step) {
         const outcome = await runChat({
           model,
-          messages: d.context ? d.context.items(t) : buildItems(t),
+          messages: photoInput(d.context ? d.context.items(t) : buildItems(t)),
           limits: prep.limits,
           notes,
           tools: prep.tools,
@@ -221,7 +247,7 @@ export function threadService(d: {
         accounting = outcome.accounting;
         incomplete = outcome.incomplete;
       } else {
-        const r = await model.reply(d.context ? d.context.messages(t) : buildMessages(t), prep.limits, notes, opts.signal ? { signal: opts.signal } : undefined);
+        const r = await model.reply(photoInput(d.context ? d.context.messages(t) : buildMessages(t)), prep.limits, notes, opts.signal ? { signal: opts.signal } : undefined);
         reply = r.value;
         provenance = r.provenance;
         source = r.source;
@@ -229,12 +255,13 @@ export function threadService(d: {
         accounting = r.accounting;
         incomplete = r.incomplete;
       }
+      if (photoNotes.length) incomplete = [...photoNotes, ...(incomplete ?? [])];
       threads.patchMessage(id, mid, { text: reply, status: "done", provenance, source, memory: prep.memory, ...(capped ? { capped } : {}), ...(fallback ? { fallback } : {}), ...(accounting?.length ? { accounting } : {}), ...(incomplete?.length ? { incomplete } : {}) });
       recent?.consider(id, { isOwner: prep.isOwner });
       return {};
     } catch (err) {
       // A tool call cut off by its deadline or a cancellation is not a model failure: say exactly what is known about it.
-      const error = err instanceof TurnInterrupted ? err.message : `The model call failed: ${err instanceof Error ? err.message : String(err)}`;
+      const error = err instanceof TurnInterrupted || err instanceof PhotoRefusal ? err.message : `The model call failed: ${err instanceof Error ? err.message : String(err)}`;
       // The user's message and every call that completed (or was cut off) stay on record; the reply is marked as not completed.
       threads.patchMessage(id, mid, { status: "error", error });
       return { error };

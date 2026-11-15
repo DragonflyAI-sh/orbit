@@ -1,7 +1,7 @@
 import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { instructions, parseOutput, responsesTools } from "./model.ts";
+import { imageSupport, instructions, parseOutput, responsesInput, responsesTools } from "./model.ts";
 import type { Item, Message, ModelPort, ReplyOptions, Step, ToolDef } from "./model.ts";
 import { deadline, RequestCancelled, RequestTimeout } from "./model-deadline.ts";
 import type { Bounds, Timers } from "./model-deadline.ts";
@@ -766,11 +766,13 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
       return readiness();
     },
 
+    images: () => imageSupport(model),
+
     async step(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], opts?: ReplyOptions): Promise<Step> {
       const body = JSON.stringify({
         model,
         instructions: instructions(limits, notes, tools.map((t) => `${t.name}: ${t.description}`)),
-        input,
+        input: responsesInput(input),
         ...(tools.length ? { tools: responsesTools(tools) } : {}),
         stream: true,
         store: false,
@@ -791,7 +793,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
       const body = JSON.stringify({
         model,
         instructions: instructions(limits, notes),
-        input: messages.map((m) => ({ role: m.role, content: m.content })),
+        input: responsesInput(messages),
         stream: true,
         store: false,
       });

@@ -1,7 +1,8 @@
 import { PR_INSPECT_TOOL_NAMES } from "./pr-inspect.ts";
 import { MAX_RESET_MS, ProviderError, RATE_PAUSE_MS, USAGE_PAUSE_MS } from "./chatgpt.ts";
 import { replySource } from "./model.ts";
-import type { FallbackInfo, Item, Message, ModelPort, Reply, ReplyOptions, Step, ToolDef } from "./model.ts";
+import type { FallbackInfo, ImageSupport, Item, Message, ModelPort, Reply, ReplyOptions, Step, ToolDef } from "./model.ts";
+import { FALLBACK_NO_PHOTOS, withoutPhotos } from "./photo-context.ts";
 import { BALANCE_EVERY_MS, openrouterClient } from "./openrouter.ts";
 import type { OpenRouterClient, OpenRouterConfig } from "./openrouter.ts";
 import { SpendError } from "./spend-ledger.ts";
@@ -119,6 +120,11 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     if (!paidOk) throw stand;
     const problem = refusal();
     if (problem) throw augment(stand, problem, []);
+    // Photos (docs/photos.md): the paid fallback is not given images in this build. Photos on the newest user message refuse the turn,
+    // so they are never silently dropped; older photos in the history are replaced by a note the model sees and the owner is told.
+    const photos = withoutPhotos(input);
+    if (photos.current) throw augment(stand, FALLBACK_NO_PHOTOS, []);
+    input = photos.items;
     const allowed = tools.filter((t) => FALLBACK_TOOLS.has(t.name));
     const names = new Set(allowed.map((t) => t.name));
     const told = [
@@ -156,7 +162,8 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       primaryLimit: { until: iso(l.until), estimated: l.estimated },
       ...(paid.costUsd !== undefined ? { costUsd: paid.costUsd } : {}),
     };
-    return { text: paid.text, calls: paid.calls, fallback: info, ...(paid.accounting?.length ? { accounting: paid.accounting } : {}), ...(paid.incomplete?.length ? { incomplete: paid.incomplete } : {}) };
+    const incomplete = [...(paid.incomplete ?? []), ...(photos.removed ? [`The OpenRouter fallback answered without seeing ${photos.removed} earlier photo(s): it is not given photos in this build.`] : [])];
+    return { text: paid.text, calls: paid.calls, fallback: info, ...(paid.accounting?.length ? { accounting: paid.accounting } : {}), ...(incomplete.length ? { incomplete } : {}) };
   };
 
   // One model turn: the primary unless its limit is still in force.
@@ -248,6 +255,14 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       : {}),
 
     step: primary.step ? step : undefined,
+
+    // Photos go to the primary only. While its limit is in force every reply comes from the fallback, which takes none.
+    images(): ImageSupport {
+      const own = primary.images?.() ?? { ok: false, detail: "the connected model does not take photos" };
+      const l = active();
+      if (own.ok && l) return { ok: false, detail: `${why(l)}; until then replies come from the OpenRouter fallback, which is not given photos in this build` };
+      return own;
+    },
 
     async reply(messages: Message[], limits: string[], notes?: string, opts?: ReplyOptions): Promise<Reply> {
       const items: Item[] = messages;
