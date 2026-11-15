@@ -84,6 +84,22 @@
   .proposal button { padding: 4px 12px; margin-right: 6px; }
   .proposal button.cancel { background: var(--card); color: var(--fg); border: 1px solid var(--line); }
   [hidden] { display: none !important; }
+  /* Photo attachments (docs/photos.md): the tray of photos waiting to be sent, and photos shown in stored messages. */
+  form { flex-wrap: wrap; }
+  .phototray { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 8px; }
+  .ph { position: relative; width: 84px; display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 11px; color: var(--muted); }
+  .phthumb { width: 84px; height: 84px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); background: var(--card); display: flex; align-items: center; justify-content: center; }
+  .ph.failed .phthumb { border-color: var(--down); }
+  .phstatus { max-width: 84px; text-align: center; overflow-wrap: anywhere; line-height: 1.25; }
+  .phstatus.bad { color: var(--down); font-weight: 600; }
+  .ph .phx { position: absolute; top: -6px; right: -6px; min-width: 28px; min-height: 28px; padding: 0; border-radius: 50%; font-size: 16px; line-height: 1; }
+  .ph .phretry { padding: 2px 8px; min-height: 28px; font-size: 12px; }
+  .phnote { flex: 1 1 100%; font-size: 12px; color: var(--mock); }
+  .phbtn { flex: none; padding: 0 10px; min-width: 44px; min-height: 44px; font-size: 18px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
+  .photos { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .photos img { width: 96px; height: 96px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); background: var(--card); display: block; }
+  .photos a { display: block; line-height: 0; }
+  @media (max-width: 480px) { .phbtn { padding: 0 6px; min-width: 40px; } .photos img { width: 72px; height: 72px; } }
   /* The Chat thread bar belongs to the Chat page only. */
   body:not([data-tab="chat"]) #threadbar { display: none !important; }
   /* Overall status: green only when every /status entry is exactly "live"; anything else, or no answer, is red. */
@@ -185,9 +201,10 @@
 <main id="log" hidden></main>
 <main id="alog" aria-label="Assistant conversation"></main>
 <section id="jobs" hidden aria-live="off"></section>
-<form id="form" hidden><textarea id="input" rows="2" placeholder="Message ORBIT" aria-label="Message ORBIT" required></textarea><button id="send">Send</button></form>
+<form id="form" hidden><div id="tray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="pick" accept="image/*" multiple hidden><input type="file" id="cam" accept="image/*" capture="environment" hidden><button type="button" class="phbtn" id="pickbtn" title="Attach photos (up to 10)" aria-label="Attach photos from your library">🖼</button><button type="button" class="phbtn" id="cambtn" title="Take a photo" aria-label="Take a photo with the camera">📷</button><textarea id="input" rows="2" placeholder="Message ORBIT" aria-label="Message ORBIT"></textarea><button id="send">Send</button></form>
 <div id="astatus" role="status" aria-live="polite"></div>
-<form id="aform"><textarea id="ainput" rows="2" placeholder="Message the Assistant" aria-label="Message the Assistant" required></textarea><button id="asend">Send</button></form>
+<form id="aform"><div id="atray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="apick" accept="image/*" multiple hidden><input type="file" id="acam" accept="image/*" capture="environment" hidden><button type="button" class="phbtn" id="apickbtn" title="Attach photos (up to 10)" aria-label="Attach photos from your library">🖼</button><button type="button" class="phbtn" id="acambtn" title="Take a photo" aria-label="Take a photo with the camera">📷</button><textarea id="ainput" rows="2" placeholder="Message the Assistant" aria-label="Message the Assistant"></textarea><button id="asend">Send</button></form>
+<script src="/photos.js"></script>
 <script>
   const history = [];
   const log = document.getElementById("log");
@@ -398,6 +415,7 @@
     // replaced. Put the menu back on the intended thread.
     if (sel && tsel.value !== sel && rows.some((t) => t?.id === sel)) tsel.value = sel;
     document.getElementById("tarchive").textContent = current?.archived ? "Restore" : "Archive";
+    chatPhotoBar();
     document.getElementById("trename").disabled = document.getElementById("tarchive").disabled = !current || Boolean(pending);
     const input = document.getElementById("input");
     input.disabled = (Boolean(current?.archived) || Boolean(routeBlock)) && !pending;
@@ -448,6 +466,8 @@
     current = view;
     routeBlock = "";
     if (switched) { log.replaceChildren(); shownThreadId = view.id; }
+    // Photos waiting in the tray belong to the thread they were uploaded into: switching threads drops them (unsent uploads expire).
+    if (switched && chatTray && chatTray.count()) chatTray.clear();
     const byId = new Map(view.cards.map((c) => [c.id, c]));
     const cardSpec = (id) => { const c = byId.get(id); return c ? { sig: JSON.stringify(c), build: () => renderCard(c, view.id) } : null; };
     const specs = [];
@@ -456,7 +476,7 @@
     if (view.summary && view.summaryUnusable) specs.push(compact());
     view.messages.forEach((m, i) => {
       if (view.summary && !view.summaryUnusable && i === view.summary.covers) specs.push(compact());
-      const parts = messageParts(m, el, cardSpec);
+      const parts = messageParts(m, el, cardSpec, (aid) => `/threads/${view.id}/attachments/${aid}`);
       const update = (node) => { const cls = messageClass(m); if (node.className !== cls) node.className = cls; reconcileChildren(node, parts, shownMeta, carryOver); };
       specs.push({ key: `m:${view.id}:${m.id}`, sig: JSON.stringify([messageClass(m), parts.map((p) => [p.key, p.sig])]), build: () => { const node = el("div"); update(node); return node; }, update });
     });
@@ -638,7 +658,7 @@
     if (next) await openThread(next.id); else { current = null; writeSel(null); setChatAddress(null, false); showEmpty(); }
   });
 
-  async function sendThreaded(content) {
+  async function sendThreaded(content, photoIds = []) {
     sending = true;
     let sentToId = null;
     try {
@@ -652,11 +672,13 @@
         writeSel(current.id);
         setChatAddress(current.id, false);
       }
-      log.append(el("div", { className: "msg user", textContent: content }), el("div", { className: "msg orbit", textContent: "Working…" }));
+      log.append(el("div", { className: "msg user", textContent: photoIds.length ? `${content}${content ? "\n" : ""}📷 ${photoIds.length} photo${photoIds.length === 1 ? "" : "s"}` : content }), el("div", { className: "msg orbit", textContent: "Working…" }));
       log.scrollTop = log.scrollHeight;
       const sentTo = current.id;
       sentToId = sentTo;
-      const r = await tapi(`/threads/${sentTo}/messages`, "POST", { text: content });
+      const r = await tapi(`/threads/${sentTo}/messages`, "POST", photoIds.length ? { text: content, attachments: photoIds } : { text: content });
+      // The photos went with the message once it was stored (200, or 502 when only the model failed); a refusal keeps them to resend.
+      if (photoIds.length && chatTray) { if (r.ok || r.status === 502) chatTray.clear(); else chatTray.setNote(r.data.error || `The photos were not sent (HTTP ${r.status}).`); }
       // If the reader switched threads while waiting (or a switch is still pending), the reply stays in its own thread and
       // is not drawn over the one they chose.
       if (current?.id !== sentTo || pending) { await listQuietly(); renderBar(); return; }
@@ -680,7 +702,10 @@
     e.preventDefault();
     const input = document.getElementById("input");
     const content = input.value.trim();
-    if (!content || sending) return;
+    const photoCount = chatTray ? chatTray.count() : 0;
+    if ((!content && !photoCount) || sending) return;
+    // Nothing is sent until every retained photo is processed and uploaded into this thread.
+    if (photoCount && !chatTray.ready()) { chatTray.setNote(chatTray.foreign() ? "These photos were attached in another thread. Remove them and attach again." : `Wait until every photo is ready (${chatTray.readyCount()} of ${photoCount}), or remove the failed ones.`); return; }
     // The address decides where a message goes. A blocked or invalid address, or one naming a thread that is not the one
     // open, sends nothing and the text stays (this cannot happen through the page's own controls; it guards the invariant).
     const addr = chatTarget(location.hash);
@@ -694,7 +719,8 @@
     const sendButton = document.getElementById("send");
     sendButton.disabled = true;
     try {
-      if (threadMode === "server") { await sendThreaded(content); refreshStatus(); return; }
+      if (threadMode === "server") { await sendThreaded(content, photoCount ? chatTray.ids() : []); refreshStatus(); return; }
+      if (photoCount) { input.value = content; chatTray.setNote("Photos can only be sent in a saved thread."); return; }
       sending = true;
       history.push({ role: "user", content });
       add("user", content);
@@ -801,6 +827,29 @@
     const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
     return s < 90 ? `${Math.round(s)}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`;
   };
+  // ---- Photos (docs/photos.md). Each composer has its own tray; photos are processed in this browser, uploaded into the open
+  // conversation only, and sent with the next message once all of them are ready. Without photos.js the buttons stay hidden.
+  const Photos = window.OrbitPhotos;
+  function wirePhotos(prefix, root, opts) {
+    const pick = document.getElementById(`${prefix}pick`), cam = document.getElementById(`${prefix}cam`);
+    const pickBtn = document.getElementById(`${prefix}pickbtn`), camBtn = document.getElementById(`${prefix}cambtn`);
+    if (!Photos) { pickBtn.hidden = camBtn.hidden = true; return null; }
+    const trayApi = Photos.createTray({ root, mk: el, ...opts });
+    pickBtn.addEventListener("click", () => pick.click());
+    camBtn.addEventListener("click", () => cam.click());
+    for (const input of [pick, cam]) input.addEventListener("change", () => { trayApi.add(input.files); input.value = ""; });
+    return trayApi;
+  }
+  var chatTray = wirePhotos("", document.getElementById("tray"), {
+    uploadUrl: () => (threadMode === "server" && current && !current.archived ? `/threads/${current.id}/attachments` : null),
+    scope: () => (current ? current.id : null),
+    onChange: () => chatPhotoBar(),
+  });
+  function chatPhotoBar() {
+    if (typeof chatTray === "undefined") return;
+    const off = !(threadMode === "server" && current && !current.archived && !pending);
+    for (const id of ["pickbtn", "cambtn"]) { const b = document.getElementById(id); if (b) { b.disabled = off || sending; b.title = off ? "Open or start a thread to attach photos" : id === "pickbtn" ? "Attach photos (up to 10)" : "Take a photo"; } }
+  }
   const safeLink = (url, text) => /^https:\/\/(claude\.ai|github\.com)\//.test(url || "")
     ? el("a", { href: url, target: "_blank", rel: "noopener noreferrer", textContent: text }) : null;
 
@@ -1301,7 +1350,19 @@
   // A stored message as separately keyed parts (body, tag, warnings, tool calls, one per card). Each part carries a
   // signature of exactly the data it shows, so the page can keep every part whose data did not change (and the text the
   // reader has selected in it) and rebuild only the part that did. `cardSpec(id)` gives a card's { sig, build } or null.
-  function messageParts(m, mk, cardSpec) {
+  // Where a stored photo is read: set per conversation by the caller (the chat thread's or the Assistant's own route).
+  function photoParts(m, mk, photoUrl) {
+    if (!photoUrl || !Array.isArray(m.attachments) || !m.attachments.length) return [];
+    const list = m.attachments.filter((a) => a && /^a[0-9a-f]{32}$/.test(a.id));
+    const sig = JSON.stringify(list.map((a) => a.id));
+    return [{ key: "photos", sig, build: () => mk("div", { className: "photos" }, ...list.map((a, i) => {
+      const url = photoUrl(a.id);
+      const img = mk("img", { src: url, alt: `Photo ${i + 1} of ${list.length}`, loading: "lazy", decoding: "async" });
+      if (a.width && a.height) { img.width = 96; img.height = 96; }
+      return mk("a", { href: url, target: "_blank", rel: "noopener", title: `Photo ${i + 1} of ${list.length} (${a.width}×${a.height}, ${Math.round((a.bytes || 0) / 1024)} KB)` }, img);
+    })) }];
+  }
+  function messageParts(m, mk, cardSpec, photoUrl) {
     const parts = [];
     const pending = m.status === "pending";
     const text = pending ? "Working…" : m.text || (m.error ? "" : m.role === "assistant" ? "(no text)" : "");
@@ -1309,6 +1370,7 @@
     // pending placeholder and error text stay plain.
     const markdown = m.role === "assistant" && !pending && Boolean(m.text);
     parts.push({ key: "body", sig: JSON.stringify([markdown, markdown ? m.text : text]), build: () => (markdown ? renderMarkdown(m.text, mk) : mk("span", { className: "body" }, ...linkify(text, mk))) });
+    parts.push(...photoParts(m, mk, photoUrl));
     const mem = m.memory && m.memory.length ? ` · memory: ${m.memory.join(", ")}` : "";
     const failed = m.status === "error" || m.status === "interrupted";
     const tag = failed ? `${m.status}: ${m.error || ""}` : m.role === "assistant" && m.provenance ? `${m.provenance} · ${m.source}${mem}` : "";
@@ -1431,7 +1493,7 @@
     return rows;
   }
   function assistantParts(m, mk, cardSpec, chunk, form) {
-    const parts = messageParts(m, mk, cardSpec).filter((p) => p.key !== "calls");
+    const parts = messageParts(m, mk, cardSpec, (aid) => `/assistant/attachments/${aid}`).filter((p) => p.key !== "calls");
     const at = parts.findIndex((p) => p.key.startsWith("card:"));
     const extra = [];
     if (m.calls && m.calls.length) {
@@ -1478,12 +1540,16 @@
   let aerror = "";
   const aNearBottom = () => alog.scrollHeight - alog.scrollTop - alog.clientHeight < 80;
   function setAStatus(text, bad) { astatus.textContent = text; astatus.className = bad ? "bad" : ""; astatus.setAttribute("role", bad ? "alert" : "status"); }
+  var atray = wirePhotos("a", document.getElementById("atray"), { uploadUrl: () => "/assistant/attachments", scope: () => "assistant", onChange: () => aBar() });
   function aBar() {
     const busy = Boolean(aview && aview.busy);
-    asendButton.disabled = asending || busy || !aview;
-    ainput.placeholder = busy && !asending ? "A reply is in progress (maybe on another device)…" : "Message the Assistant";
+    const photos = atray ? atray.count() : 0;
+    const photosWaiting = photos > 0 && !atray.ready();
+    asendButton.disabled = asending || busy || !aview || photosWaiting;
+    for (const id of ["apickbtn", "acambtn"]) { const b = document.getElementById(id); if (b) b.disabled = asending || !aview; }
+    ainput.placeholder = busy && !asending ? "A reply is in progress (maybe on another device)…" : photos ? "Add a caption or question (optional)" : "Message the Assistant";
     if (aerror) setAStatus(aerror, true);
-    else setAStatus(asending ? "Waiting for the reply…" : busy ? "A reply is in progress on another tab or device. Send is paused until it finishes." : "", false);
+    else setAStatus(asending ? "Waiting for the reply…" : busy ? "A reply is in progress on another tab or device. Send is paused until it finishes." : photosWaiting ? (atray.busy() ? `Preparing photos: ${atray.readyCount()} of ${photos} ready. Send waits for all of them.` : `${atray.failed()} photo(s) failed. Retry or remove them to send.`) : "", false);
   }
   function drawAssistant(view, keepScroll) {
     const atBottom = aNearBottom();
@@ -1554,26 +1620,30 @@
     if (aview) drawAssistant(aview, true);
     alog.scrollTop = alog.scrollHeight - top;
   }
-  async function asend(text) {
+  async function asend(text, photoIds = []) {
     asending = true;
     aerror = "";
     aBar();
-    alog.append(el("div", { className: "msg user", textContent: text }), el("div", { className: "msg orbit", textContent: "Working…" }));
+    alog.append(el("div", { className: "msg user", textContent: photoIds.length ? `${text}${text ? "\n" : ""}📷 ${photoIds.length} photo${photoIds.length === 1 ? "" : "s"}` : text }), el("div", { className: "msg orbit", textContent: "Working…" }));
     alog.scrollTop = alog.scrollHeight;
     // One id per send: if the browser repeats the request after a dropped connection, ORBIT refuses the repeat instead of running it.
     const bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);
     const requestId = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
     let r;
-    try { r = await tapi("/assistant/messages", "POST", { text, requestId }); } catch { r = null; }
+    try { r = await tapi("/assistant/messages", "POST", photoIds.length ? { text, requestId, attachments: photoIds } : { text, requestId }); } catch { r = null; }
     asending = false;
+    // Photos leave the tray once a stored message holds them; otherwise they stay, ready to send again.
+    const photosStored = () => photoIds.length && aview && aview.chunks.some((c) => c.messages.some((m) => (m.attachments || []).some((a) => a.id === photoIds[0])));
     if (!r) {
       // No answer at all: the message may or may not have reached ORBIT. It is never sent again automatically.
       aerror = "ORBIT did not answer. Your message may or may not have been received; it was not sent again. The conversation below is reloaded from the server.";
       await aload(false);
+      if (atray && photosStored()) atray.clear();
       aBar();
       return;
     }
+    if (atray && photoIds.length && (r.ok || r.status === 502 || r.data.duplicate)) atray.clear();
     // The answer to a send is held to the same order as a poll; the optimistic bubbles above are replaced either way.
     if (r.data.assistant) drawAssistant(aview && !aNewer(aview, r.data.assistant) ? aview : r.data.assistant, false); else await aload(false);
     if (!r.ok) {
@@ -1586,10 +1656,13 @@
   aform.addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = ainput.value.trim();
-    if (!text || asending || (aview && aview.busy)) { aBar(); return; }
+    const photos = atray ? atray.count() : 0;
+    if ((!text && !photos) || asending || (aview && aview.busy)) { aBar(); return; }
+    // Nothing is sent until every retained photo is processed and uploaded.
+    if (photos && !atray.ready()) { aBar(); return; }
     ainput.value = "";
     asendButton.disabled = true;
-    try { await asend(text); } finally { aBar(); }
+    try { await asend(text, photos ? atray.ids() : []); } finally { aBar(); }
   });
   ainput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); aform.requestSubmit(); }

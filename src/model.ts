@@ -4,7 +4,11 @@ import type { PortStatus, Result } from "./ports.ts";
 import { deadline } from "./model-deadline.ts";
 import type { Bounds, Timers } from "./model-deadline.ts";
 
-export type Message = { role: "user" | "assistant"; content: string };
+// `images`: photos attached to a user message (docs/photos.md). Built from stored attachment refs (`id` only); src/photo-context.ts
+// loads the processed bytes (`data`, base64 JPEG) for the bounded set that is actually sent. A provider adapter must turn every image
+// into real image input or refuse the request: an image is never silently dropped or replaced by its name.
+export type ModelImage = { id: string; data?: string };
+export type Message = { role: "user" | "assistant"; content: string; images?: ModelImage[] };
 
 export type ToolDef = { name: string; description: string; parameters: Record<string, unknown> };
 export type ToolCall = { call_id: string; name: string; arguments: string };
@@ -39,8 +43,13 @@ export type Reply = Result<string> & { fallback?: FallbackInfo; accounting?: str
 // never a limit). No caller passes one today; every request is bounded by its own deadlines regardless (src/model-deadline.ts).
 export type ReplyOptions = { fallback?: boolean; signal?: AbortSignal };
 
+// Whether this model can be sent photos. `ok: false` says why in words the owner can act on.
+export type ImageSupport = { ok: boolean; detail: string };
+
 export type ModelPort = {
   status(): PortStatus;
+  // Photo input (docs/photos.md). Absent means the model does not take photos: a turn with photos is refused with that reason.
+  images?(): ImageSupport;
   // Periodic upkeep (renewing a login before it expires). Never throws; absent when there is nothing to maintain.
   maintain?(): Promise<void>;
   reply(messages: Message[], limits: string[], notes?: string, opts?: ReplyOptions): Promise<Reply>;
@@ -98,6 +107,7 @@ export function instructions(limits: string[], notes?: string, tooling?: string[
 export function mockModel(detail: string, now: () => Date = () => new Date()): ModelPort {
   return {
     status: () => ({ port: "model", state: "mock", impl: "mock-echo", detail, verifiedAt: now().toISOString() }),
+    images: () => ({ ok: false, detail: "no model is connected (replies are mock), so nothing can look at photos" }),
     reply: async (messages, _limits, notes) => ({
       value: `Mock reply: no model is connected, so this is not a real answer. You said: "${messages.at(-1)?.content ?? ""}"${
         notes ? "\n\nMemory found these notes, which a real model would read:\n" + [...notes.matchAll(/^### (.+)$/gm)].map((m) => `- ${m[1]}`).join("\n") : ""
@@ -129,6 +139,32 @@ export function parseOutput(output: OutputItem[]): Step {
 // The Responses API wants {type:"function", name, description, parameters}.
 export const responsesTools = (tools: ToolDef[]) => tools.map((t) => ({ type: "function", ...t }));
 
+// Conversation items as the Responses API takes them. A user message with photos becomes its text followed by one input_image part per
+// photo, in order, as an inline data URL (never a public link). A photo whose bytes were not loaded is an error, never dropped.
+export function responsesInput(items: Item[]): unknown[] {
+  return items.map((it) => {
+    if (!("role" in it)) return it;
+    if (!it.images?.length) return { role: it.role, content: it.content };
+    if (it.role !== "user") throw new Error("Only a user message can carry photos.");
+    const parts: unknown[] = [{ type: "input_text", text: it.content }];
+    for (const img of it.images) {
+      if (!img.data) throw new Error(`Photo ${img.id} was not loaded, so the request was not sent.`);
+      parts.push({ type: "input_image", image_url: `data:image/jpeg;base64,${img.data}`, detail: "auto" });
+    }
+    return { role: "user", content: parts };
+  });
+}
+
+// Which configured OpenAI models ORBIT treats as taking photo input. OpenAI documents image input for these families on the Responses
+// API, and Codex CLI sends photos to the ChatGPT backend the same way (input_image). This is a list in ORBIT's code, not a check made
+// with the provider: a model outside it is refused with this reason rather than sent photos it might ignore.
+const VISION_MODELS = /^(gpt-4o|gpt-4\.1|gpt-4\.5|gpt-5|o3(?!-mini)|o4-mini|codex-mini)/i;
+export function imageSupport(model: string): ImageSupport {
+  return VISION_MODELS.test(model)
+    ? { ok: true, detail: `${model} is in ORBIT's list of OpenAI models that take image input (not verified with the provider by ORBIT).` }
+    : { ok: false, detail: `ORBIT does not know that the configured model ${model} takes image input, so photos are not sent to it.` };
+}
+
 // Bounds on one OpenAI API request (audit D1; docs/model-request-deadlines.md). It is not streamed, so headers come only once the
 // whole answer is ready: the header wait is the total bound.
 export const OPENAI_BOUNDS: Bounds = { headersMs: 600 * 1000, idleMs: 300 * 1000, totalMs: 600 * 1000 };
@@ -149,7 +185,7 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch, 
         body: JSON.stringify({
           model,
           instructions: instructions(limits, notes, tools.map((t) => `${t.name}: ${t.description}`)),
-          input,
+          input: responsesInput(input),
           ...(tools.length ? { tools: responsesTools(tools) } : {}),
         }),
       });
@@ -172,6 +208,7 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch, 
   };
 
   return {
+    images: () => imageSupport(model),
     step: (input, limits, notes, tools, o) => request(input, limits, notes, tools, o?.signal),
     status: () => {
       if (lastError && (!lastOk || lastError.at > lastOk)) {

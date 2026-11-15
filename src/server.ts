@@ -43,6 +43,9 @@ import type { Origin, RunLink, WorkSessions } from "./work-sessions.ts";
 import type { Proposal } from "./agent.ts";
 import { sessionDigest } from "./session-digest.ts";
 import type { Chunk } from "./assistant-store.ts";
+import { AttachmentError, attachmentStore, isAttachmentId, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments.ts";
+import type { AttachmentRef, Attachments } from "./attachments.ts";
+import { JPEG_MAX_BYTES, normalizeJpeg } from "./jpeg.ts";
 
 export const STALE_AFTER_MS = 5 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -50,6 +53,7 @@ const MAX_MESSAGES = 40;
 const MAX_NOTE_CHARS = 2000;
 const page = readFileSync(new URL("./web/index.html", import.meta.url), "utf8");
 const avatar = readFileSync(new URL("./web/avatar.png", import.meta.url));
+const photosJs = readFileSync(new URL("./web/photos.js", import.meta.url), "utf8");
 
 export type Deps = {
   ports: Port[];
@@ -89,6 +93,8 @@ export type Deps = {
   assistantDir?: string;
   // Work sessions and run links (src/work-sessions.ts, docs/adr/0002-work-sessions.md). Absent means memory only, which a restart empties.
   workSessions?: WorkSessions;
+  // Private photo attachments (src/attachments.ts, docs/photos.md), kept in <state>/attachments. Absent means memory only.
+  attachments?: Attachments;
   // The clock for thread cards and the recent-context note. Tests inject one; it must be the clock the proposals use.
   now?: () => Date;
   // Chat tool execution deadline and abort grace period (docs/tool-deadlines.md). Tests lower them; production uses the defaults.
@@ -162,6 +168,7 @@ export function buildServer({
   threads = threadStore(undefined),
   assistantDir,
   workSessions: workArg,
+  attachments = attachmentStore(undefined),
   recentContext: recentPort = stateRecentContext(jsonStore(undefined, "recent-context", null)),
   now,
   toolDeadlineMs,
@@ -210,7 +217,9 @@ export function buildServer({
   // Threads: the store, the rolling recent-context note, and the service that runs a turn against a thread.
   const recent = recentContext({ port: recentPort, threads, model, now, cardLines: (t) => svc.cardLines(t) });
   // `origin`: a proposal made in a turn is bound to that turn's conversation (server context, never model text) before its card is stored.
-  const svc = threadService({ threads, model, proposals, jobs, admin: adminOps, sys: sysOps, recent, now, toolDeadlineMs, abortGraceMs, origin: chatSessionId });
+  // Photos are loaded per conversation scope: a chat thread's turn can only read that thread's attachments, the Assistant's only its own.
+  const chatScope = (threadId: string) => `chat:${threadId}`;
+  const svc = threadService({ threads, model, proposals, jobs, admin: adminOps, sys: sysOps, recent, now, toolDeadlineMs, abortGraceMs, origin: chatSessionId, photos: (tid, aid) => attachments.read(aid, chatScope(tid)) });
 
   // The Assistant (docs/assistant.md): one server-owned rolling conversation in its own chunk store, run by the same turn code as
   // chat threads but with a bounded context and no compaction. It does not feed or read the chat threads' rolling note.
@@ -235,7 +244,14 @@ export function buildServer({
     maxCardLines: ASSISTANT_CARD_LINES_MAX,
     origin: () => assistantSessionId(),
     context: { items: () => planItems(planTurn()), messages: () => planMessages(planTurn()) },
+    photos: (_tid, aid) => attachments.read(aid, "assistant"),
   });
+  // Unsent uploads past their time are removed at start (and before every new upload). Bound photos are never removed.
+  try {
+    attachments.cleanup();
+  } catch {
+    // reported by the next upload that fails
+  }
   // The session registry (src/sessions.ts, docs/adr/0001-session-registry.md): a read-only view over the Assistant's chunk store,
   // the chat threads and the job store. Only the Assistant is offered its tools (prepare and allowAgent below).
   const jobsReader = jobs ? { all: () => jobs.all(), health: (j: Job) => jobs.health(j) } : undefined;
@@ -412,6 +428,11 @@ export function buildServer({
       return res.end(page);
     }
 
+    if (req.method === "GET" && url.pathname === "/photos.js") {
+      res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff" });
+      return res.end(photosJs);
+    }
+
     if (req.method === "GET" && url.pathname === "/avatar.png") {
       res.writeHead(200, { "content-type": "image/png", "cache-control": "public, max-age=86400" });
       return res.end(avatar);
@@ -474,6 +495,88 @@ export function buildServer({
       }
     };
 
+    // ---- Photo attachments (owner only, every route; docs/photos.md). Uploads are raw processed JPEG bodies into one conversation;
+    // reads are served only within the conversation that owns the photo. Neither route trusts a filename, MIME type or client metadata.
+    const photoRoute = url.pathname.match(/^\/(?:assistant|threads\/([0-9a-f-]{36}))\/attachments(?:\/([A-Za-z0-9]{1,64}))?$/);
+    if (photoRoute) {
+      const [, threadId, attId] = photoRoute;
+      if (threadId !== undefined && !isThreadId(threadId)) return send(res, 404, { error: "No thread with that id." });
+      const scope = threadId ? chatScope(threadId) : "assistant";
+      if (attId === undefined) {
+        if (req.method !== "POST") return send(res, 405, { error: "Use POST for this route." });
+        if (!(await owned("attachments", "upload"))) return;
+        if (threadId) {
+          const t = threads.get(threadId);
+          if (!t) return send(res, 404, { error: "No thread with that id." });
+          if (t.archived) return send(res, 409, { error: "This thread is archived. Restore it to attach photos." });
+        }
+        const refuse = (code: number, error: string, kind: string) => {
+          console.log(JSON.stringify({ at: new Date().toISOString(), event: "attachment_refused", scope: threadId ? "chat" : "assistant", kind }));
+          res.setHeader("connection", "close");
+          return send(res, code, { error });
+        };
+        const declared = Number(req.headers["content-length"]);
+        if (Number.isFinite(declared) && declared > JPEG_MAX_BYTES) return refuse(413, `The photo is larger than ${JPEG_MAX_BYTES} bytes. ORBIT's page shrinks photos before upload; nothing was stored.`, "size");
+        // Read into memory only, never to a temporary file, and stop at the limit.
+        const parts: Buffer[] = [];
+        let size = 0;
+        try {
+          for await (const chunk of req) {
+            size += (chunk as Buffer).length;
+            if (size > JPEG_MAX_BYTES) return refuse(413, `The photo is larger than ${JPEG_MAX_BYTES} bytes. ORBIT's page shrinks photos before upload; nothing was stored.`, "size");
+            parts.push(chunk as Buffer);
+          }
+        } catch {
+          return refuse(400, "The upload did not complete. Nothing was stored.", "aborted");
+        }
+        const checked = normalizeJpeg(Buffer.concat(parts));
+        if (!checked.ok) return refuse(checked.kind === "size" ? 413 : checked.kind === "format" ? 415 : 422, checked.error, checked.kind);
+        try {
+          const { meta, reused } = attachments.put(scope, checked.bytes, { width: checked.width, height: checked.height });
+          console.log(JSON.stringify({ at: new Date().toISOString(), event: "attachment_stored", scope: threadId ? "chat" : "assistant", id: meta.id, bytes: meta.bytes, width: meta.width, height: meta.height, reused }));
+          return send(res, reused ? 200 : 201, { attachment: { id: meta.id, type: meta.type, bytes: meta.bytes, width: meta.width, height: meta.height, reused } });
+        } catch (err) {
+          if (err instanceof AttachmentError) return send(res, err.code, { error: err.message });
+          return send(res, 500, { error: "Could not store the photo. Nothing was stored." });
+        }
+      }
+      if (req.method !== "GET") return send(res, 405, { error: "Use GET for this route." });
+      // Reads are GETs, so the cross-site refusal above does not cover them: a page on another site must not be able to embed or
+      // fetch a photo through Rai's browser either.
+      const site = req.headers["sec-fetch-site"];
+      if (site && site !== "same-origin" && site !== "none") {
+        audit("policy", "cross-site", { allow: false, reason: `refused a photo read from ${site}` });
+        return send(res, 403, { error: "Cross-site requests are refused." });
+      }
+      if (!(await owned("attachments", "read"))) return;
+      const bytes = isAttachmentId(attId) ? attachments.read(attId, scope) : undefined;
+      if (!bytes) return send(res, 404, { error: "No photo with that id in this conversation." });
+      res.writeHead(200, {
+        "content-type": "image/jpeg",
+        "content-length": String(bytes.length),
+        "cache-control": "private, max-age=86400",
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "default-src 'none'; sandbox",
+        "cross-origin-resource-policy": "same-origin",
+        "content-disposition": 'inline; filename="photo.jpg"',
+      });
+      return res.end(bytes);
+    }
+    // The photos a message names, bound to it before its turn (all or none). Refused before anything is stored when one is unknown,
+    // from another conversation, already sent, or more than allowed. `release` undoes the bind when the message was never stored.
+    const photosOf = (input: Record<string, unknown>, scope: string): { refs: AttachmentRef[]; release(stored: () => boolean): void } | undefined => {
+      try {
+        const refs = attachments.bind(input.attachments, scope);
+        return { refs, release: (stored) => void (refs.length && !stored() && attachments.release(refs.map((r) => r.id), scope)) };
+      } catch (err) {
+        if (err instanceof AttachmentError) send(res, err.code, { error: err.message });
+        else send(res, 500, { error: "Could not record the photos. Nothing was sent." });
+        return undefined;
+      }
+    };
+    const tooMany = (input: Record<string, unknown>) => Array.isArray(input.attachments) && input.attachments.length > MAX_ATTACHMENTS_PER_MESSAGE;
+    const hasRefs = (msgs: { attachments?: AttachmentRef[] }[], refs: AttachmentRef[]) => msgs.some((m) => m.attachments?.some((a) => a.id === refs[0]?.id));
+
     // ---- Threads (owner only, every route). A thread is stored on the server and shared by every device; the model's context is
     // built from the stored thread, never from text the browser sends. docs/threads.md describes each route.
     const threadFail = (err: unknown) =>
@@ -523,12 +626,24 @@ export function buildServer({
           return send(res, 200, { thread: svc.view(id) });
         }
         const text = typeof input.text === "string" ? input.text.trim() : "";
-        if (!text || text.length > MAX_MESSAGE_CHARS) return send(res, 400, { error: `Send {text}: 1-${MAX_MESSAGE_CHARS} characters.` });
+        const withPhotos = Array.isArray(input.attachments) && input.attachments.length > 0;
+        if (tooMany(input)) return send(res, 400, { error: `At most ${MAX_ATTACHMENTS_PER_MESSAGE} photos per message. Nothing was sent.` });
+        if ((!text && !withPhotos) || text.length > MAX_MESSAGE_CHARS) return send(res, 400, { error: `Send {text}: 1-${MAX_MESSAGE_CHARS} characters (or photos with optional text).` });
         const decision = decide("channel", "chat", false);
         audit("channel", "chat", decision);
         if (!decision.allow) return send(res, 403, { error: decision.reason });
+        if (threads.isBusy(id)) return send(res, 409, { error: "A reply is already in progress in this thread." });
+        if (threads.get(id)?.archived) return send(res, 409, { error: "This thread is archived. Restore it to continue." });
         const prep = await prepare(callerIsOwner, text);
-        const out = await svc.turn(id, text, { notes: prep.notes, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner), isOwner: callerIsOwner });
+        const photos = photosOf(input, chatScope(id));
+        if (!photos) return;
+        let out;
+        try {
+          out = await svc.turn(id, text, { notes: prep.notes, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner), isOwner: callerIsOwner, ...(photos.refs.length ? { attachments: photos.refs } : {}) });
+        } catch (err) {
+          photos.release(() => hasRefs(threads.get(id)?.messages ?? [], photos.refs));
+          throw err;
+        }
         return send(res, out.error ? 502 : 200, { thread: out.thread, limits: prep.current, ...(out.error ? { error: out.error } : {}) });
       } catch (err) {
         return threadFail(err);
@@ -543,6 +658,7 @@ export function buildServer({
       if (req.method !== method) return send(res, 405, { error: `Use ${method} for this route.` });
       if (!(await owned("assistant", route === "/" ? "open" : route.slice(1)))) return;
       const callerIsOwner = await isOwnerOf(req);
+      let assistantPhotos: ReturnType<typeof photosOf>;
       try {
         if (route === "/") return send(res, 200, { assistant: assistantView() });
         if (route === "/history") {
@@ -554,7 +670,9 @@ export function buildServer({
         const input = await body();
         if (!input) return;
         const text = typeof input.text === "string" ? input.text.trim() : "";
-        if (!text || text.length > MAX_MESSAGE_CHARS) return send(res, 400, { error: `Send {text}: 1-${MAX_MESSAGE_CHARS} characters.` });
+        const withPhotos = Array.isArray(input.attachments) && input.attachments.length > 0;
+        if (tooMany(input)) return send(res, 400, { error: `At most ${MAX_ATTACHMENTS_PER_MESSAGE} photos per message. Nothing was sent.` });
+        if ((!text && !withPhotos) || text.length > MAX_MESSAGE_CHARS) return send(res, 400, { error: `Send {text}: 1-${MAX_MESSAGE_CHARS} characters (or photos with optional text).` });
         const decision = decide("channel", "chat", false);
         audit("channel", "chat", decision);
         if (!decision.allow) return send(res, 403, { error: decision.reason });
@@ -567,12 +685,18 @@ export function buildServer({
         if (requestId && assistant.seenRequest(requestId)) return duplicate();
         const prep = await prepare(callerIsOwner, text, "assistant");
         if (requestId && assistant.seenRequest(requestId)) return duplicate();
+        if (assistant.isBusy(ASSISTANT_ID)) return send(res, 409, { error: "A reply is already in progress in the Assistant (maybe from another tab or device). Nothing was sent; wait for it and send again.", assistant: assistantView() });
+        const photos = photosOf(input, "assistant");
+        if (!photos) return;
+        assistantPhotos = photos;
         // Set immediately before the turn: nothing is awaited between here and the turn's first write, which takes it.
         assistant.expectRequest(requestId);
-        const out = await asvc.turn(ASSISTANT_ID, text, { notes: [boundNotes(prep.notes), prep.digest].filter(Boolean).join("\n\n") || undefined, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner, "assistant"), isOwner: callerIsOwner });
+        const out = await asvc.turn(ASSISTANT_ID, text, { notes: [boundNotes(prep.notes), prep.digest].filter(Boolean).join("\n\n") || undefined, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner, "assistant"), isOwner: callerIsOwner, ...(photos.refs.length ? { attachments: photos.refs } : {}) });
         return send(res, out.error ? 502 : 200, { assistant: assistantView(), limits: prep.current, ...(out.error ? { error: out.error } : {}) });
       } catch (err) {
         assistant.expectRequest(undefined);
+        const bound = assistantPhotos;
+        bound?.release(() => hasRefs(assistant.active().flatMap((c) => c.messages), bound.refs));
         if (err instanceof ThreadError) return send(res, err.code, { error: err.message, ...(err.code === 409 ? { assistant: assistantView() } : {}) });
         return send(res, 500, { error: "Could not save the Assistant conversation. Nothing more was changed." });
       }

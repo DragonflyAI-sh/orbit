@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { redact } from "./ops/protocol.ts";
 import { maskStoredText, maskVaultText } from "./vault/filter.ts";
 import type { FallbackInfo } from "./model.ts";
+import type { AttachmentRef } from "./attachments.ts";
 
 // Server-owned chat threads. One JSON file per thread in <state>/threads/, written atomically; the in-memory copy is
 // the single source while ORBIT runs. docs/threads.md describes the schema, concurrency and migration.
@@ -106,6 +107,8 @@ export type ThreadMessage = {
   role: "user" | "assistant";
   at: string;
   text: string;
+  // Photos sent with a user message (docs/photos.md): ordered references into the private attachment store, never the bytes.
+  attachments?: AttachmentRef[];
   status?: MessageStatus;
   error?: string;
   calls?: StoredCall[];
@@ -170,8 +173,13 @@ export type SessionFacts = { busy: boolean; titleSet: boolean; messageCount: num
 // What session_read (src/sessions.ts) may see of one stored message: the conversational text and its identity, never the tool calls'
 // arguments or outputs, cards, memory paths, error, accounting or fallback details. Only how many calls and cards there were is kept,
 // so a reader knows something was left out.
-export type TranscriptMessage = { id: string; role: "user" | "assistant"; at: string; text: string; status?: MessageStatus; toolCalls: number; cards: number };
-export const transcriptMessage = (m: ThreadMessage): TranscriptMessage => ({ id: m.id, role: m.role, at: m.at, text: typeof m.text === "string" ? m.text : "", ...(m.status ? { status: m.status } : {}), toolCalls: m.calls?.length ?? 0, cards: m.cards?.length ?? 0 });
+// Photos are never readable through session_read: only how many a message had (`photos`, when there were any).
+export type TranscriptMessage = { id: string; role: "user" | "assistant"; at: string; text: string; status?: MessageStatus; toolCalls: number; cards: number; photos?: number };
+export const transcriptMessage = (m: ThreadMessage): TranscriptMessage => ({ id: m.id, role: m.role, at: m.at, text: typeof m.text === "string" ? m.text : "", ...(m.status ? { status: m.status } : {}), toolCalls: m.calls?.length ?? 0, cards: m.cards?.length ?? 0, ...(m.attachments?.length ? { photos: m.attachments.length } : {}) });
+
+// The stored form of a message's photo references: ids and safe facts only, at most 10, in the order given.
+export const safeAttachments = (refs: AttachmentRef[] | undefined): AttachmentRef[] | undefined =>
+  refs?.length ? refs.slice(0, 10).map((r) => ({ id: r.id, type: r.type, bytes: r.bytes, width: r.width, height: r.height })) : undefined;
 // A thread's transcript as of one moment. The store replaces a thread object on every change (copy on write), so the messages seen
 // through one value never change under the reader. `readable` stops before the first reply still being written.
 export type ThreadTranscript = { rev: number; updatedAt: string; archived: boolean; total: number; readable: number; inProgress: boolean; compacted: number; at(i: number): TranscriptMessage | undefined };
@@ -387,9 +395,10 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
     holds: (id: string, token: symbol) => busy.get(id) === token,
     isBusy: (id: string) => busy.has(id),
 
-    appendUser(id: string, text: string): ThreadMessage {
+    appendUser(id: string, text: string, attachments?: AttachmentRef[]): ThreadMessage {
       return mutate(id, (t) => {
-        const m: ThreadMessage = { id: randomUUID(), role: "user", at: now().toISOString(), text: maskContent(text).slice(0, MAX_MESSAGE_CHARS) };
+        const refs = safeAttachments(attachments);
+        const m: ThreadMessage = { id: randomUUID(), role: "user", at: now().toISOString(), text: maskContent(text).slice(0, MAX_MESSAGE_CHARS), ...(refs ? { attachments: refs } : {}) };
         t.messages.push(m);
         if (!t.titleSet && t.title === DEFAULT_TITLE) t.title = autoTitle(text);
         return m;
