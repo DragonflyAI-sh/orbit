@@ -42,6 +42,26 @@ const cut = (s: string, keep: number, what: string, seq: number): string => {
   return `${s.slice(0, Math.max(0, keep - note.length - 1))}\n${note}`;
 };
 
+// A page of a paged session tool carries its nextCursor after the page's items, so cutting the output would drop it, and with it
+// the only way a later turn can continue where this one stopped (a turn is capped at MAX_ROUNDS pages). When such an output is cut,
+// its cursor is kept whole at the end, inside the same BOUNDED_OUTPUT_CHARS.
+const PAGED_TOOLS = new Set(["session_read", "sessions_list"]);
+const pageCursor = (name: string, output: string): string | undefined => {
+  if (!PAGED_TOOLS.has(name)) return undefined;
+  try {
+    const v = (JSON.parse(output) as { result?: { nextCursor?: unknown } } | null)?.result?.nextCursor;
+    return typeof v === "string" && /^[A-Za-z0-9_-]{1,600}$/.test(v) ? v : undefined;
+  } catch {
+    return undefined;
+  }
+};
+const cutOutput = (name: string, output: string, seq: number): string => {
+  const cursor = output.length > BOUNDED_OUTPUT_CHARS ? pageCursor(name, output) : undefined;
+  if (!cursor) return cut(output, BOUNDED_OUTPUT_CHARS, `the output of ${name}`, seq);
+  const tail = `\n${marker(`the output of ${name}`, output.length, BOUNDED_OUTPUT_CHARS, seq)}\n[ORBIT: this page's nextCursor, kept whole so reading can continue from where it stopped] nextCursor: "${cursor}"`;
+  return `${output.slice(0, Math.max(0, BOUNDED_OUTPUT_CHARS - tail.length))}${tail}`;
+};
+
 // The bounded representation of one chunk: at most `cap` characters, with every tool call still followed by its own result.
 export function boundChunk(chunk: ChunkLike, cap: number = ASSISTANT_CHUNK_MAX_CHARS): BoundedChunk {
   const full = chunk.messages;
@@ -51,7 +71,7 @@ export function boundChunk(chunk: ChunkLike, cap: number = ASSISTANT_CHUNK_MAX_C
   const clipped = full.map((m) => ({
     ...m,
     text: cut(m.text, BOUNDED_TEXT_CHARS, "this message", chunk.seq),
-    ...(m.calls ? { calls: m.calls.map((c) => ({ ...c, output: cut(c.output, BOUNDED_OUTPUT_CHARS, `the output of ${c.name}`, chunk.seq) })) } : {}),
+    ...(m.calls ? { calls: m.calls.map((c) => ({ ...c, output: cutOutput(c.name, c.output, chunk.seq) })) } : {}),
   }));
   const clippedChars = total(clipped);
   if (clippedChars <= cap) return { messages: clipped, chars: clippedChars, form: "clipped" };

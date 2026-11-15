@@ -255,6 +255,17 @@ A cursor is base64url JSON `{b, h}`: `b` is `{v, s: session id, d: direction, g:
 - **Stale cursor.** On every continuation the cursor's message is checked: it must still be at its position with the same id, and when the read is part-way through it, its text must still have the same digest. Otherwise the call fails with "stale-cursor: the session changed where this cursor points (...)" and nothing is returned, so nothing is skipped or repeated silently: read the first page again, once. Settled message text is not changed by ORBIT (only replies in progress are patched), so in practice this fires only when a file was edited by hand.
 - **Restart.** Thread ids, chunk numbers and message ids are persisted, so a cursor from before a restart continues after it. A thread whose file was removed before a restart is "not found".
 
+### Durability and pagination acceptance
+
+`test/session-durability.test.ts` (offline; synthetic "Slate Heron" chat in temporary state directories; a scripted model) covers what the short Copper Finch check did not:
+
+- **Several real pages in one Assistant turn** (`POST /assistant/messages`): every page within the tool-output limit and never clipped, a usable `nextCursor` on every page but the last, one source and revision throughout, every stored message exactly once in order, two successive corrections on pages after the first, facts that never change, and no approval anywhere. Which value is current is computed by the test from the retrieved data; the scripted model only follows cursors.
+- **Across turns.** A turn is capped at 5 tool rounds and a page carries about 3,000 characters of text at most, because the answer's own fields share the tool-output limit, so a longer chat needs more than one turn. An earlier turn's chunk is often sent in `clipped` form; its cut `session_read`/`sessions_list` outputs keep `nextCursor` whole (`boundChunk` in `src/assistant-context.ts`). Before that fix the cursor was cut off and the next turn could only start again from the first page.
+- **Concurrent change through the Assistant**: an edit where the cursor points gives `stale-cursor:`, and one restart reads a single newer revision with none of the old text. During a forward read, an append arrives once, at the end, on a page with a higher `revision.rev`.
+- **A real process restart**: one ORBIT process (`test/helpers/session-durability-server.ts`) seeds the chat over HTTP, reads one page and exits. A new process on the same state directory discovers the same id and continues from the cursor in the Assistant's persisted history to the end.
+
+Not covered: a real model's reasoning over the pages, a deployed ORBIT, and hand edits on disk to messages already read (only seen after a restart; a cursor elsewhere still continues, and `revision.rev` is the revision stored in the thread file, so such an edit is not signalled unless it also changes `rev`).
+
 ### What is read, and source IO
 
 - Chat threads are already in memory: a read projects only the messages of that thread (identity and text), nothing is cloned in full.
