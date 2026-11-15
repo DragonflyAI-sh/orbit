@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { PortStatus, Result } from "./ports.ts";
 import { deadline } from "./model-deadline.ts";
 import type { Bounds, Timers } from "./model-deadline.ts";
+import { redact } from "./ops/protocol.ts";
 
 // `images`: photos attached to a user message (docs/photos.md). Built from stored attachment refs (`id` only); src/photo-context.ts
 // loads the processed bytes (`data`, base64 JPEG) for the bounded set that is actually sent. A provider adapter must turn every image
@@ -44,7 +45,7 @@ export type Reply = Result<string> & { fallback?: FallbackInfo; accounting?: str
 export type ReplyOptions = { fallback?: boolean; signal?: AbortSignal };
 
 // Whether this model can be sent photos. `ok: false` says why in words the owner can act on.
-export type ImageSupport = { ok: boolean; detail: string };
+export type ImageSupport = { ok: boolean; detail: string; capability?: "supported" | "unsupported" | "unknown" };
 
 export type ModelPort = {
   status(): PortStatus;
@@ -155,19 +156,50 @@ export function responsesInput(items: Item[]): unknown[] {
   });
 }
 
-// Which configured OpenAI models ORBIT treats as taking photo input. OpenAI documents image input for these families on the Responses
-// API, and Codex CLI sends photos to the ChatGPT backend the same way (input_image). This is a list in ORBIT's code, not a check made
-// with the provider: a model outside it is refused with this reason rather than sent photos it might ignore.
-const VISION_MODELS = /^(gpt-4o|gpt-4\.1|gpt-4\.5|gpt-5|o3(?!-mini)|o4-mini|codex-mini)/i;
+// Which configured OpenAI models ORBIT treats as taking photo input (docs/photos.md, "Model capability"). This is a table in ORBIT's
+// code, not a check made with the provider. Three answers, kept distinct:
+//   supported:   OpenAI documents image input for the model on the Responses API. Photos are sent as input_image parts.
+//   unsupported: OpenAI documents the model as text-only. Photos are refused with that reason.
+//   unknown:     ORBIT has no evidence either way. Photos are refused rather than sent to a model that might ignore them.
+// Entries are exact model ids or documented families, never a guess from a name: "gpt-6-astra" is listed by itself (OpenAI's model
+// page for it lists text and image input), which does not make any other gpt-6 model supported. The model id comes only from
+// ORBIT_MODEL (the operator's configuration); nothing in a message can change what is looked up here.
+export type ImageCapability = "supported" | "unsupported" | "unknown";
+const VISION_FAMILIES = /^(gpt-4o|gpt-4\.1|gpt-4\.5|gpt-5|o3(?!-mini)|o4-mini|codex-mini)/i;
+const VISION_EXACT = new Set(["gpt-6-astra"]);
+const TEXT_ONLY = /^(gpt-3\.5|o1-mini|o3-mini)/i;
+export function imageCapability(model: string): ImageCapability {
+  if (VISION_EXACT.has(model) || VISION_FAMILIES.test(model)) return "supported";
+  if (TEXT_ONLY.test(model)) return "unsupported";
+  return "unknown";
+}
 export function imageSupport(model: string): ImageSupport {
-  return VISION_MODELS.test(model)
-    ? { ok: true, detail: `${model} is in ORBIT's list of OpenAI models that take image input (not verified with the provider by ORBIT).` }
-    : { ok: false, detail: `ORBIT does not know that the configured model ${model} takes image input, so photos are not sent to it.` };
+  const capability = imageCapability(model);
+  if (capability === "supported") return { ok: true, capability, detail: `${model} is in ORBIT's list of OpenAI models that take image input (not verified with the provider by ORBIT).` };
+  if (capability === "unsupported") return { ok: false, capability, detail: `the configured model ${model} does not take image input (OpenAI documents it as text-only), so photos are not sent to it` };
+  return { ok: false, capability, detail: `ORBIT does not know that the configured model ${model} takes image input, so photos are not sent to it` };
 }
 
 // Bounds on one OpenAI API request (audit D1; docs/model-request-deadlines.md). It is not streamed, so headers come only once the
 // whole answer is ready: the header wait is the total bound.
 export const OPENAI_BOUNDS: Bounds = { headersMs: 600 * 1000, idleMs: 300 * 1000, totalMs: 600 * 1000 };
+
+// The words for a failed OpenAI API request: the status, the provider's error code and message (cleaned as above, at most 200
+// characters) and, when the request carried photos, that it did. Never the request body, so never image data.
+export function openaiProblem(status: number, text: string, withPhotos = false): string {
+  let code = "";
+  let said = "";
+  try {
+    const e = (JSON.parse(text) as { error?: { code?: unknown; type?: unknown; message?: unknown } }).error;
+    code = String(e?.code ?? e?.type ?? "");
+    said = String(e?.message ?? "");
+  } catch {
+    said = /^\s*</.test(text) ? "" : text;
+  }
+  const clean = (s: string, max: number) => redact(s.replace(/data:[a-z/+.-]+;base64,[A-Za-z0-9+/=]*/gi, "[image data]")).replace(/\s+/g, " ").trim().slice(0, max);
+  const what = [clean(code, 60), clean(said, 200).replace(/[.!\s]+$/, "")].filter(Boolean).join(": ");
+  return `HTTP ${status}: OpenAI returned an error${what ? `: ${what}` : ""}.${withPhotos ? " The request carried photos; nothing from it was used." : ""}`;
+}
 
 export function openaiModel(model: string, key: string, fetcher: Fetch = fetch, opts: { bounds?: Partial<Bounds>; timers?: Timers } = {}): ModelPort {
   let lastOk: string | undefined;
@@ -190,8 +222,13 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch, 
         }),
       });
       if (!res.ok) {
-        d.discard(res);
-        throw new Error(`HTTP ${res.status}`);
+        // The provider's reason (for example a refused image), one line, secrets and long opaque strings (base64) redacted. The
+        // status alone still says what happened when the body cannot be read in time; a cancellation is still a cancellation.
+        const text = await d.read(res).catch((err) => {
+          if (err instanceof Error && err.name === "RequestCancelled") throw err;
+          return "";
+        });
+        throw new Error(openaiProblem(res.status, text, input.some((i) => "role" in i && !!i.images?.length)));
       }
       const step = parseOutput((JSON.parse(await d.read(res)) as { output?: OutputItem[] }).output ?? []);
       if (!step.text && !step.calls.length) throw new Error("response had no text");
