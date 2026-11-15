@@ -179,7 +179,10 @@ export async function runChat(options: {
     if (!media || !media.images.length) return undefined;
     if (!gate) return "This reply cannot take tool-supplied images, so none were supplied.";
     const support = gate.support();
-    if (!support.ok) return `ORBIT blocked the images locally, before any request: ${support.detail.replace(/[.\s]+$/, "")}. None were supplied.`;
+    if (!support.ok) {
+      const d = support.detail.replace(/[.\s]+$/, "");
+      return `${/^ORBIT blocked the (photos|images) locally/.test(d) ? d : `ORBIT blocked the images locally, before any request: ${d}`}. None were supplied.`;
+    }
     const left = gate.remaining();
     const bytes = media.images.reduce((n, i) => n + i.bytes.length, 0);
     const refs = media.images.map((i) => i.ref);
