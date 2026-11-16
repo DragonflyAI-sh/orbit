@@ -344,7 +344,9 @@ export const RECALL_NOTICE =
 export const MODEL_LABEL = "model observation from an earlier inspection: what the model said it saw when this exact processed image was supplied to it; not a verified fact";
 export const CORRECTION_LABEL = "user correction: Rai's statement relayed from his message; not a visual inspection";
 
-export function observationTools(d: { store: ObservationStore; attachments: Attachments; sources: ObservationSources; caller: string; isOwner: boolean; now?: () => Date; zone?: string }): ChatTool[] {
+// `onChange(ref)`: called after a correction or forgetting changed a photo's records, so derived data (the opt-in semantic search's
+// vectors, src/photo-semantic.ts) is deleted in the same tool call and in-flight writes for that photo are discarded.
+export function observationTools(d: { store: ObservationStore; attachments: Attachments; sources: ObservationSources; caller: string; isOwner: boolean; now?: () => Date; zone?: string; onChange?: (ref: string) => void }): ChatTool[] {
   const now = d.now ?? (() => new Date());
   const zone = d.zone ?? "UTC";
   const policy = photoPolicy(d.caller);
@@ -600,6 +602,7 @@ export function observationTools(d: { store: ObservationStore; attachments: Atta
           return { records: [...records, rec], result: undefined };
         });
         writes++;
+        d.onChange?.(ref);
         return { provenance: "live", source: "photo-observations", value: { saved: true, id, ref, revision: rev, label: CORRECTION_LABEL, ...(supersedes.length ? { superseded: supersedes } : {}), provenance: { conversation: rec.source.conversation, userMessage: rec.source.userMessage, message: rec.source.message, at, imageSha256: rec.image.sha256 } } };
       },
     },
@@ -652,6 +655,8 @@ export function observationTools(d: { store: ObservationStore; attachments: Atta
           const unknown = wanted ? [...wanted].filter((id) => !done.includes(id) && !already.includes(id)) : [];
           return { records, result: { done, already, unknown } };
         });
+        // Derived vectors of this photo go with the text, whatever was forgotten; they are rebuilt only from what is still active.
+        d.onChange?.(ref);
         return {
           provenance: "live",
           source: "photo-observations",
@@ -670,6 +675,5 @@ export function observationTools(d: { store: ObservationStore; attachments: Atta
   ];
 }
 
-// The milestone 3 seam (not built): an observation search would walk store.refs(), re-authorize each photo with photoReach and each
-// record with readableRecords for the caller, exactly as photos_recall does, and never build a second source of truth. Any index it
-// adds must be rebuildable from these files, private, bounded and idempotent.
+// Milestone 3a (opt-in, src/photo-semantic.ts) reads these records through readableRecords for the caller, exactly as photos_recall
+// does; its vector cache is derived, rebuildable and pruned through onChange above.

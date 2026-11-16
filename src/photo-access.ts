@@ -25,7 +25,9 @@ import { zonedToUtc } from "./time.ts";
 // caller may not read, or whose source is gone answers the same "not found", so nothing about other conversations leaks.
 
 // Every photo tool, for the policy check (src/server.ts allowAgent). The observation tools are defined in src/photo-observations.ts.
-export const PHOTO_TOOL_NAMES = ["photos_list", "photos_inspect", "photos_show", "photos_observe", "photos_recall", "photos_correct", "photos_forget"] as const;
+// photos_search (src/photo-semantic.ts) is offered only when opt-in semantic photo search is configured; it is listed here so the same
+// owner/attachments/sessions policy applies to it.
+export const PHOTO_TOOL_NAMES = ["photos_list", "photos_inspect", "photos_show", "photos_observe", "photos_recall", "photos_correct", "photos_forget", "photos_search"] as const;
 export const PHOTO_LIST_LIMIT_DEFAULT = 10;
 export const PHOTO_LIST_LIMIT_MAX = 25;
 export const PHOTO_RANGE_DAYS_MAX = 31;
@@ -140,7 +142,7 @@ export function dayWindow(a: { day?: unknown; from?: unknown; to?: unknown }, no
 }
 
 // ---- resolving a photo to its source ---------------------------------------------------------------------------------------------
-type Located = {
+export type Located = {
   meta: AttachmentMeta;
   ref: string;
   sentAt: string;
@@ -197,6 +199,26 @@ export function photoReach(d: { attachments: Attachments; sources: PhotoSources 
       return meta ? locate(meta) : undefined;
     },
   };
+}
+
+// Every photo a caller may read right now, located at its source (the same policy and resolver photoReach applies to one ref). Used by
+// opt-in semantic search (src/photo-semantic.ts) to build its candidate set BEFORE anything is matched, ranked, counted or embedded.
+export function reachablePhotos(d: { attachments: Attachments; sources: PhotoSources }, caller: string, includeArchived: boolean): { photos: Located[]; archivedHidden: number } {
+  const policy = photoPolicy(caller);
+  const locate = resolver(d.sources);
+  const photos: Located[] = [];
+  let archivedHidden = 0;
+  for (const meta of d.attachments.bound()) {
+    if (!policy.may(meta.scope)) continue;
+    const l = locate(meta);
+    if (!l) continue;
+    if (l.conversation.archived && !includeArchived) {
+      archivedHidden++;
+      continue;
+    }
+    photos.push(l);
+  }
+  return { photos, archivedHidden };
 }
 
 // ---- display (docs/photo-recall.md, "Display") -----------------------------------------------------------------------------------
@@ -286,7 +308,7 @@ export const PHOTO_QUERY_CHARS_MAX = 200;
 export const PHOTO_QUERY_TERMS_MAX = 8;
 export const PHOTO_SEARCH_NOT_AVAILABLE = [
   "search of what the photos show (image content is never searched or inferred)",
-  "search over saved visual observations (milestone 3, not built: photos_recall reads the saved observations of photos you name by ref)",
+  "search over saved visual observations (photos_list never searches them; photos_recall reads the observations of photos you name by ref, and photos_search, when ORBIT offers it, ranks photos by them)",
   "semantic topic extraction (only literal words in captions and titles match)",
   "user labels or tags (ORBIT has none)",
   "capture dates or places (EXIF and GPS are removed before upload; only ORBIT's own send and upload times exist)",

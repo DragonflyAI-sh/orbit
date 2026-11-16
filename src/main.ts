@@ -34,6 +34,7 @@ import { jsonStore } from "./store.ts";
 import { threadStore } from "./threads.ts";
 import { attachmentStore } from "./attachments.ts";
 import { observationStore } from "./photo-observations.ts";
+import { embeddingBudget, embeddingsConfig, embeddingsStatus, openaiEmbedder } from "./embeddings.ts";
 import { workFile, workSessions } from "./work-sessions.ts";
 import { join } from "node:path";
 import { watcher } from "./watch.ts";
@@ -175,6 +176,16 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
   });
 }
 
+// Opt-in semantic photo search (docs/photo-semantic-search.md). Off unless ORBIT_PHOTO_SEMANTIC=on; then it needs the dedicated
+// orbit.openai-embeddings credential (never orbit.openai, never the ChatGPT login). Off: nothing below runs and no tool or port changes.
+const semanticConfig = embeddingsConfig(process.env);
+const semanticBudget = semanticConfig.state === "ready" ? embeddingBudget(stateDir ? join(stateDir, "embeddings-budget.json") : undefined, semanticConfig.settings) : undefined;
+const semanticEmbedder = semanticConfig.state === "ready" && semanticBudget ? openaiEmbedder({ key: semanticConfig.key, settings: semanticConfig.settings, budget: semanticBudget }) : undefined;
+const photoSemantic =
+  semanticConfig.state === "off"
+    ? undefined
+    : { embedder: semanticEmbedder, cacheDir: stateDir ? join(stateDir, "photo-vectors") : undefined, status: () => embeddingsStatus(semanticConfig, semanticEmbedder, semanticBudget) };
+
 buildServer({
   ports: MOCK_PORT_NAMES.map((name) => mockPort(name)),
   model,
@@ -193,6 +204,7 @@ buildServer({
   attachments: attachmentStore(stateDir ? join(stateDir, "attachments") : undefined),
   // Saved photo observations: <state>/photo-observations (docs/photo-recall.md). Without a state directory they are kept in memory only.
   photoObservations: observationStore(stateDir ? join(stateDir, "photo-observations") : undefined),
+  photoSemantic,
   // Work sessions and run links: <state>/work-sessions.json (docs/adr/0002-work-sessions.md).
   workSessions: workSessions(workFile(stateDir)),
   vaultEdits,

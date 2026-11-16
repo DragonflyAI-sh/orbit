@@ -1,12 +1,14 @@
-// Synthetic fixture and offline evaluation harness for the hybrid photo retrieval spike (docs/photo-semantic-spike.md).
+// Synthetic fixture and evaluation harness for opt-in hybrid photo retrieval (docs/photo-semantic-search.md; first written for the
+// spike, docs/photo-semantic-spike.md).
 //
 // Everything here is invented: refs, hashes, captions and observations describe no real photo. The `lexicalStandIn` embedder is a
 // character-trigram hash: it measures PLUMBING (caching, lifecycle, access, fusion, fallback) and spelling tolerance, never semantic
 // quality. Results produced with it must not be reported as semantic retrieval quality. `runEvaluation` takes any `Embedder`, so the
-// same harness can be run unchanged against a real endpoint once one is verified (see the design note's "safe next step").
+// same harness runs unchanged against the real adapter (tools/photo-semantic-eval, owner-run, bounded).
 import { createHash } from "node:crypto";
-import type { Access, Embedder, Evidence, RetrievalResult, VectorCache } from "../src/spike/photo-semantic.ts";
-import { countingEmbedder, retrieve } from "../src/spike/photo-semantic.ts";
+import type { Embedder } from "../src/embeddings.ts";
+import type { Access, Evidence, RetrievalResult, VectorCache } from "../src/photo-semantic.ts";
+import { countingEmbedder, eligibleEvidence, keywordRanking, retrieve } from "../src/photo-semantic.ts";
 
 const h = (s: string) => createHash("sha256").update(s).digest("hex");
 const ref = (n: string) => `ph_${h(`fixture:${n}`).slice(0, 32)}`;
@@ -115,42 +117,48 @@ export function lexicalStandIn(dims = 256): Embedder {
 }
 const STOP = new Set(["the", "and", "that", "with", "all", "for", "behind", "place", "query", "its", "this", "was", "are"]);
 
-export type Row = { q: string; note: string; intended: string; keyword: { rank: number | null; top3: boolean; misleading: string[] }; hybrid: { rank: number | null; top3: boolean; misleading: string[]; ambiguous: boolean; noMatch: boolean; mode: string; context: string[] } };
+type Side = { rank: number | null; top3: boolean; misleading: string[] };
+export type Row = { q: string; note: string; intended: string; keywordMetadata: Side; keywordAll: Side; hybrid: Side & { ambiguous: boolean; noMatch: boolean; mode: string; context: string[] } };
 
 const rankOf = (r: string[], target: string | null) => (target ? r.indexOf(target) + 1 || null : null);
 
-export async function runEvaluation(o: { embedder: Embedder; cache: VectorCache; maxRequests: number; access?: Access }) {
+// Three rankings over the SAME eligible corpus (forgotten, superseded, stale and unauthorized evidence already removed):
+// - keywordMetadata: photos_list's existing rule (captions and titles only), the status quo;
+// - keywordAll: the fair keyword baseline over every evidence kind the hybrid sees, so coverage gains are not credited to embeddings;
+// - hybrid: retrieve() with the given embedder.
+export async function runEvaluation(o: { embedder: Embedder; cache: VectorCache; maxRequests: number; access?: Access; queries?: Query[] }) {
   const access = o.access ?? fixtureAccess();
   const { embedder, counts } = countingEmbedder(o.embedder, o.maxRequests);
   const queryCache = new Map<string, number[]>();
   const evidence = fixtureEvidence();
+  const eligible = eligibleEvidence(evidence, access);
   const rows: Row[] = [];
   const results: RetrievalResult[] = [];
-  const kwOnlyEmbedder: Embedder = { id: embedder.id, embed: async () => Promise.reject(new Error("keyword-only baseline")) };
-  for (const q of QUERIES) {
-    const kw = await retrieve({ query: q.q, evidence, access, embedder: kwOnlyEmbedder, cache: o.cache });
+  const latencies: number[] = [];
+  for (const q of o.queries ?? QUERIES) {
+    const t0 = performance.now();
     const hy = await retrieve({ query: q.q, evidence, access, embedder, cache: o.cache, queryCache });
+    latencies.push(performance.now() - t0);
     results.push(hy);
-    const kwRefs = kw.candidates.map((c) => c.ref);
+    const side = (refs: string[]): Side => ({ rank: rankOf(refs, q.intended), top3: q.intended ? refs.slice(0, 3).includes(q.intended) : refs.length === 0, misleading: refs.slice(0, 3).filter((r) => q.mustNot?.includes(r)).map((r) => LABEL[r]!) });
     const hyRefs = hy.candidates.map((c) => c.ref);
-    const bad = (refs: string[]) => refs.filter((r) => q.mustNot?.includes(r)).map((r) => LABEL[r]);
     rows.push({
       q: q.q,
       note: q.note,
-      intended: q.intended ? LABEL[q.intended] : "(none)",
-      keyword: { rank: rankOf(kwRefs, q.intended), top3: q.intended ? kwRefs.includes(q.intended) : kwRefs.length === 0, misleading: bad(kwRefs) },
-      hybrid: {
-        rank: rankOf(hyRefs, q.intended),
-        top3: q.intended ? hyRefs.includes(q.intended) : hyRefs.length === 0,
-        misleading: bad(hyRefs),
-        ambiguous: hy.ambiguous,
-        noMatch: hy.noMatch,
-        mode: hy.mode,
-        context: hy.candidates.filter((c) => c.evidence.every((e) => e.kind === "discussion-context")).map((c) => LABEL[c.ref]),
-      },
+      intended: q.intended ? LABEL[q.intended]! : "(none)",
+      keywordMetadata: side(keywordRanking(q.q, eligible, "metadata").slice(0, 3)),
+      keywordAll: side(keywordRanking(q.q, eligible, "all").slice(0, 3)),
+      hybrid: { ...side(hyRefs), ambiguous: hy.ambiguous, noMatch: hy.noMatch, mode: hy.mode, context: hy.candidates.filter((c) => c.evidence.every((e) => e.kind === "discussion-context")).map((c) => LABEL[c.ref]!) },
     });
   }
   const answerable = rows.filter((r) => r.intended !== "(none)");
+  const unanswerable = rows.filter((r) => r.intended === "(none)");
+  const sum = (k: "keywordMetadata" | "keywordAll" | "hybrid") => ({
+    top1: answerable.filter((r) => r[k].rank === 1).length,
+    top3: answerable.filter((r) => r[k].top3).length,
+    emptyOnUnanswerable: unanswerable.filter((r) => r[k].top3).length,
+    misleading: rows.filter((r) => r[k].misleading.length).length,
+  });
   return {
     rows,
     results,
@@ -158,14 +166,14 @@ export async function runEvaluation(o: { embedder: Embedder; cache: VectorCache;
     summary: {
       queries: rows.length,
       answerable: answerable.length,
-      keywordTop1: answerable.filter((r) => r.keyword.rank === 1).length,
-      keywordTop3: answerable.filter((r) => r.keyword.top3).length,
-      hybridTop1: answerable.filter((r) => r.hybrid.rank === 1).length,
-      hybridTop3: answerable.filter((r) => r.hybrid.top3).length,
-      keywordMisleading: rows.filter((r) => r.keyword.misleading.length).length,
-      hybridMisleading: rows.filter((r) => r.hybrid.misleading.length).length,
+      unanswerable: unanswerable.length,
+      keywordMetadata: sum("keywordMetadata"),
+      keywordAll: sum("keywordAll"),
+      hybrid: sum("hybrid"),
+      ambiguousFlagged: rows.filter((r) => r.hybrid.ambiguous).length,
       cacheEntries: o.cache.count(),
       cacheBytes: o.cache.bytes(),
+      latencyMsMedian: Number([...latencies].sort((a, b) => a - b)[Math.floor(latencies.length / 2)]!.toFixed(2)),
     },
   };
 }
