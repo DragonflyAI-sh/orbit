@@ -187,6 +187,25 @@ const strictKeys = (a: Record<string, unknown>, allowed: string[]) => {
   if (extra.length) throw new Error(`Unknown argument(s). Accepted: ${allowed.join(", ")}.`);
 };
 const opt = (v: unknown) => (v === null ? undefined : v);
+const blank = (v: unknown) => typeof v === "string" && v.trim() === "";
+
+// photos_list arguments as the tool reads them (docs/photos.md, "Tool contracts per provider"). Every optional argument may be left
+// out or null: under the Responses API's strict schema null is how a model leaves one out. Beyond that, each field has its own rule:
+// - timezone, day, from, to: an empty or whitespace-only string also means "left out" (a model filling every field sends ""), so the
+//   owner's configured zone and today apply. A valid zone is trimmed; anything else nonblank is refused, never replaced.
+// - conversation: an access selector. Left out or null is "every conversation this caller may read"; a blank string is refused rather
+//   than widened to "all", so an empty value never chooses scope by accident.
+// - cursor: "" is the first page (as session tools document); any other value, whitespace included, must be a cursor of this query.
+// - includeArchived, limit: null is the default; other values keep their types (a boolean, an integer), and strings are refused.
+export function listArgs(raw: Record<string, unknown>) {
+  const a: Record<string, unknown> = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, opt(v)]));
+  strictKeys(a, ["conversation", "day", "from", "to", "timezone", "includeArchived", "limit", "cursor"]);
+  for (const k of ["timezone", "day", "from", "to"]) if (blank(a[k])) a[k] = undefined;
+  if (typeof a.timezone === "string") a.timezone = a.timezone.trim();
+  if (blank(a.conversation)) throw new Error("conversation must be a session id such as assistant:assistant or chat:<uuid>; leave it out (or null) for every conversation you may read. An empty value is not accepted.");
+  for (const k of Object.keys(a)) if (a[k] === undefined) delete a[k];
+  return a;
+}
 
 // ---- tools -----------------------------------------------------------------------------------------------------------------------
 export function photoTools(d: { attachments: Attachments; sources: PhotoSources; caller: string; isOwner: boolean; now?: () => Date; zone?: string }): ChatTool[] {
@@ -195,14 +214,16 @@ export function photoTools(d: { attachments: Attachments; sources: PhotoSources;
   const owner = () => {
     if (!d.isOwner) throw new Error("Photos are refused: only the owner can list or inspect photos.");
   };
-  // The time zone "today" means. The owner's configured zone; a zone Rai names explicitly wins. No zone at all is never replaced by
-  // the server's clock zone: the tool asks instead.
+  // The time zone "today" means. The owner's configured zone; a zone Rai names explicitly wins. No zone at all (left out, null or
+  // blank, see listArgs) is never replaced by the server's clock zone: without a usable configured zone the tool asks instead.
   const zoneOf = (given: unknown) => {
     if (given !== undefined) {
-      if (typeof given !== "string" || !validZone(given)) throw new Error("timezone must be an IANA time zone name such as America/Los_Angeles.");
+      if (typeof given !== "string") throw new Error("timezone must be a string: an IANA time zone name such as America/Los_Angeles, or left out (or null) for Rai's configured zone.");
+      if (!validZone(given)) throw new Error("timezone must be an IANA time zone name such as America/Los_Angeles, or left out (or null) for Rai's configured zone.");
       return { zone: given, source: "named in this call" };
     }
     if (!d.zone) throw new Error("No owner time zone is configured, so ORBIT will not guess what today means. Ask Rai which time zone to use and pass it as timezone.");
+    if (!validZone(d.zone)) throw new Error("ORBIT's configured owner time zone is not a valid IANA zone, so ORBIT will not guess what today means. Ask Rai which time zone to use and pass it as timezone.");
     return { zone: d.zone, source: "ORBIT's configured owner time zone (src/time.ts ZONE, the zone schedules and quiet hours use)" };
   };
   const visible = (includeArchived: boolean, only?: string) => {
@@ -228,26 +249,26 @@ export function photoTools(d: { attachments: Attachments; sources: PhotoSources;
     {
       name: "photos_list",
       readOnly: true,
-      description: `Find photos Rai already sent, by conversation and date, without loading them. ${policy.crossConversation ? "In the Assistant this covers the Assistant and every chat thread." : "In a chat thread this covers only this thread; other conversations are reachable from the Assistant."} Days are in Rai's configured time zone (pass timezone only if he names another). day: today (default), yesterday or YYYY-MM-DD; or from/to (YYYY-MM-DD, inclusive, at most ${PHOTO_RANGE_DAYS_MAX} days). Newest first, ${PHOTO_LIST_LIMIT_DEFAULT} per page (at most ${PHOTO_LIST_LIMIT_MAX}); pass nextCursor back exactly to continue. Returns stable refs, times, the source conversation and message, and the caption (the message text). Metadata only: it does not let you see any photo and is not a search of photo content. To look at photos, call photos_inspect with their refs. Read-only.`,
+      strict: true,
+      description: `Find photos Rai already sent, by conversation and date, without loading them. ${policy.crossConversation ? "In the Assistant this covers the Assistant and every chat thread." : "In a chat thread this covers only this thread; other conversations are reachable from the Assistant."} Every argument is optional: leave it out or pass null for its default; {} lists today's photos. Days are in Rai's configured time zone: pass timezone only if he names another zone, otherwise leave it out or null (never guess one). day: today (default), yesterday or YYYY-MM-DD; or from/to (YYYY-MM-DD, inclusive, at most ${PHOTO_RANGE_DAYS_MAX} days), not both. Newest first, ${PHOTO_LIST_LIMIT_DEFAULT} per page (at most ${PHOTO_LIST_LIMIT_MAX}); pass nextCursor back exactly, with the same other arguments, to continue. Returns stable refs, times, the source conversation and message, and the caption (the message text). Metadata only: it does not let you see any photo and is not a search of photo content. To look at photos, call photos_inspect with their refs. Read-only.`,
       parameters: {
         type: "object",
         properties: {
-          conversation: { type: "string", description: policy.crossConversation ? "Only this conversation: assistant:assistant or chat:<uuid> (as sessions_list returns). Leave out for all." : "Leave out (this thread), or this thread's own id." },
-          day: { type: "string", description: "today, yesterday or YYYY-MM-DD." },
-          from: { type: "string", description: "First day, YYYY-MM-DD (inclusive)." },
-          to: { type: "string", description: "Last day, YYYY-MM-DD (inclusive). Default: today." },
-          timezone: { type: "string", description: "IANA zone, only if Rai names one; otherwise his configured zone is used." },
-          includeArchived: { type: "boolean", description: "Include archived chat threads (default false)." },
-          limit: { type: "integer", minimum: 1, maximum: PHOTO_LIST_LIMIT_MAX },
-          cursor: { type: "string", description: "Leave out for the first page; to continue, nextCursor exactly as returned for the same query." },
+          conversation: { type: "string", description: policy.crossConversation ? "Only this conversation: assistant:assistant or chat:<uuid> (as sessions_list returns). Leave out or null for all; an empty string is refused." : "Leave out or null (this thread), or this thread's own id; an empty string is refused." },
+          day: { type: "string", description: "today, yesterday or YYYY-MM-DD. Leave out or null for today (or to use from/to)." },
+          from: { type: "string", description: "First day, YYYY-MM-DD (inclusive). Leave out or null unless listing a range." },
+          to: { type: "string", description: "Last day, YYYY-MM-DD (inclusive). Leave out or null for today." },
+          timezone: { type: "string", description: "IANA zone such as Europe/Paris, only if Rai names one. Leave out or null to use his configured zone (an empty string means the same)." },
+          includeArchived: { type: "boolean", description: "Include archived chat threads. Leave out or null for false." },
+          limit: { type: "integer", minimum: 1, maximum: PHOTO_LIST_LIMIT_MAX, description: `Photos per page, 1 to ${PHOTO_LIST_LIMIT_MAX}. Leave out or null for ${PHOTO_LIST_LIMIT_DEFAULT}.` },
+          cursor: { type: "string", description: "Leave out or null for the first page; to continue, nextCursor exactly as returned for the same query." },
         },
         required: [],
         additionalProperties: false,
       },
       run: async (raw): Promise<ToolResult> => {
         owner();
-        const a = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, opt(v)]));
-        strictKeys(a, ["conversation", "day", "from", "to", "timezone", "includeArchived", "limit", "cursor"]);
+        const a = listArgs(raw);
         let only: string | undefined;
         if (a.conversation !== undefined) {
           const sc = typeof a.conversation === "string" ? scopeOfSession(a.conversation) : undefined;
@@ -311,6 +332,8 @@ export function photoTools(d: { attachments: Attachments; sources: PhotoSources;
     {
       name: "photos_inspect",
       readOnly: true,
+      // Its one argument is required, so the strict schema is the same schema.
+      strict: true,
       description: `Look at stored photos: loads the photos with these refs (from photos_list, at most ${PHOTO_INSPECT_REFS_MAX}) and supplies them to you as real image input right after the tool results, in the order given, each after a source label. Only the photos this result lists as supplied are visible to you, and only in this reply; in a later reply call it again. Bounded per reply by ORBIT's photo limits (the photos already in this request count). It is refused or blocked when the model cannot take photos; it never describes a photo itself. Read-only.`,
       parameters: {
         type: "object",
