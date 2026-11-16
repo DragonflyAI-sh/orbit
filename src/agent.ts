@@ -38,6 +38,9 @@ export type ChatTool = {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  // Send this tool with a strict schema where the transport has one (src/model.ts responsesTools, strictSchema): every optional property
+  // becomes nullable there, so run() must treat null exactly like a left-out argument.
+  strict?: boolean;
   // runChat always passes `ctx`; it is optional so a tool can also be called directly.
   run(args: Record<string, unknown>, ctx?: ToolContext): Promise<ToolResult>;
   // True only for a tool that changes nothing outside ORBIT's own caches. Anything else is treated as possibly having an effect:
@@ -96,7 +99,7 @@ export type CallRecord = {
 // Neither is ever put into `input`, so no later model turn sees them as prose.
 export type ChatOutcome = { text: string; calls: CallRecord[]; rounds: number; capped: boolean; fallback?: FallbackInfo; mixed?: boolean; accounting?: string[]; incomplete?: string[] };
 
-const def = (t: ChatTool): ToolDef => ({ name: t.name, description: t.description, parameters: t.parameters });
+const def = (t: ChatTool): ToolDef => ({ name: t.name, description: t.description, parameters: t.parameters, ...(t.strict ? { strict: true } : {}) });
 
 const merge = (into: string[], more: readonly string[] | undefined) => {
   for (const m of more ?? []) if (!into.includes(m)) into.push(m);
