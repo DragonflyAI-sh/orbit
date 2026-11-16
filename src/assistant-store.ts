@@ -3,8 +3,8 @@ import { closeSync, existsSync, fsyncSync, fstatSync, mkdirSync, openSync, readd
 import { join } from "node:path";
 import { ASSISTANT_ACTIVE_BUDGET_CHARS, boundChunk, planContext } from "./assistant-context.ts";
 import type { ChunkForm, ContextPlan } from "./assistant-context.ts";
-import { jobCardsOf, maskCall, maskContent, maskDeep, MAX_MESSAGE_CHARS, safeAttachments, safePatch, THREAD_SCHEMA, ThreadError, transcriptMessage, writeAtomic } from "./threads.ts";
-import type { Card, CardState, JobCardRef, MessagePatch, StoredCall, Thread, ThreadMessage, TranscriptMessage } from "./threads.ts";
+import { jobCardsOf, maskCall, photoMessagesOf, maskContent, maskDeep, MAX_MESSAGE_CHARS, safeAttachments, safePatch, THREAD_SCHEMA, ThreadError, transcriptMessage, writeAtomic } from "./threads.ts";
+import type { Card, CardState, JobCardRef, MessagePatch, PhotoMessage, StoredCall, Thread, ThreadMessage, TranscriptMessage } from "./threads.ts";
 import type { AttachmentRef } from "./attachments.ts";
 
 // The Assistant: one durable rolling conversation, owned by the server (docs/assistant.md). It is stored as small chunk files,
@@ -469,6 +469,11 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
         jobCards.push(...jobCardsOf(c.cards));
       }
       return { createdAt: session.createdAt, busy: Boolean(busy), activeChunks: active.size, archivedChunks: archived.length, activeMessages: messages, lastMessageAt: last, jobCards, persisted: Boolean(dir), problems: problems.length };
+    },
+    // Read-only photo discovery (src/photo-access.ts): the user messages with photos in the active chunks (memory only, no file read).
+    // Archived chunks are not read here, so a photo sent in an archived chunk has no resolved message (`archivedChunks` says how many).
+    photoSource(): { messages: PhotoMessage[]; archivedChunks: number } {
+      return { messages: sortedActive().flatMap((c) => photoMessagesOf(Array.isArray(c.messages) ? c.messages : [])), archivedChunks: archived.length };
     },
     // Read-only transcript access for session_read (src/sessions.ts). Nothing is cloned in full, written, indexed or counted as a
     // change, and no card is expired (archivePage does that; this does not use it). Active chunk objects are replaced on every change,

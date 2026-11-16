@@ -45,6 +45,9 @@ import { sessionDigest } from "./session-digest.ts";
 import type { Chunk } from "./assistant-store.ts";
 import { resolutionSummary } from "./model-capability.ts";
 import { AttachmentError, attachmentStore, isAttachmentId, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments.ts";
+import { PHOTO_TOOL_NAMES, photoTools } from "./photo-access.ts";
+import type { PhotoSources } from "./photo-access.ts";
+import { ZONE } from "./time.ts";
 import type { AttachmentRef, Attachments } from "./attachments.ts";
 import { JPEG_MAX_BYTES, normalizeJpeg } from "./jpeg.ts";
 
@@ -258,6 +261,8 @@ export function buildServer({
   const jobsReader = jobs ? { all: () => jobs.all(), health: (j: Job) => jobs.health(j) } : undefined;
   const work = workArg ?? newWorkSessions(workFile(undefined), clock);
   const sessions = sessionRegistry({ adapters: [assistantAdapter(assistant), chatAdapter(threads), workAdapter(work, jobsReader)], jobs: jobsReader, work, now });
+  // What photo discovery reads of the conversation stores (src/photo-access.ts): titles, archive state and user messages with photos.
+  const photoSources: PhotoSources = { assistant: () => assistant.photoSource(), chat: (tid) => threads.photoSource(tid) };
   // The service that owns a proposal's card: the Assistant's when its card is there, otherwise the chat threads'.
   const cardSvc = (proposalId: string) => (assistant.threadOfCard(proposalId) ? asvc : svc);
 
@@ -338,7 +343,9 @@ export function buildServer({
   // What a reply is given besides the conversation: memory excerpts and the device summary (owner only), the limits to
   // disclose, and the tools offered. Shared by the legacy /chat route, the thread routes and the Assistant. `scope` says which:
   // session discovery is offered only in the Assistant (policy decision, docs/adr/0001-session-registry.md).
-  const prepare = async (isOwner: boolean, query: string, scope: "chat" | "assistant" = "chat") => {
+  // `conversation`: the session id of the conversation the turn runs in (chat:<uuid> or assistant:assistant), from the route, never
+  // from model text. The photo tools are offered only with one, and only reach what src/photo-access.ts photoPolicy allows it.
+  const prepare = async (isOwner: boolean, query: string, scope: "chat" | "assistant" = "chat", conversation?: string) => {
     let notes: string | undefined;
     let used: string[] = [];
     const memoryDecision = decide("memory", "search", isOwner);
@@ -358,7 +365,7 @@ export function buildServer({
     }
     const current = limits(isOwner);
     const offered = isOwner && model.step
-      ? [...refuseLegacyContext(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : [])]
+      ? [...refuseLegacyContext(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }) : [])]
       : [];
     if (!offered.length) {
       current.push(
@@ -391,6 +398,19 @@ export function buildServer({
       audit("sessions", tool, second);
       if (!second.allow) return second.reason;
       return scope === "assistant" ? undefined : `${tool} is refused: session discovery is only offered in the Assistant`;
+    }
+    // Photo discovery and inspection: owner only through the attachments port; reaching another conversation is session reading, so
+    // the Assistant also needs the sessions port. A chat thread's tools reach only its own photos (src/photo-access.ts photoPolicy).
+    if ((PHOTO_TOOL_NAMES as readonly string[]).includes(tool)) {
+      const second = decide("attachments", tool, isOwner);
+      audit("attachments", tool, second);
+      if (!second.allow) return second.reason;
+      if (scope === "assistant") {
+        const third = decide("sessions", tool, isOwner);
+        audit("sessions", tool, third);
+        if (!third.allow) return third.reason;
+      }
+      return undefined;
     }
     // Vault writes, the config view and pull-request inspection have their own policy port entries, so the owner-only rule is stated for each.
     const port = tool.startsWith("vault_") ? "vault" : tool === "orbit_config_view" ? "config" : (PR_INSPECT_TOOL_NAMES as readonly string[]).includes(tool) ? "pulls" : undefined;
@@ -637,7 +657,7 @@ export function buildServer({
         if (!decision.allow) return send(res, 403, { error: decision.reason });
         if (threads.isBusy(id)) return send(res, 409, { error: "A reply is already in progress in this thread." });
         if (threads.get(id)?.archived) return send(res, 409, { error: "This thread is archived. Restore it to continue." });
-        const prep = await prepare(callerIsOwner, text);
+        const prep = await prepare(callerIsOwner, text, "chat", chatSessionId(id));
         const photos = photosOf(input, chatScope(id));
         if (!photos) return;
         let out;
@@ -686,7 +706,7 @@ export function buildServer({
         const requestId = typeof input.requestId === "string" && /^[A-Za-z0-9-]{8,64}$/.test(input.requestId) ? input.requestId : undefined;
         const duplicate = () => send(res, 409, { error: "This message was already received (the browser repeated the request). It was not run again.", duplicate: true, assistant: assistantView() });
         if (requestId && assistant.seenRequest(requestId)) return duplicate();
-        const prep = await prepare(callerIsOwner, text, "assistant");
+        const prep = await prepare(callerIsOwner, text, "assistant", assistantSessionId());
         if (requestId && assistant.seenRequest(requestId)) return duplicate();
         if (assistant.isBusy(ASSISTANT_ID)) return send(res, 409, { error: "A reply is already in progress in the Assistant (maybe from another tab or device). Nothing was sent; wait for it and send again.", assistant: assistantView() });
         const photos = photosOf(input, "assistant");

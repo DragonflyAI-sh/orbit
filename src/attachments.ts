@@ -189,6 +189,24 @@ export function attachmentStore(dir: string | undefined, opts: { now?: () => Dat
       }
     },
 
+    // The bytes of an attachment of `scope` with the reason when they cannot be used (src/photo-access.ts): `missing` (no record in
+    // this scope, or the file is gone or has the wrong size) or `corrupt` (the file no longer matches the SHA-256 recorded when it was
+    // stored). The caller decides what to reveal; this never says which conversation an id belongs to.
+    load(id: string, scope: string): { ok: true; bytes: Buffer; meta: AttachmentMeta } | { ok: false; reason: "missing" | "corrupt" } {
+      const m = store.get(id);
+      if (!m || m.scope !== scope) return { ok: false, reason: "missing" };
+      const b = store.read(id, scope);
+      if (!b) return { ok: false, reason: "missing" };
+      if (createHash("sha256").update(b).digest("hex") !== m.sha256) return { ok: false, reason: "corrupt" };
+      return { ok: true, bytes: b, meta: m };
+    },
+
+    // Every attachment already sent with a message (state bound), as safe records (no bytes). For photo discovery, which applies the
+    // caller's own scope policy (src/photo-access.ts); pending uploads are never listed.
+    bound(): AttachmentMeta[] {
+      return [...metas.values()].filter((m) => m.state === "bound").map((m) => ({ ...m }));
+    },
+
     // Binds attachments to a message, all or none. Each must exist in `scope` and still be pending: one from another conversation is
     // "not found" (404), one already sent with a message is refused (409), so an id can never be reused in another message or context.
     bind(ids: unknown, scope: string): AttachmentRef[] {
