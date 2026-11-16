@@ -5,7 +5,7 @@ import type { Identify } from "./identity.ts";
 import { jobLauncher } from "./job-launch.ts";
 import { researchStore } from "./research.ts";
 import type { ResearchLane, ResearchStore, ResearchTool } from "./research.ts";
-import { researchTools, withLaneGuard } from "./research-tools.ts";
+import { researchTools, watchResearchVault, withLaneGuard } from "./research-tools.ts";
 import { hasLegacyContext, LEGACY_CONTEXT_ERROR, refuseLegacyContext } from "./job-context.ts";
 import { jobRow, toolCommitStatus } from "./job-view.ts";
 import type { Job, Jobs } from "./jobs.ts";
@@ -249,6 +249,8 @@ export function buildServer({
   const launchJob = jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit, research: researchLaunch });
 
   // The lane tools (src/research-tools.ts): discover both lanes, propose research, read and save results. Owner only, like job_launch.
+  // A research report's vault save that needed a card: its outcome is written to the research job the moment the card settles.
+  if (jobs && vaultEdits) watchResearchVault(jobs, vaultEdits);
   const laneTools = () => (jobs ? researchTools({ jobs, proposals, lane: researchLane, build: launchable, routineRepos: research?.routineRepos ?? new Map(), store: research?.store ?? researchStore(undefined), vault: vaultEdits, now }) : []);
 
   // Threads: the store, the rolling recent-context note, and the service that runs a turn against a thread.
@@ -1028,6 +1030,7 @@ export function buildServer({
       if (!proposal) return send(res, 404, gone);
       if (proposalMatch[2] === "cancel") {
         if (!claimed(proposal.id, "cancelled")) return alreadyUsed();
+        if (proposal.kind === "vault_edit") vaultEdits?.cancelled(proposal.id);
         return send(res, 200, { cancelled: proposal.id });
       }
       if (proposal.kind === "ops_admin" || proposal.kind === "ops_sys") return send(res, 409, { error: "Not confirmed: server operations need their digest." });

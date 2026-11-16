@@ -1,8 +1,8 @@
 import type { ChatTool, Proposals } from "./agent.ts";
-import type { Job, Jobs } from "./jobs.ts";
+import type { Job, Jobs, ResearchVaultAttempt } from "./jobs.ts";
 import { RESEARCH_BUDGET, RESEARCH_LIMITS, researchNote, researchVaultPath } from "./research.ts";
 import type { ResearchLane, ResearchStore } from "./research.ts";
-import type { VaultEdits } from "./vault/tools.ts";
+import type { VaultEdits, VaultProposalState } from "./vault/tools.ts";
 
 // The owner's chat tools for choosing and using the two job lanes (docs/research-lane.md):
 //   routines_list          read-only: both lanes, whether each is configured, what each can and cannot do, and how to choose
@@ -40,6 +40,50 @@ export type ResearchToolDeps = {
   vault?: VaultEdits;
   now?: () => Date;
 };
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// The vault-save lifecycle. A save that needs Rai's confirmation is recorded as pending with its card's id; the card's outcome is then
+// written back: at once when it settles in this process (watchResearchVault), and on every read or save (reconcileResearchVault) for
+// what no listener can see: a card that expired, or one an ORBIT restart dropped (cards and their held edits live in memory only).
+
+type VaultRecord = NonNullable<NonNullable<Job["research"]>["vault"]>;
+
+const LAPSED = "The confirmation card expired, or an ORBIT restart dropped it, before it was confirmed. Nothing was written by it.";
+
+function settledRecord(cur: VaultRecord, live: VaultProposalState, at: string): VaultRecord | undefined {
+  if (live.state === "committed") return { ...cur, state: "committed", settledAt: live.at, ...(live.commit ? { commit: live.commit } : {}) };
+  if (live.state === "failed") return { ...cur, state: "failed", settledAt: live.at, error: live.error };
+  if (live.state === "cancelled") return { ...cur, state: "cancelled", settledAt: live.at };
+  if (live.state === "gone") return { ...cur, state: "expired", settledAt: at, error: LAPSED };
+  return undefined; // open or being confirmed: still pending
+}
+
+export function reconcileResearchVault(jobs: Jobs, vault: VaultEdits | undefined, id: string, now: () => Date = () => new Date()): VaultRecord | undefined {
+  const job = jobs.get(id);
+  const cur = job?.research?.vault;
+  if (!job?.research || !cur || cur.state !== "pending-confirmation") return cur;
+  // Without the vault port (writes disabled since) the card cannot be confirmed here; past its expiry it has certainly lapsed.
+  const live: VaultProposalState = !cur.proposalId ? { state: "gone" } : vault ? vault.state(cur.proposalId) : cur.expiresAt && new Date(cur.expiresAt) <= now() ? { state: "gone" } : { state: "confirming" };
+  const next = settledRecord(cur, live, now().toISOString());
+  if (!next) return cur;
+  jobs.setResearch(id, { ...job.research, vault: next });
+  return next;
+}
+
+// Registered once by the server: writes a card's outcome to its research job the moment the card settles.
+export function watchResearchVault(jobs: Jobs, vault: VaultEdits): void {
+  vault.onSettle((proposalId, outcome) => {
+    for (const job of jobs.all()) {
+      const cur = job.kind === "research" ? job.research?.vault : undefined;
+      if (!job.research || !cur || cur.state !== "pending-confirmation" || cur.proposalId !== proposalId) continue;
+      const next = settledRecord(cur, outcome, outcome.at);
+      if (next) jobs.setResearch(job.id, { ...job.research, vault: next });
+    }
+  });
+}
+
+// Saves in flight, per job id, so two overlapping calls cannot both reach the vault pipeline.
+const saving = new Set<string>();
 
 export function researchTools(d: ResearchToolDeps): ChatTool[] {
   const now = d.now ?? (() => new Date());
@@ -120,6 +164,8 @@ export function researchTools(d: ResearchToolDeps): ChatTool[] {
       run: async (a) => {
         only(a, ["id"]);
         const job = researchJob(need(a, "id"));
+        const vaultState = reconcileResearchVault(d.jobs, d.vault, job.id, now);
+        const card = vaultState?.state === "pending-confirmation" && vaultState.proposalId && d.vault ? d.vault.state(vaultState.proposalId) : undefined;
         const stored = d.store.read(job.id);
         const text = stored?.text ?? (job.summary?.state === "complete" ? job.summary.text : undefined);
         return {
@@ -135,7 +181,7 @@ export function researchTools(d: ResearchToolDeps): ChatTool[] {
             text: text === undefined ? null : text.slice(0, 6000),
             textTruncated: text !== undefined && text.length > 6000,
             isolation: job.research?.isolation ?? null,
-            vault: job.research?.vault ?? { state: "not saved" },
+            vault: vaultState ? { ...vaultState, ...(card ? { card } : {}) } : { state: "not saved" },
             trust: UNTRUSTED_NOTE,
           },
           provenance: "live" as const,
@@ -156,24 +202,34 @@ export function researchTools(d: ResearchToolDeps): ChatTool[] {
         const job = researchJob(need(a, "id"));
         if (job.state !== "done") throw new Error(`Research job ${job.id} is ${job.state}; only a finished (done) report can be saved. Nothing was written.`);
         if (!job.research?.report?.valid) throw new Error(`Research job ${job.id} has no valid stored report${job.research?.report?.problems.length ? ` (${job.research.report.problems.slice(0, 3).join("; ")})` : ""}. Nothing was written.`);
-        if (job.research.vault?.state === "committed") throw new Error(`Already saved at ${job.research.vault.path} (commit ${job.research.vault.commit?.slice(0, 7) ?? "unknown"}). Nothing was written again.`);
+        if (saving.has(job.id)) throw new Error(`A save of ${job.id} is already running. Nothing new was written or proposed.`);
+        const prior = reconcileResearchVault(d.jobs, vault, job.id, now);
+        if (prior?.state === "committed") throw new Error(`Already saved at ${prior.path} (commit ${prior.commit?.slice(0, 7) ?? "unknown"}). Nothing was written again.`);
+        if (prior?.state === "pending-confirmation") throw new Error(`A save of this report is already waiting for Rai's confirmation (card ${prior.proposalId ?? "unknown"}${prior.expiresAt ? `, expires ${prior.expiresAt}` : ""}). Confirm or cancel that card; nothing new was proposed.`);
         const stored = d.store.read(job.id);
         if (!stored) throw new Error(`The stored report for ${job.id} could not be read from ORBIT's state directory. Nothing was written.`);
         if (stored.meta.sha256 !== job.research.report.sha256) throw new Error("The stored report does not match the one ORBIT checked (digest differs). Nothing was written.");
         const path = researchVaultPath(job.id);
         const at = now().toISOString();
         const content = researchNote(job, stored.text, stored.meta, at.slice(0, 10));
-        const record = (v: NonNullable<NonNullable<Job["research"]>["vault"]>) => d.jobs.setResearch(job.id, { ...d.jobs.get(job.id)!.research!, vault: v });
+        // Earlier attempts (failed, cancelled or expired) stay on the record as provenance, newest last.
+        const { previous: older = [], ...last } = prior ?? ({} as Partial<VaultRecord>);
+        const previous = prior ? [...older, last as ResearchVaultAttempt].slice(-10) : [];
+        const record = (v: ResearchVaultAttempt) => d.jobs.setResearch(job.id, { ...d.jobs.get(job.id)!.research!, vault: { ...v, ...(previous.length ? { previous } : {}) } });
+        saving.add(job.id);
         try {
           const r = await vault.apply("create_note", { path, content });
-          const v = r.value as { status?: string; commit?: string; proposalId?: string };
+          const v = r.value as { status?: string; commit?: string; proposalId?: string; expiresAt?: string };
           if (v.status === "committed") record({ at, path, state: "committed", ...(v.commit ? { commit: v.commit } : {}) });
-          else if (v.status === "pending-confirmation") record({ at, path, state: "pending-confirmation", ...(v.proposalId ? { proposalId: v.proposalId } : {}) });
+          else if (v.status === "pending-confirmation") record({ at, path, state: "pending-confirmation", ...(v.proposalId ? { proposalId: v.proposalId } : {}), ...(v.expiresAt ? { expiresAt: v.expiresAt } : {}) });
+          else record({ at, path, state: "failed", error: `The vault pipeline returned an unexpected status (${String(v.status).slice(0, 40)}).` });
           return { ...r, value: { ...(r.value as object), path, lane: "research", job: job.id } };
         } catch (err) {
           const error = (err instanceof Error ? err.message : String(err)).slice(0, 400);
           record({ at, path, state: "failed", error });
           throw err;
+        } finally {
+          saving.delete(job.id);
         }
       },
     });

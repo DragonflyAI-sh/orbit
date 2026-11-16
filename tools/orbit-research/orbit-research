@@ -35,15 +35,21 @@ load() {
 }
 
 # call METHOD PATH [BODY-FILE]: prints the response body, returns 0 on 2xx, 22 on an HTTP error (body still printed), other on network failure.
+# The token never appears in a process's arguments (where `ps` would show it): the Authorization header is written by the shell's
+# printf builtin to a fresh mode-0600 file in the job's 0700 directory, curl reads it with `-H @file`, and the file is removed after.
 call() {
-  local method=$1 path=$2 data=${3:-} out code
+  local method=$1 path=$2 data=${3:-} out code hdr rc=0
   rm -f "$DIR/last-http"
   out=$(mktemp)
+  hdr=$(umask 077; mktemp "$DIR/auth.XXXXXX") || { rm -f "$out"; return 7; }
+  printf 'Authorization: Bearer %s\n' "$TOKEN" >"$hdr"
   if [ -n "$data" ]; then
-    code=$(curl -sS -m 30 -o "$out" -w '%{http_code}' -X "$method" -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" --data-binary "@$data" "$API$path" 2>"$DIR/api.err") || { rm -f "$out"; return 7; }
+    code=$(curl -sS -m 30 -o "$out" -w '%{http_code}' -X "$method" -H "@$hdr" -H "content-type: application/json" --data-binary "@$data" "$API$path" 2>"$DIR/api.err") || rc=7
   else
-    code=$(curl -sS -m 30 -o "$out" -w '%{http_code}' -X "$method" -H "Authorization: Bearer $TOKEN" "$API$path" 2>"$DIR/api.err") || { rm -f "$out"; return 7; }
+    code=$(curl -sS -m 30 -o "$out" -w '%{http_code}' -X "$method" -H "@$hdr" "$API$path" 2>"$DIR/api.err") || rc=7
   fi
+  rm -f "$hdr"
+  [ "$rc" = 0 ] || { rm -f "$out"; return 7; }
   cat "$out"; rm -f "$out"
   [[ $code == 2* ]] && return 0
   echo "$code" >"$DIR/last-http"
@@ -124,7 +130,8 @@ show_steers() {
 }
 
 cmd_start() {
-  local job="" api="" token="" commit="${ORBIT_JOB_TOOL_COMMIT:-unknown}"
+  # The token may come from ORBIT_RESEARCH_TOKEN instead of --token, which keeps it out of this process's arguments too.
+  local job="" api="" token="${ORBIT_RESEARCH_TOKEN:-}" commit="${ORBIT_JOB_TOOL_COMMIT:-unknown}"
   while [ $# -gt 0 ]; do
     case "$1" in
       --job) job=$2; shift 2 ;;
@@ -137,7 +144,7 @@ cmd_start() {
   valid_id "$job" || die "start needs --job <id>"
   # https only; plain http only to this machine's loopback (tests).
   [[ $api == https://* || $api =~ ^http://127\.0\.0\.1(:[0-9]+)?$ ]] || die "start needs --api https://..."
-  [ -n "$token" ] || die "start needs --token"
+  [ -n "$token" ] || die "start needs --token (or ORBIT_RESEARCH_TOKEN)"
   [[ $commit =~ ^[0-9a-f]{40}$ ]] || commit=unknown
   mkdir -p "$STATE_ROOT/$job/steer" "$STATE_ROOT/$job/replies" && chmod 700 "$STATE_ROOT" "$STATE_ROOT/$job"
   ( umask 077; printf '%s' "$token" >"$STATE_ROOT/$job/token"; printf '%s' "$api" >"$STATE_ROOT/$job/api" )

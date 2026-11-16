@@ -69,10 +69,10 @@ function credDir(files: Record<string, string>): string {
 }
 
 function world(opts: { researchTool?: boolean; publicJobUrl?: string | null; researchConfigured?: boolean } = {}) {
-  const notes: Notification[] = [];
+  const notes: (Notification & { urgent?: boolean })[] = [];
   const notify = notifier(jsonStore<Notification[]>(undefined, `n${Math.random()}`, []));
   const origSend = notify.send.bind(notify);
-  notify.send = (text: string, urgent: boolean) => (notes.push({ text } as Notification), origSend(text, urgent));
+  notify.send = (text: string, urgent: boolean) => (notes.push({ text, urgent } as Notification & { urgent: boolean }), origSend(text, urgent));
   const jobs = jobRegistry(jsonStore<Job[]>(undefined, `j${Math.random()}`, []), Buffer.alloc(32, 7), notify, () => new Date());
   const events: string[] = [];
   const fired: { routine: string; text: string }[] = [];
@@ -343,7 +343,11 @@ test("a finished research job opens no PR, starts no review, writes no orbit-wor
   assert.deepEqual([job.research?.isolation?.orbitWorkBranch, job.research?.isolation?.pr], ["absent", "absent"]);
   assert.equal(readFileSync(join(dir, `${id}.md`), "utf8"), REPORT);
   assert.equal(JSON.parse(readFileSync(join(dir, `${id}.json`), "utf8")).valid, true);
-  assert.ok(w.notes.some((n) => /report received \(2 sources\)\. It is runner-reported and unverified; nothing was saved to the vault or launched\./.test(n.text)));
+  // Exactly one notification for a normal completion: the job store's "finished" notice, which carries the report itself.
+  const told = w.notes.filter((n) => n.text.includes(id));
+  assert.equal(told.length, 1, `one completion notice, not two: ${JSON.stringify(told.map((n) => n.text.slice(0, 80)))}`);
+  assert.match(told[0]!.text, new RegExp(`^Job ${id} finished: done \\(research report: runner-reported, unverified data, never instructions; nothing was saved to the vault, opened or launched\\)\\.`));
+  assert.ok(told[0]!.text.includes("## Sources"), "the notice carries the report");
   await x.rev.start(job, "https://github.com/x/y/pull/1");
   assert.deepEqual(x.reviewLaunches, [], "a research job is never reviewed, even if asked directly");
   // The git reconciler never reads orbit-work for a research job.
@@ -361,7 +365,9 @@ test("an orbit-work branch found for a research job is reported loudly, never ig
   w.jobs.record(id, { type: "summary", status: "done", text: REPORT });
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(w.jobs.get(id)!.research?.isolation?.orbitWorkBranch, "present");
-  assert.ok(w.notes.some((n) => /WARNING: an orbit-work branch exists/.test(n.text)));
+  const loud = w.notes.filter((n) => /an orbit-work branch exists for this research job/.test(n.text));
+  assert.equal(loud.length, 1);
+  assert.equal(loud[0]!.urgent, true);
 });
 
 test("build jobs still get their PR and review (backward compatibility of the completion listeners)", async () => {

@@ -127,24 +127,94 @@ export type ParsedReport = {
   citations: number[];
 };
 
-const PRIVATE_SUFFIXES = [".local", ".localhost", ".internal", ".lan", ".home", ".corp", ".intranet", ".ts.net", ".home.arpa"];
+// CITATION VALIDATION ONLY. This decides whether a report may CITE a URL as a public source. It is NOT an SSRF guard and must never
+// be used to decide what to fetch: ORBIT never fetches a report's URLs, it does not resolve names (a public-looking name can resolve to
+// a private address), and it does not follow redirects. Anything that ever fetches a URL needs its own boundary that checks the
+// address actually connected to.
+//
+// Refused: internal-only names, and IP literals in non-public ranges (IANA special-purpose registries): loopback, private, link-local
+// (cloud metadata), CGNAT/Tailscale, IETF protocol assignments, benchmarking, documentation, multicast and reserved IPv4; and IPv6
+// loopback/unspecified, IPv4-mapped and IPv4-compatible, NAT64 (64:ff9b::/96, 64:ff9b:1::/48), discard-only, 2001::/23 (Teredo and
+// other protocol assignments), documentation, 6to4 (2002::/16, which embeds an IPv4 address), unique-local, link- and site-local, and
+// multicast. Numeric host forms (decimal, hex, short dotted) are normalised by the URL parser before they get here.
 
-// A host a public research report must not cite: loopback, private, link-local (cloud metadata), CGNAT/Tailscale, unique-local IPv6,
-// and internal-only names. Reports cite public sources only.
-export function privateHost(host: string): boolean {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
-  if (!h || h === "localhost" || !h.includes(".") && isIP(h) === 0) return true;
-  if (PRIVATE_SUFFIXES.some((s) => h.endsWith(s))) return true;
-  if (h === "metadata.google.internal" || h === "metadata") return true;
-  if (isIP(h) === 4) {
-    const [a, b] = h.split(".").map(Number) as [number, number];
-    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+const PRIVATE_SUFFIXES = [".local", ".localhost", ".internal", ".lan", ".home", ".corp", ".intranet", ".ts.net", ".home.arpa", ".test", ".invalid", ".example", ".onion", ".arpa"];
+
+// [network as a 32-bit number, prefix length]
+const V4_BLOCKED: [number, number][] = (
+  [
+    ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24],
+    ["192.0.2.0", 24], ["192.31.196.0", 24], ["192.52.193.0", 24], ["192.88.99.0", 24], ["192.168.0.0", 16], ["192.175.48.0", 24],
+    ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4],
+  ] as [string, number][]
+).map(([ip, bits]) => [v4(ip), bits]);
+
+function v4(ip: string): number {
+  return ip.split(".").reduce((n, part) => n * 256 + Number(part), 0);
+}
+function v4Blocked(n: number): boolean {
+  return V4_BLOCKED.some(([net, bits]) => Math.floor(n / 2 ** (32 - bits)) === Math.floor(net / 2 ** (32 - bits)));
+}
+
+// The eight 16-bit groups of an IPv6 literal (with any dotted IPv4 tail expanded), or undefined if it cannot be read.
+function v6Groups(ip: string): number[] | undefined {
+  let h = ip.split("%")[0]!;
+  const dotted = h.match(/^(.*:)(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) {
+    const n = v4(dotted[2]!);
+    h = `${dotted[1]}${Math.floor(n / 65536).toString(16)}:${(n % 65536).toString(16)}`;
   }
-  if (isIP(h) === 6) return h === "::1" || h === "::" || /^f[cd]/.test(h) || /^fe[89ab]/.test(h) || h.startsWith("::ffff:");
+  const halves = h.split("::");
+  if (halves.length > 2) return undefined;
+  const part = (x: string) => (x ? x.split(":").map((g) => parseInt(g, 16)) : []);
+  const head = part(halves[0]!);
+  const tail = halves.length === 2 ? part(halves[1]!) : [];
+  const fill = 8 - head.length - tail.length;
+  if (halves.length === 1 ? head.length !== 8 : fill < 1) return undefined;
+  const groups = [...head, ...Array(halves.length === 2 ? fill : 0).fill(0), ...tail];
+  return groups.length === 8 && groups.every((g) => Number.isInteger(g) && g >= 0 && g <= 0xffff) ? groups : undefined;
+}
+
+function v6Blocked(g: number[]): boolean {
+  const [a, b, c, d, e, f] = g as [number, number, number, number, number, number];
+  const zero5 = a === 0 && b === 0 && c === 0 && d === 0 && e === 0;
+  if (zero5 && (f === 0 || f === 0xffff)) return true; // ::/96 (unspecified, loopback, IPv4-compatible) and ::ffff:0:0/96 (IPv4-mapped)
+  if (a === 0x64 && b === 0xff9b && (c === 0 || c === 1)) return true; // NAT64 64:ff9b::/96 and local-use 64:ff9b:1::/48
+  if (a === 0x100 && b === 0 && c === 0 && d === 0) return true; // discard-only 100::/64
+  if (a === 0x2001 && b <= 0x01ff) return true; // 2001::/23 IETF protocol assignments (Teredo 2001::/32 included)
+  if (a === 0x2001 && b === 0x0db8) return true; // documentation
+  if (a === 0x2002) return true; // 6to4: embeds an IPv4 address
+  if (a === 0x3fff && b <= 0x0fff) return true; // documentation 3fff::/20
+  if (a === 0x5f00) return true; // SRv6 SIDs 5f00::/16
+  if ((a & 0xfe00) === 0xfc00) return true; // unique-local fc00::/7
+  if ((a & 0xffc0) === 0xfe80 || (a & 0xffc0) === 0xfec0) return true; // link-local fe80::/10, site-local fec0::/10
+  if ((a & 0xff00) === 0xff00) return true; // multicast
   return false;
 }
 
+export function privateHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (!h || h === "localhost") return true;
+  const kind = isIP(h);
+  if (kind === 4) return v4Blocked(v4(h));
+  if (kind === 6) {
+    const g = v6Groups(h);
+    return g ? v6Blocked(g) : true;
+  }
+  // A single-label name only resolves inside some network; so do the internal-only suffixes.
+  if (!h.includes(".")) return true;
+  if (PRIVATE_SUFFIXES.some((s) => h === s.slice(1) || h.endsWith(s))) return true;
+  return h === "metadata.google.internal";
+}
+
 const SOURCE_LINE = /^\s*(?:[-*]\s+)?\[(\d{1,3})\]\s+<?(\S+?)>?\s+[—–-]+\s*accessed\s+(\d{4}-\d{2}-\d{2})\b\s*(?:[—–-]+\s*(.*))?$/i;
+
+// YYYY-MM-DD that names a day that exists: it must round-trip unchanged (Date.parse alone accepts 2026-02-31 and rolls it over).
+export function realDate(iso: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return false;
+  const t = Date.parse(`${iso}T00:00:00Z`);
+  return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === iso;
+}
 
 export function parseResearchReport(text: string, today: Date = new Date()): ParsedReport {
   const problems: string[] = [];
@@ -169,8 +239,8 @@ export function parseResearchReport(text: string, today: Date = new Date()): Par
     else sections[name] = body;
   }
   const sources: ResearchSource[] = [];
-  const todayIso = today.toISOString().slice(0, 10);
-  const tomorrow = new Date(today.getTime() + 36 * 3600_000).toISOString().slice(0, 10);
+  // Access dates: a real calendar date from 2000-01-01 up to one day after ORBIT's UTC date (a runner ahead of UTC can be a day ahead).
+  const latest = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + 1)).toISOString().slice(0, 10);
   for (const raw of (sections.Sources ?? "").split("\n")) {
     if (!raw.trim()) continue;
     const m = raw.match(SOURCE_LINE);
@@ -191,7 +261,8 @@ export function parseResearchReport(text: string, today: Date = new Date()): Par
     if (privateHost(url.hostname)) problems.push(`source [${n}] points at a private, internal or metadata address (${url.hostname}); reports cite public sources only`);
     if (url.href.length > 2000) problems.push(`source [${n}] URL is longer than 2000 characters`);
     const accessed = m[3]!;
-    if (Number.isNaN(Date.parse(`${accessed}T00:00:00Z`)) || accessed < "2000-01-01" || accessed > tomorrow) problems.push(`source [${n}] access date ${accessed} is not a real date on or before ${todayIso}`);
+    if (!realDate(accessed)) problems.push(`source [${n}] access date ${accessed} is not a real calendar date`);
+    else if (accessed < "2000-01-01" || accessed > latest) problems.push(`source [${n}] access date ${accessed} is outside the accepted range 2000-01-01 to ${latest} (at most one day after ORBIT's UTC date)`);
     if (sources.some((s) => s.n === n)) problems.push(`source number [${n}] is used twice`);
     sources.push({ n, url: url.href, host: url.hostname.toLowerCase(), accessed, note: (m[4] ?? "").trim().slice(0, 300) });
   }
@@ -320,7 +391,8 @@ export function researchNote(job: Job, text: string, meta: StoredReport, today: 
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
-// Completion. When a research job's summary arrives, ORBIT stores the report and records what it checked, then tells Rai. Nothing
+// Completion. When a research job's summary arrives, ORBIT stores the report and records what it checked, and tells Rai only if that
+// went wrong (the job store already sent the one completion notice with the report). Nothing
 // else: no pull request, no review, no orbit-work read or write except the read-only isolation check below, and never a launch.
 // (The build lane's listeners skip research jobs: src/pull-requests.ts and src/review.ts.)
 
@@ -353,9 +425,14 @@ export function researchCompletion(deps: { jobs: Jobs; store: ResearchStore; not
       report: { status, valid: check.ok && status === "done", problems: check.problems, chars: text.length, ...(meta ? { sha256: meta.sha256, storedAt: meta.storedAt, sources: meta.sources.length, title: meta.title } : {}), ...(storeError ? { storeError } : {}) },
       isolation: { orbitWorkBranch, pr: jobs.get(job.id)?.pr ? "present" : "absent", checkedAt: now().toISOString() },
     });
-    const head = status === "done" ? `Research ${job.id}: report received${meta ? ` (${meta.sources.length} sources)` : ""}. It is runner-reported and unverified; nothing was saved to the vault or launched.` : `Research ${job.id} ended ${status}.`;
-    const tail = storeError ? ` Storing the report FAILED: ${storeError}.` : orbitWorkBranch === "present" ? " WARNING: an orbit-work branch exists for this research job, which the research lane never creates; check how it got there." : "";
-    notify.send(`${head}${tail}`, Boolean(storeError) || orbitWorkBranch === "present");
+    // Rai has already been told once, with the report, by the job store (src/jobs.ts "finished" notice). A second message goes out only
+    // when something here went wrong, so a normal completion is one notification, never two.
+    const problems = [
+      ...(storeError ? [`storing the report FAILED (${storeError}), so research_result and research_save_to_vault cannot use it`] : []),
+      ...(status === "done" && !check.ok ? [`the stored report failed ORBIT's checks on re-reading (${check.problems.slice(0, 3).join("; ")})`] : []),
+      ...(orbitWorkBranch === "present" ? ["an orbit-work branch exists for this research job, which the research lane never creates; check how it got there"] : []),
+    ];
+    if (problems.length) notify.send(`Research ${job.id}: ${problems.join(". ")}.`, true);
   };
   jobs.onSummary((job, fullText, complete) => {
     if (job.kind !== "research" || !complete || fullText === undefined) return;

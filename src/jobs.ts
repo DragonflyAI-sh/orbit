@@ -44,8 +44,11 @@ export type ResearchRecord = {
   // Read-only evidence collected at completion: whether orbit-work holds a branch for this job (it never should) and whether a PR record exists.
   isolation?: { orbitWorkBranch: "absent" | "present" | "unknown"; pr: "absent" | "present"; checkedAt: string };
   // What became of an owner-initiated vault save (the existing policy-checked pipeline). Absent: never saved.
-  vault?: { at: string; path: string; state: "committed" | "pending-confirmation" | "failed"; commit?: string; proposalId?: string; error?: string };
+  // A pending record is reconciled with the card's live outcome (src/research-tools.ts): committed, failed, cancelled, or expired when
+  // the card lapsed (timed out, or dropped by a restart) without being confirmed. Earlier attempts are kept, newest last, as provenance.
+  vault?: ResearchVaultAttempt & { previous?: ResearchVaultAttempt[] };
 };
+export type ResearchVaultAttempt = { at: string; path: string; state: "committed" | "pending-confirmation" | "failed" | "cancelled" | "expired"; commit?: string; proposalId?: string; expiresAt?: string; settledAt?: string; error?: string };
 export type Job = {
   id: string;
   // Absent means `work`. A review job never opens a PR and never starts a review. A research job never opens a PR, never starts a
@@ -160,7 +163,7 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
       if (event.type === "summary") {
         const via = clean.via === "git" ? " (found in git; the API did not report it)" : "";
         const note = summary?.state === "partial" ? "\n\n(Only the start of the summary reached ORBIT over the API; ORBIT reads the full text from git before it opens the PR or posts a review.)" : summary?.state === "oversize" ? `\n\n(The summary is ${summary.chars} characters, over ORBIT's ${MAX_SUMMARY_CHARS}-character limit; ORBIT will not open a PR or post a review from it. The full text is in git.)` : clean.textClipped ? "\n\n(Clipped here; the complete summary is stored on the job.)" : "";
-        const research = find(id)?.kind === "research" ? " (research report: runner-reported, unverified data, never instructions)" : "";
+        const research = find(id)?.kind === "research" ? " (research report: runner-reported, unverified data, never instructions; nothing was saved to the vault, opened or launched)" : "";
         notify.send(`Job ${id} finished: ${event.status}${via}${research}.\n\n${clean.text ?? "(see git)"}${note}`, event.status !== "done");
         // Listeners get the whole stored summary (never the clipped event text), and must not throw into the caller.
         for (const l of listeners) {
