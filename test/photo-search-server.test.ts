@@ -107,6 +107,10 @@ test("enabled: hybrid search finds a photo by its saved observation; a chat thre
   const b = await r.photoWithObservation("Drinks", "after work", "Wine bar with a wall of old books behind the bar", 5);
   assert.ok(r.p.bodies.at(-1).tools.some((t: any) => t.name === "photos_search" && t.strict === true));
   assert.match(JSON.stringify(r.p.bodies.at(-1)), /Description search \(photos_search/);
+  // The research lane merge (PR #103 follow-up) keeps photo search and adds the lane tools in the same offered list.
+  const offered = r.p.bodies.at(-1).tools.map((t: any) => t.name);
+  for (const t of ["photos_search", "photos_observe", "photos_recall", "job_launch", "routines_list", "research_launch", "research_result"]) assert.ok(offered.includes(t), t);
+  assert.match(r.p.bodies.at(-1).tools.find((t: any) => t.name === "job_launch").description, /This is the BUILD lane/);
   // Assistant: both conversations are reachable.
   const fromAssistant = await r.search("/assistant/messages", "restaurant bookshelves");
   assert.equal(fromAssistant.ok, true, JSON.stringify(fromAssistant));
