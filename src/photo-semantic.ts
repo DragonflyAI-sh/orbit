@@ -546,7 +546,9 @@ export function collectEvidence(d: { attachments: Attachments; sources: Semantic
     evidence.push({ ...base, kind: "conversation-title", sourceType: "conversation-title", sourceId: l.conversation.id, text: l.conversation.title });
     for (const x of readableRecords(d.store, d.sources, caller, l.ref, v).readable) {
       if (x.r.state !== "active") continue;
-      if (x.r.kind === "model-observation") evidence.push({ ...base, kind: "visual-observation", sourceType: "observation-record", sourceId: x.r.id, text: [x.r.scope, ...(x.r.observations ?? [])].filter(Boolean).join(". ") });
+      // Only the observation statements are visual evidence. The record's scope (Rai's question or the task, for example "whether a
+      // bicycle is in the photo") and its limitations are never matched or embedded: a question about a bicycle is not a bicycle.
+      if (x.r.kind === "model-observation") evidence.push({ ...base, kind: "visual-observation", sourceType: "observation-record", sourceId: x.r.id, text: (x.r.observations ?? []).filter(Boolean).join(". ") });
       else if (x.r.correction) evidence.push({ ...base, kind: "user-correction", sourceType: "observation-record", sourceId: x.r.id, text: x.r.correction });
     }
     if (l.message && d.sources.discussion) {

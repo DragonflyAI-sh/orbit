@@ -8,11 +8,13 @@ When it is enabled, one extra read-only chat tool, `photos_search {query, includ
 
 | Evidence kind | Source | Label in results |
 |---|---|---|
-| `visual-observation` | active model observations (`photos_observe`, scope and statements) | model observation, not a verified fact |
+| `visual-observation` | active model observations (`photos_observe`), the statements only | model observation, not a verified fact |
 | `user-correction` | active corrections (`photos_correct`) | Rai's statement, not a visual inspection |
 | `caption` | the text of the message that carried the photo | caption |
 | `conversation-title` | current title of that conversation | title |
 | `discussion-context` | **Rai's own** next message after the photo, within 30 minutes, if it has text and no photos | context, not a description of the photo |
+
+An observation record's `scope` (what the inspection was about, often Rai's question) and its `limitations` are never matched or embedded: "whether a bicycle is in the photo" is a question, not evidence of a bicycle (tested).
 
 Discussion uses only Rai's messages. Assistant replies are never used, because they may quote observation text that was later corrected or forgotten, and forgotten text must not come back from history. The current turn's own message is excluded, so a search request is never context for itself. Context similarity counts at half weight.
 
