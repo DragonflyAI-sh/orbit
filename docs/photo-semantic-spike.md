@@ -1,6 +1,6 @@
 # Spike: hybrid semantic photo retrieval on ChatGPT-subscription auth
 
-Status: **design spike, not built into ORBIT.** Nothing here is wired into chat tools, routes, ports or startup, and no index is created under ORBIT's state directory. It belongs to milestone 3 of `docs/photo-recall.md`, which still needs separate approval.
+Status: **design spike, superseded by the opt-in implementation in `docs/photo-semantic-search.md`** (API-key embeddings were chosen; the prototype `src/spike/photo-semantic.ts` was replaced by `src/photo-semantic.ts`, and its tests moved to `test/photo-semantic.test.ts`). The rest of this note is kept as the spike recorded it. Nothing here is wired into chat tools, routes, ports or startup, and no index is created under ORBIT's state directory. It belongs to milestone 3 of `docs/photo-recall.md`, which still needs separate approval.
 
 ## 1. Access: can ORBIT's ChatGPT login call an embeddings endpoint?
 

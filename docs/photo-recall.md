@@ -10,7 +10,8 @@ Builds on `docs/photos.md` (storage, `photos_list`, `photos_inspect`, the strict
 |---|---|---|
 | **1. Metadata search and display** | Text search over what ORBIT already stores (captions, conversation titles), filterable by date and conversation; `photos_show` galleries stored on the reply; a re-authorizing image route; the page gallery. | **Built** (#98). |
 | **2. Observations with provenance** | After a photo is genuinely supplied to the model (attached to Rai's message, or `photos_inspect`), the model may save what it saw, tied to the exact processed image version, with server-assigned provenance; `photos_recall` reuses it later without pixels, always labelled as a model observation; Rai's corrections and forgetting. | **Built (this change).** |
-| 3. Topic and observation search, recall UX | Search over saved observations and extracted topics across the library, better recall UX (for example "photos like this"). | Not built. Needs approval. |
+| 3a. Opt-in description search | `photos_search`: hybrid keyword + embedding ranking over observations, corrections, captions, titles and Rai's follow-ups; off by default (`docs/photo-semantic-search.md`). | **Built, off by default; live quality unverified.** |
+| 3. Topic extraction, recall UX | Extracted topics across the library, better recall UX (for example "photos like this"). | Not built. Needs approval. |
 
 ## Milestone 1: what exists now
 
@@ -144,7 +145,7 @@ Same policy as milestone 1, on every read, write, correction, forget and replay:
 - A page UI for observations beyond the call rows ("✓ photos_observe … saved") and the model's reply.
 - Cross-process locking; photo deletion.
 
-## Seam for milestone 3 (not built)
+## Seam for milestone 3 (3a built as opt-in `photos_search`, `docs/photo-semantic-search.md`)
 
 `orbit-photo-ref/1` (`src/photo-ref.ts`) and `orbit-photo-observation/1` (`src/photo-observations.ts`). The authoritative records stay the attachment store (`id`, `scope`, `state`, `type`, `bytes`, `width`, `height`, `sha256`, `createdAt`, `boundAt`), the conversation message that binds a photo, and one observation file per ref. An observation search would walk `observationStore.refs()`, re-authorize each photo with `photoReach` and each record with `readableRecords` for the caller (exactly as `photos_recall` does), match only `active` records about the current version, and label every hit as "text match over saved model observations, not visual verification". Any index it adds must be rebuildable from these files, private, bounded and idempotent, and must drop forgotten text at once.
 

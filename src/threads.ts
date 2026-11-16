@@ -192,6 +192,19 @@ export const safeAttachments = (refs: AttachmentRef[] | undefined): AttachmentRe
 export type PhotoMessage = { id: string; at: string; text: string; ids: string[] };
 export const photoMessagesOf = (msgs: readonly ThreadMessage[]): PhotoMessage[] =>
   msgs.filter((m) => m.role === "user" && m.attachments?.length).map((m) => ({ id: m.id, at: m.at, text: typeof m.text === "string" ? m.text : "", ids: m.attachments!.map((a) => a.id) }));
+// Discussion near a photo, for opt-in semantic photo search (src/photo-semantic.ts): Rai's next message after the one that carried the
+// photo, if it is a plain completed user message with text and no photos of its own, sent within 30 minutes of the photo. Only Rai's own words: assistant replies are never
+// used, because they may quote observation text that was later corrected or forgotten (docs/photo-semantic-search.md). Read-only.
+export const PHOTO_DISCUSSION_WINDOW_MS = 30 * 60_000;
+export const photoDiscussionOf = (msgs: readonly ThreadMessage[], messageId: string): { id: string; text: string } | undefined => {
+  const i = msgs.findIndex((m) => m.id === messageId);
+  if (i < 0) return undefined;
+  const next = msgs.slice(i + 1).find((m) => m.role === "user");
+  if (!next || next.status === "pending" || next.attachments?.length || typeof next.text !== "string" || !next.text.trim()) return undefined;
+  // Only a follow-up sent soon after the photo is about it; a later message (for example a search for the photo) is not.
+  if (!(Date.parse(next.at) - Date.parse(msgs[i]!.at) <= PHOTO_DISCUSSION_WINDOW_MS)) return undefined;
+  return { id: next.id, text: next.text };
+};
 export type ThreadTranscript = { rev: number; updatedAt: string; archived: boolean; total: number; readable: number; inProgress: boolean; compacted: number; at(i: number): TranscriptMessage | undefined };
 
 export function jobCardsOf(cards: Card[]): JobCardRef[] {
@@ -527,6 +540,12 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
     photoSource(id: string): { title: string; archived: boolean; messages: PhotoMessage[] } | undefined {
       const t = threads.get(id);
       return t ? { title: t.title, archived: t.archived === true, messages: photoMessagesOf(t.messages) } : undefined;
+    },
+
+    // Rai's next message after a photo message (opt-in semantic photo search). Read-only.
+    photoDiscussion(id: string, messageId: string): { id: string; text: string } | undefined {
+      const t = threads.get(id);
+      return t ? photoDiscussionOf(t.messages, messageId) : undefined;
     },
 
     // Whether a message of this thread still exists (photo observation sources, src/photo-observations.ts). Read-only.

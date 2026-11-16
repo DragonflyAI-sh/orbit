@@ -50,6 +50,9 @@ import { isPhotoRef, safeGalleries } from "./photo-ref.ts";
 import type { PhotoSources } from "./photo-access.ts";
 import { observationStore, observationTools } from "./photo-observations.ts";
 import type { ObservationSources, ObservationStore } from "./photo-observations.ts";
+import { photoSearchTool, photoSemantic as semanticSearch } from "./photo-semantic.ts";
+import type { SemanticSources } from "./photo-semantic.ts";
+import type { Embedder } from "./embeddings.ts";
 import { ZONE } from "./time.ts";
 import type { AttachmentRef, Attachments } from "./attachments.ts";
 import { JPEG_MAX_BYTES, normalizeJpeg } from "./jpeg.ts";
@@ -104,6 +107,9 @@ export type Deps = {
   attachments?: Attachments;
   // Saved photo observations (src/photo-observations.ts, docs/photo-recall.md), kept in <state>/photo-observations. Absent means memory only.
   photoObservations?: ObservationStore;
+  // Opt-in semantic photo search (src/photo-semantic.ts, docs/photo-semantic-search.md). Absent (the default) means photos_search is not
+  // offered and nothing changes. `status` is its /status line.
+  photoSemantic?: { embedder: Embedder | undefined; cacheDir: string | undefined; status(): PortStatus };
   // The clock for thread cards and the recent-context note. Tests inject one; it must be the clock the proposals use.
   now?: () => Date;
   // Chat tool execution deadline and abort grace period (docs/tool-deadlines.md). Tests lower them; production uses the defaults.
@@ -179,6 +185,7 @@ export function buildServer({
   workSessions: workArg,
   attachments = attachmentStore(undefined),
   photoObservations = observationStore(undefined),
+  photoSemantic,
   recentContext: recentPort = stateRecentContext(jsonStore(undefined, "recent-context", null)),
   now,
   toolDeadlineMs,
@@ -197,7 +204,7 @@ export function buildServer({
     return [
       fixed("policy", "fail-closed", "Allows reads and chat replies; memory, vault writes, the config view, notify, schedule, runs, tools, devices and jobs for the owner only; refuses everything else."),
       fixed("channel", "web", "Web chat at /. Discord and CLI are not built."),
-      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...(jobs ? [launcherStatus(jobs.status())] : []), ...ports.map((p) => p.status()), ...(watch ? [watch.status()] : [])].map((s) => withFreshness(s, now)),
+      ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...(jobs ? [launcherStatus(jobs.status())] : []), ...ports.map((p) => p.status()), ...(photoSemantic ? [photoSemantic.status()] : []), ...(watch ? [watch.status()] : [])].map((s) => withFreshness(s, now)),
     ];
   };
   watch?.attach(() => statuses().filter((st) => st.port !== "watch"));
@@ -275,6 +282,12 @@ export function buildServer({
     ...photoSources,
     message: (conversation, messageId) => (conversation === "assistant:assistant" ? assistant.messageState(messageId) : /^chat:/.test(conversation) ? threads.messageState(conversation.slice(5), messageId) : "gone"),
   };
+  // Opt-in semantic photo search (docs/photo-semantic-search.md): only when configured. Discussion context is Rai's own next message.
+  const semanticSources: SemanticSources = {
+    ...observationSources,
+    discussion: (conversation, messageId) => (conversation === "assistant:assistant" ? assistant.photoDiscussion(messageId) : /^chat:/.test(conversation) ? threads.photoDiscussion(conversation.slice(5), messageId) : undefined),
+  };
+  const semantic = photoSemantic ? semanticSearch({ attachments, sources: semanticSources, store: photoObservations, embedder: photoSemantic.embedder, cacheDir: photoSemantic.cacheDir, zone: ZONE }) : undefined;
   // Galleries photos_show displayed (docs/photo-recall.md): resolved again at every view and every image fetch, under the policy of
   // the conversation that shows them.
   const display = photoDisplay({ attachments, sources: photoSources, zone: ZONE });
@@ -383,7 +396,7 @@ export function buildServer({
     }
     const current = limits(isOwner);
     const offered = isOwner && model.step
-      ? [...refuseLegacyContext(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? [...photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...observationTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE })] : [])]
+      ? [...refuseLegacyContext(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? [...photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...observationTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE, onChange: semantic ? (ref) => semantic.invalidate(ref) : undefined }), ...(semantic ? [photoSearchTool({ semantic, attachments, caller: conversation, isOwner, zone: ZONE })] : [])] : [])]
       : [];
     if (!offered.length) {
       current.push(

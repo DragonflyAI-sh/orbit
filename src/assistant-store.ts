@@ -3,7 +3,7 @@ import { closeSync, existsSync, fsyncSync, fstatSync, mkdirSync, openSync, readd
 import { join } from "node:path";
 import { ASSISTANT_ACTIVE_BUDGET_CHARS, boundChunk, planContext } from "./assistant-context.ts";
 import type { ChunkForm, ContextPlan } from "./assistant-context.ts";
-import { jobCardsOf, maskCall, photoMessagesOf, maskContent, maskDeep, MAX_MESSAGE_CHARS, safeAttachments, safePatch, THREAD_SCHEMA, ThreadError, transcriptMessage, writeAtomic } from "./threads.ts";
+import { jobCardsOf, maskCall, photoDiscussionOf, photoMessagesOf, maskContent, maskDeep, MAX_MESSAGE_CHARS, safeAttachments, safePatch, THREAD_SCHEMA, ThreadError, transcriptMessage, writeAtomic } from "./threads.ts";
 import type { Card, CardState, JobCardRef, MessagePatch, PhotoMessage, StoredCall, Thread, ThreadMessage, TranscriptMessage } from "./threads.ts";
 import type { AttachmentRef } from "./attachments.ts";
 
@@ -474,6 +474,10 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
     // Archived chunks are not read here, so a photo sent in an archived chunk has no resolved message (`archivedChunks` says how many).
     photoSource(): { messages: PhotoMessage[]; archivedChunks: number } {
       return { messages: sortedActive().flatMap((c) => photoMessagesOf(Array.isArray(c.messages) ? c.messages : [])), archivedChunks: archived.length };
+    },
+    // Rai's next message after a photo message in the active chunks (opt-in semantic photo search, src/photo-semantic.ts). Read-only.
+    photoDiscussion(messageId: string): { id: string; text: string } | undefined {
+      return photoDiscussionOf(sortedActive().flatMap((c) => (Array.isArray(c.messages) ? c.messages : [])), messageId);
     },
     // Whether an Assistant message still exists (photo observation sources, src/photo-observations.ts). Active chunks are in memory;
     // archived chunks are not read here, so a message not found while archived chunks exist is "archived" (kept, not re-read).
