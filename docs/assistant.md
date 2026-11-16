@@ -140,6 +140,7 @@ All are refused with 403 for anyone but the owner (`decide("assistant", …)`), 
 | `GET /assistant/history?before=&limit=` | A page of archived chunks, oldest first, and `more` |
 | `POST /assistant/messages {text, requestId?, attachments?}` | Runs one turn; returns the view (502 with the view if the model failed; 409 if busy or a duplicate). `attachments`: up to 10 photo ids of the Assistant; `text` may then be empty (docs/photos.md) |
 | `POST /assistant/attachments`, `GET /assistant/attachments/:aid` | Upload a processed JPEG; read one of the Assistant's photos (docs/photos.md) |
+| `GET /assistant/photos/:ref` | A photo shown in an Assistant gallery (`photos_show`), re-authorized on every request (docs/photo-recall.md) |
 | `POST /chat/proposals/:id/confirm|cancel` | Existing routes; a card from the Assistant settles in the Assistant (`cardSvc` in `src/server.ts`) |
 
 ## The page

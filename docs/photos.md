@@ -182,7 +182,7 @@ Rai can ask, in a later message or in another conversation, "Can you see the ima
 
 **What was missing (verified before this change).** No tool listed or loaded photos. `session_read` reports a `photos` count only, and a tool result in `runChat` was text only, so a model in another conversation could at best read a caption, never the photo.
 
-**Two read-only tools**, offered to the owner's model in the Assistant and in every chat thread (only with a model that can call tools):
+**Read-only tools**, offered to the owner's model in the Assistant and in every chat thread (only with a model that can call tools). `photos_list` also takes an optional `query` (metadata text search over captions and conversation titles), and `photos_show` displays stored photos to Rai as a gallery without sending them to the model: see `docs/photo-recall.md`.
 
 | Tool | What it does |
 |---|---|
@@ -300,6 +300,6 @@ Use non-private test photos (a printed page, a whiteboard, an object).
 - **Model support.** The capability table is ORBIT's own and is not queried from the provider. A configured model outside it cannot take photos until the table is changed (see "Model capability").
 - **Paid fallback.** The OpenRouter fallback takes no photos.
 - **Thumbnails.** There are no server-side thumbnails. The page shows the stored copy (at most 1 MiB) scaled by CSS, lazily loaded and privately cached for a day.
-- **Not built.** Galleries, OCR indexing, search over photo content (`photos_list` finds photos by conversation and date only), durable-memory promotion and photo export.
+- **Not built.** OCR indexing, search over photo content (`photos_list` finds photos by conversation, date and caption/title words only; see `docs/photo-recall.md`), saved visual observations, durable-memory promotion and photo export. Galleries of earlier photos (`photos_show`) are built: `docs/photo-recall.md`.
 - **Earlier photos.** Cross-conversation retrieval is offered in the Assistant only; a chat thread reaches only its own photos. A photo in an archived Assistant chunk is listed without its message. Retrieved photos are visible for one reply at a time (see "Earlier photos").
 - **Deletion.** Deleting individual photos or messages is not built. Bound photos stay as long as their conversation does.

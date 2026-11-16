@@ -27,7 +27,8 @@ import { smallJpeg } from "./jpeg-fixture.ts";
 const ZONE = "America/Los_Angeles";
 const T1 = "11111111-1111-4111-8111-111111111111";
 const T2 = "22222222-2222-4222-8222-222222222222";
-const LIST_KEYS = ["conversation", "day", "from", "to", "timezone", "includeArchived", "limit", "cursor"];
+// `query` was added by the photo-recall search (docs/photo-recall.md); it is optional like every other field.
+const LIST_KEYS = ["conversation", "day", "from", "to", "timezone", "includeArchived", "limit", "cursor", "query"];
 const ALL_NULL = Object.fromEntries(LIST_KEYS.map((k) => [k, null]));
 
 // A small JSON Schema checker for the subset ORBIT's tool schemas use (type incl. "null" unions, enum, required, additionalProperties,

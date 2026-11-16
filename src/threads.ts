@@ -5,6 +5,8 @@ import { redact } from "./ops/protocol.ts";
 import { maskStoredText, maskVaultText } from "./vault/filter.ts";
 import type { FallbackInfo } from "./model.ts";
 import type { AttachmentRef } from "./attachments.ts";
+import { safeGalleries } from "./photo-ref.ts";
+import type { StoredGallery } from "./photo-ref.ts";
 
 // Server-owned chat threads. One JSON file per thread in <state>/threads/, written atomically; the in-memory copy is
 // the single source while ORBIT runs. docs/threads.md describes the schema, concurrency and migration.
@@ -109,6 +111,9 @@ export type ThreadMessage = {
   text: string;
   // Photos sent with a user message (docs/photos.md): ordered references into the private attachment store, never the bytes.
   attachments?: AttachmentRef[];
+  // Galleries photos_show displayed under an assistant reply (docs/photo-recall.md): ordered photo refs only, resolved again under
+  // the viewing conversation's policy every time the message is shown. Never image data, titles, captions, ids or URLs.
+  gallery?: StoredGallery[];
   status?: MessageStatus;
   error?: string;
   calls?: StoredCall[];
@@ -243,6 +248,11 @@ export function safePatch(patch: MessagePatch): MessagePatch {
   if (typeof safe.error === "string") safe.error = maskText(safe.error).slice(0, 1000);
   if (Array.isArray(safe.accounting)) safe.accounting = safe.accounting.slice(0, 5).map((a) => maskText(String(a)).slice(0, 300));
   if (Array.isArray(safe.incomplete)) safe.incomplete = safe.incomplete.slice(0, 5).map((a) => maskText(String(a)).slice(0, 300));
+  if ("gallery" in safe) {
+    const g = safeGalleries(safe.gallery);
+    if (g?.length) safe.gallery = g;
+    else delete safe.gallery;
+  }
   return safe;
 }
 

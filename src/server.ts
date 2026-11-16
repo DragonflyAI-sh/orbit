@@ -45,7 +45,8 @@ import { sessionDigest } from "./session-digest.ts";
 import type { Chunk } from "./assistant-store.ts";
 import { resolutionSummary } from "./model-capability.ts";
 import { AttachmentError, attachmentStore, isAttachmentId, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments.ts";
-import { PHOTO_TOOL_NAMES, photoTools } from "./photo-access.ts";
+import { PHOTO_TOOL_NAMES, photoDisplay, photoTools } from "./photo-access.ts";
+import { isPhotoRef, safeGalleries } from "./photo-ref.ts";
 import type { PhotoSources } from "./photo-access.ts";
 import { ZONE } from "./time.ts";
 import type { AttachmentRef, Attachments } from "./attachments.ts";
@@ -223,7 +224,7 @@ export function buildServer({
   // `origin`: a proposal made in a turn is bound to that turn's conversation (server context, never model text) before its card is stored.
   // Photos are loaded per conversation scope: a chat thread's turn can only read that thread's attachments, the Assistant's only its own.
   const chatScope = (threadId: string) => `chat:${threadId}`;
-  const svc = threadService({ threads, model, proposals, jobs, admin: adminOps, sys: sysOps, recent, now, toolDeadlineMs, abortGraceMs, origin: chatSessionId, photos: (tid, aid) => attachments.read(aid, chatScope(tid)) });
+  const svc = threadService({ threads, model, proposals, jobs, admin: adminOps, sys: sysOps, recent, now, toolDeadlineMs, abortGraceMs, origin: chatSessionId, photos: (tid, aid) => attachments.read(aid, chatScope(tid)), galleries: (tid, g) => display.galleries(chatSessionId(tid), g) });
 
   // The Assistant (docs/assistant.md): one server-owned rolling conversation in its own chunk store, run by the same turn code as
   // chat threads but with a bounded context and no compaction. It does not feed or read the chat threads' rolling note.
@@ -249,6 +250,7 @@ export function buildServer({
     origin: () => assistantSessionId(),
     context: { items: () => planItems(planTurn()), messages: () => planMessages(planTurn()) },
     photos: (_tid, aid) => attachments.read(aid, "assistant"),
+    galleries: (_tid, g) => display.galleries(assistantSessionId(), g),
   });
   // Unsent uploads past their time are removed at start (and before every new upload). Bound photos are never removed.
   try {
@@ -263,6 +265,9 @@ export function buildServer({
   const sessions = sessionRegistry({ adapters: [assistantAdapter(assistant), chatAdapter(threads), workAdapter(work, jobsReader)], jobs: jobsReader, work, now });
   // What photo discovery reads of the conversation stores (src/photo-access.ts): titles, archive state and user messages with photos.
   const photoSources: PhotoSources = { assistant: () => assistant.photoSource(), chat: (tid) => threads.photoSource(tid) };
+  // Galleries photos_show displayed (docs/photo-recall.md): resolved again at every view and every image fetch, under the policy of
+  // the conversation that shows them.
+  const display = photoDisplay({ attachments, sources: photoSources, zone: ZONE });
   // The service that owns a proposal's card: the Assistant's when its card is there, otherwise the chat threads'.
   const cardSvc = (proposalId: string) => (assistant.threadOfCard(proposalId) ? asvc : svc);
 
@@ -312,7 +317,10 @@ export function buildServer({
     createdAt: c.createdAt,
     state: c.state,
     ...(c.context ? { context: c.context } : {}),
-    messages: c.messages.map(({ calls, ...m }) => ({ ...m, ...(calls ? { calls: calls.map(({ output, ...x }) => ({ ...x, outputChars: output.length })) } : {}) })),
+    messages: c.messages.map(({ calls, gallery, ...m }) => {
+      const galleries = gallery?.length ? display.galleries(assistantSessionId(), safeGalleries(gallery)) : undefined;
+      return { ...m, ...(calls ? { calls: calls.map(({ output, ...x }) => ({ ...x, outputChars: output.length })) } : {}), ...(galleries?.length ? { galleries } : {}) };
+    }),
     cards: c.cards.map((card) => ({ ...card, live: asvc.liveOf(card) })),
   });
   const assistantView = () => {
@@ -585,6 +593,39 @@ export function buildServer({
       });
       return res.end(bytes);
     }
+    // ---- Displayed photos (docs/photo-recall.md): GET only, owner only, same-site only. The viewing conversation is the route's, never
+    // a parameter; every fetch re-authorizes the ref under that conversation's policy and re-checks the source and the stored file, so
+    // showing a ref somewhere grants nothing. 404: not visible here (unknown, forged, other conversation, source gone); 410: visible
+    // but its stored file is missing or damaged.
+    const shownRoute = url.pathname.match(/^\/(?:assistant|threads\/([0-9a-f-]{36}))\/photos\/([A-Za-z0-9_]{1,64})$/);
+    if (shownRoute) {
+      const [, threadId, ref] = shownRoute;
+      if (req.method !== "GET") return send(res, 405, { error: "Use GET for this route." });
+      const site = req.headers["sec-fetch-site"];
+      if (site && site !== "same-origin" && site !== "none") {
+        audit("policy", "cross-site", { allow: false, reason: `refused a photo read from ${site}` });
+        return send(res, 403, { error: "Cross-site requests are refused." });
+      }
+      if (!(await owned("attachments", "read"))) return;
+      // Showing another conversation's photo in the Assistant is session reading, as for the photo tools there.
+      if (threadId === undefined && !(await owned("sessions", "read"))) return;
+      if (threadId !== undefined && (!isThreadId(threadId) || !threads.get(threadId))) return send(res, 404, { error: "No thread with that id." });
+      const caller = threadId ? chatSessionId(threadId) : assistantSessionId();
+      const got = isPhotoRef(ref) ? display.fetch(caller, ref!) : ({ ok: false, status: 404 } as const);
+      if (!got.ok) return send(res, got.status, { error: got.status === 410 ? "This photo's stored file is missing or damaged." : "No such photo is visible in this conversation." });
+      res.writeHead(200, {
+        "content-type": "image/jpeg",
+        "content-length": String(got.bytes.length),
+        // Re-authorized on every request: a revoked source must not keep showing from a cache.
+        "cache-control": "private, no-store",
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "default-src 'none'; sandbox",
+        "cross-origin-resource-policy": "same-origin",
+        "content-disposition": 'inline; filename="photo.jpg"',
+      });
+      return res.end(got.bytes);
+    }
+
     // The photos a message names, bound to it before its turn (all or none). Refused before anything is stored when one is unknown,
     // from another conversation, already sent, or more than allowed. `release` undoes the bind when the message was never stored.
     const photosOf = (input: Record<string, unknown>, scope: string): { refs: AttachmentRef[]; release(stored: () => boolean): void } | undefined => {

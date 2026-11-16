@@ -40,6 +40,7 @@ Every route is owner only (`decide("threads", ...)`, 403 for anyone else, checke
 | `POST /threads/:id/archive {archived?}` | Archive (default) or restore with `archived:false`; data is untouched |
 | `POST /threads/:id/messages {text, attachments?}` | Continue: runs one turn and returns the thread (502 plus the thread if the model failed). `attachments`: up to 10 photo ids of this thread; `text` may then be empty (docs/photos.md) |
 | `POST /threads/:id/attachments`, `GET /threads/:id/attachments/:aid` | Upload a processed JPEG into this thread; read one of this thread's photos (docs/photos.md) |
+| `GET /threads/:id/photos/:ref` | A photo shown in one of this thread's galleries (`photos_show`); only this thread's own photos, re-authorized on every request (docs/photo-recall.md) |
 | `POST /threads/notice/ack` | Dismiss the one-time notice for every device |
 | `POST /chat/proposals/:id/confirm|cancel` | Existing routes; they now also settle the card |
 

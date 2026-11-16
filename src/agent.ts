@@ -21,7 +21,10 @@ export type ToolContext = { signal: AbortSignal; media?: MediaGate };
 // transient user message right after this round's tool results (docs/photos.md, "Earlier photos").
 export type ToolImage = { ref: string; label: string; bytes: Buffer };
 export type ToolMedia = { images: ToolImage[] };
-export type ToolResult = Result<unknown> & { media?: ToolMedia };
+// Photos a tool asks to DISPLAY to Rai (photos_show, docs/photo-recall.md): ordered photo refs only. Display is separate from inspection:
+// these never reach the model as images; the conversation stores the refs on the reply and the page loads them through its own route.
+export type ToolDisplay = { refs: string[] };
+export type ToolResult = Result<unknown> & { media?: ToolMedia; display?: ToolDisplay };
 
 // What a tool can see of the reply's image budget. Counts include the photos the request already carries (the current message's,
 // loaded by src/photo-context.ts), so a reply never carries more than the existing per-request bounds.
@@ -135,7 +138,8 @@ export async function runChat(options: {
   fallback?: boolean;
   // Called after each tool call has run, with exactly what the model is about to see. A thread stores it here, call by call,
   // so a later failure cannot lose the calls that already happened. A throw ends the turn.
-  onCall?: (done: { call_id: string; name: string; arguments: string; output: string; record: CallRecord }) => void | Promise<void>;
+  // `display`: the gallery a call asked for, only when it completed in time and this reply admitted it (see `display` below).
+  onCall?: (done: { call_id: string; name: string; arguments: string; output: string; record: CallRecord; display?: ToolDisplay }) => void | Promise<void>;
   // Execution deadline for one tool call (a tool's own `deadlineMs` wins). Tests pass a few milliseconds.
   toolDeadlineMs?: number;
   // How long to wait, after asking an overdue call to stop, to see whether it did.
@@ -147,6 +151,9 @@ export async function runChat(options: {
   // Tool-supplied images (src/photo-access.ts). Absent: no tool may supply images in this reply, and any that one returns are refused.
   // `images`/`bytes`: what the request already carries (the conversation's own photos); `maxImages`/`maxBytes`: the per-request bounds.
   media?: { support: () => ImageSupport; images: number; bytes: number; maxImages: number; maxBytes: number; maxCalls?: number };
+  // Tool-requested galleries (photos_show). Absent: this reply cannot display photos, and a tool's display request is refused.
+  // `maxGalleries`: per reply; a gallery identical to one already shown in this reply is refused rather than shown twice.
+  display?: { maxGalleries: number; maxItems: number };
 }): Promise<ChatOutcome> {
   const { model, limits, notes, tools, allow } = options;
   const maxRounds = options.maxRounds ?? MAX_ROUNDS;
@@ -199,6 +206,19 @@ export async function runChat(options: {
     return undefined;
   };
 
+  // The reply's galleries so far, as ordered ref lists.
+  const galleries: string[] = [];
+  const admitDisplay = (d: ToolDisplay | undefined): string | undefined => {
+    if (!d) return undefined;
+    if (!options.display) return "This conversation cannot display photos, so nothing was shown.";
+    if (!d.refs.length || d.refs.length > options.display.maxItems || new Set(d.refs).size !== d.refs.length) return "The gallery was malformed, so nothing was shown.";
+    const key = JSON.stringify(d.refs);
+    if (galleries.includes(key)) return "This exact gallery is already displayed in this reply, so it was not shown twice. Refer to it by its positions.";
+    if (galleries.length >= options.display.maxGalleries) return `At most ${options.display.maxGalleries} galleries per reply; nothing more was shown. Answer with what is displayed.`;
+    galleries.push(key);
+    return undefined;
+  };
+
   for (let round = 0; ; round++) {
     const capped = round >= maxRounds;
     // At the cap the model gets no tools, so it has to answer with what it has.
@@ -237,6 +257,14 @@ export async function runChat(options: {
       input.push({ type: "function_call", call_id: call.call_id, name: call.name, arguments: call.arguments });
       const ran = await execute(call.name, call.arguments, byName, allow, bound);
       let { output, record } = ran;
+      let display: ToolDisplay | undefined;
+      if (ran.display && !record.interrupted) {
+        const refused = admitDisplay(ran.display);
+        if (refused) {
+          output = JSON.stringify({ ok: false, error: refused, displayed: 0 });
+          record = { ...record, ok: false, summary: refused };
+        } else display = ran.display;
+      }
       if (ran.media && !record.interrupted) {
         const refused = admit(ran.media);
         if (refused) {
@@ -246,7 +274,7 @@ export async function runChat(options: {
       }
       calls.push(record);
       input.push({ type: "function_call_output", call_id: call.call_id, output });
-      await options.onCall?.({ call_id: call.call_id, name: call.name, arguments: call.arguments, output, record });
+      await options.onCall?.({ call_id: call.call_id, name: call.name, arguments: call.arguments, output, record, ...(display ? { display } : {}) });
       // The call that was cut off is on record (above); the turn ends here, exactly once. No later call starts and the model is not
       // asked again, so a call that is still running cannot be followed by more effects in this turn.
       if (record.interrupted) throw new TurnInterrupted(record.interrupted, record, left - 1, interruptedText(record, bound, left - 1));
@@ -287,7 +315,7 @@ async function execute(
   byName: Map<string, ChatTool>,
   allow: ((tool: string) => string | undefined) | undefined,
   bound: Bound,
-): Promise<{ output: string; record: CallRecord; media?: ToolMedia }> {
+): Promise<{ output: string; record: CallRecord; media?: ToolMedia; display?: ToolDisplay }> {
   let args: Record<string, unknown> = {};
   const fail = (error: string) => ({
     output: JSON.stringify({ ok: false, error }),
@@ -359,8 +387,8 @@ async function execute(
     const s = settled!;
     if (!s.ok) return fail(message(s.err));
     // Images travel beside the output, never inside it: the text the model, the thread and the logs get has no image data.
-    const { media, ...value } = s.value;
-    return { ...success(value), ...(media ? { media } : {}) };
+    const { media, display, ...value } = s.value;
+    return { ...success(value), ...(media ? { media } : {}), ...(display ? { display } : {}) };
   }
 
   // Overdue or cancelled: ask the call to stop, then give it a short grace period to show whether it did.
@@ -375,7 +403,8 @@ async function execute(
   if (s?.ok) {
     // It finished after all (inside the grace period): the outcome is known, so it is recorded as it is. Its images are not used: the
     // turn ends here, so no model request follows.
-    const { media: _late, ...value } = s.value;
+    // Nor is a gallery shown: an interrupted call never adds one.
+    const { media: _late, display: _lateDisplay, ...value } = s.value;
     return success(value, { interrupted: why }, { interrupted: why, note: `Completed after ORBIT's ${secs(deadline)} deadline; the turn ended here.` });
   }
   const abort: "requested" | "confirmed" = s ? "confirmed" : "requested";

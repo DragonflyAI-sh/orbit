@@ -80,7 +80,9 @@ export function boundChunk(chunk: ChunkLike, cap: number = ASSISTANT_CHUNK_MAX_C
   const noCalls = clipped.map((m) => {
     if (!m.calls?.length) return m;
     const list = m.calls.map((c) => `${c.name} (${callState(c)})`).join(", ").slice(0, 400);
-    const note = `[ORBIT: ${m.calls.length} tool call(s) of this turn are omitted from the model's context to stay within budget: ${list}. They are stored in full in assistant chunk ${chunk.seq}.]`;
+    // A gallery shown in this turn stays addressable ("the second one") even when its photos_show call is omitted: its ordered refs.
+    const shown = (m.gallery ?? []).map((g, i) => `gallery ${i + 1}: ${g.refs.map((r, j) => `${j + 1}=${r}`).join(", ")}`).join("; ");
+    const note = `[ORBIT: ${m.calls.length} tool call(s) of this turn are omitted from the model's context to stay within budget: ${list}. They are stored in full in assistant chunk ${chunk.seq}.${shown ? ` Photos displayed to Rai in this turn (display only, never seen by the model), by position: ${shown}.` : ""}]`;
     // An errored reply's own text is not sent (as in chat threads); the note is, so the model knows calls happened.
     const text = m.status === "error" || m.status === "interrupted" ? note : `${note}\n${m.text}`;
     return { ...m, calls: [], text, status: "done" as const };

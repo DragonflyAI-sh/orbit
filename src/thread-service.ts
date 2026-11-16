@@ -11,6 +11,9 @@ import { maskContent, maskDeep, maskText, ThreadError } from "./threads.ts";
 import { maskVaultText } from "./vault/filter.ts";
 import type { AttachmentRef } from "./attachments.ts";
 import { hasPhotos, MODEL_IMAGE_BYTES_MAX, MODEL_IMAGES_MAX, withoutPhotos, withPhotos } from "./photo-context.ts";
+import type { GalleryView } from "./photo-access.ts";
+import { GALLERIES_PER_MESSAGE_MAX, GALLERY_ITEMS_MAX, safeGalleries } from "./photo-ref.ts";
+import type { StoredGallery } from "./photo-ref.ts";
 import type { Card, CardState, StoredCall, Thread, ThreadMessage, Threads } from "./threads.ts";
 
 // Runs one chat turn against a stored thread and shapes threads for the page. The server owns the policy checks and the
@@ -31,7 +34,8 @@ export type TurnPrep = {
 
 export type Live = { source: "jobs" | "ops-admin" | "ops-sys"; found: boolean; state?: string; health?: string; detail?: string; url?: string; delivered?: boolean };
 export type CardView = Card & { live?: Live };
-export type MessageView = Omit<ThreadMessage, "calls"> & { calls?: (Omit<StoredCall, "output"> & { outputChars: number })[] };
+// `galleries`: the message's stored galleries resolved for the page now (docs/photo-recall.md); the stored refs themselves are not sent.
+export type MessageView = Omit<ThreadMessage, "calls" | "gallery"> & { calls?: (Omit<StoredCall, "output"> & { outputChars: number })[]; galleries?: GalleryView[] };
 // summaryUnusable: a summary is stored but has no usable text, so it is not used and the full thread is sent instead.
 export type ThreadView = Omit<Thread, "messages" | "cards"> & { messages: MessageView[]; cards: CardView[]; busy: boolean; summaryUnusable?: true };
 
@@ -76,6 +80,9 @@ export function threadService(d: {
   // The processed bytes of one photo of a thread of this store, or undefined (docs/photos.md). Each store passes a loader bound to its
   // own conversation scope, so a request is only ever given photos of the conversation it belongs to. Absent: no photos are loaded.
   photos?: (threadId: string, attachmentId: string) => Buffer | undefined;
+  // Resolves a message's stored galleries for the page, under the policy of the conversation that shows them (src/photo-access.ts
+  // photoDisplay). Present: photos_show may display galleries in this store's replies. Absent: display is refused.
+  galleries?: (threadId: string, stored: StoredGallery[] | undefined) => GalleryView[] | undefined;
 }) {
   const { threads, model, proposals, jobs, admin, sys, recent } = d;
   const now = d.now ?? (() => new Date());
@@ -121,7 +128,10 @@ export function threadService(d: {
       ...t,
       busy: threads.isBusy(id),
       ...(summaryUnusable(t) ? { summaryUnusable: true as const } : {}),
-      messages: t.messages.map(({ calls, ...m }): MessageView => ({ ...m, ...(calls ? { calls: calls.map(({ output, ...c }) => ({ ...c, outputChars: output.length })) } : {}) })),
+      messages: t.messages.map(({ calls, gallery, ...m }): MessageView => {
+        const galleries = gallery?.length ? d.galleries?.(id, safeGalleries(gallery)) : undefined;
+        return { ...m, ...(calls ? { calls: calls.map(({ output, ...c }) => ({ ...c, outputChars: output.length })) } : {}), ...(galleries?.length ? { galleries } : {}) };
+      }),
       cards: t.cards.map((c) => ({ ...c, live: liveOf(c) })),
     };
   }
@@ -216,6 +226,9 @@ export function threadService(d: {
       carried = { images: plan.sent, bytes: plan.sentBytes };
       return plan.items;
     };
+    // Galleries shown in this reply (photos_show), in order; written to the reply as each call completes, so a refresh mid-turn or a
+    // later failure keeps the ones already shown. Keyed by call id: a call recorded twice never adds a second gallery.
+    const shownGalleries: StoredGallery[] = [];
     try {
       let reply: string;
       let provenance: "live" | "mock";
@@ -246,13 +259,18 @@ export function threadService(d: {
             maxImages: MODEL_IMAGES_MAX,
             maxBytes: MODEL_IMAGE_BYTES_MAX,
           },
-          onCall: ({ call_id, name, arguments: args, output, record }) => {
+          ...(d.galleries ? { display: { maxGalleries: GALLERIES_PER_MESSAGE_MAX, maxItems: GALLERY_ITEMS_MAX } } : {}),
+          onCall: ({ call_id, name, arguments: args, output, record, display }) => {
             // Only the turn that holds the thread writes to it.
             if (!threads.holds(id, token)) throw new Error("This turn no longer holds the thread.");
             threads.addCall(id, mid, { callId: call_id, name, arguments: args, output, ok: record.ok, provenance: record.provenance, source: record.source, summary: record.summary, at: now().toISOString(), ...(record.interrupted ? { interrupted: record.interrupted } : {}), ...(record.abort ? { abort: record.abort } : {}), ...(record.outcomeUnknown ? { outcomeUnknown: true } : {}) });
             const pid = proposalIdOf(output);
             const p = pid ? proposals.peek(pid) : undefined;
             if (p && (!d.origin || proposals.bind(p.id, d.origin(id)))) threads.addCard(id, mid, cardOf(p));
+            if (display && d.galleries && !shownGalleries.some((g) => g.callId === call_id)) {
+              shownGalleries.push({ v: 1, callId: call_id, at: now().toISOString(), refs: display.refs.slice(0, GALLERY_ITEMS_MAX) });
+              threads.patchMessage(id, mid, { gallery: [...shownGalleries] });
+            }
           },
         });
         reply = outcome.text || "(the model returned no text)";
