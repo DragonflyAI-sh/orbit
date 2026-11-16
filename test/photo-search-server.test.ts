@@ -53,19 +53,19 @@ function serverRig(semantic: { embedder: Embedder | undefined } | undefined) {
     return ((await res.json()) as any).attachment.id as string;
   };
   // Rai sends a photo in a new thread; the scripted model saves what it "saw" (it was really sent the photo), then answers.
-  const photoWithObservation = async (title: string, caption: string, observation: string, seed: number) => {
+  const photoWithObservation = async (title: string, caption: string, observation: string, seed: number, scope = "what is in this photo") => {
     const th = await r.create(title);
     const id = await upload(`/threads/${th.id}/attachments`, smallJpeg(seed, 48, 32));
     const ref = photoRef(id);
-    p.scripts.push(() => ({ name: "photos_observe", args: { ref, scope: "what is in this photo", observations: [observation], limitations: null, supersedes: null } }), () => ({ text: "Noted." }));
+    p.scripts.push(() => ({ name: "photos_observe", args: { ref, scope, observations: [observation], limitations: null, supersedes: null } }), () => ({ text: "Noted." }));
     const res = await r.api(`/threads/${th.id}/messages`, "POST", { text: caption, attachments: [id] });
     assert.equal(res.status, 200, JSON.stringify(res.data));
     assert.equal(photoObservations.records(ref).length, 1);
     return { th, ref };
   };
-  const search = async (path: string, query: string) => {
+  const search = async (path: string, query: string, includeArchived: boolean | null = null) => {
     let out: any;
-    p.scripts.push(() => ({ name: "photos_search", args: { query, includeArchived: null } }), (body) => ((out = lastOutput(body)), { text: "Here are the candidates." }));
+    p.scripts.push(() => ({ name: "photos_search", args: { query, includeArchived } }), (body) => ((out = lastOutput(body)), { text: "Here are the candidates." }));
     const res = await r.api(path, "POST", { text: `Find ${query}` });
     assert.equal(res.status, 200, JSON.stringify(res.data));
     return out;
@@ -181,5 +181,35 @@ test("discussion context: Rai's follow-up is labelled context; assistant replies
   const b = await r.photoWithObservation("Walk", "walk", "A path through trees", 5);
   const own = (await r.search(`/threads/${b.th.id}/messages`, "noted giraffe")).result;
   assert.equal(own.noMatch, true, JSON.stringify(own));
+  r.close();
+});
+
+test("an observation's scope (the question asked) is never evidence: only the statements match, in keyword-only and hybrid modes", async () => {
+  for (const embedder of [undefined, lexicalStandIn()]) {
+    const r = serverRig({ embedder });
+    const a = await r.photoWithObservation("Errands", "front step", "A red front door and a potted plant", 11, "whether a bicycle is in the photo");
+    const q = (await r.search("/assistant/messages", "bicycle")).result;
+    assert.equal(q.noMatch, true, JSON.stringify(q.candidates));
+    assert.equal(q.candidates.length, 0);
+    // The record itself is still used: its statements match.
+    const hit = (await r.search("/assistant/messages", "potted plant")).result;
+    assert.equal(hit.candidates[0].ref, a.ref);
+    const e = hit.candidates[0].evidence.find((x: any) => x.kind === "visual-observation");
+    assert.ok(e, JSON.stringify(hit.candidates[0]));
+    assert.doesNotMatch(e.snippet, /bicycle/);
+    r.close();
+  }
+});
+
+test("archived threads: their photos are hidden and counted unless includeArchived is true, under the same policy", async () => {
+  const r = serverRig({ embedder: undefined });
+  const a = await r.photoWithObservation("Old trip", "harbour", "A lighthouse on a rocky point", 13);
+  await r.api(`/threads/${a.th.id}/archive`, "POST", { archived: true });
+  const hidden = (await r.search("/assistant/messages", "lighthouse")).result;
+  assert.equal(hidden.noMatch, true);
+  assert.equal(hidden.coverage.archivedThreadPhotosHidden, 1);
+  const shown = (await r.search("/assistant/messages", "lighthouse", true)).result;
+  assert.equal(shown.candidates[0].ref, a.ref);
+  assert.equal(shown.candidates[0].conversation.archived, true);
   r.close();
 });
