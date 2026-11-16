@@ -647,7 +647,8 @@ test("schemas: photos_show is strict with a required bounded refs list; photos_l
   const text = instructions([], undefined, defs.map((d) => `${d.name}: ${d.description}`));
   assert.match(text, /matches captions and conversation titles only, never what a photo shows/);
   assert.match(text, /photos_show sends you no image/);
-  assert.match(text, /Saved visual observations and topic extraction do not exist yet/);
+  // Milestone 2 replaced "saved visual observations do not exist yet": only search by content is still missing.
+  assert.match(text, /Searching by what photos show \(topic or observation search\) does not exist yet/);
   // A text-only setup gets none of it.
   assert.doesNotMatch(instructions([], undefined, []), /photos_show/);
 });

@@ -48,6 +48,8 @@ import { AttachmentError, attachmentStore, isAttachmentId, MAX_ATTACHMENTS_PER_M
 import { PHOTO_TOOL_NAMES, photoDisplay, photoTools } from "./photo-access.ts";
 import { isPhotoRef, safeGalleries } from "./photo-ref.ts";
 import type { PhotoSources } from "./photo-access.ts";
+import { observationStore, observationTools } from "./photo-observations.ts";
+import type { ObservationSources, ObservationStore } from "./photo-observations.ts";
 import { ZONE } from "./time.ts";
 import type { AttachmentRef, Attachments } from "./attachments.ts";
 import { JPEG_MAX_BYTES, normalizeJpeg } from "./jpeg.ts";
@@ -100,6 +102,8 @@ export type Deps = {
   workSessions?: WorkSessions;
   // Private photo attachments (src/attachments.ts, docs/photos.md), kept in <state>/attachments. Absent means memory only.
   attachments?: Attachments;
+  // Saved photo observations (src/photo-observations.ts, docs/photo-recall.md), kept in <state>/photo-observations. Absent means memory only.
+  photoObservations?: ObservationStore;
   // The clock for thread cards and the recent-context note. Tests inject one; it must be the clock the proposals use.
   now?: () => Date;
   // Chat tool execution deadline and abort grace period (docs/tool-deadlines.md). Tests lower them; production uses the defaults.
@@ -174,6 +178,7 @@ export function buildServer({
   assistantDir,
   workSessions: workArg,
   attachments = attachmentStore(undefined),
+  photoObservations = observationStore(undefined),
   recentContext: recentPort = stateRecentContext(jsonStore(undefined, "recent-context", null)),
   now,
   toolDeadlineMs,
@@ -265,6 +270,11 @@ export function buildServer({
   const sessions = sessionRegistry({ adapters: [assistantAdapter(assistant), chatAdapter(threads), workAdapter(work, jobsReader)], jobs: jobsReader, work, now });
   // What photo discovery reads of the conversation stores (src/photo-access.ts): titles, archive state and user messages with photos.
   const photoSources: PhotoSources = { assistant: () => assistant.photoSource(), chat: (tid) => threads.photoSource(tid) };
+  // Where saved photo observations came from (src/photo-observations.ts): the conversation must still exist and hold the message.
+  const observationSources: ObservationSources = {
+    ...photoSources,
+    message: (conversation, messageId) => (conversation === "assistant:assistant" ? assistant.messageState(messageId) : /^chat:/.test(conversation) ? threads.messageState(conversation.slice(5), messageId) : "gone"),
+  };
   // Galleries photos_show displayed (docs/photo-recall.md): resolved again at every view and every image fetch, under the policy of
   // the conversation that shows them.
   const display = photoDisplay({ attachments, sources: photoSources, zone: ZONE });
@@ -373,7 +383,7 @@ export function buildServer({
     }
     const current = limits(isOwner);
     const offered = isOwner && model.step
-      ? [...refuseLegacyContext(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }) : [])]
+      ? [...refuseLegacyContext(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? [...photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...observationTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE })] : [])]
       : [];
     if (!offered.length) {
       current.push(

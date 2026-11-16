@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { runChat, TurnInterrupted } from "./agent.ts";
 import type { ChatTool, Proposal, Proposals } from "./agent.ts";
 import type { Jobs } from "./jobs.ts";
@@ -11,6 +12,7 @@ import { maskContent, maskDeep, maskText, ThreadError } from "./threads.ts";
 import { maskVaultText } from "./vault/filter.ts";
 import type { AttachmentRef } from "./attachments.ts";
 import { hasPhotos, MODEL_IMAGE_BYTES_MAX, MODEL_IMAGES_MAX, withoutPhotos, withPhotos } from "./photo-context.ts";
+import { photoRef } from "./photo-access.ts";
 import type { GalleryView } from "./photo-access.ts";
 import { GALLERIES_PER_MESSAGE_MAX, GALLERY_ITEMS_MAX, safeGalleries } from "./photo-ref.ts";
 import type { StoredGallery } from "./photo-ref.ts";
@@ -198,7 +200,7 @@ export function threadService(d: {
     // Older context is summarized first, so the model call below is within budget. A failure here never blocks the reply.
     // Only a chat thread store compacts (the Assistant passes compact: false and never reaches this with its own store).
     if (d.compact !== false) await compactThread({ threads: threads as Threads, model, id, now, budget: d.budget }).catch(() => {});
-    threads.appendUser(id, text, prep.attachments);
+    const userMessage = threads.appendUser(id, text, prep.attachments).id;
     const mid = threads.beginAssistant(id);
     const t = threads.get(id)!;
     const notes = [prep.notes, await recent?.note(), summaryNote(t), t.cards.length ? dataBlock("proposal-cards", `Proposal cards in this thread, from ORBIT's records:\n${(d.maxCardLines ? cardLines(t).slice(-d.maxCardLines) : cardLines(t)).join("\n")}`) : undefined].filter(Boolean).join("\n\n") || undefined;
@@ -208,6 +210,8 @@ export function threadService(d: {
     let photosSent = false;
     // What the request already carries, so photos a tool supplies later in this reply stay within the same per-request bounds.
     let carried = { images: 0, bytes: 0 };
+    // The photos this request really carries as image input, with the SHA-256 of the bytes sent (docs/photo-recall.md, "Evidence").
+    let delivered: { ref: string; sha256: string }[] = [];
     const photoInput = <T extends Item>(items: T[]): T[] => {
       if (!hasPhotos(items)) return items;
       const support = model.images?.() ?? { ok: false, detail: "the connected model does not take photos" };
@@ -219,11 +223,21 @@ export function threadService(d: {
         if (stripped.removed) photoNotes.push(`The model answered without seeing ${stripped.removed} earlier photo(s): ${why}.`);
         return stripped.items;
       }
-      const plan = withPhotos(items, (aid) => d.photos?.(id, aid));
+      const hashes = new Map<string, string>();
+      const plan = withPhotos(
+        items,
+        (aid) => {
+          const b = d.photos?.(id, aid);
+          if (b) hashes.set(aid, createHash("sha256").update(b).digest("hex"));
+          return b;
+        },
+        { refOf: photoRef },
+      );
       if (plan.currentMissing) throw new PhotoRefusal(`${plan.currentMissing} photo(s) of this message could not be loaded from ORBIT's storage, so nothing was sent to the model.`);
       if (plan.missing) photoNotes.push(`${plan.missing} earlier photo(s) could not be loaded from storage and were not sent.`);
       photosSent = hasPhotos(plan.items);
       carried = { images: plan.sent, bytes: plan.sentBytes };
+      delivered = plan.items.flatMap((it) => ("role" in it && it.images ? it.images.filter((img) => img.data && hashes.has(img.id)).map((img) => ({ ref: photoRef(img.id), sha256: hashes.get(img.id)! })) : []));
       return plan.items;
     };
     // Galleries shown in this reply (photos_show), in order; written to the reply as each call completes, so a refresh mid-turn or a
@@ -260,10 +274,14 @@ export function threadService(d: {
             maxBytes: MODEL_IMAGE_BYTES_MAX,
           },
           ...(d.galleries ? { display: { maxGalleries: GALLERIES_PER_MESSAGE_MAX, maxItems: GALLERY_ITEMS_MAX } } : {}),
+          // The turn's identity, from this service's own records (never model text): what photo observations are attributed to.
+          ...(d.origin ? { turn: { conversation: d.origin(id), replyMessage: mid, userMessage, model: model.status().impl }, delivered } : {}),
           onCall: ({ call_id, name, arguments: args, output, record, display }) => {
             // Only the turn that holds the thread writes to it.
             if (!threads.holds(id, token)) throw new Error("This turn no longer holds the thread.");
-            threads.addCall(id, mid, { callId: call_id, name, arguments: args, output, ok: record.ok, provenance: record.provenance, source: record.source, summary: record.summary, at: now().toISOString(), ...(record.interrupted ? { interrupted: record.interrupted } : {}), ...(record.abort ? { abort: record.abort } : {}), ...(record.outcomeUnknown ? { outcomeUnknown: true } : {}) });
+            // A tool may keep its arguments and output out of the transcript (photo observations): the stub is what is stored and replayed.
+            const kept = prep.tools.find((t) => t.name === name)?.transcript?.({ arguments: args, output, summary: record.summary, ok: record.ok }) ?? { arguments: args, output, summary: record.summary };
+            threads.addCall(id, mid, { callId: call_id, name, arguments: kept.arguments, output: kept.output, ok: record.ok, provenance: record.provenance, source: record.source, summary: kept.summary, at: now().toISOString(), ...(record.interrupted ? { interrupted: record.interrupted } : {}), ...(record.abort ? { abort: record.abort } : {}), ...(record.outcomeUnknown ? { outcomeUnknown: true } : {}) });
             const pid = proposalIdOf(output);
             const p = pid ? proposals.peek(pid) : undefined;
             if (p && (!d.origin || proposals.bind(p.id, d.origin(id)))) threads.addCard(id, mid, cardOf(p));

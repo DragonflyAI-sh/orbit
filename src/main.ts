@@ -33,6 +33,7 @@ import { decide } from "./policy.ts";
 import { jsonStore } from "./store.ts";
 import { threadStore } from "./threads.ts";
 import { attachmentStore } from "./attachments.ts";
+import { observationStore } from "./photo-observations.ts";
 import { workFile, workSessions } from "./work-sessions.ts";
 import { join } from "node:path";
 import { watcher } from "./watch.ts";
@@ -190,6 +191,8 @@ buildServer({
   assistantDir: stateDir ? join(stateDir, "assistant") : undefined,
   // Private photo attachments: <state>/attachments (docs/photos.md). Without a state directory they are kept in memory only.
   attachments: attachmentStore(stateDir ? join(stateDir, "attachments") : undefined),
+  // Saved photo observations: <state>/photo-observations (docs/photo-recall.md). Without a state directory they are kept in memory only.
+  photoObservations: observationStore(stateDir ? join(stateDir, "photo-observations") : undefined),
   // Work sessions and run links: <state>/work-sessions.json (docs/adr/0002-work-sessions.md).
   workSessions: workSessions(workFile(stateDir)),
   vaultEdits,
