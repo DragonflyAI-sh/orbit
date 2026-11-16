@@ -473,7 +473,7 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
     // Read-only photo discovery (src/photo-access.ts): the user messages with photos in the active chunks (memory only, no file read).
     // Archived chunks are not read here, so a photo sent in an archived chunk has no resolved message (`archivedChunks` says how many).
     photoSource(): { messages: PhotoMessage[]; archivedChunks: number } {
-      return { messages: sortedActive().flatMap((c) => photoMessagesOf(Array.isArray(c.messages) ? c.messages : [])), archivedChunks: archived.length };
+      return { messages: photoMessagesOf(sortedActive().flatMap((c) => (Array.isArray(c.messages) ? c.messages : []))), archivedChunks: archived.length };
     },
     // Whether an Assistant message still exists (photo observation sources, src/photo-observations.ts). Active chunks are in memory;
     // archived chunks are not read here, so a message not found while archived chunks exist is "archived" (kept, not re-read).

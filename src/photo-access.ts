@@ -5,7 +5,7 @@ import { GALLERY_ITEMS_MAX, isPhotoRef, PHOTO_REF_CONTRACT } from "./photo-ref.t
 import type { StoredGallery } from "./photo-ref.ts";
 import type { AttachmentMeta, Attachments } from "./attachments.ts";
 import { isThreadId } from "./threads.ts";
-import type { PhotoMessage } from "./threads.ts";
+import type { PhotoContextMessage, PhotoMessage } from "./threads.ts";
 import { untrustedText } from "./sessions.ts";
 import { zonedToUtc } from "./time.ts";
 
@@ -24,14 +24,15 @@ import { zonedToUtc } from "./time.ts";
 // chat thread, or an active Assistant chunk) still referenced by its message. A ref that is unknown, forged, from a conversation this
 // caller may not read, or whose source is gone answers the same "not found", so nothing about other conversations leaks.
 
-// Every photo tool, for the policy check (src/server.ts allowAgent). The observation tools are defined in src/photo-observations.ts.
-export const PHOTO_TOOL_NAMES = ["photos_list", "photos_inspect", "photos_show", "photos_observe", "photos_recall", "photos_correct", "photos_forget"] as const;
+// Every photo tool, for the policy check (src/server.ts allowAgent). The observation tools are defined in src/photo-observations.ts,
+// photos_search in src/photo-search.ts.
+export const PHOTO_TOOL_NAMES = ["photos_list", "photos_search", "photos_inspect", "photos_show", "photos_observe", "photos_recall", "photos_correct", "photos_forget"] as const;
 export const PHOTO_LIST_LIMIT_DEFAULT = 10;
 export const PHOTO_LIST_LIMIT_MAX = 25;
 export const PHOTO_RANGE_DAYS_MAX = 31;
 export const PHOTO_INSPECT_REFS_MAX = 10;
 export const PHOTO_CAPTION_MAX = 280;
-const TITLE_MAX = 100;
+export const TITLE_MAX = 100;
 const DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const CURSOR_MAX = 400;
 // What one photos_list answer may use of the tool-output limit (src/agent.ts clips longer outputs, which would cut nextCursor): a page
@@ -74,10 +75,10 @@ export const localBlock = (detail: string) => {
   const d = detail.replace(/[.\s]+$/, "");
   return /^ORBIT blocked the (photos|images) locally/.test(d) ? d : `ORBIT blocked the photos locally, before any request: ${d}`;
 };
-const scopeOfSession = (session: string): string | undefined => (session === "assistant:assistant" ? "assistant" : /^chat:/.test(session) && isThreadId(session.slice(5)) ? session : undefined);
+export const scopeOfSession = (session: string): string | undefined => (session === "assistant:assistant" ? "assistant" : /^chat:/.test(session) && isThreadId(session.slice(5)) ? session : undefined);
 
 // ---- time ------------------------------------------------------------------------------------------------------------------------
-const validZone = (zone: string) => {
+export const validZone = (zone: string) => {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: zone });
     return true;
@@ -140,22 +141,22 @@ export function dayWindow(a: { day?: unknown; from?: unknown; to?: unknown }, no
 }
 
 // ---- resolving a photo to its source ---------------------------------------------------------------------------------------------
-type Located = {
+export type Located = {
   meta: AttachmentMeta;
   ref: string;
   sentAt: string;
   conversation: { id: string; kind: "assistant" | "chat"; title: string; archived: boolean };
-  message: { id: string; at: string; photo: number; of: number; caption: string } | null;
+  message: { id: string; at: string; photo: number; of: number; caption: string; context: PhotoContextMessage[] } | null;
   messageNote?: string;
 };
 
-function resolver(sources: PhotoSources) {
+export function resolver(sources: PhotoSources) {
   let assistant: ReturnType<PhotoSources["assistant"]> | undefined;
   const chats = new Map<string, ReturnType<PhotoSources["chat"]> | null>();
   const find = (messages: PhotoMessage[], id: string) => {
     for (const m of messages) {
       const i = m.ids.indexOf(id);
-      if (i >= 0) return { id: m.id, at: m.at, photo: i + 1, of: m.ids.length, caption: m.text };
+      if (i >= 0) return { id: m.id, at: m.at, photo: i + 1, of: m.ids.length, caption: m.text, context: m.context ?? [] };
     }
     return undefined;
   };
@@ -267,9 +268,9 @@ export function photoDisplay(d: { attachments: Attachments; sources: PhotoSource
 export type PhotoDisplay = ReturnType<typeof photoDisplay>;
 
 // Newest first; within one message, in the order it was sent; then by ref, so the order is total and stable while paging.
-type Key = { s: string; c: string; p: number; r: string };
-const keyOf = (l: Located): Key => ({ s: l.sentAt, c: l.conversation.id, p: l.message?.photo ?? 0, r: l.ref });
-const cmp = (a: Key, b: Key) => (a.s !== b.s ? (a.s < b.s ? 1 : -1) : a.c !== b.c ? (a.c < b.c ? -1 : 1) : a.p !== b.p ? a.p - b.p : a.r < b.r ? -1 : a.r > b.r ? 1 : 0);
+export type Key = { s: string; c: string; p: number; r: string };
+export const keyOf = (l: Located): Key => ({ s: l.sentAt, c: l.conversation.id, p: l.message?.photo ?? 0, r: l.ref });
+export const cmp = (a: Key, b: Key) => (a.s !== b.s ? (a.s < b.s ? 1 : -1) : a.c !== b.c ? (a.c < b.c ? -1 : 1) : a.p !== b.p ? a.p - b.p : a.r < b.r ? -1 : a.r > b.r ? 1 : 0);
 
 const strictKeys = (a: Record<string, unknown>, allowed: string[]) => {
   const extra = Object.keys(a).filter((k) => !allowed.includes(k));
@@ -286,14 +287,14 @@ export const PHOTO_QUERY_CHARS_MAX = 200;
 export const PHOTO_QUERY_TERMS_MAX = 8;
 export const PHOTO_SEARCH_NOT_AVAILABLE = [
   "search of what the photos show (image content is never searched or inferred)",
-  "search over saved visual observations (milestone 3, not built: photos_recall reads the saved observations of photos you name by ref)",
+  "search over saved visual observations, Rai's corrections and nearby conversation messages (that is photos_search, a separate tool; photos_list matches captions and titles only)",
   "semantic topic extraction (only literal words in captions and titles match)",
   "user labels or tags (ORBIT has none)",
   "capture dates or places (EXIF and GPS are removed before upload; only ORBIT's own send and upload times exist)",
 ];
 export const NO_MATCH =
   "No caption or conversation title matched these words in this window. This only says that no stored text matched: it says nothing about what the photos show, because image content is not searched. Try other words, a wider date range, or list by date.";
-const fold = (s: string) => s.normalize("NFKD").replace(/\p{M}+/gu, "").toLowerCase();
+export const fold = (s: string) => s.normalize("NFKD").replace(/\p{M}+/gu, "").toLowerCase();
 export function queryTerms(q: unknown): string[] {
   if (typeof q !== "string") throw new Error("query must be a string of words to find in captions and conversation titles.");
   if (q.length > PHOTO_QUERY_CHARS_MAX) throw new Error(`query is at most ${PHOTO_QUERY_CHARS_MAX} characters: pass a few distinctive words.`);
@@ -330,6 +331,19 @@ export function listArgs(raw: Record<string, unknown>) {
   return a;
 }
 
+// The time zone "today" means. The owner's configured zone; a zone Rai names explicitly wins. No zone at all (left out, null or
+// blank, see listArgs) is never replaced by the server's clock zone: without a usable configured zone the tool asks instead.
+export function ownerZone(given: unknown, configured: string | undefined): { zone: string; source: string } {
+  if (given !== undefined) {
+    if (typeof given !== "string") throw new Error("timezone must be a string: an IANA time zone name such as America/Los_Angeles, or left out (or null) for Rai's configured zone.");
+    if (!validZone(given)) throw new Error("timezone must be an IANA time zone name such as America/Los_Angeles, or left out (or null) for Rai's configured zone.");
+    return { zone: given, source: "named in this call" };
+  }
+  if (!configured) throw new Error("No owner time zone is configured, so ORBIT will not guess what today means. Ask Rai which time zone to use and pass it as timezone.");
+  if (!validZone(configured)) throw new Error("ORBIT's configured owner time zone is not a valid IANA zone, so ORBIT will not guess what today means. Ask Rai which time zone to use and pass it as timezone.");
+  return { zone: configured, source: "ORBIT's configured owner time zone (src/time.ts ZONE, the zone schedules and quiet hours use)" };
+}
+
 // ---- tools -----------------------------------------------------------------------------------------------------------------------
 export function photoTools(d: { attachments: Attachments; sources: PhotoSources; caller: string; isOwner: boolean; now?: () => Date; zone?: string }): ChatTool[] {
   const now = d.now ?? (() => new Date());
@@ -337,18 +351,7 @@ export function photoTools(d: { attachments: Attachments; sources: PhotoSources;
   const owner = () => {
     if (!d.isOwner) throw new Error("Photos are refused: only the owner can list or inspect photos.");
   };
-  // The time zone "today" means. The owner's configured zone; a zone Rai names explicitly wins. No zone at all (left out, null or
-  // blank, see listArgs) is never replaced by the server's clock zone: without a usable configured zone the tool asks instead.
-  const zoneOf = (given: unknown) => {
-    if (given !== undefined) {
-      if (typeof given !== "string") throw new Error("timezone must be a string: an IANA time zone name such as America/Los_Angeles, or left out (or null) for Rai's configured zone.");
-      if (!validZone(given)) throw new Error("timezone must be an IANA time zone name such as America/Los_Angeles, or left out (or null) for Rai's configured zone.");
-      return { zone: given, source: "named in this call" };
-    }
-    if (!d.zone) throw new Error("No owner time zone is configured, so ORBIT will not guess what today means. Ask Rai which time zone to use and pass it as timezone.");
-    if (!validZone(d.zone)) throw new Error("ORBIT's configured owner time zone is not a valid IANA zone, so ORBIT will not guess what today means. Ask Rai which time zone to use and pass it as timezone.");
-    return { zone: d.zone, source: "ORBIT's configured owner time zone (src/time.ts ZONE, the zone schedules and quiet hours use)" };
-  };
+  const zoneOf = (given: unknown) => ownerZone(given, d.zone);
   const visible = (includeArchived: boolean, only?: string) => {
     const locate = resolver(d.sources);
     const out: Located[] = [];
@@ -373,7 +376,7 @@ export function photoTools(d: { attachments: Attachments; sources: PhotoSources;
       name: "photos_list",
       readOnly: true,
       strict: true,
-      description: `Find photos Rai already sent, by conversation and date, without loading them. ${policy.crossConversation ? "In the Assistant this covers the Assistant and every chat thread." : "In a chat thread this covers only this thread; other conversations are reachable from the Assistant."} Every argument is optional: leave it out or pass null for its default; {} lists today's photos. Days are in Rai's configured time zone: pass timezone only if he names another zone, otherwise leave it out or null (never guess one). day: today (default), yesterday or YYYY-MM-DD; or from/to (YYYY-MM-DD, inclusive, at most ${PHOTO_RANGE_DAYS_MAX} days), not both. Newest first, ${PHOTO_LIST_LIMIT_DEFAULT} per page (at most ${PHOTO_LIST_LIMIT_MAX}); pass nextCursor back exactly, with the same other arguments, to continue. Returns stable refs, times, the source conversation and message, and the caption (the message text). query: a few distinctive words to find in captions and conversation titles (every word must match; with no day or range it searches every date); each result says which words matched where. That is a text match of stored metadata, not a search of what photos show, and no match does not mean no such photo. Metadata only: it does not let you see any photo. To show photos to Rai, call photos_show; to look at them yourself, photos_inspect. Read-only.`,
+      description: `Find photos Rai already sent, by conversation and date, without loading them. ${policy.crossConversation ? "In the Assistant this covers the Assistant and every chat thread." : "In a chat thread this covers only this thread; other conversations are reachable from the Assistant."} Every argument is optional: leave it out or pass null for its default; {} lists today's photos. Days are in Rai's configured time zone: pass timezone only if he names another zone, otherwise leave it out or null (never guess one). day: today (default), yesterday or YYYY-MM-DD; or from/to (YYYY-MM-DD, inclusive, at most ${PHOTO_RANGE_DAYS_MAX} days), not both. Newest first, ${PHOTO_LIST_LIMIT_DEFAULT} per page (at most ${PHOTO_LIST_LIMIT_MAX}); pass nextCursor back exactly, with the same other arguments, to continue. Returns stable refs, times, the source conversation and message, and the caption (the message text). query: a few distinctive words to find in captions and conversation titles (every word must match; with no day or range it searches every date); each result says which words matched where. That is a text match of stored metadata, not a search of what photos show, and no match does not mean no such photo. To also search saved observations, Rai's corrections and his nearby messages, use photos_search. Metadata only: it does not let you see any photo. To show photos to Rai, call photos_show; to look at them yourself, photos_inspect. Read-only.`,
       parameters: {
         type: "object",
         properties: {
@@ -490,7 +493,7 @@ export function photoTools(d: { attachments: Attachments; sources: PhotoSources;
       readOnly: true,
       // Its one argument is required, so the strict schema is the same schema.
       strict: true,
-      description: `Look at stored photos: loads the photos with these refs (from photos_list, at most ${PHOTO_INSPECT_REFS_MAX}) and supplies them to you as real image input right after the tool results, in the order given, each after a source label. Only the photos this result lists as supplied are visible to you, and only in this reply; in a later reply call it again. Bounded per reply by ORBIT's photo limits (the photos already in this request count). It is refused or blocked when the model cannot take photos; it never describes a photo itself. If photos_recall already holds observations that answer the question, use them instead, unless a new detail is needed or Rai asks you to look again. After looking, save what you saw with photos_observe. Read-only.`,
+      description: `Look at stored photos: loads the photos with these refs (from photos_list or photos_search, at most ${PHOTO_INSPECT_REFS_MAX}) and supplies them to you as real image input right after the tool results, in the order given, each after a source label. Only the photos this result lists as supplied are visible to you, and only in this reply; in a later reply call it again. Bounded per reply by ORBIT's photo limits (the photos already in this request count). It is refused or blocked when the model cannot take photos; it never describes a photo itself. If photos_recall already holds observations that answer the question, use them instead, unless a new detail is needed or Rai asks you to look again. After looking, save what you saw with photos_observe. Read-only.`,
       parameters: {
         type: "object",
         properties: { refs: { type: "array", items: { type: "string" }, minItems: 1, maxItems: PHOTO_INSPECT_REFS_MAX, description: "Photo refs exactly as photos_list returned them, in the order to show them." } },
@@ -574,7 +577,7 @@ export function photoTools(d: { attachments: Attachments; sources: PhotoSources;
       readOnly: true,
       // Its one argument is required, so the strict schema is the same schema.
       strict: true,
-      description: `Show stored photos to Rai: displays the photos with these refs (from photos_list or an earlier gallery, at most ${GALLERY_ITEMS_MAX}, in the order given) as a gallery under your reply in this conversation, loaded from ORBIT's private storage. Display only: it sends NO image to you and does not let you see them, so never describe a photo you only showed; use photos_inspect to look. The result numbers the gallery from 1, so "the second one" later means position 2 of that gallery: show or inspect it again by its ref. ${policy.crossConversation ? "In the Assistant this can show photos of the Assistant and every chat thread." : "In a chat thread this shows only this thread's own photos; other conversations are reachable from the Assistant."} Read-only.`,
+      description: `Show stored photos to Rai: displays the photos with these refs (from photos_list, photos_search or an earlier gallery, at most ${GALLERY_ITEMS_MAX}, in the order given) as a gallery under your reply in this conversation, loaded from ORBIT's private storage. Display only: it sends NO image to you and does not let you see them, so never describe a photo you only showed; use photos_inspect to look. The result numbers the gallery from 1, so "the second one" later means position 2 of that gallery: show or inspect it again by its ref. ${policy.crossConversation ? "In the Assistant this can show photos of the Assistant and every chat thread." : "In a chat thread this shows only this thread's own photos; other conversations are reachable from the Assistant."} Read-only.`,
       parameters: {
         type: "object",
         properties: { refs: { type: "array", items: { type: "string" }, minItems: 1, maxItems: GALLERY_ITEMS_MAX, description: "Photo refs exactly as photos_list (or an earlier photos_show) returned them, in the order to show them." } },

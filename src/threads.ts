@@ -189,9 +189,41 @@ export const safeAttachments = (refs: AttachmentRef[] | undefined): AttachmentRe
 // through one value never change under the reader. `readable` stops before the first reply still being written.
 // A user message that carries photos, as photo discovery (src/photo-access.ts) sees it: identity, time, its text (the caption, already
 // masked by the store) and the ordered attachment ids. Never the bytes.
-export type PhotoMessage = { id: string; at: string; text: string; ids: string[] };
-export const photoMessagesOf = (msgs: readonly ThreadMessage[]): PhotoMessage[] =>
-  msgs.filter((m) => m.role === "user" && m.attachments?.length).map((m) => ({ id: m.id, at: m.at, text: typeof m.text === "string" ? m.text : "", ids: m.attachments!.map((a) => a.id) }));
+// `context` (docs/photo-recall.md, "Milestone 3", association rule): Rai's OWN nearby messages in the same conversation, never the
+// assistant's: the user message just before the photo message and the next two user messages after it, each only if it carries no
+// photos of its own (the window stops at another photo message), was sent within PHOTO_CONTEXT_GAP_MS of the photo message, and has
+// text. At most PHOTO_CONTEXT_CHARS of each. Already masked by the store. Never the whole conversation.
+export type PhotoContextMessage = { id: string; at: string; text: string; position: "before" | "after" };
+export type PhotoMessage = { id: string; at: string; text: string; ids: string[]; context?: PhotoContextMessage[] };
+export const PHOTO_CONTEXT_BEFORE = 1;
+export const PHOTO_CONTEXT_AFTER = 2;
+export const PHOTO_CONTEXT_GAP_MS = 6 * 3_600_000;
+export const PHOTO_CONTEXT_CHARS = 1000;
+export function photoMessagesOf(msgs: readonly ThreadMessage[]): PhotoMessage[] {
+  const users = msgs.filter((m) => m.role === "user");
+  const out: PhotoMessage[] = [];
+  const near = (m: ThreadMessage, at: string) => {
+    const gap = Math.abs(Date.parse(m.at) - Date.parse(at));
+    return Number.isFinite(gap) && gap <= PHOTO_CONTEXT_GAP_MS;
+  };
+  const textOf = (m: ThreadMessage) => (typeof m.text === "string" ? m.text : "");
+  users.forEach((m, i) => {
+    if (!m.attachments?.length) return;
+    const context: PhotoContextMessage[] = [];
+    for (let j = i - 1, n = 0; j >= 0 && n < PHOTO_CONTEXT_BEFORE; j--, n++) {
+      const x = users[j]!;
+      if (x.attachments?.length || !near(x, m.at)) break;
+      if (textOf(x).trim()) context.push({ id: x.id, at: x.at, text: textOf(x).slice(0, PHOTO_CONTEXT_CHARS), position: "before" });
+    }
+    for (let j = i + 1, n = 0; j < users.length && n < PHOTO_CONTEXT_AFTER; j++, n++) {
+      const x = users[j]!;
+      if (x.attachments?.length || !near(x, m.at)) break;
+      if (textOf(x).trim()) context.push({ id: x.id, at: x.at, text: textOf(x).slice(0, PHOTO_CONTEXT_CHARS), position: "after" });
+    }
+    out.push({ id: m.id, at: m.at, text: textOf(m), ids: m.attachments.map((a) => a.id), ...(context.length ? { context } : {}) });
+  });
+  return out;
+}
 export type ThreadTranscript = { rev: number; updatedAt: string; archived: boolean; total: number; readable: number; inProgress: boolean; compacted: number; at(i: number): TranscriptMessage | undefined };
 
 export function jobCardsOf(cards: Card[]): JobCardRef[] {

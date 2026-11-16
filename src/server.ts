@@ -49,6 +49,7 @@ import { PHOTO_TOOL_NAMES, photoDisplay, photoTools } from "./photo-access.ts";
 import { isPhotoRef, safeGalleries } from "./photo-ref.ts";
 import type { PhotoSources } from "./photo-access.ts";
 import { observationStore, observationTools } from "./photo-observations.ts";
+import { searchTools } from "./photo-search.ts";
 import type { ObservationSources, ObservationStore } from "./photo-observations.ts";
 import { ZONE } from "./time.ts";
 import type { AttachmentRef, Attachments } from "./attachments.ts";
@@ -383,7 +384,7 @@ export function buildServer({
     }
     const current = limits(isOwner);
     const offered = isOwner && model.step
-      ? [...refuseLegacyContext(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? [...photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...observationTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE })] : [])]
+      ? [...refuseLegacyContext(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? [...photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...observationTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...searchTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE })] : [])]
       : [];
     if (!offered.length) {
       current.push(

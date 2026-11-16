@@ -1,6 +1,6 @@
 # Uploaded photo recall
 
-Rai wants to say "Show me photos uploaded yesterday", "Find the screenshot from our garden conversation" and "Show the second one again" and get the real stored photos back on the page, without uploading them again and without a vision call. This document is the design and the staged plan. **Milestones 1 and 2 are built.** Milestone 3 needs separate approval.
+Rai wants to say "Show me photos uploaded yesterday", "Find the screenshot from our garden conversation" and "Show the second one again" and get the real stored photos back on the page, without uploading them again and without a vision call. This document is the design and the staged plan. **Milestones 1, 2 and 3 are built** (milestone 3 is keyword retrieval over stored text, not semantic topic understanding).
 
 Builds on `docs/photos.md` (storage, `photos_list`, `photos_inspect`, the strict-schema and time-zone fixes). Nothing there was duplicated: search extends `photos_list`, and display reuses its refs, policy and source resolver.
 
@@ -9,8 +9,8 @@ Builds on `docs/photos.md` (storage, `photos_list`, `photos_inspect`, the strict
 | | Scope | State |
 |---|---|---|
 | **1. Metadata search and display** | Text search over what ORBIT already stores (captions, conversation titles), filterable by date and conversation; `photos_show` galleries stored on the reply; a re-authorizing image route; the page gallery. | **Built** (#98). |
-| **2. Observations with provenance** | After a photo is genuinely supplied to the model (attached to Rai's message, or `photos_inspect`), the model may save what it saw, tied to the exact processed image version, with server-assigned provenance; `photos_recall` reuses it later without pixels, always labelled as a model observation; Rai's corrections and forgetting. | **Built (this change).** |
-| 3. Topic and observation search, recall UX | Search over saved observations and extracted topics across the library, better recall UX (for example "photos like this"). | Not built. Needs approval. |
+| **2. Observations with provenance** | After a photo is genuinely supplied to the model (attached to Rai's message, or `photos_inspect`), the model may save what it saw, tied to the exact processed image version, with server-assigned provenance; `photos_recall` reuses it later without pixels, always labelled as a model observation; Rai's corrections and forgetting. | **Built** (#99). |
+| **3. Observation and conversation-context search** | `photos_search`: bounded deterministic keyword search over active saved observations, Rai's corrections, captions, Rai's own nearby messages and conversation titles, each match typed; then `photos_show` / `photos_recall` / `photos_inspect`. No embeddings, no topic extraction, no "photos like this". | **Built (this change).** |
 
 ## Milestone 1: what exists now
 
@@ -138,13 +138,13 @@ Same policy as milestone 1, on every read, write, correction, forget and replay:
 
 ### Not built in milestone 2
 
-- Search over observations or topics across the library, "photos like this", embeddings (milestone 3).
+- Search over observations (milestone 3 adds keyword search: `photos_search`); topics, "photos like this" and embeddings remain unbuilt.
 - Background or batch indexing, any automatic inference outside a request Rai made.
 - Face recognition, identification of people, automatic sensitive-attribute inference: the save tool tells the model not to record them; ORBIT does not detect them semantically (see residual risks).
 - A page UI for observations beyond the call rows ("✓ photos_observe … saved") and the model's reply.
 - Cross-process locking; photo deletion.
 
-## Seam for milestone 3 (not built)
+## Seam for milestone 3 (as designed in milestone 2; built below)
 
 `orbit-photo-ref/1` (`src/photo-ref.ts`) and `orbit-photo-observation/1` (`src/photo-observations.ts`). The authoritative records stay the attachment store (`id`, `scope`, `state`, `type`, `bytes`, `width`, `height`, `sha256`, `createdAt`, `boundAt`), the conversation message that binds a photo, and one observation file per ref. An observation search would walk `observationStore.refs()`, re-authorize each photo with `photoReach` and each record with `readableRecords` for the caller (exactly as `photos_recall` does), match only `active` records about the current version, and label every hit as "text match over saved model observations, not visual verification". Any index it adds must be rebuildable from these files, private, bounded and idempotent, and must drop forgotten text at once.
 
@@ -226,3 +226,119 @@ Use non-private test photos (for example a mug with a sticky note). Change no co
 6. In a **different** Chat thread, ask about that photo: it should not find it or any observation.
 7. Reload the page and restart ORBIT if convenient: steps 2 to 5 should behave the same.
 8. Ask "Did you save anything about that photo?" right after a listing or a gallery without inspection: it should not claim a save.
+
+## Milestone 3: search over saved observations and conversation context (`photos_search`)
+
+Source: `src/photo-search.ts` (`photos_search`, `searchStub`), `src/threads.ts` (`photoMessagesOf`: the context association rule), `src/assistant-store.ts` (`photoSource` now applies the rule across the active chunks), `src/photo-access.ts` (shared resolver, ordering, zone and query helpers now exported; `photos_list` unchanged), `src/server.ts` (wiring), `src/model.ts` (guidance), `src/policy.ts` (the policy comment). Tests: `test/photos-search.test.ts`.
+
+**Recovery note.** This was built by job `orbit-202611160536-bsii` as a retry of `orbit-202611160439-fakl`. That job's control branch recorded progress (a `photos_search` implementation and tests passing), but no code branch for it exists on `DragonflyAI-sh/orbit`, so nothing of it could be reviewed or reused; everything here was written fresh against `main` after milestones 1 (#98) and 2 (#99), which were verified present. The earlier job's records were not changed.
+
+### What it does
+
+"Find the bicycle photo", "the image from our garden discussion", "the screenshot whose error you read": the model calls `photos_search {query}` and gets ranked candidates, each with typed matches and short snippets, without any image being loaded or sent and without any model inference beyond the turn Rai asked for. It then shows candidates with `photos_show` (unchanged), reads a selected photo's records with `photos_recall` (unchanged), and calls `photos_inspect` only for a detail the records do not cover or when Rai asks to look again.
+
+`photos_list` is unchanged (its `query` still matches captions and titles only, and its cursors stay valid); its description and `search.notAvailable` now point to `photos_search` instead of saying observation search is unbuilt.
+
+### Evidence kinds (what is searched)
+
+| Kind | Text | About the photo? |
+|---|---|---|
+| `user-correction` | `correction` of each **active** user-correction record about the photo's **current** version, from a conversation the caller can read whose source message still exists (`readableRecords`). | Rai's statement about it; not an inspection. |
+| `model-observation` | the `observations` statements of each **active** model-observation record, same filters. **Never** the record's `scope` or `limitations` ("did not check for a bicycle" is not a bicycle). | Text a model wrote while it had this exact image; may be wrong. |
+| `caption` | the text of Rai's message the photo was sent with. | Rai's text sent with it; not visual verification. |
+| `conversation-context` | Rai's own nearby messages (rule below). | **No**: about the conversation. |
+| `conversation-title` | the conversation's current title. | **No**: about the conversation. |
+
+Never searched: image content; superseded, forgotten, stale-version or no-longer-sourced records, and records from conversations the caller cannot read; assistant replies, tool results, compaction summaries and the recent-context note (so an assistant description cannot recreate a forgotten or corrected observation); anything beyond literal words (no synonyms, stemming, topics or embeddings).
+
+### Association rule for conversation context
+
+For each user message with photos (`src/threads.ts photoMessagesOf`), its context is at most **1 user message before and 2 user messages after**, counted among Rai's messages only (assistant messages in between are skipped, never included), where each:
+
+- carries no photos itself (the window **stops** at another photo message, so neighbouring photos do not share context),
+- was sent within **6 hours** of the photo message (the window stops at the first one further away),
+- has text; only its first **1000 characters** are searched.
+
+The text is the stored, already masked message text. In the Assistant the rule runs over the active chunks in order (so it spans chunk boundaries); archived chunks are not read here, so a photo sent in an archived chunk has no resolved message, no caption and no context (coverage says how many such photos were searched only by records and title). Nothing about the whole conversation's topic is attached to any photo, and nothing is generated.
+
+### Matching, ranking and limits
+
+- **Query:** the same rules as `photos_list` (`queryTerms`): folded (NFKD, accents removed, lowercase), words of 2+ characters or containing a digit, at most 8 words and 200 characters, required. A photo matches when **every** word is a substring of at least one of its searched texts (words may come from different kinds; such a hit ranks lower).
+- **Negation:** a word whose every occurrence in a text has a negation cue (`no`, `not`, `without`, `never`, `n't`, `missing`, …) in the preceding 40 characters of the same sentence is reported in `negationNearby` and does **not** count toward rank. This is a heuristic flag, not understanding: "the bicycle is missing" or sarcasm is not detected, and a negated match still matches.
+- **Ranking (deterministic, documented, not a confidence):** (1) photos with every word in one text first (the count of non-negated words in the best single text, descending); (2) the strongest kind with a non-negated match, in the order user-correction > model-observation > caption > conversation-context > conversation-title; (3) the number of kinds with non-negated matches; (4) newest `sentAt` first, then conversation id, photo position and ref (the `photos_list` order). No score or percentage is produced.
+- **Dedup:** one result per photo; its matches are listed strongest kind first (at most 4 shown, `moreMatches` counts the rest).
+- **Bounds:** at most **2000** photos examined per call (newest first in the window); records per photo are already bounded (30); context ≤ 3 messages × 1000 chars; snippets ≤ 160 characters around the first matched word, flattened (control and invisible characters removed); pages of 5 (at most 10), shrunk to fit the tool-output limit, with the cursor continuing after the last item kept.
+- **Coverage:** every answer has `coverage {complete, photosInScope, photosSearched}`; beyond the scan bound it adds `notSearched` and a `partial` note ("do not say the search was exhaustive"); archived threads not searched are counted (only the caller's own scope); photos with an unresolved Assistant message are counted. Zero matches add `noMatch`: no stored text matched, which says nothing about what photos show.
+- **Window and zone:** no `day`/`from`/`to` searches every date; otherwise the `photos_list` window (owner zone, 23 h/25 h DST days). Without a configured zone and with no window, times are shown in UTC and the answer says so.
+
+### Result (`orbit-photo-search/1`)
+
+Top level: `notice`, `contract`, `policy` (chat threads), `search {terms, rule, window}`, `kinds` (the label of each kind), `contextRule`, `ranking`, `coverage`, `noMatch?`, `matches`, `returned`, `nextCursor`, `photos`. Per photo: `position`, `ref`, `sentAt`, `sentLocal`, `uploadedAt`, `conversation {id, title, archived?}`, `message {id, photo}`, `link` (`#assistant` or `#chat/<uuid>`), `imageVersion` (SHA-256 of the stored processed JPEG), `file` (only when missing), `basis` (`saved-text-about-image`, `caption-only`, or `context-or-title-only: NOT evidence …`), `matches [{kind, terms, negationNearby?, snippet, record? {id, recordedAt, conversation, message}, contextMessage? {id, position}}]`, `moreMatches?`, `rank {allWordsInOneText, strongestKind, kindsMatched}`. Never bytes, base64, attachment ids, paths or URLs.
+
+### Pagination
+
+The opaque cursor binds the contract, caller, conversation filter, window, archive choice and the query words, and holds the last item's rank key. A cursor of another search is refused (`invalid-cursor`) before anything is read. Every page is computed from the live records; the next page returns the items that sort **after** the cursor key. Consequences, documented rather than hidden: a photo that is sent, gains or loses evidence between pages is placed by its new rank, so it can be skipped (it now sorts before the cursor) or appear again; `matches` is recounted per page. Re-run the search for a fresh consistent view.
+
+### Privacy and lifecycle
+
+- Owner only. The same policy as every photo tool: the Assistant reaches the Assistant and every existing chat thread; a chat thread reaches only its own photos and its own records (naming another conversation is refused by rule). A record made in the Assistant about a thread's photo contributes nothing in that thread, not even a count.
+- Every call re-resolves every photo (bound, visible to the caller, source message still refers to it, conversation still exists) and every record through `readableRecords`. So a correction (the superseded record stops contributing at once), a forget (the text is gone from the store), a revocation, a deleted thread or a changed image version is reflected by the next call. Archived threads follow `photos_list`: excluded unless `includeArchived`, then marked.
+- No index or cache: there is nothing to invalidate or rebuild and nothing derived is written. The integrity of the image file is not re-hashed during search (that would read every file); version matching uses the attachment store's recorded SHA-256, and each returned photo's file presence is checked (`file: "missing …"`). `photos_show` and `photos_recall` re-check integrity as before.
+- **Transcript:** `photos_search` declares a `transcript` stub: the conversation stores only refs, positions, conversation ids, times, the kinds that matched and record ids, plus the arguments; never snippets, captions, titles or observation text. The page's call row, replayed context, `session_read`, compaction and the omitted-calls note see only the stub, so a forgotten or corrected observation cannot come back through tool history. The model's own reply prose remains part of the conversation, as in milestone 2: forgetting does not edit earlier replies.
+- Matched text is untrusted: the notice says so, snippets are plain flattened text in JSON, and the page never renders search results (only galleries, whose labels are set as text).
+- Showing or searching gives no inspection evidence: `photos_observe` after `photos_search`/`photos_show` alone is refused (tested).
+
+### Guidance
+
+`src/model.ts photoGuidance` (when `photos_search` is offered): search with a few distinctive words; say what kind of text matched; context and title matches are never evidence of the photo's content; an observation match is "an earlier inspection recorded …"; a negated word is not a sighting; keyword matching is not topic understanding; no match is not absence; show candidates with `photos_show` (several plausible ones as a small labelled gallery, or ask; never pick one confidently); `photos_recall` for more; `photos_inspect` only for a missing detail or an explicit look-again; never `photos_observe` after searching or showing alone. When `photos_search` is not offered (for example a setup without the observation store's tools), the guidance says so instead of the old "does not exist yet" wording.
+
+### Not built in milestone 3
+
+- Semantic or topic search, synonyms, stemming, embeddings, "photos like this", OCR indexing, background or batch indexing, automatic visual analysis or any inference to describe photos for search.
+- Negation and question understanding beyond the `negationNearby` cue.
+- Search of archived Assistant chunks' captions and context.
+- A search UI on the page (the model shows results as galleries).
+- Photo deletion (unchanged from milestone 2).
+
+## Milestone 3 evidence
+
+**Automated, offline (this change):** `test/photos-search.test.ts`. Every image is synthetic; every model answer is **scripted** (at the ChatGPT token-sharing and OpenAI API adapters' HTTP boundary through the real server, or as a scripted `ModelPort` through the real `runChat` dispatch). These tests show what ORBIT searches, labels, excludes, bounds and sends; they are **not** evidence that a real model chooses `photos_search`, reads the kinds correctly or asks when several photos fit.
+
+- Acceptance, both adapters, through the real server: an observation saved after the photo was attached in a chat thread is found from the Assistant by "bicycle" **after a restart**, typed `model-observation` with its record id, source and image version; `photos_show` displays it and the stored gallery resolves `ok`; **no request of that turn carries an image part**; the stored transcript holds the search stub and no observation text, and replayed history carries no observation text. "garden" matches only Rai's own message after another photo (typed `conversation-context`, basis "NOT evidence …"), not the observation whose scope and limitations mention a garden.
+- Evidence kinds labelled separately; a photo with an observation and a caption appears once with both matches; ranking order and ties are deterministic; split-word matches rank below single-text matches; no score fields.
+- Scope and limitations never match; a correction makes the superseded observation's words stop matching and its own words match as `user-correction`; after forgetting, neither the observation nor the correction matches.
+- Context rule unit test: one before, two after, assistant prose excluded, stops at another photo message, 6 h bound, neighbouring photos do not share context.
+- Negation: flagged in `negationNearby`, ranked below a plain match, notice explains it.
+- Access and lifecycle: the Assistant's record of a thread's photo neither matches nor is counted in that thread; naming another conversation from a thread is refused; not-owner refused; stale image version, gone source message, archived thread (hidden by default, marked with `includeArchived`), revoked photo and deleted thread contribute no matches and no counts.
+- Bounds: a 2025-photo synthetic corpus is searched up to 2000 with `partial` coverage; a page of 10 fits; paging has no repeats; cursors of other words, windows or archive choice and oversized cursors are refused; a photo added between pages is not inserted into later pages.
+- Arguments: strict schema (`query` required, every other field nullable), unknown keys, blank or over-long queries, too many words, bad limits, empty or path-like `conversation`, `day` with `from` refused; blank optional strings are "left out"; hostile caption text is returned as bounded plain data without control or bidi characters.
+- Dispatch: search then show then a save attempt: the save is refused (not delivered), nothing is stored; the stub keeps refs and kinds only.
+- Guidance: the search → show → recall → inspect sequence, "never evidence of what the photo shows", "not topic understanding", no "does not exist yet" wording.
+- Regression: the full suite (`pnpm test`) and `pnpm typecheck` pass, including milestone 1 and 2 tests (one milestone 1 guidance assertion was updated from the old "does not exist yet" wording to the new conditional wording).
+
+**Not verified:** no live model call, no production data or configuration, no Safari/iOS run, no load test beyond the synthetic 2025-photo corpus.
+
+### Residual risks
+
+- Keyword matching misses synonyms ("bike" does not find "bicycle"), and substring matching can over-match ("cat" in "category"). The guidance tells the model to try other words.
+- The negation cue is a heuristic; a negated or hypothetical statement can still look like a match.
+- Observation text is only as good as the model that wrote it; corrections depend on Rai making them.
+- Conversation context can be about something else entirely; it is labelled, but a model could still over-read it.
+- Pages are computed live; evidence changing between pages can skip or repeat a photo (documented).
+- Search does not re-hash image files; a damaged-but-same-size file's records can still match (display and recall then refuse it).
+
+## Milestone 3 owner acceptance (after deploying)
+
+Use non-private test photos. Change no configuration. Steps 1–2 need an image-capable model.
+
+1. In a Chat thread "Bike test", send a photo of a bicycle with "What's in this photo?". The reply should save an observation (`✓ photos_observe … saved`).
+2. In another thread "Garden test", send a photo of something that is not a garden (for example a mug) without a caption, then send "I want to replan the garden beds".
+3. In the **Assistant**, ask "Find the bicycle photo". It should call `photos_search`, say an earlier inspection recorded a bicycle (with the thread and date), and on "show it" display the gallery with `photos_show`. No `photos_inspect` call should be needed.
+4. Ask "Show the image from our garden discussion". It should find the mug photo and say the match is your message next to it, not something seen in the photo.
+5. Ask "Is there a bicycle in the garden photo?". It should not answer from the search; it should recall or inspect.
+6. Say "No, that's a scooter, not a bicycle" about the bike photo (it should call `photos_correct`), then "Find the bicycle photo" again: the old observation must not be the match; any remaining match should be your correction (flagged near "not").
+7. Say "Forget what you saw in that photo", then search "scooter" and "bicycle": no observation or correction match.
+8. Search for something nothing mentions ("a dog"): it should say no stored text matched, not that no such photo exists.
+9. In the "Garden test" thread, search "bicycle": the Bike test photo must not appear and nothing should hint that it exists.
+10. Reload the page and, if convenient, restart ORBIT: steps 3 and 4 behave the same; earlier galleries still show.
+11. Ask "show the second one" after a search that showed two photos: position 2 of that gallery is shown.

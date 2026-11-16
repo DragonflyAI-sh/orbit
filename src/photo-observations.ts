@@ -215,7 +215,7 @@ export function observationStore(dir: string | undefined) {
       else mem.set(ref, structuredClone(next));
       return { result, rev: next.rev };
     },
-    // The refs that have records (the seam for milestone 3's observation search; nothing here searches).
+    // The refs that have records (photos_search, src/photo-search.ts, skips reading records of other photos).
     refs(): string[] {
       if (!dir) return [...mem.keys()];
       return readdirSync(dir)
@@ -670,6 +670,5 @@ export function observationTools(d: { store: ObservationStore; attachments: Atta
   ];
 }
 
-// The milestone 3 seam (not built): an observation search would walk store.refs(), re-authorize each photo with photoReach and each
-// record with readableRecords for the caller, exactly as photos_recall does, and never build a second source of truth. Any index it
-// adds must be rebuildable from these files, private, bounded and idempotent.
+// Milestone 3 (src/photo-search.ts photos_search) reads these records only through readableRecords, per photo and per caller, and
+// keeps no index: there is no second source of truth to go stale.
