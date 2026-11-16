@@ -2,6 +2,8 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { normalizeToolCommit } from "./jobs.ts";
 import type { JobEvent, Jobs } from "./jobs.ts";
+import { checkResearchSummary, researchBriefPayload } from "./research.ts";
+import type { ResearchTool } from "./research.ts";
 
 // The only listener meant to face the internet. It knows the job registry and nothing else:
 // no memory, tools, model or owner routes. Every request needs the token for that one job.
@@ -28,7 +30,12 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
 }
 
-export function buildIngress(jobs: Jobs, now: () => number = Date.now): Server {
+// Research jobs (src/research.ts) use two more read-only routes with the same one-job token: `GET .../brief` (they have no orbit-work
+// branch to read it from) and `GET .../tool` (the runner's tool, whose sha256 the fire text carries). Both answer 404 for any other
+// kind of job. A research job's `done` summary must be a valid report, and every research summary must be whole, bounded and free of
+// secret-shaped text: otherwise it is refused (422) and nothing is recorded, so the runner fixes it and sends it again. Nothing a
+// runner sends can set a job's kind, routine, repository or PR: the event fields are an allowlist.
+export function buildIngress(jobs: Jobs, now: () => number = Date.now, opts: { researchTool?: ResearchTool } = {}): Server {
   const hits = new Map<string, number[]>();
   const limited = (id: string) => {
     const recent = (hits.get(id) ?? []).filter((t) => now() - t < 60_000);
@@ -39,7 +46,7 @@ export function buildIngress(jobs: Jobs, now: () => number = Date.now): Server {
 
   return createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://ingress");
-    const match = url.pathname.match(/^\/v1\/jobs\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})\/(events|steers)$/);
+    const match = url.pathname.match(/^\/v1\/jobs\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})\/(events|steers|brief|tool)$/);
     if (!match) return send(res, 404, { error: "Not found" });
     const [, id, what] = match;
     const token = req.headers.authorization?.replace(/^Bearer /, "");
@@ -51,6 +58,15 @@ export function buildIngress(jobs: Jobs, now: () => number = Date.now): Server {
       return send(res, 200, { steers: jobs.pending(id) });
     }
 
+    const research = jobs.get(id)?.kind === "research";
+    if ((what === "brief" || what === "tool") && req.method === "GET") {
+      if (!research) return send(res, 404, { error: "Not found" });
+      if (what === "brief") return send(res, 200, researchBriefPayload(jobs.get(id)!));
+      if (!opts.researchTool) return send(res, 503, { error: "The research tool is not available on this ORBIT." });
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-orbit-sha256": opts.researchTool.sha256 });
+      return res.end(opts.researchTool.text);
+    }
+
     if (what === "events" && req.method === "POST") {
       let body: Record<string, unknown>;
       try {
@@ -59,6 +75,15 @@ export function buildIngress(jobs: Jobs, now: () => number = Date.now): Server {
         return send(res, 400, { error: "Body must be JSON under 640 KB." });
       }
       if (typeof body.type !== "string" || !TYPES.has(body.type)) return send(res, 400, { error: "type must be started, checkin, reply or summary" });
+      if (research && body.type === "summary") {
+        // A research report has no git copy to complete it from: it must arrive whole.
+        if (body.textComplete === false || typeof body.text !== "string") return send(res, 422, { error: "A research summary must be sent whole, as text.", problems: ["send the whole report in one summary event"] });
+        const check = checkResearchSummary(typeof body.status === "string" ? body.status : undefined, body.text, new Date(now()));
+        if (!check.ok) return send(res, 422, { error: "Research summary refused; nothing was recorded. Fix these and send it again.", problems: check.problems });
+      }
+      if (research && (body.type === "checkin" || body.type === "reply") && typeof body.text === "string" && body.text.length > 20_000) {
+        return send(res, 422, { error: "Research check-ins and replies are at most 20,000 characters.", problems: ["shorten the text"] });
+      }
       const event: Omit<JobEvent, "at"> = {
         type: body.type as JobEvent["type"],
         ...(typeof body.sha === "string" ? { sha: body.sha.slice(0, 64) } : {}),

@@ -1,3 +1,4 @@
+import { laneGuidance } from "./research-tools.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PortStatus, Result } from "./ports.ts";
@@ -77,7 +78,7 @@ export function replySource(impl: string, fallback?: FallbackInfo, mixed?: boole
   return `model/openrouter/${fallback.model} (FALLBACK, paid: ChatGPT ${limit}, ${l.estimated ? `ORBIT's estimated pause until ${l.until}` : `resets ${l.until}`}${mixed ? `; earlier rounds of this reply came from ${impl}` : ""})`;
 }
 
-export const RECORD_TOOLS = ["jobs_list", "job_status", "ops_admin_operations", "ops_sys_operations"];
+export const RECORD_TOOLS = ["jobs_list", "job_status", "research_result", "ops_admin_operations", "ops_sys_operations"];
 
 // The instruction that asks the model to check records before claiming an outcome. This is a request, not a guarantee: ORBIT
 // cannot force a model to comply, which is why proposal cards and job state on the page come from the records themselves.
@@ -133,6 +134,7 @@ export function instructions(limits: string[], notes?: string, tooling?: string[
         ]
       : []),
     ...photoGuidance(tooling ?? []),
+    ...laneGuidance(tooling ?? []),
     "",
     recordCheckInstruction(tooling ?? []),
     ...(notes

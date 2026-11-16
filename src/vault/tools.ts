@@ -119,6 +119,9 @@ export function vaultEdits(deps: { clone: VaultClone; memory: MemoryPort; propos
 
   return {
     tools,
+    // The same direct-or-proposal pipeline the write tools use, for ORBIT's own callers that choose the path themselves (the research
+    // lane's research_save_to_vault). Same validation, policy, secret refusal, Log line and remote verification; same results.
+    apply: run,
     // The confirmed path: re-validates the exact edit (path rules, secrets, preconditions, and that the policy still asks for
     // no more than the reasons on the card), then runs the same pipeline as a direct write.
     async confirm(proposal: Proposal & { kind: "vault_edit" }): Promise<{ code: number; body: Record<string, unknown> }> {

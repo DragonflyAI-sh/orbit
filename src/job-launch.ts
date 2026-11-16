@@ -3,6 +3,8 @@ import type { ControlRepo, Routine } from "./launcher.ts";
 import { briefWords } from "./duplicates.ts";
 import type { Notifier } from "./notify.ts";
 import type { JobWorkLink } from "./work-sessions.ts";
+import { RESEARCH_LIMITS } from "./research.ts";
+import type { Lane, ResearchTool } from "./research.ts";
 
 // The one launch path: write the brief to orbit-work, register the job, fire the Routine. The /jobs/launch route,
 // a confirmed chat proposal and ORBIT's own review launches all end here.
@@ -22,15 +24,33 @@ export type LaunchResult = { code: number; body: unknown };
 // removed (src/job-context.ts). A runner that needs notes reads the ones its brief names from its own read-only vault checkout.
 // `work`: the confirmed proposal's work-session link (src/work-sessions.ts), written on the job in the same write that registers it, so a
 // restart can tell which confirmation produced which job. Absent for the /jobs/launch route and review launches.
-export type JobLauncher = (routineName: string, briefText: string, review?: NonNullable<Job["review"]>, work?: JobWorkLink) => Promise<LaunchResult>;
+// `lane`: the lane the confirmed proposal was made for. When given, a routine of the other lane is refused (a build proposal can never
+// launch on a research routine, or the reverse, even if the configuration changed after it was proposed). Absent: the owner's direct
+// /jobs/launch route and ORBIT's review launches, where the routine name alone decides.
+export type JobLauncher = (routineName: string, briefText: string, review?: NonNullable<Job["review"]>, work?: JobWorkLink, lane?: Lane) => Promise<LaunchResult>;
 
-export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines?: Map<string, Routine>; notify: Notifier; publicJobUrl?: string; commit?: string }): JobLauncher {
+// The research lane (src/research.ts): its own routines (never the build ones) and the runner tool the listener serves.
+export type ResearchLaunch = { routines: Map<string, Routine>; tool?: ResearchTool; unavailable?: string };
+
+export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines?: Map<string, Routine>; notify: Notifier; publicJobUrl?: string; commit?: string; research?: ResearchLaunch }): JobLauncher {
   const { jobs, control, notify, publicJobUrl } = deps;
   const commit = toolCommit(deps.commit);
   const routines = deps.routines ?? new Map<string, Routine>();
+  const researchRoutines = deps.research?.routines ?? new Map<string, Routine>();
   const withHealth = (job: Job) => ({ ...job, health: jobs!.health(job) });
-  return async (routineName, briefText, review, work) => {
+  return async (routineName, briefText, review, work, lane) => {
     if (!jobs) return { code: 503, body: { error: "Jobs are not enabled." } };
+    // A name in both lanes is refused outright (src/research.ts refuses that configuration too): never guess which lane was meant.
+    if (routines.has(routineName) && researchRoutines.has(routineName)) return { code: 409, body: { error: `Routine ${routineName} is configured in both the build and the research lane; nothing was launched.` } };
+    if (researchRoutines.has(routineName)) {
+      if (lane === "build") return { code: 409, body: { error: `${routineName} is a research routine; a build launch cannot use it. Nothing was launched.` } };
+      if (review) return { code: 409, body: { error: "A review cannot run on a research routine. Nothing was launched." } };
+      return launchResearch(researchRoutines.get(routineName)!, briefText, work);
+    }
+    if (lane === "research") {
+      const why = deps.research?.unavailable ?? `no research routine named ${routineName} is configured`;
+      return { code: 409, body: { error: `Not launched: ${why}. A research job never falls back to a build routine.` } };
+    }
     const routine = routines.get(routineName);
     if (!routine) return { code: 400, body: { error: `Unknown routine. Configured: ${[...routines.keys()].join(", ") || "none"}.` } };
     if (!control) return { code: 503, body: { error: "No orbit-work GitHub credential is installed, so the brief cannot be written." } };
@@ -63,4 +83,31 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
     }
     return { code: 202, body: withHealth(jobs.get(id)!) };
   };
+
+  // A research launch writes nothing to any repository: the brief is held on the job and served to the runner by the job listener
+  // (src/ingress.ts), so the job API and the runner tool are required. The fire text says which lane it is and carries the tool digest.
+  async function launchResearch(routine: Routine, briefText: string, work?: JobWorkLink): Promise<LaunchResult> {
+    if (!publicJobUrl) return { code: 503, body: { error: "Research jobs need the job API (ORBIT_PUBLIC_JOB_URL), since they have no git record. Nothing was launched." } };
+    if (!deps.research?.tool) return { code: 503, body: { error: "The research runner tool is missing from this release, so a research runner could not verify what it runs. Nothing was launched." } };
+    const brief = briefText.trim();
+    if (!brief) return { code: 400, body: { error: "A launch needs a brief." } };
+    if (brief.length > RESEARCH_LIMITS.briefChars) return { code: 400, body: { error: `A research brief is at most ${RESEARCH_LIMITS.briefChars} characters.` } };
+    const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);
+    const id = `${routine.name}-${stamp}-${Math.random().toString(36).slice(2, 6)}`;
+    const registered = jobs!.register(id, RESEARCH_LIMITS.tokenTtlMs, { ...(work ? { work } : {}), research: { brief } });
+    if ("error" in registered) return { code: 400, body: { error: registered.error } };
+    const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString(), briefWords: briefWords(brief) };
+    jobs!.setLaunch(id, launch);
+    const text = ["Lane: research", `Job id: ${id}`, `API: ${publicJobUrl}`, `Token: ${registered.token}`, `Tool commit: ${commit}`, `Tool sha256: ${deps.research.tool.sha256}`].join("\n");
+    try {
+      const fired = await routine.fire(text);
+      jobs!.setLaunch(id, { ...launch, ...fired });
+    } catch (err) {
+      const error = `routine not fired: ${err instanceof Error ? err.message : err}`;
+      jobs!.setLaunch(id, { ...launch, failedAt: new Date().toISOString(), error });
+      notify.send(`Research job ${id} could not launch: ${error}`, false);
+      return { code: 502, body: { error, job: withHealth(jobs!.get(id)!) } };
+    }
+    return { code: 202, body: withHealth(jobs!.get(id)!) };
+  }
 }

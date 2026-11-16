@@ -3,6 +3,9 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Identify } from "./identity.ts";
 import { jobLauncher } from "./job-launch.ts";
+import { researchStore } from "./research.ts";
+import type { ResearchLane, ResearchStore, ResearchTool } from "./research.ts";
+import { researchTools, withLaneGuard } from "./research-tools.ts";
 import { hasLegacyContext, LEGACY_CONTEXT_ERROR, refuseLegacyContext } from "./job-context.ts";
 import { jobRow, toolCommitStatus } from "./job-view.ts";
 import type { Job, Jobs } from "./jobs.ts";
@@ -89,6 +92,9 @@ export type Deps = {
   publicJobUrl?: string;
   control?: ControlRepo;
   routines?: Map<string, Routine>;
+  // The research lane (src/research.ts, docs/research-lane.md): its routines, report store and runner tool. Absent means the lane is
+  // unconfigured: research_launch refuses and nothing ever falls back to a build routine.
+  research?: { lane: ResearchLane; store: ResearchStore; tool?: ResearchTool; routineRepos?: Map<string, string> };
   commit: string;
   owner?: string;
   identify: Identify;
@@ -174,6 +180,7 @@ export function buildServer({
   publicJobUrl,
   control,
   routines = new Map(),
+  research,
   commit,
   owner,
   identify,
@@ -219,7 +226,7 @@ export function buildServer({
     const ready = control && names.length;
     return {
       ...st,
-      detail: `${st.detail} ${ready ? `Launches through Routines: ${names.join(", ")}.` : `Cannot launch yet: ${control ? "" : "no orbit-work GitHub credential. "}${names.length ? "" : "no Routine configured."}`}`.trim(),
+      detail: `${st.detail} ${ready ? `Launches through Routines: ${names.join(", ")}.` : `Cannot launch yet: ${control ? "" : "no orbit-work GitHub credential. "}${names.length ? "" : "no Routine configured."}`} ${researchStatus()}`.trim(),
     };
   };
   const withHealth = (job: Job) => ({ ...job, toolCommit: job.toolCommit ?? "unknown", toolCommitStatus: toolCommitStatus(job.toolCommit, commit), health: jobs!.health(job) });
@@ -228,8 +235,21 @@ export function buildServer({
     problem: !jobs ? "jobs are not enabled" : !control ? "no orbit-work GitHub credential is installed" : routines.size ? undefined : "no Routine is configured",
   });
 
+  // The research lane: unconfigured unless main.ts selected it. Its status is part of the jobs port detail, and is never "live" on
+  // configuration alone: only a valid report proves a research runner actually ran.
+  const researchLane = (): ResearchLane => research?.lane ?? { state: "unconfigured", reason: "No research lane is configured on this ORBIT.", routines: new Map(), names: [] };
+  const researchStatus = () => {
+    const lane = researchLane();
+    if (lane.state !== "configured") return `Research lane ${lane.state}.`;
+    const reports = jobs ? jobs.all().filter((j) => j.kind === "research" && j.research?.report?.valid).length : 0;
+    return `Research lane configured (${lane.names.join(", ")})${research?.tool ? "" : " but its runner tool is missing, so research launches are refused"}; ${reports ? `${reports} valid research report(s) received.` : "no research report received yet: not proven live."}`;
+  };
   // The one launch path: the /jobs/launch route and a confirmed chat proposal both end here (ORBIT's own review launches use jobLauncher directly).
-  const launchJob = jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit });
+  const researchLaunch = { routines: researchLane().routines, tool: research?.tool, ...(researchLane().state === "configured" ? {} : { unavailable: `the research lane is ${researchLane().state}` }) };
+  const launchJob = jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit, research: researchLaunch });
+
+  // The lane tools (src/research-tools.ts): discover both lanes, propose research, read and save results. Owner only, like job_launch.
+  const laneTools = () => (jobs ? researchTools({ jobs, proposals, lane: researchLane, build: launchable, routineRepos: research?.routineRepos ?? new Map(), store: research?.store ?? researchStore(undefined), vault: vaultEdits, now }) : []);
 
   // Threads: the store, the rolling recent-context note, and the service that runs a turn against a thread.
   const recent = recentContext({ port: recentPort, threads, model, now, cardLines: (t) => svc.cardLines(t) });
@@ -396,7 +416,7 @@ export function buildServer({
     }
     const current = limits(isOwner);
     const offered = isOwner && model.step
-      ? [...refuseLegacyContext(withDuplicateWarning(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? [...photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...observationTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE, onChange: semantic ? (ref) => semantic.invalidate(ref) : undefined }), ...(semantic ? [photoSearchTool({ semantic, attachments, caller: conversation, isOwner, zone: ZONE })] : [])] : [])]
+      ? [...refuseLegacyContext(withDuplicateWarning([...withLaneGuard(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), () => researchLane().names, () => [...routines.keys()]), ...laneTools()], proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? [...photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...observationTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE, onChange: semantic ? (ref) => semantic.invalidate(ref) : undefined }), ...(semantic ? [photoSearchTool({ semantic, attachments, caller: conversation, isOwner, zone: ZONE })] : [])] : [])]
       : [];
     if (!offered.length) {
       current.push(
@@ -978,7 +998,8 @@ export function buildServer({
         }
         let result: { code: number; body: unknown };
         try {
-          result = await launchJob(taken.routine, taken.brief, undefined, { proposal: taken.id, workSession: link.workSession, origin: origin.session });
+          // The proposal's lane is enforced by the launcher: a build card never launches on a research routine, or the reverse.
+          result = await launchJob(taken.routine, taken.brief, undefined, { proposal: taken.id, workSession: link.workSession, origin: origin.session }, taken.lane === "research" ? "research" : "build");
         } catch (e) {
           // The launcher threw: whether a job was registered or fired is not known here. The job store is read (never retried) and
           // the link says what it shows: no job means nothing was sent; a job without a fire result is ambiguous.

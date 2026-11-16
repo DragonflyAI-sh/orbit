@@ -282,7 +282,7 @@
     const sysop = p.kind === "ops_sys";
     const vault = p.kind === "vault_edit";
     const ops = p.kind === "ops_admin" || sysop || vault;
-    head.textContent = vault ? `Proposed vault change: ${p.summary} Nothing has been written yet.` : ops ? `Proposed server action: ${p.summary} Nothing has been done yet.` : steer ? `Proposed steer for job ${p.job}. Nothing has been sent yet.` : `Proposed job on routine "${p.routine}". Nothing has launched yet.`;
+    head.textContent = vault ? `Proposed vault change: ${p.summary} Nothing has been written yet.` : ops ? `Proposed server action: ${p.summary} Nothing has been done yet.` : steer ? `Proposed steer for job ${p.job}. Nothing has been sent yet.` : p.lane === "research" ? `Proposed RESEARCH job on routine "${p.routine}" (internet research, no repository access). Nothing has launched yet.` : `Proposed job on routine "${p.routine}". Nothing has launched yet.`;
     const brief = document.createElement("pre");
     brief.tabIndex = 0;
     brief.textContent = vault ? `${Object.entries(p.display || {}).map(([k, v]) => `${k}: ${v}`).join("\n")}\n\ndigest ${p.digest.slice(0, 16)}` : sysop ? `${p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action}\n\n${(p.warnings || []).map((w) => `! ${w}`).join("\n\n")}\n\ndigest ${p.digest.slice(0, 16)}` : ops ? (p.display ? Object.entries(p.display).map(([k, v]) => `${k}=${v}`).join("\n") : p.action) + `\n\ndigest ${p.digest.slice(0, 16)}`  : steer ? p.text : p.brief + (p.context && p.context.length ? "\n\n! This proposal names vault context from an older ORBIT build. Launch-time vault context is no longer supported, so confirming it will be refused; ask for a new launch that names the notes in the brief." : "");
@@ -1321,7 +1321,7 @@
     return `${t.title}${t.archived ? " (archived)" : ""}${t.openCards ? ` · ${t.openCards} waiting` : ""}${t.busy ? " · replying…" : ""}`;
   }
   function cardTitle(card) {
-    const what = card.kind === "vault_edit" ? `vault change: ${card.summary || card.action}` : card.kind === "job_steer" ? `steer for job ${card.job}` : card.kind === "job_launch" ? `job on routine "${card.routine}"` : `server action: ${card.summary || card.action}`;
+    const what = card.kind === "vault_edit" ? `vault change: ${card.summary || card.action}` : card.kind === "job_steer" ? `steer for job ${card.job}` : card.kind === "job_launch" ? `${card.lane === "research" ? "research " : ""}job on routine "${card.routine}"` : `server action: ${card.summary || card.action}`;
     return [`Proposed ${what}. ${CARD_STATE_TEXT[card.state] || card.state}.`];
   }
   // What a decided card says. The live line comes from ORBIT's own job and operation records at the time the thread was
