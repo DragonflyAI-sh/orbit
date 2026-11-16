@@ -529,6 +529,11 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
       return t ? { title: t.title, archived: t.archived === true, messages: photoMessagesOf(t.messages) } : undefined;
     },
 
+    // Whether a message of this thread still exists (photo observation sources, src/photo-observations.ts). Read-only.
+    messageState(id: string, messageId: string): "present" | "gone" {
+      return threads.get(id)?.messages.some((m) => m.id === messageId) ? "present" : "gone";
+    },
+
     // Read-only transcript access for session_read (src/sessions.ts): one message projected at a time, nothing cloned in full,
     // written or counted as a change.
     sessionTranscript(id: string): ThreadTranscript | undefined {

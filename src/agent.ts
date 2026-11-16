@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { ProviderError } from "./chatgpt.ts";
 import type { FallbackInfo, ImageSupport, Item, Message, ModelPort, ToolDef } from "./model.ts";
 import type { MutatingAction } from "./ops/admin-protocol.ts";
@@ -14,7 +14,19 @@ export const MAX_OUTPUT_CHARS = 8000;
 // What a tool is given besides its arguments. `signal` is aborted when ORBIT stops waiting for the call (its deadline passed or the
 // turn was cancelled). A tool that passes it on stops its work where the operation supports it; a tool that ignores it keeps running.
 // `media`: the reply's image budget, present only when the caller enabled tool-supplied images for this reply (runChat `media`).
-export type ToolContext = { signal: AbortSignal; media?: MediaGate };
+// `evidence`: what the server knows about this call's turn and step (docs/photo-recall.md, "Evidence"), present only when the caller
+// passed its turn identity to runChat. Built by runChat, never from model text.
+export type ToolContext = { signal: AbortSignal; media?: MediaGate; evidence?: Evidence };
+
+// The turn a reply belongs to, from the server's own context (src/thread-service.ts): the conversation (session id), the assistant
+// reply being written, the user message that started it, and the model ORBIT requested for it.
+export type TurnIdentity = { conversation: string; replyMessage: string; userMessage?: string; model: string };
+// A photo that really reached the model as image input in this reply: the message's own photos (step 0) or photos admitted from a
+// photos_inspect call in round r (seen first by step r + 1). `sha256` is of the exact bytes that were sent.
+export type DeliveredImage = { ref: string; sha256: string; via: "message" | "photos_inspect"; callId?: string; step: number };
+// `step`: the model step that asked for this call: its index (round), whether the paid fallback answered it (it is never given
+// photos), and whether its response was cut off or partly malformed.
+export type Evidence = { turn: TurnIdentity; callId: string; step: { index: number; fallback: boolean; incomplete: boolean }; delivered(ref: string): DeliveredImage | undefined };
 
 // Images a tool loaded for the model (src/photo-access.ts). They never enter the tool's text output, the thread, a log or a summary:
 // runChat checks them against the reply's budget and the model's photo capability, then sends them once as image input in a
@@ -51,6 +63,9 @@ export type ChatTool = {
   readOnly?: boolean;
   // This tool's own execution deadline, when it legitimately takes longer than TOOL_DEADLINE_MS (see docs/tool-deadlines.md).
   deadlineMs?: number;
+  // What the conversation stores of a call (src/thread-service.ts). The model sees the real arguments and output in its own reply;
+  // a tool whose arguments or results must not live on in the transcript (photo observations, docs/photo-recall.md) returns a stub.
+  transcript?: (call: { arguments: string; output: string; summary: string; ok: boolean }) => { arguments: string; output: string; summary: string };
 };
 
 // How long ORBIT waits for one chat tool call before it stops waiting, ends the turn and frees the thread (docs/tool-deadlines.md).
@@ -154,6 +169,10 @@ export async function runChat(options: {
   // Tool-requested galleries (photos_show). Absent: this reply cannot display photos, and a tool's display request is refused.
   // `maxGalleries`: per reply; a gallery identical to one already shown in this reply is refused rather than shown twice.
   display?: { maxGalleries: number; maxItems: number };
+  // The turn's identity (docs/photo-recall.md). Present: every tool call gets `evidence` in its context. `delivered`: the photos this
+  // reply's first request already carries as image input (the message's own photos), with the SHA-256 of the bytes sent.
+  turn?: TurnIdentity;
+  delivered?: { ref: string; sha256: string }[];
 }): Promise<ChatOutcome> {
   const { model, limits, notes, tools, allow } = options;
   const maxRounds = options.maxRounds ?? MAX_ROUNDS;
@@ -206,6 +225,11 @@ export async function runChat(options: {
     return undefined;
   };
 
+  // Which photos reached the model as image input, and from which step on (docs/photo-recall.md, "Evidence"). Recorded only when
+  // images are actually admitted into the input, never from what a tool or the model says.
+  const delivered = new Map<string, DeliveredImage>();
+  for (const x of options.delivered ?? []) if (!delivered.has(x.ref)) delivered.set(x.ref, { ref: x.ref, sha256: x.sha256, via: "message", step: 0 });
+
   // The reply's galleries so far, as ordered ref lists.
   const galleries: string[] = [];
   const admitDisplay = (d: ToolDisplay | undefined): string | undefined => {
@@ -240,6 +264,9 @@ export async function runChat(options: {
         (capped ? `I stopped after ${maxRounds} rounds of tool calls without reaching an answer. Calls made are listed below.` : "");
       return { text, calls, rounds: round, capped: capped && step.calls.length > 0, ...provenance() };
     }
+    const stepFacts = { index: round, fallback: Boolean(step.fallback), incomplete: Boolean(step.incomplete?.length) };
+    const evidenceFor = (callId: string): Evidence | undefined =>
+      options.turn ? { turn: { ...options.turn }, callId, step: { ...stepFacts }, delivered: (ref) => (delivered.has(ref) ? { ...delivered.get(ref)! } : undefined) } : undefined;
     const bound: Bound = {
       deadlineMs: options.toolDeadlineMs ?? TOOL_DEADLINE_MS,
       graceMs: options.abortGraceMs ?? TOOL_ABORT_GRACE_MS,
@@ -255,7 +282,7 @@ export async function runChat(options: {
       // A cancelled turn starts no new tool call.
       if (options.signal?.aborted) throw new TurnInterrupted("cancelled", undefined, left, `The turn was cancelled. ${notStartedText(left)}`);
       input.push({ type: "function_call", call_id: call.call_id, name: call.name, arguments: call.arguments });
-      const ran = await execute(call.name, call.arguments, byName, allow, bound);
+      const ran = await execute(call.name, call.arguments, byName, allow, { ...bound, evidence: evidenceFor(call.call_id) });
       let { output, record } = ran;
       let display: ToolDisplay | undefined;
       if (ran.display && !record.interrupted) {
@@ -270,7 +297,11 @@ export async function runChat(options: {
         if (refused) {
           output = JSON.stringify({ ok: false, error: refused, supplied: 0 });
           record = { ...record, ok: false, summary: refused };
-        } else roundImages.push(...ran.media.images);
+        } else {
+          roundImages.push(...ran.media.images);
+          // Seen by the model from the next step on (the images follow this round's tool results).
+          for (const img of ran.media.images) if (!delivered.has(img.ref)) delivered.set(img.ref, { ref: img.ref, sha256: createHash("sha256").update(img.bytes).digest("hex"), via: "photos_inspect", callId: call.call_id, step: round + 1 });
+        }
       }
       calls.push(record);
       input.push({ type: "function_call_output", call_id: call.call_id, output });
@@ -291,7 +322,7 @@ export function toolImageMessage(images: ToolImage[]): Message {
   return { role: "user", via: "tool", content: TOOL_IMAGES_NOTE(images.length), images: images.map((i) => ({ id: i.ref, label: i.label, data: i.bytes.toString("base64") })) };
 }
 
-type Bound = { deadlineMs: number; graceMs: number; signal?: AbortSignal; onLate?: (late: { name: string; ok: boolean; error?: string }) => void; media?: MediaGate };
+type Bound = { deadlineMs: number; graceMs: number; signal?: AbortSignal; onLate?: (late: { name: string; ok: boolean; error?: string }) => void; media?: MediaGate; evidence?: Evidence };
 
 const secs = (ms: number) => (ms >= 1000 ? `${Math.round(ms / 100) / 10} s` : `${ms} ms`);
 const notStartedText = (n: number) => (n ? `${n} tool call${n === 1 ? "" : "s"} the model asked for ${n === 1 ? "was" : "were"} not started.` : "");
@@ -348,7 +379,7 @@ async function execute(
   let settled: Settled | undefined;
   let waiting = true;
   const done: Promise<void> = Promise.resolve()
-    .then(() => tool.run(args, { signal: ctl.signal, ...(bound.media ? { media: bound.media } : {}) }))
+    .then(() => tool.run(args, { signal: ctl.signal, ...(bound.media ? { media: bound.media } : {}), ...(bound.evidence ? { evidence: bound.evidence } : {}) }))
     .then(
       (value) => void (settled = { ok: true, value }),
       (err) => void (settled = { ok: false, err }),

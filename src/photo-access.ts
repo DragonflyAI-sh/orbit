@@ -24,7 +24,8 @@ import { zonedToUtc } from "./time.ts";
 // chat thread, or an active Assistant chunk) still referenced by its message. A ref that is unknown, forged, from a conversation this
 // caller may not read, or whose source is gone answers the same "not found", so nothing about other conversations leaks.
 
-export const PHOTO_TOOL_NAMES = ["photos_list", "photos_inspect", "photos_show"] as const;
+// Every photo tool, for the policy check (src/server.ts allowAgent). The observation tools are defined in src/photo-observations.ts.
+export const PHOTO_TOOL_NAMES = ["photos_list", "photos_inspect", "photos_show", "photos_observe", "photos_recall", "photos_correct", "photos_forget"] as const;
 export const PHOTO_LIST_LIMIT_DEFAULT = 10;
 export const PHOTO_LIST_LIMIT_MAX = 25;
 export const PHOTO_RANGE_DAYS_MAX = 31;
@@ -285,7 +286,7 @@ export const PHOTO_QUERY_CHARS_MAX = 200;
 export const PHOTO_QUERY_TERMS_MAX = 8;
 export const PHOTO_SEARCH_NOT_AVAILABLE = [
   "search of what the photos show (image content is never searched or inferred)",
-  "saved visual observations (nothing a model saw in a photo is stored)",
+  "search over saved visual observations (milestone 3, not built: photos_recall reads the saved observations of photos you name by ref)",
   "semantic topic extraction (only literal words in captions and titles match)",
   "user labels or tags (ORBIT has none)",
   "capture dates or places (EXIF and GPS are removed before upload; only ORBIT's own send and upload times exist)",
@@ -489,7 +490,7 @@ export function photoTools(d: { attachments: Attachments; sources: PhotoSources;
       readOnly: true,
       // Its one argument is required, so the strict schema is the same schema.
       strict: true,
-      description: `Look at stored photos: loads the photos with these refs (from photos_list, at most ${PHOTO_INSPECT_REFS_MAX}) and supplies them to you as real image input right after the tool results, in the order given, each after a source label. Only the photos this result lists as supplied are visible to you, and only in this reply; in a later reply call it again. Bounded per reply by ORBIT's photo limits (the photos already in this request count). It is refused or blocked when the model cannot take photos; it never describes a photo itself. Read-only.`,
+      description: `Look at stored photos: loads the photos with these refs (from photos_list, at most ${PHOTO_INSPECT_REFS_MAX}) and supplies them to you as real image input right after the tool results, in the order given, each after a source label. Only the photos this result lists as supplied are visible to you, and only in this reply; in a later reply call it again. Bounded per reply by ORBIT's photo limits (the photos already in this request count). It is refused or blocked when the model cannot take photos; it never describes a photo itself. If photos_recall already holds observations that answer the question, use them instead, unless a new detail is needed or Rai asks you to look again. After looking, save what you saw with photos_observe. Read-only.`,
       parameters: {
         type: "object",
         properties: { refs: { type: "array", items: { type: "string" }, minItems: 1, maxItems: PHOTO_INSPECT_REFS_MAX, description: "Photo refs exactly as photos_list returned them, in the order to show them." } },

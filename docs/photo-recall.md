@@ -1,6 +1,6 @@
 # Uploaded photo recall
 
-Rai wants to say "Show me photos uploaded yesterday", "Find the screenshot from our garden conversation" and "Show the second one again" and get the real stored photos back on the page, without uploading them again and without a vision call. This document is the design and the staged plan. **Only milestone 1 is built.** Milestones 2 and 3 each need separate approval.
+Rai wants to say "Show me photos uploaded yesterday", "Find the screenshot from our garden conversation" and "Show the second one again" and get the real stored photos back on the page, without uploading them again and without a vision call. This document is the design and the staged plan. **Milestones 1 and 2 are built.** Milestone 3 needs separate approval.
 
 Builds on `docs/photos.md` (storage, `photos_list`, `photos_inspect`, the strict-schema and time-zone fixes). Nothing there was duplicated: search extends `photos_list`, and display reuses its refs, policy and source resolver.
 
@@ -8,9 +8,9 @@ Builds on `docs/photos.md` (storage, `photos_list`, `photos_inspect`, the strict
 
 | | Scope | State |
 |---|---|---|
-| **1. Metadata search and display** | Text search over what ORBIT already stores (captions, conversation titles), filterable by date and conversation; `photos_show` galleries stored on the reply; a re-authorizing image route; the page gallery. | **Built (this change).** |
-| 2. Observations with provenance | After a genuine `photos_inspect`, optionally persist what the model said it saw, tied to the exact processed image version, and reuse it later, always labelled as a model observation. | Not built. Needs approval. |
-| 3. Topic and observation search, corrections, recall UX | Search over saved observations and extracted topics, owner corrections and deletions of observations, better recall UX (for example "photos like this"). | Not built. Needs approval. |
+| **1. Metadata search and display** | Text search over what ORBIT already stores (captions, conversation titles), filterable by date and conversation; `photos_show` galleries stored on the reply; a re-authorizing image route; the page gallery. | **Built** (#98). |
+| **2. Observations with provenance** | After a photo is genuinely supplied to the model (attached to Rai's message, or `photos_inspect`), the model may save what it saw, tied to the exact processed image version, with server-assigned provenance; `photos_recall` reuses it later without pixels, always labelled as a model observation; Rai's corrections and forgetting. | **Built (this change).** |
+| 3. Topic and observation search, recall UX | Search over saved observations and extracted topics across the library, better recall UX (for example "photos like this"). | Not built. Needs approval. |
 
 ## Milestone 1: what exists now
 
@@ -49,17 +49,114 @@ Owner only. **Assistant:** the Assistant and every chat thread that still exists
 - Refs live as long as the attachment is stored (bound photos are kept with their conversation; nothing here deletes or extends anything).
 - Stored galleries are part of the reply message, so they follow the conversation's own retention, archive and deletion: archiving a thread keeps its messages (and galleries); an archived source stays viewable from the Assistant and is marked archived, as for inspection.
 - When a source is renamed the next view shows the new title; when it is archived the next view says so; when a message stops referring to a photo or the conversation is gone, views show `not-found` and the route answers 404; when a file is missing or damaged, views show `unavailable` and the route answers 410.
-- Nothing derived is stored besides the ordered refs on the reply. No search index, no thumbnails, no captions or titles copied, no observations.
+- Nothing derived is stored besides the ordered refs on the reply. No search index, no thumbnails, no captions or titles copied. (Milestone 2 adds observation records in their own store; see below.)
 
-## Contract for later milestones (the seam, not built)
+## Milestone 2: saved observations with provenance
+
+Source: `src/photo-observations.ts` (store, `photos_observe`, `photos_recall`, `photos_correct`, `photos_forget`, `readableRecords`), `src/agent.ts` (`TurnIdentity`, `DeliveredImage`, `Evidence`, `ChatTool.transcript`, delivery tracking in `runChat`), `src/thread-service.ts` (turn identity, delivered photos with their SHA-256, transcript stubs), `src/photo-context.ts` (the photo note names refs), `src/threads.ts` / `src/assistant-store.ts` (`messageState`), `src/server.ts` and `src/main.ts` (wiring, `<state>/photo-observations`), `src/model.ts` (guidance). Tests: `test/photos-observations.test.ts`.
+
+### What it does
+
+1. Rai sends a photo, or asks about an earlier one and the model calls `photos_inspect`. The model really receives the image.
+2. After looking, the model calls `photos_observe {ref, scope, observations, limitations?, supersedes?}` (one photo per call). ORBIT admits it only if the evidence rules below hold, stores the record atomically, and only then returns `saved: true` with the record id. The model's next step (the usual tool loop, no separate inference call to produce observations) answers Rai and may say it was saved.
+3. Later, "what did you previously notice about this photo?" or a follow-up the records cover: the model calls `photos_recall {refs}` (text and metadata only, no image input) and answers "the earlier inspection recorded …" with date and source. For a detail the records do not mention, conflicting, stale or superseded records, or when Rai asks to look again, it calls `photos_inspect` as before.
+4. "No, that's a heron": `photos_correct` stores Rai's statement and supersedes the named records. "Forget what you saw in that photo": `photos_forget` removes the text.
+
+### Evidence: when a visual observation is admitted (`photos_observe`)
+
+The backend can prove that an image was delivered, never that a description of it is correct. So a saved observation is always a **model observation** (label: "what the model said it saw when this exact processed image was supplied to it; not a verified fact"). ORBIT admits one only when **all** of these hold, checked in `runChat` and the tool from server state, never from arguments:
+
+- **Delivered in this reply.** `runChat` keeps a per-reply map of refs that really reached the model as image input: the photos the first request carried (the turn's own message and, under the existing context rule, the newest earlier photo messages of the same conversation; the thread service records each with the SHA-256 of the exact bytes loaded), and photos `runChat` admitted from a `photos_inspect` result (hash of the admitted bytes). A blocked, refused, over-budget, not-found, unavailable or interrupted inspection adds nothing. Listing, showing, captions, titles, previous assistant text and saved observations never add anything.
+- **Seen before the call.** Photos the message carried are seen from step 0; photos `photos_inspect` supplied in round *r* are seen from step *r* + 1 (they follow that round's tool results). A save in the same step as its inspection is refused.
+- **A completed primary generation.** The step that asked for the save was not answered by the OpenRouter fallback (which is never given photos) and carried no `incomplete` note (cut off, or malformed calls dropped).
+- **Same version.** The delivered bytes' SHA-256 equals the attachment's recorded SHA-256, and the stored file still passes its integrity check now.
+- **Visible now.** The ref is re-authorized with `photoReach` for the calling conversation (owner, policy, bound, source still present).
+- **Strict arguments.** Only `ref`, `scope`, `observations`, `limitations`, `supersedes` are accepted; any other key (for example `model`, `at`, `sha256`, `inspected`) is refused with "provenance is assigned by ORBIT".
+
+The ref of a photo Rai attached is named in ORBIT's note in front of the images (`Refs in order: photo 1 = ph_…`), so a batch is assigned per photo; each call saves exactly one ref.
+
+### Data contract (`orbit-photo-observation/1`)
+
+One file per photo: `<state>/photo-observations/<ref>.json` = `{v: 1, contract, ref, rev, records: [...]}`, mode 0600 in a 0700 directory. A record:
+
+| Field | Meaning | Set by |
+|---|---|---|
+| `id` | `ob_` + 24 hex = SHA-256 of (contract, conversation, reply message, call id, ref). Deterministic, so a call recorded or retried twice maps to one record. | server |
+| `kind` | `model-observation` or `user-correction`. Never mixed. | server |
+| `state` | `active`, `superseded` or `forgotten`. | server |
+| `image` | `{sha256, bytes, width, height}` of the stored processed JPEG the record is about. | server (attachment record) |
+| `at` | when it was saved (server clock). | server |
+| `source` | `{conversation, message, callId, userMessage}`: the conversation (session id), the assistant reply and tool call that saved it, and Rai's message that started the turn. | server (turn context) |
+| `inspection` | model observations only: `{via: "message" \| "photos_inspect", callId (the inspect call), step, model}`. `model` is the model ORBIT requested (`status().impl`), not an identity the provider confirmed. | server (`runChat` evidence) |
+| `scope` | what the inspection was about, as the model stated it (≤ 160 chars). | model |
+| `observations` | 1–6 short statements (≤ 240 chars each). | model |
+| `limitations` | 0–3 (≤ 160 chars each). | model |
+| `correction` | user corrections only: Rai's statement as relayed (≤ 300 chars). | model, relaying Rai |
+| `supersedes`, `supersededBy`, `supersededAt` | supersession links. | server |
+| `forgotten` | `{at, conversation, message}` of the forgetting turn. | server |
+
+Authoritative upload facts stay in the attachment store; user context stays in the conversation; model observations and Rai's corrections are separate record kinds and are always labelled differently in `photos_recall`. Text is flattened (control and invisible characters removed), masked with the conversation masker, and refused if it contains a data URL or a long opaque run (base64, keys). No original upload, EXIF/GPS, base64, image bytes or transcripts are stored.
+
+**Bounds:** 1–6 observations, 0–3 limitations, scope ≤ 160, correction ≤ 300, at most 6 superseded ids per write; at most 10 saves (observe and correct together) per reply; at most 12 active records and 30 records in total per photo (at the cap the oldest forgotten, then superseded, entries are dropped; active records are never evicted, a save is refused instead); a file over 256 KiB is not read or written; `photos_recall` takes at most 5 refs and is shrunk to the tool-output limit, oldest records first, saying how many it left out.
+
+### Writes: atomicity, idempotency, concurrency, failure semantics
+
+- Each change is one synchronous read-modify-write of one photo's file: read from disk, validate every record against the contract, apply, validate again, write a temp file, fsync, rename; `rev` increases by one. A crash leaves the old or the new file, never a mix; leftover temp files are removed at start. A file that does not parse or breaks the contract is not served and **never overwritten** (writes refuse), so a person can inspect it.
+- ORBIT is the only writer, and Node runs each change to completion without interleaving, so concurrent turns (the Assistant and a chat thread) never lose an update. There is no cross-process lock: a second ORBIT process writing the same state directory is not supported (as for the thread stores).
+- **Commit point: the tool call.** A record is written when `photos_observe` runs, after the model step that asked for it completed and the evidence checks passed. Nothing is staged and nothing is written later. Consequences: an aborted or failed model request, a cancelled turn, a step that never asks to save, or a refused call writes nothing and claims nothing; a reply that fails **after** a successful save keeps the record (the observation was made from a real delivery), and its source message is then an errored reply, which `photos_recall` still links to. The tool's result (and so the call row on the page) says `saved` only after the write returned.
+- **Idempotency.** The same call id in the same reply is recorded once (`duplicate: true`); the same observations saved twice in one reply are stored once. A retried message is a new turn, a new delivery and so a new record.
+
+### Reads (`photos_recall`) and the decision policy
+
+For each ref: re-authorize the photo (`photoReach`) and load it with its SHA-256 check (a missing or damaged file: `photo-unavailable`, no record reusable). Then each record (`readableRecords`): its source conversation must be readable by the caller (Chat: only itself; Assistant: itself and every existing chat thread), that conversation must still exist and still hold the source message (an Assistant message in an archived chunk is kept and marked, as photo discovery does), and its image version must equal the photo's current SHA-256. Forgotten records, records about another version and records whose source is gone are **counts only** (`notReusable`), never text. Superseded records only with `includeSuperseded: true`, marked with `supersededBy`. A record from a conversation the caller cannot read is left out without a count, so a chat thread does not learn that the Assistant observed its photo.
+
+Each returned record carries its label, id, kind, state, time (UTC and owner-zone), exact image version, source (conversation, title, archived, reply, Rai's message, call, page link), how the image was delivered and the requested model, scope, observations, limitations, correction and supersession links. The result returns no image and `runChat` adds no image input for it.
+
+**Decision policy (guidance, `src/model.ts photoGuidance`).** ORBIT cannot decide whether recorded text answers a question; the model does, following the guidance: recall first for "what did you notice" and covered follow-ups; answer with "the earlier inspection recorded …" and never imply seeing the photo now; a correction wins over a model observation; inspect afresh for a detail the records do not mention, for conflicting, stale or superseded records, or when Rai asks to look again ("a detail missing from the records is not evidence that it is missing from the photo"); save after looking; never save for a photo only listed, shown, captioned or recalled. The backend enforces the structural rules above; the tests check this policy only with **scripted** models, which is not evidence that a real model follows it. The earlier wording ("saved visual observations do not exist yet") is replaced; the rule that a listing, caption or earlier description is not the photo is kept.
+
+Note: in the **same** conversation, ORBIT's existing context rule (`docs/photos.md`) re-sends the newest photo messages with each request, so a follow-up there may carry the pixels anyway; recall matters most for photos not in the current request (another conversation, or older photos). This milestone does not change that rule.
+
+### Corrections (`photos_correct`)
+
+Owner only, needs a turn with a message from Rai (its id is recorded as `source.userMessage`), the photo visible and intact. Stored as `user-correction` with the photo's current version, **never** with an `inspection`, and labelled "Rai's statement relayed from his message; not a visual inspection". It supersedes only the active records it names, which must be readable by the caller and about the current version; anything else refuses the whole call. Superseded records are excluded from default reuse and kept for audit (with `supersededBy`). Nothing else is amended.
+
+### Forgetting (`photos_forget`) and retention
+
+Owner only. Forgets the named records (or, with `ids: null`, every record of that photo **the caller can read**; a chat thread cannot forget the Assistant's records). The record keeps only a minimal audit entry: `id`, `kind`, `state: forgotten`, `ref`, image version, original time, source ids (conversation, reply, Rai's message, call) and `forgotten {at, conversation, message}`. Scope, observations, limitations and correction text are deleted from the file at once and never reconstructed. Records a forgotten correction had superseded stay superseded (no silent amendment); the oldest forgotten entries are the first to go at the per-photo cap. Forgetting works even if the photo's file is damaged, as long as the photo is visible.
+
+Retention otherwise follows the photo: records are kept as long as the photo and are never served once the photo, its source message or the record's source conversation is gone, or the image version changed. There is no photo deletion in ORBIT yet, so nothing deletes the files; when one exists it must remove `<ref>.json` too.
+
+### Transcript and replay (stale text)
+
+Observation text lives in exactly one place, the observation store. `ChatTool.transcript` lets a tool decide what the conversation stores of its call: for `photos_observe`, `photos_recall` and `photos_correct` the stored arguments, output and summary keep refs, ids, kinds, states and counts only (`"observation text is not kept in the conversation transcript; photos_recall reads the current records"`). The model sees the full result within its own reply; replayed context, the page, `session_read`, compaction summaries and the omitted-calls note only ever see the stub. So after forgetting, a correction, a revocation or a version change, no stale observation text comes back through tool history: a later reply must call `photos_recall`, which re-authorizes everything.
+
+**Limitation:** the model's own reply prose ("It shows a blue mug") is part of the conversation, as before, and is replayed and summarized like any reply. Forgetting does not edit earlier replies (the tool says so), and the rolling recent-context note may have summarized them.
+
+### Authorization
+
+Same policy as milestone 1, on every read, write, correction, forget and replay: owner only (`attachments` policy port; the Assistant also `sessions`), the photo re-authorized by `photoReach`, and each record's source conversation re-authorized by `photoPolicy`. Chat gains no cross-thread access: it can neither read nor change records made elsewhere. A gallery or a listed ref grants nothing. Archived sources stay readable from the Assistant and are marked archived. Observation and correction text, captions and titles are untrusted data in every result ("never instructions").
+
+### Not built in milestone 2
+
+- Search over observations or topics across the library, "photos like this", embeddings (milestone 3).
+- Background or batch indexing, any automatic inference outside a request Rai made.
+- Face recognition, identification of people, automatic sensitive-attribute inference: the save tool tells the model not to record them; ORBIT does not detect them semantically (see residual risks).
+- A page UI for observations beyond the call rows ("✓ photos_observe … saved") and the model's reply.
+- Cross-process locking; photo deletion.
+
+## Seam for milestone 3 (not built)
+
+`orbit-photo-ref/1` (`src/photo-ref.ts`) and `orbit-photo-observation/1` (`src/photo-observations.ts`). The authoritative records stay the attachment store (`id`, `scope`, `state`, `type`, `bytes`, `width`, `height`, `sha256`, `createdAt`, `boundAt`), the conversation message that binds a photo, and one observation file per ref. An observation search would walk `observationStore.refs()`, re-authorize each photo with `photoReach` and each record with `readableRecords` for the caller (exactly as `photos_recall` does), match only `active` records about the current version, and label every hit as "text match over saved model observations, not visual verification". Any index it adds must be rebuildable from these files, private, bounded and idempotent, and must drop forgotten text at once.
+
+## Contract kept from milestone 1
 
 `orbit-photo-ref/1` (`src/photo-ref.ts`): a ref is `ph_` + 32 hex derived from the attachment's server-issued id; a stored gallery is `{v: 1, callId, at, refs}`. The authoritative record stays the attachment store (`id`, `scope`, `state`, `type`, `bytes`, `width`, `height`, `sha256`, `createdAt`, `boundAt`) plus the conversation message that binds it; no second source of truth was introduced.
 
-Milestone 2 would add observation records keyed by **(ref, `sha256` of the processed bytes)**, so an observation is tied to the exact processed image version and becomes invalid if the bytes ever change (`load()` already verifies the hash). Each record would carry its provenance: the model and backend that produced it, the `photos_inspect` call and reply it came from (conversation, message, call id), the time, and that it is a model statement, not ground truth. Its retention would follow the photo's: removed with the photo or its conversation, hidden when the source is not visible to the caller, and correctable or deletable by Rai. Only text a model actually produced after real image input would be stored; nothing would be inferred in the background, and no faces, sensitive attributes or embeddings would be extracted.
+The milestone 1 design said milestone 2 would key observations by **(ref, `sha256` of the processed bytes)** and carry their provenance, follow the photo's retention and be correctable and deletable by Rai; that is what was built (above), with one change: a record is admitted after any genuine delivery of the image to the model (the photo attached to Rai's message, or `photos_inspect`), not only after `photos_inspect`.
 
 ## Not built (by design, in milestone 1)
 
-- Search of image content, saved visual observations, semantic topic extraction, user labels, embeddings, face recognition, OCR indexing.
+- Search of image content, saved visual observations (milestone 2 adds them, without search), semantic topic extraction, user labels, embeddings, face recognition, OCR indexing.
 - Capture dates or places (EXIF/GPS are stripped at upload).
 - Cross-conversation recall from a chat thread (Assistant only, as before).
 - Server-side thumbnails; galleries load the stored processed copy.
@@ -89,3 +186,43 @@ Use non-private test photos. Change no configuration.
 9. Rename the thread, then reload the Assistant: the gallery labels show the new title. Archive the thread: the labels say archived and the photos still show.
 10. In a **different** Chat thread, ask "Show me the garden photos". It should find only that thread's own photos (or none) and say other conversations are reachable from the Assistant.
 11. Ask for something no caption or title mentions ("photos of a dog"): the reply should say no caption or title matched, not that no such photo exists.
+
+## Milestone 2 evidence
+
+**Automated, offline (this change):** `test/photos-observations.test.ts`. Every image is synthetic; every model answer is scripted (at the ChatGPT token-sharing and OpenAI API adapters' HTTP boundary through the real server, or as a scripted `ModelPort` through the real `runChat` dispatch). The policy decisions in these tests (save after looking, recall first, inspect again for a new detail) are **scripted assertions of the guidance, not proof of what a real model does**.
+
+- Acceptance, both adapters: a photo attached to Rai's message in a chat thread is sent as image input with its ref in ORBIT's note; `photos_observe` saves it with server-assigned provenance (thread, reply, Rai's message, call, delivered via the message at step 0, requested model, exact SHA-256); the stored transcript holds no observation text; after a restart over the same state directory the Assistant's `photos_recall` returns the record with its label, source, link, scope, limitations and version, **no request of that turn carries an image part**, and replayed history carries only the stub; a question about a detail the record does not mention goes through `photos_inspect`, whose request carries exactly the stored bytes.
+- `photos_inspect` then save in the next step records `via: photos_inspect` with the inspect call id; listing and showing from the Assistant (with a hostile caption that asks for a save) cannot save.
+- `runChat` evidence: an undelivered ref, fabricated provenance fields, a forged ref, a fallback step, a cut-off step and a missing turn context are refused; same-step inspect-and-save is refused; partial delivery (over budget) admits only the supplied photo; a blocked model admits none; a batch is assigned per photo.
+- Aborted provider request and cancelled turn write nothing; the same call twice and the same observations twice give one record; four concurrent saves on one photo all land and `rev` counts each.
+- Corrections supersede the named record, carry Rai's message id and no inspection, are labelled as his statement, and hide the superseded record by default; superseding a non-active record is refused.
+- Forgetting removes the text from the file, keeps the audit entry, is idempotent, leaves records of other conversations alone, and the forgotten record is a count only.
+- Access: a chat thread neither sees nor counts the Assistant's record of its own photo; another thread gets "not found" for read, save and forget; not-owner is refused; an archived source thread stays readable from the Assistant and is marked; a gone source message, a changed image version and a revoked photo give no reusable text; a damaged photo file gives `photo-unavailable` and refuses saves; a broken record file is not served and not overwritten.
+- Hostile observation text is returned as data under the untrusted notice; data URLs, opaque runs, over-long and too many items are refused.
+- Strict schemas: every optional field is nullable and listed as required in the strict form; null is accepted. Guidance contains the recall-first, "earlier inspection recorded", "not evidence of absence" and inspect-again rules, and the old "do not exist yet" wording is gone.
+- Regression: the full suite (`pnpm test`) and `pnpm typecheck` pass, including milestone 1 search/display/route/browser tests and the photo upload, inspection and capability tests.
+
+**Not verified:** no live model call (whether a real model saves after looking, recalls first, phrases answers as earlier inspections, or avoids sensitive attributes is unverified), no production data or configuration, no Safari/iOS run.
+
+### Residual risks
+
+- A saved observation is only as good as the model's description; ORBIT proves delivery, not correctness. Labels say so.
+- The model writes `scope` and the observation text; it could misstate the scope, or relay a "correction" Rai did not make (the record names Rai's message so it can be checked).
+- Sensitive attributes and identification of people are excluded by instruction only.
+- The model may skip saving, or recall when it should inspect; nothing forces the policy.
+- Reply prose that quoted an observation stays in the conversation after forgetting.
+- Single-writer assumption: no cross-process lock on the observation files.
+- In the same conversation the existing context rule may still re-send recent photos, so recall does not always avoid pixels there.
+
+## Milestone 2 owner acceptance (after deploying)
+
+Use non-private test photos (for example a mug with a sticky note). Change no configuration. Needs an image-capable model.
+
+1. In a Chat thread "Desk test", send a photo with "What's in this photo?". The reply should describe it; the tool calls should show `✓ photos_observe(…)` with a saved record id. If the model did not save, note it (guidance is not enforcement).
+2. In the **Assistant**, ask "What did you previously notice about the photo from Desk test?". It should call `photos_list` (if needed) and `photos_recall`, answer "the earlier inspection recorded …" with the date and thread, and not claim to see the photo.
+3. Ask a detail you did not mention and the first answer did not cover ("what colour is the pen?"). It should call `photos_inspect` and answer from the photo.
+4. Say "No, the mug is green, not blue." It should call `photos_correct`; ask again what was noticed: the correction should lead, labelled as your statement.
+5. Say "Forget what you saw in that photo." It should call `photos_forget`; ask again: it should say nothing reusable is saved and offer to look again.
+6. In a **different** Chat thread, ask about that photo: it should not find it or any observation.
+7. Reload the page and restart ORBIT if convenient: steps 2 to 5 should behave the same.
+8. Ask "Did you save anything about that photo?" right after a listing or a gallery without inspection: it should not claim a save.

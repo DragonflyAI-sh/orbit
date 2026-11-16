@@ -475,6 +475,12 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
     photoSource(): { messages: PhotoMessage[]; archivedChunks: number } {
       return { messages: sortedActive().flatMap((c) => photoMessagesOf(Array.isArray(c.messages) ? c.messages : [])), archivedChunks: archived.length };
     },
+    // Whether an Assistant message still exists (photo observation sources, src/photo-observations.ts). Active chunks are in memory;
+    // archived chunks are not read here, so a message not found while archived chunks exist is "archived" (kept, not re-read).
+    messageState(messageId: string): "present" | "archived" | "gone" {
+      for (const c of active.values()) if (Array.isArray(c.messages) && c.messages.some((m) => m.id === messageId)) return "present";
+      return archived.length ? "archived" : "gone";
+    },
     // Read-only transcript access for session_read (src/sessions.ts). Nothing is cloned in full, written, indexed or counted as a
     // change, and no card is expired (archivePage does that; this does not use it). Active chunk objects are replaced on every change,
     // never edited in place, so the snapshot taken here stays consistent while the reader walks it, even if the chunk is archived.
