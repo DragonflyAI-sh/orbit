@@ -37,6 +37,10 @@ export const FALLBACK_TOOLS: ReadonlySet<string> = new Set([
   "job_status",
   "vault_policy",
   "job_launch",
+  // The lane tools that only read or only propose (research_save_to_vault writes, so it is not here).
+  "routines_list",
+  "research_result",
+  "research_launch",
   ...PR_INSPECT_TOOL_NAMES,
 ]);
 

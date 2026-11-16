@@ -87,6 +87,8 @@ export type Card = {
   decidedAt?: string;
   // Display data (masked). `brief` and `text` can be long.
   routine?: string;
+  // "research" on a research_launch card; absent on build launch cards.
+  lane?: "research";
   brief?: string;
   briefMasked?: boolean;
   // Legacy (job_launch cards stored by an older build): the vault notes that build was to copy at launch. Never set any more.

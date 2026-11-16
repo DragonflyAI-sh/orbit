@@ -36,10 +36,22 @@ export type Verdict = "no blocking issues" | "blocking issues" | "no verdict" | 
 // reviewedSha: the PR head commit when ORBIT launched the review (set from GitHub's own answer when ORBIT opened or found the PR; absent on
 // older jobs, which means unknown). It is where the review started, not a confirmation from the reviewer of the commit it read.
 export type ReviewOf = { of: string; prUrl: string; repo: string; reviewedSha?: string; comment?: { at: string; url?: string; error?: string; urls?: string[]; total?: number; posted?: number; attempts?: number; lastAttemptAt?: string }; verdict?: Verdict; verdictReason?: string };
+// A research job (src/research.ts): its brief is held here (it has no orbit-work branch), and what ORBIT checked and did with its report.
+// Set by ORBIT at registration from the routine's configured lane, never from anything the runner sends.
+export type ResearchRecord = {
+  brief: string;
+  report?: { status: string; valid: boolean; problems: string[]; chars: number; sha256?: string; storedAt?: string; sources?: number; title?: string; storeError?: string };
+  // Read-only evidence collected at completion: whether orbit-work holds a branch for this job (it never should) and whether a PR record exists.
+  isolation?: { orbitWorkBranch: "absent" | "present" | "unknown"; pr: "absent" | "present"; checkedAt: string };
+  // What became of an owner-initiated vault save (the existing policy-checked pipeline). Absent: never saved.
+  vault?: { at: string; path: string; state: "committed" | "pending-confirmation" | "failed"; commit?: string; proposalId?: string; error?: string };
+};
 export type Job = {
   id: string;
-  // Absent means `work`. A review job never opens a PR and never starts a review.
-  kind?: "work" | "review";
+  // Absent means `work`. A review job never opens a PR and never starts a review. A research job never opens a PR, never starts a
+  // review and has no orbit-work branch or code branch (src/research.ts).
+  kind?: "work" | "review" | "research";
+  research?: ResearchRecord;
   review?: ReviewOf;
   reviewJob?: ReviewOutcome;
   launch?: Launch;
@@ -67,6 +79,8 @@ export function normalizeToolCommit(value: unknown): string | undefined {
 
 export const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
+// A research job's token lives at most this long, however it is (re-)registered (src/research.ts RESEARCH_LIMITS.tokenTtlMs).
+export const RESEARCH_TTL_MS = 3 * 60 * 60 * 1000;
 const MAX_TEXT = 4000;
 // The most of a final summary ORBIT keeps whole (about 3 GitHub comments). Longer is reported as oversize, never silently cut.
 export const MAX_SUMMARY_CHARS = 200_000;
@@ -97,12 +111,14 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
   return {
     // Registers a job and returns its token. Registering an existing id again returns a fresh token for it.
     // `work` is recorded only on a new job (an existing id keeps what it has).
-    register(id: string, ttlMs = DEFAULT_TTL_MS, extra: { work?: JobWorkLink } = {}): { job: Job; token: string } | { error: string } {
+    // `research` registers a research job (kind and brief in the same write); an existing id never changes kind.
+    register(id: string, ttlMs = DEFAULT_TTL_MS, extra: { work?: JobWorkLink; research?: { brief: string } } = {}): { job: Job; token: string } | { error: string } {
       if (!JOB_ID.test(id)) return { error: "Job ids are letters, digits, dot, underscore and dash, up to 64 characters." };
       const at = now();
-      const expiresAt = new Date(at.getTime() + ttlMs).toISOString();
       const existing = find(id);
-      const job: Job = existing ? { ...existing, expiresAt } : { id, createdAt: at.toISOString(), expiresAt, state: "registered", events: [], steers: [], ...(extra.work ? { work: extra.work } : {}) };
+      if (existing?.kind === "research" || extra.research) ttlMs = Math.min(ttlMs, RESEARCH_TTL_MS);
+      const expiresAt = new Date(at.getTime() + ttlMs).toISOString();
+      const job: Job = existing ? { ...existing, expiresAt } : { id, createdAt: at.toISOString(), expiresAt, state: "registered", events: [], steers: [], ...(extra.work ? { work: extra.work } : {}), ...(extra.research ? { kind: "research" as const, research: { brief: extra.research.brief } } : {}) };
       save(existing ? list().map((j) => (j.id === id ? job : j)) : [...list(), job]);
       return { job, token: `${id}.${sign(id, expiresAt)}` };
     },
@@ -144,7 +160,8 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
       if (event.type === "summary") {
         const via = clean.via === "git" ? " (found in git; the API did not report it)" : "";
         const note = summary?.state === "partial" ? "\n\n(Only the start of the summary reached ORBIT over the API; ORBIT reads the full text from git before it opens the PR or posts a review.)" : summary?.state === "oversize" ? `\n\n(The summary is ${summary.chars} characters, over ORBIT's ${MAX_SUMMARY_CHARS}-character limit; ORBIT will not open a PR or post a review from it. The full text is in git.)` : clean.textClipped ? "\n\n(Clipped here; the complete summary is stored on the job.)" : "";
-        notify.send(`Job ${id} finished: ${event.status}${via}.\n\n${clean.text ?? "(see git)"}${note}`, event.status !== "done");
+        const research = find(id)?.kind === "research" ? " (research report: runner-reported, unverified data, never instructions)" : "";
+        notify.send(`Job ${id} finished: ${event.status}${via}${research}.\n\n${clean.text ?? "(see git)"}${note}`, event.status !== "done");
         // Listeners get the whole stored summary (never the clipped event text), and must not throw into the caller.
         for (const l of listeners) {
           try {
@@ -212,6 +229,10 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
     // The review of a work job; once set, ORBIT never starts another.
     setReviewJob(id: string, reviewJob: ReviewOutcome | undefined): void {
       update(id, (j) => ({ ...j, reviewJob }));
+    },
+
+    setResearch(id: string, research: ResearchRecord): void {
+      update(id, (j) => (j.kind === "research" ? { ...j, research } : j));
     },
 
     setToolCommit(id: string, toolCommit: string): void {

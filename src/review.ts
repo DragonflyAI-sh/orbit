@@ -109,7 +109,8 @@ export function reviewer(jobs: Jobs, launch: JobLauncher, comments: CommentPort 
 
   // Called once a PR was opened (not found) for a job. Starts at most one review per work job.
   const start = async (work: Job, prUrl: string, headSha?: string): Promise<void> => {
-    if (work.kind === "review" || work.reviewJob) return;
+    // Only work jobs are reviewed: never a review, and never a research job (it has no PR).
+    if (work.kind === "review" || work.kind === "research" || work.reviewJob) return;
     const match = PR_URL.exec(prUrl);
     const routine = work.launch?.routine;
     if (!match || !routine) return;

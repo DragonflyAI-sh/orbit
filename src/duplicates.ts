@@ -51,7 +51,7 @@ export function findDuplicates(brief: string, jobs: Job[], health: (j: Job) => s
 // tool result the model reads.
 export function withDuplicateWarning(tools: ChatTool[], proposals: Proposals, find: (brief: string) => DuplicateJob[]): ChatTool[] {
   return tools.map((t) =>
-    t.name !== "job_launch"
+    t.name !== "job_launch" && t.name !== "research_launch"
       ? t
       : {
           ...t,

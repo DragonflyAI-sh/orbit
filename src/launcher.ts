@@ -100,6 +100,8 @@ export function gitReconciler(jobs: import("./jobs.ts").Jobs, control: ControlRe
   return async (): Promise<void> => {
     if (!control.readJob) return;
     for (const job of jobs.list()) {
+      // A research job has no git record (src/research.ts): nothing to reconcile from orbit-work.
+      if (job.kind === "research") continue;
       // A summary that reached ORBIT only in part (over the API size limit) is completed from git, whatever the job's state:
       // the PR and the review wait for it. Retried every QUIET_MS until git answers.
       if (job.summary?.state === "partial") {

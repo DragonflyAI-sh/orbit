@@ -212,6 +212,7 @@ export function pullRequestOpener(jobs: Jobs, repos: Map<string, string>, pulls:
   };
 
   const handle = async (job: Job, summary: string): Promise<void> => {
+    if (job.kind === "research" || job.kind === "review") return;
     const repo = job.launch?.routine ? repos.get(job.launch.routine) : undefined;
     if (!repo) return;
     const at = now().toISOString();
@@ -256,7 +257,8 @@ export function pullRequestOpener(jobs: Jobs, repos: Map<string, string>, pulls:
     }
   };
   jobs.onSummary((job, fullText, complete) => {
-    if (job.kind === "review" || job.state !== "done" || job.pr) return;
+    // Review and research jobs never open a pull request (a research job has no code branch and no project repository).
+    if (job.kind === "review" || job.kind === "research" || job.state !== "done" || job.pr) return;
     // A partial summary is not acted on: git completes it and this listener runs again with the whole text.
     if (!complete && job.summary?.state !== "oversize") return;
     void handle(job, fullText ?? "").catch((err) => console.error(JSON.stringify({ at: new Date().toISOString(), pr: String(err) })));

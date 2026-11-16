@@ -22,6 +22,7 @@ import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
 import { selectPrInspect } from "./pr-inspect.ts";
 import { parseRoutineRepos, pullRequestOpener, selectPulls } from "./pull-requests.ts";
 import { reviewer, selectComments } from "./review.ts";
+import { loadResearchTool, researchCompletion, researchStore, selectResearchLane } from "./research.ts";
 import { memoryReport, modelTask, runner, toolCall } from "./runs.ts";
 import { scheduler } from "./schedule.ts";
 import { buildServer } from "./server.ts";
@@ -125,6 +126,14 @@ const watch = watcher(jsonStore(stateDir, "watch", { ports: {} }), notify, () =>
 const control = selectControl(process.env);
 const routines = selectRoutines(process.env);
 const publicJobUrl = process.env.ORBIT_PUBLIC_JOB_URL || undefined;
+// The research lane (docs/research-lane.md): its own Routine(s) and credential(s), fails closed when absent or ambiguous. Reports are
+// stored in <state>/research; completion never opens a PR, starts a review, writes orbit-work or launches anything.
+const routineRepos = parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS);
+const researchLane = selectResearchLane(process.env, { routineRepos });
+const researchReports = researchStore(stateDir ? join(stateDir, "research") : undefined);
+const researchTool = loadResearchTool();
+if (researchLane.state === "misconfigured") console.error(JSON.stringify({ at: new Date().toISOString(), research: researchLane.reason }));
+researchCompletion({ jobs, store: researchReports, notify, control });
 // ORBIT starts reviews itself, from a PR it just opened: not a chat tool call, so no confirmation is needed.
 const review = reviewer(jobs, jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit }), selectComments(process.env), notify);
 const prs = pullRequestOpener(jobs, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), selectPulls(process.env), notify, () => new Date(), (job, url, headSha) => void review.start(job, url, headSha), selectComments(process.env));
@@ -133,7 +142,7 @@ const reconcile = control ? gitReconciler(jobs, control) : async () => {};
 // The job listener binds to localhost only; Tailscale Funnel is what publishes it.
 const ingressPort = process.env.ORBIT_INGRESS_PORT ? Number(process.env.ORBIT_INGRESS_PORT) : undefined;
 if (ingressPort) {
-  buildIngress(jobs).listen(ingressPort, "127.0.0.1", () => console.log(`orbit job listener on 127.0.0.1:${ingressPort}`));
+  buildIngress(jobs, Date.now, { researchTool }).listen(ingressPort, "127.0.0.1", () => console.log(`orbit job listener on 127.0.0.1:${ingressPort}`));
 }
 const runs = runner(jsonStore(stateDir, "runs", []), [memoryReport(memory), modelTask(model), toolCall(tools)], notify);
 runs.recover();
@@ -216,6 +225,7 @@ buildServer({
   publicJobUrl,
   control,
   routines,
+  research: { lane: researchLane, store: researchReports, tool: researchTool, routineRepos },
   commit,
   owner,
   identify: tailscaleIdentify(),

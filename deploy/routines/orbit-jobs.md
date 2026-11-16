@@ -1,6 +1,6 @@
 # Routine: ORBIT jobs (orbit-work + orbit)
 
-The Claude Code scheduled task (formerly "routine") that runs ORBIT's coding jobs. It lives on claude.ai, not in this repo, so this file is its source of truth: if the task is lost or needs recreating, rebuild it from here. Keep this file in step with the live task whenever either changes.
+The Claude Code scheduled task (formerly "routine") that runs ORBIT's coding jobs (the **build** lane). Research jobs use a separate routine and environment with no repositories, defined in `deploy/routines/orbit-research.md`; nothing here changes for them. It lives on claude.ai, not in this repo, so this file is its source of truth: if the task is lost or needs recreating, rebuild it from here. Keep this file in step with the live task whenever either changes.
 
 ## Settings
 
