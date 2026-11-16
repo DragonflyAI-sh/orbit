@@ -18,7 +18,7 @@ import { hasUserinfo, maskRemote } from "./vault/remote.ts";
 
 // The orbit.env settings that are non-secret. Anything else in the environment (the owner's identity, credential paths,
 // tokens) is never shown, whatever its name.
-export const ENV_ALLOWLIST: readonly string[] = [...CONFIG_KEYS, "HOST", "PORT", "ORBIT_COMMIT", "ORBIT_DEPLOY_STATE", "ORBIT_VAULT", "ORBIT_VAULT_STATE", "ORBIT_VAULT_REMOTE", "ORBIT_VAULT_BRANCH"];
+export const ENV_ALLOWLIST: readonly string[] = [...CONFIG_KEYS, "ORBIT_RESEARCH_ROUTINES", "HOST", "PORT", "ORBIT_COMMIT", "ORBIT_DEPLOY_STATE", "ORBIT_VAULT", "ORBIT_VAULT_STATE", "ORBIT_VAULT_REMOTE", "ORBIT_VAULT_BRANCH"];
 
 type Section<T> = { state: "ok"; source: string; value: T } | { state: "unavailable"; source: string; reason: string };
 const unavailable = (source: string, err: unknown): Section<never> => ({ state: "unavailable", source, reason: maskText(err instanceof Error ? err.message : String(err)).slice(0, 240) });
@@ -26,6 +26,8 @@ const unavailable = (source: string, err: unknown): Section<never> => ({ state: 
 const ROUTINE_FILE = "deploy/routines/orbit-jobs.md";
 // Chat tool output is capped near 8000 characters, so the definition is cut (the Settings table comes first) and its hash and size are given.
 const ROUTINE_MAX_CHARS = 3200;
+const RESEARCH_ROUTINE_FILE = "deploy/routines/orbit-research.md";
+const RESEARCH_ROUTINE_MAX_CHARS = 700;
 
 export type ConfigViewDeps = {
   env: NodeJS.ProcessEnv;
@@ -58,6 +60,11 @@ export function configView(deps: ConfigViewDeps): (ports: PortStatus[]) => Promi
         // Trigger ids masked as the tier 2 cards mask them (trig_…last4).
         routines.ORBIT_ROUTINES = v;
         out[key] = displayConfig(routines).ORBIT_ROUTINES ?? "(set)";
+        continue;
+      }
+      if (key === "ORBIT_RESEARCH_ROUTINES") {
+        // The research lane's trigger ids (docs/research-lane.md), masked the same way. Not a tier 2 setting: set by hand by an operator.
+        out[key] = v.split(",").map((e) => `${e.split("=")[0]}=trig_…${e.slice(-4)}`).join(",");
       } else if (key === "ORBIT_VAULT_REMOTE" && hasUserinfo(v)) {
         // A remote with a user name or password in it is shown without them (host and path only), and says so.
         out[key] = `${maskRemote(v)} (userinfo in the URL is hidden)`;
@@ -107,12 +114,12 @@ export function configView(deps: ConfigViewDeps): (ports: PortStatus[]) => Promi
     }
   };
 
-  const routine = (): Section<{ file: string; totalChars: number; sha256: string; truncated: boolean; text: string }> => {
-    const source = `${ROUTINE_FILE} in the running release (${commit.slice(0, 7)})`;
+  const routine = (file = ROUTINE_FILE, max: number = ROUTINE_MAX_CHARS): Section<{ file: string; totalChars: number; sha256: string; truncated: boolean; text: string }> => {
+    const source = `${file} in the running release (${commit.slice(0, 7)})`;
     try {
-      const raw = readFileSync(join(root, ROUTINE_FILE), "utf8");
+      const raw = readFileSync(join(root, file), "utf8");
       const text = maskText(raw);
-      return { state: "ok", source, value: { file: ROUTINE_FILE, totalChars: raw.length, sha256: createHash("sha256").update(raw).digest("hex").slice(0, 24), truncated: text.length > ROUTINE_MAX_CHARS, text: text.slice(0, ROUTINE_MAX_CHARS) } };
+      return { state: "ok", source, value: { file, totalChars: raw.length, sha256: createHash("sha256").update(raw).digest("hex").slice(0, 24), truncated: text.length > max, text: text.slice(0, max) } };
     } catch (err) {
       return unavailable(source, err);
     }
@@ -140,6 +147,8 @@ export function configView(deps: ConfigViewDeps): (ports: PortStatus[]) => Promi
       credentials: { tier1: credentials, loadedByThisProcess: loadedCredentials() },
       deployedCommit: { runningProcess: commit, tier1DeployState: deployState },
       routine: routine(),
+      // The research lane's Routine definition (docs/research-lane.md): only its start, to keep the result under the tool output cap.
+      researchRoutine: routine(RESEARCH_ROUTINE_FILE, RESEARCH_ROUTINE_MAX_CHARS),
       vaultPolicy: vaultPolicy(),
       photoCapability: photoCapability(),
       ports: { state: "ok" as const, source: "each port's own status()", value: ports.map((p) => ({ port: p.port, state: p.state, impl: p.impl, detail: maskText(p.detail).slice(0, 300), verifiedAt: p.verifiedAt })) },

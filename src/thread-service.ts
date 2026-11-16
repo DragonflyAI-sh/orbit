@@ -142,7 +142,7 @@ export function threadService(d: {
   function cardLines(t: Thread): string[] {
     return t.cards.map((c) => {
       const live = liveOf(c);
-      const what = c.kind === "job_launch" ? `launch on routine ${c.routine}` : c.kind === "job_steer" ? `steer of job ${c.job}` : c.kind === "vault_edit" ? `vault edit ${c.summary ?? c.action}` : `server operation ${c.action}`;
+      const what = c.kind === "job_launch" ? `${c.lane === "research" ? "research " : ""}launch on routine ${c.routine}` : c.kind === "job_steer" ? `steer of job ${c.job}` : c.kind === "vault_edit" ? `vault edit ${c.summary ?? c.action}` : `server operation ${c.action}`;
       const rec = c.state !== "confirmed" ? "" : live ? (live.found ? `; record now: ${live.state}${live.health ? ` (${live.health})` : ""}` : "; the record could not be found") : c.outcome?.error ? `; confirmation problem: ${c.outcome.error}` : "; no result recorded yet";
       const id = c.outcome?.jobId ?? c.outcome?.opId ?? (c.outcome?.commit ? `commit ${c.outcome.commit.slice(0, 7)} (pushed, remote verified)` : undefined);
       return `- proposal ${c.id.slice(0, 8)} (${what}): ${c.state}${id ? `, id ${id}` : ""}${rec}${c.duplicates?.length ? `; was flagged as similar to ${c.duplicates.map((x) => x.job).join(", ")}` : ""}`;
@@ -153,7 +153,7 @@ export function threadService(d: {
     const base = { id: p.id, state: "open" as const, createdAt: p.createdAt, expiresAt: p.expiresAt };
     if (p.kind === "job_launch") {
       const brief = maskContent(p.brief);
-      return { ...base, kind: p.kind, routine: p.routine, brief, ...(brief !== p.brief ? { briefMasked: true } : {}), ...(p.duplicates?.length ? { duplicates: p.duplicates } : {}) };
+      return { ...base, kind: p.kind, routine: p.routine, ...(p.lane === "research" ? { lane: "research" as const } : {}), brief, ...(brief !== p.brief ? { briefMasked: true } : {}), ...(p.duplicates?.length ? { duplicates: p.duplicates } : {}) };
     }
     if (p.kind === "job_steer") return { ...base, kind: p.kind, job: p.job, text: maskContent(p.text) };
     // A vault edit card shows exactly what will run (cardDisplay refuses text the vault filter would mask), so it is masked by the

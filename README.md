@@ -67,6 +67,10 @@ Owner only, read-only. `GET /tools` lists them; `POST /tools/<name>` calls one. 
 
 Owner only. `GET /nodes` lists the owner's devices on the tailnet, online or offline with last-seen, read from this host's tailscaled every 30 seconds. Devices of other tailnet users are never listed. The owner's chat gets the same summary, so ORBIT can answer "is my laptop on?". Presence only for now: desktop notifications will need a helper on each laptop.
 
+## Research lane
+
+A second job lane for internet research, separate from the build routine: its own Routine and environment with no repository sources, its own setting and credential (`ORBIT_RESEARCH_ROUTINES`, `orbit.research-routine.<name>`), and an API-only runner tool (`tools/orbit-research`). The owner's model discovers both lanes with `routines_list`, proposes research with `research_launch` (Rai confirms, like every launch and steer), reads the stored, validated, source-linked report with `research_result`, and can save it to the vault with `research_save_to_vault` through the existing policy-checked pipeline at a path ORBIT chooses. A research job never opens a PR, starts a review, writes `orbit-work` or launches a build. **Not provisioned:** the lane reports `unconfigured` until an operator follows `deploy/routines/orbit-research.md` and its smoke test passes. Design, security boundary and what is still unverified: `docs/research-lane.md`.
+
 ## Cloud runners: `orbit-job`
 
 `tools/orbit-job` is the job protocol for Claude cloud runners. A job's control files live in the private `DragonflyAI-sh/orbit-work` repo on branch `orbit/<job-id>`: ORBIT writes `.orbit/brief.md` and `.orbit/steer/<n>.md`; the runner writes `started.json`, `checkins.jsonl`, `replies/<n>.md` and `summary.md`. Code always goes to the project repo, never `orbit-work`.

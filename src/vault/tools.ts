@@ -25,11 +25,33 @@ const failure = (err: unknown): Error => {
 };
 
 export type VaultEdits = ReturnType<typeof vaultEdits>;
+export type VaultSettlement = { state: "committed"; at: string; commit?: string } | { state: "failed"; at: string; error: string } | { state: "cancelled"; at: string };
+// The live state of a vault proposal as this process knows it. "gone": not open, not being confirmed and not settled here, so it
+// expired or was dropped by a restart (proposals and their held edits are in memory only); nothing was written by it.
+export type VaultProposalState = VaultSettlement | { state: "open"; expiresAt: string } | { state: "confirming" } | { state: "gone" };
 
 export function vaultEdits(deps: { clone: VaultClone; memory: MemoryPort; proposals: Proposals; now?: () => Date }) {
   const { clone, memory, proposals } = deps;
+  const clock = deps.now ?? (() => new Date());
   // The exact validated edit behind each open proposal, in memory only (a restart drops it with the proposal).
   const pending = new Map<string, { edit: VaultEdit; reasons: string[] }>();
+  // What became of each proposal this process settled (confirmed into a commit or a failure, or cancelled), and the ones being
+  // confirmed right now, so a caller that recorded a pending proposal (the research lane) can reconcile it with the live outcome.
+  // In memory, bounded; a listener is told the moment a proposal settles so the caller can persist the outcome itself.
+  const settled = new Map<string, VaultSettlement>();
+  const confirming = new Set<string>();
+  const listeners: ((proposalId: string, outcome: VaultSettlement) => void)[] = [];
+  const settle = (id: string, outcome: VaultSettlement) => {
+    settled.set(id, outcome);
+    while (settled.size > 200) settled.delete(settled.keys().next().value!);
+    for (const l of listeners) {
+      try {
+        l(id, outcome);
+      } catch {
+        /* a listener's failure is its own to report */
+      }
+    }
+  };
 
   function propose(edit: VaultEdit, reasons: string[]) {
     // The complete change, or a refusal (VaultError policy_refused) when it cannot be shown in full: nothing is ever clipped.
@@ -119,29 +141,59 @@ export function vaultEdits(deps: { clone: VaultClone; memory: MemoryPort; propos
 
   return {
     tools,
+    // The same direct-or-proposal pipeline the write tools use, for ORBIT's own callers that choose the path themselves (the research
+    // lane's research_save_to_vault). Same validation, policy, secret refusal, Log line and remote verification; same results.
+    apply: run,
     // The confirmed path: re-validates the exact edit (path rules, secrets, preconditions, and that the policy still asks for
     // no more than the reasons on the card), then runs the same pipeline as a direct write.
     async confirm(proposal: Proposal & { kind: "vault_edit" }): Promise<{ code: number; body: Record<string, unknown> }> {
-      const held = pending.get(proposal.id);
-      pending.delete(proposal.id);
-      if (!held) return { code: 410, body: { error: "The exact change for this proposal is no longer held (ORBIT restarted since it was made). Nothing was written; ask for it again." } };
-      if (digestOfEdit(held.edit, held.reasons) !== proposal.digest) return { code: 409, body: { error: "The held change does not match this proposal's digest. Nothing was written." } };
-      // What the card shows must be, byte for byte, the complete change that is about to run.
-      let shown: Record<string, string>;
+      confirming.add(proposal.id);
       try {
-        shown = cardDisplay(held.edit, held.reasons);
-      } catch (err) {
-        return { code: 422, body: { error: `Not saved: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400), code: "policy_refused" } };
-      }
-      if (JSON.stringify(shown) !== JSON.stringify(proposal.display)) return { code: 409, body: { error: "The card does not show the complete change that would run. Nothing was written." } };
-      try {
-        const r = await clone.write([held.edit], { kind: "confirmed", reasons: held.reasons }, { actor: "confirmed-card" });
-        memory.invalidate?.();
-        return { code: 200, body: { committed: true, saved: true, verifiedOnRemote: true, commit: r.commit, files: r.files, logFile: r.logFile } };
-      } catch (err) {
-        const e = err instanceof VaultError ? err : undefined;
-        return { code: e?.code === "conflict" ? 409 : e ? 422 : 502, body: { error: `Not saved: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400), ...(e ? { code: e.code } : {}), ...(e?.code === "conflict" ? { files: maskVaultDeep(e.details) } : {}) } };
+        const result = await confirmHeld(proposal);
+        const commit = typeof result.body.commit === "string" ? result.body.commit : undefined;
+        settle(proposal.id, result.code === 200 ? { state: "committed", at: clock().toISOString(), ...(commit ? { commit } : {}) } : { state: "failed", at: clock().toISOString(), error: String(result.body.error ?? `HTTP ${result.code}`).slice(0, 400) });
+        return result;
+      } finally {
+        confirming.delete(proposal.id);
       }
     },
+    // A cancelled card: the held edit is dropped and the outcome recorded (the server's cancel route calls this for vault edits).
+    cancelled(proposalId: string): void {
+      pending.delete(proposalId);
+      settle(proposalId, { state: "cancelled", at: clock().toISOString() });
+    },
+    state(proposalId: string): VaultProposalState {
+      const done = settled.get(proposalId);
+      if (done) return done;
+      if (confirming.has(proposalId)) return { state: "confirming" };
+      const open = proposals.peek(proposalId);
+      return open ? { state: "open", expiresAt: open.expiresAt } : { state: "gone" };
+    },
+    onSettle(listener: (proposalId: string, outcome: VaultSettlement) => void): void {
+      listeners.push(listener);
+    },
   };
+
+  async function confirmHeld(proposal: Proposal & { kind: "vault_edit" }): Promise<{ code: number; body: Record<string, unknown> }> {
+    const held = pending.get(proposal.id);
+    pending.delete(proposal.id);
+    if (!held) return { code: 410, body: { error: "The exact change for this proposal is no longer held (ORBIT restarted since it was made). Nothing was written; ask for it again." } };
+    if (digestOfEdit(held.edit, held.reasons) !== proposal.digest) return { code: 409, body: { error: "The held change does not match this proposal's digest. Nothing was written." } };
+    // What the card shows must be, byte for byte, the complete change that is about to run.
+    let shown: Record<string, string>;
+    try {
+      shown = cardDisplay(held.edit, held.reasons);
+    } catch (err) {
+      return { code: 422, body: { error: `Not saved: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400), code: "policy_refused" } };
+    }
+    if (JSON.stringify(shown) !== JSON.stringify(proposal.display)) return { code: 409, body: { error: "The card does not show the complete change that would run. Nothing was written." } };
+    try {
+      const r = await clone.write([held.edit], { kind: "confirmed", reasons: held.reasons }, { actor: "confirmed-card" });
+      memory.invalidate?.();
+      return { code: 200, body: { committed: true, saved: true, verifiedOnRemote: true, commit: r.commit, files: r.files, logFile: r.logFile } };
+    } catch (err) {
+      const e = err instanceof VaultError ? err : undefined;
+      return { code: e?.code === "conflict" ? 409 : e ? 422 : 502, body: { error: `Not saved: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400), ...(e ? { code: e.code } : {}), ...(e?.code === "conflict" ? { files: maskVaultDeep(e.details) } : {}) } };
+    }
+  }
 }
