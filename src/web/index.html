@@ -100,6 +100,19 @@
   .photos img { width: 96px; height: 96px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); background: var(--card); display: block; }
   .photos a { display: block; line-height: 0; }
   @media (max-width: 480px) { .phbtn { padding: 0 6px; min-width: 40px; } .photos img { width: 72px; height: 72px; } }
+  /* Galleries photos_show displayed under a reply (docs/photo-recall.md): stored photos loaded through the conversation's own route. */
+  .gallery { margin-top: 8px; display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; max-width: 100%; }
+  .gallery .gnote { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
+  .gitem { margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .gthumb { padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--card); line-height: 0; cursor: zoom-in; width: 100%; aspect-ratio: 1 / 1; }
+  .gthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .gitem figcaption { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; line-height: 1.3; }
+  .gitem figcaption a { color: inherit; }
+  .gmissing { aspect-ratio: 1 / 1; border: 1px dashed var(--line); border-radius: 8px; display: flex; align-items: center; justify-content: center; text-align: center; padding: 6px; font-size: 11px; color: var(--muted); }
+  .gviewer { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, 0.88); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 16px; gap: 8px; }
+  .gviewer img { max-width: 100%; max-height: calc(100% - 72px); object-fit: contain; }
+  .gviewer .glabel { color: #eee; font-size: 13px; text-align: center; overflow-wrap: anywhere; max-width: 100%; }
+  .gviewer button { position: absolute; top: 8px; right: 8px; min-width: 44px; min-height: 44px; }
   /* The Chat thread bar belongs to the Chat page only. */
   body:not([data-tab="chat"]) #threadbar { display: none !important; }
   /* Overall status: green only when every /status entry is exactly "live"; anything else, or no answer, is red. */
@@ -476,7 +489,7 @@
     if (view.summary && view.summaryUnusable) specs.push(compact());
     view.messages.forEach((m, i) => {
       if (view.summary && !view.summaryUnusable && i === view.summary.covers) specs.push(compact());
-      const parts = messageParts(m, el, cardSpec, (aid) => `/threads/${view.id}/attachments/${aid}`);
+      const parts = messageParts(m, el, cardSpec, (aid) => `/threads/${view.id}/attachments/${aid}`, `/threads/${view.id}/photos`);
       const update = (node) => { const cls = messageClass(m); if (node.className !== cls) node.className = cls; reconcileChildren(node, parts, shownMeta, carryOver); };
       specs.push({ key: `m:${view.id}:${m.id}`, sig: JSON.stringify([messageClass(m), parts.map((p) => [p.key, p.sig])]), build: () => { const node = el("div"); update(node); return node; }, update });
     });
@@ -1362,7 +1375,67 @@
       return mk("a", { href: url, target: "_blank", rel: "noopener", title: `Photo ${i + 1} of ${list.length} (${a.width}×${a.height}, ${Math.round((a.bytes || 0) / 1024)} KB)` }, img);
     })) }];
   }
-  function messageParts(m, mk, cardSpec, photoUrl) {
+  // Galleries photos_show displayed under a reply (docs/photo-recall.md). The server resolves each stored ref again at every view,
+  // under this conversation's policy, and gives its status and source facts. The page builds every image address itself from the
+  // validated ref and this conversation's own route (`galleryBase`), and every link only from a validated conversation id, so a
+  // stored or forged value can never become another URL. Titles and captions are untrusted text and are only ever set as text.
+  const GALLERY_REF = /^ph_[0-9a-f]{32}$/;
+  const GALLERY_LINK = /^#(?:assistant|chat\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+  function galleryLabel(it, n) {
+    const s = it.source || {};
+    const c = s.conversation || {};
+    const where = c.kind === "assistant" ? "Assistant" : `“${String(c.title || "chat thread").slice(0, 100)}”${c.archived ? " (archived)" : ""}`;
+    const msg = s.message ? ` · photo ${Number(s.message.photo) || "?"} of ${Number(s.message.of) || "?"}` : "";
+    return `${it.position} of ${n} · ${where} · sent ${String(s.sentLocal || "").slice(0, 40)}${msg}`;
+  }
+  function openGalleryViewer(mk, src, label) {
+    const prior = document.activeElement;
+    const close = () => { box.remove(); document.removeEventListener("keydown", onKey); if (prior && prior.focus) prior.focus(); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    const shut = mk("button", { type: "button", textContent: "✕", ariaLabel: "Close photo", onclick: close });
+    const box = mk("div", { className: "gviewer", role: "dialog", ariaModal: "true", ariaLabel: label },
+      mk("img", { src, alt: label }), mk("div", { className: "glabel", textContent: label }), shut);
+    box.addEventListener("click", (e) => { if (e.target === box) close(); });
+    document.addEventListener("keydown", onKey);
+    document.body.append(box);
+    shut.focus();
+  }
+  function galleryParts(m, mk, galleryBase) {
+    if (!galleryBase || !Array.isArray(m.galleries) || !m.galleries.length) return [];
+    return m.galleries.slice(0, 3).map((g, gi) => {
+      const items = (Array.isArray(g.items) ? g.items : []).slice(0, 10).filter((it) => it && GALLERY_REF.test(it.ref));
+      const sig = JSON.stringify(items.map((it) => [it.ref, it.status, galleryLabel(it, items.length), it.caption || "", it.link || ""]));
+      return { key: `gallery:${gi}`, sig, build: () => {
+        const shown = items.filter((it) => it.status === "ok").length;
+        const box = mk("div", { className: "gallery", role: "group", ariaLabel: `Photos shown by ORBIT (${items.length})` },
+          mk("div", { className: "gnote", textContent: `Shown from ORBIT's stored copies (${shown} of ${items.length}). Displaying a photo does not mean the model looked at it.` }));
+        for (const it of items) {
+          const label = galleryLabel(it, items.length);
+          const cap = mk("figcaption", {}, label);
+          if (it.caption) cap.append(mk("div", { textContent: `Caption: ${String(it.caption).slice(0, 140)}` }));
+          if (typeof it.link === "string" && GALLERY_LINK.test(it.link)) cap.append(" · ", mk("a", { href: it.link, textContent: it.link === "#assistant" ? "Open the Assistant" : "Open conversation" }));
+          if (it.status !== "ok") {
+            const miss = mk("figure", { className: "gitem" }, mk("div", { className: "gmissing", role: "img", ariaLabel: `Photo ${it.position} unavailable`, textContent: String(it.note || "This photo is not available.").slice(0, 200) }), cap);
+            miss.dataset.ref = it.ref;
+            miss.dataset.status = it.status === "unavailable" ? "unavailable" : "not-found";
+            box.append(miss);
+            continue;
+          }
+          const src = `${galleryBase}/${it.ref}`;
+          const img = mk("img", { src, alt: `Photo ${label}`, loading: "lazy", decoding: "async" });
+          const thumb = mk("button", { type: "button", className: "gthumb", ariaLabel: `Enlarge photo ${label}`, onclick: () => openGalleryViewer(mk, src, label) }, img);
+          const fig = mk("figure", { className: "gitem" }, thumb, cap);
+          fig.dataset.ref = it.ref;
+          fig.dataset.status = "ok";
+          // A file removed or a source revoked after this view: a placeholder, never a broken image.
+          img.addEventListener("error", () => { fig.dataset.status = "failed"; thumb.replaceWith(mk("div", { className: "gmissing", role: "img", ariaLabel: `Photo ${it.position} could not be loaded`, textContent: "This photo could not be loaded (it may have been removed or is no longer visible here)." })); }, { once: true });
+          box.append(fig);
+        }
+        return box;
+      } };
+    });
+  }
+  function messageParts(m, mk, cardSpec, photoUrl, galleryBase) {
     const parts = [];
     const pending = m.status === "pending";
     const text = pending ? "Working…" : m.text || (m.error ? "" : m.role === "assistant" ? "(no text)" : "");
@@ -1371,6 +1444,7 @@
     const markdown = m.role === "assistant" && !pending && Boolean(m.text);
     parts.push({ key: "body", sig: JSON.stringify([markdown, markdown ? m.text : text]), build: () => (markdown ? renderMarkdown(m.text, mk) : mk("span", { className: "body" }, ...linkify(text, mk))) });
     parts.push(...photoParts(m, mk, photoUrl));
+    parts.push(...galleryParts(m, mk, galleryBase));
     const mem = m.memory && m.memory.length ? ` · memory: ${m.memory.join(", ")}` : "";
     const failed = m.status === "error" || m.status === "interrupted";
     const tag = failed ? `${m.status}: ${m.error || ""}` : m.role === "assistant" && m.provenance ? `${m.provenance} · ${m.source}${mem}` : "";
@@ -1493,7 +1567,7 @@
     return rows;
   }
   function assistantParts(m, mk, cardSpec, chunk, form) {
-    const parts = messageParts(m, mk, cardSpec, (aid) => `/assistant/attachments/${aid}`).filter((p) => p.key !== "calls");
+    const parts = messageParts(m, mk, cardSpec, (aid) => `/assistant/attachments/${aid}`, "/assistant/photos").filter((p) => p.key !== "calls");
     const at = parts.findIndex((p) => p.key.startsWith("card:"));
     const extra = [];
     if (m.calls && m.calls.length) {

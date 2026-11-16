@@ -189,6 +189,19 @@ export function attachmentStore(dir: string | undefined, opts: { now?: () => Dat
       }
     },
 
+    // Whether the photo file of an attachment of `scope` is there with its recorded size (a cheap check for a page view; the image
+    // route itself loads and verifies the SHA-256 with load()).
+    present(id: string, scope: string): boolean {
+      const m = store.get(id);
+      if (!m || m.scope !== scope) return false;
+      if (!dir) return memBytes.has(id);
+      try {
+        return statSync(jpg(id)).size === m.bytes;
+      } catch {
+        return false;
+      }
+    },
+
     // The bytes of an attachment of `scope` with the reason when they cannot be used (src/photo-access.ts): `missing` (no record in
     // this scope, or the file is gone or has the wrong size) or `corrupt` (the file no longer matches the SHA-256 recorded when it was
     // stored). The caller decides what to reveal; this never says which conversation an id belongs to.
