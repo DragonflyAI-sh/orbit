@@ -308,18 +308,22 @@ test("Send is disabled while a message is in flight, while the thread is archive
 const nav = html.match(/<nav id="tabs"[^>]*>([\s\S]*?)<\/nav>/)?.[0] ?? "";
 const links = [...nav.matchAll(/<a ([^>]*)>([\s\S]*?)<\/a>/g)].map((m) => ({ attrs: m[1]!, href: m[1]!.match(/href="([^"]*)"/)?.[1] ?? "", label: m[2]!.replace(/<[^>]+>/g, "").trim() }));
 
-test("navigation is real links to the page's views and the status endpoint, nothing invented", () => {
+test("navigation is real links to the page's views, nothing invented; the status endpoint is linked from the status line", () => {
   assert.match(nav, /aria-label="ORBIT pages"/);
-  assert.deepEqual(links.map((l) => l.href), ["/#assistant", "/#chat", "/#jobs", "/status"]);
+  assert.deepEqual(links.map((l) => l.href), ["/#assistant", "/#chat", "/#jobs"]);
   assert.equal(nav.includes("<button"), false, "no button pretends to be navigation");
   // Each destination is a GET route the server really has: "/" serves this page (Chat and Jobs are its views), and
   // "/status" answers with JSON, which the link says.
   assert.match(server, /req\.method === "GET" && url\.pathname === "\/"\)/);
   assert.match(server, /req\.method === "GET" && url\.pathname === "\/status"\)/);
   assert.match(server, /url\.pathname === "\/jobs" && req\.method === "GET"/, "the Jobs view has its owner-only data route");
-  const status = links.find((l) => l.href === "/status")!;
-  assert.match(status.label, /Status\s*JSON/);
-  assert.match(status.attrs, /title="[^"]*JSON/);
+  const statusLine = html.match(/<div id="statusline"[^>]*>[\s\S]*?<\/a><\/div>/)?.[0] ?? "";
+  const status = statusLine.match(/<a ([^>]*)>/)?.[1] ?? "";
+  assert.match(status, /href="\/status"/);
+  assert.match(status, /target="_blank"/);
+  assert.match(status, /rel="noopener noreferrer"/);
+  assert.match(status, /title="[^"]*JSON/);
+  assert.match(status, /aria-label="Open the status page \(raw JSON\) in a new tab"/);
   // No API or state-changing endpoint is offered as a link.
   for (const l of links) assert.doesNotMatch(l.href, /\/(chat\/proposals|jobs\/launch|threads|notifications|schedule|model|ops|runs|tools|nodes|ports)\b|\/steer|\/confirm|\/cancel/);
 });

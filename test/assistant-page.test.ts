@@ -44,13 +44,15 @@ test("routing: the root and unknown hashes open the Assistant; explicit #chat an
   assert.equal(pageFor("#chat", false, false), "chat");
 });
 
-test("the page markup: Assistant first in the nav, then Chat, Jobs, Status; the logo header stays; the dot links to Status", () => {
+test("the page markup: Assistant first in the nav, then Chat, Jobs (no Status link); the logo header stays; the dot toggles the status line", () => {
   const nav = html.match(/<nav id="tabs"[^>]*>([\s\S]*?)<\/nav>/)![1]!;
   const labels = [...nav.matchAll(/<a [^>]*>([\s\S]*?)<\/a>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
-  assert.deepEqual(labels.map((l) => l.split(" ")[0]), ["Assistant", "Chat", "Jobs", "Status"]);
+  assert.deepEqual(labels.map((l) => l.split(" ")[0]), ["Assistant", "Chat", "Jobs"]);
   assert.match(html, /<div class="brand"><img src="\/avatar.png" alt=""><h1>ORBIT<\/h1>/);
-  const dot = html.match(/<a id="health"[^>]*>/)![0];
-  assert.match(dot, /href="\/status"/);
+  const dot = html.match(/<button type="button" id="health"[^>]*>/)![0];
+  assert.doesNotMatch(dot, /href=/, "a toggle, not a link");
+  assert.match(dot, /aria-expanded="false"/);
+  assert.match(dot, /aria-controls="statusline"/);
   assert.match(dot, /aria-label="Overall status: unknown, not all live/);
   assert.doesNotMatch(dot, /class="ok"/, "it starts red, never green before an answer");
   // No session picker, New, Rename, Archive or delete control on the Assistant: the only controls are the input and Send.
@@ -142,7 +144,7 @@ const shown = (sel: string) => page.evaluate((s: string) => { const e = document
 test("browser: the root opens the Assistant first, with Assistant first in the nav, and no Chat thread bar", { skip }, async () => {
   reset();
   await open();
-  assert.deepEqual(await page.$$eval("#tabs a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.textContent!.trim().split(/\s/)[0])), ["Assistant", "Chat", "Jobs", "Status"]);
+  assert.deepEqual(await page.$$eval("#tabs a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.textContent!.trim().split(/\s/)[0])), ["Assistant", "Chat", "Jobs"]);
   assert.equal(await page.getAttribute("#assistanttab", "aria-current"), "page");
   assert.equal(await shown("#alog"), true);
   assert.equal(await shown("#aform"), true);
@@ -188,7 +190,8 @@ test("browser: the status dot is green only when all entries are live, red for a
   await open();
   await page.waitForFunction(() => document.getElementById("health")!.className === "ok");
   assert.match(await page.getAttribute("#health", "aria-label"), /all live/);
-  assert.equal(await page.getAttribute("#health", "href"), "/status");
+  assert.equal(await page.getAttribute("#health", "href"), null, "the dot toggles the status line; the status page link is inside it");
+  assert.equal(await page.getAttribute("#statusopen", "href"), "/status");
   status = { code: 200, body: { ports: [{ port: "model", state: "live" }, { port: "watch", state: "degraded" }] } };
   await page.evaluate("refreshStatus()");
   await page.waitForFunction(() => document.getElementById("health")!.className === "bad");
