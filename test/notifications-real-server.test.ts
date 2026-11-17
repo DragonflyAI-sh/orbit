@@ -62,7 +62,7 @@ async function reviewedRun(o: ReturnType<typeof orbit>): Promise<Run> {
 
 // ---- the server's contract (always runs) ------------------------------------------------------------------------------
 
-test("API: GET /notifications adds `current` (unshown or listed, due) and keeps `inbox` and `recent` as they were", async () => {
+test("API: GET /notifications adds `current` (unshown or listed, held or due) and keeps `inbox` and `recent` as they were", async () => {
   const o = orbit(stateDir());
   clock.t = new Date("2026-11-17T07:30:00Z").getTime(); // 23:30 Pacific: a non-urgent note is held
   const held = o.notify.send("held until morning");
@@ -71,7 +71,8 @@ test("API: GET /notifications adds `current` (unshown or listed, due) and keeps 
   clock.t = new Date("2026-11-17T07:30:00Z").getTime();
   try {
     const body = (await o.r.api("/notifications")).data;
-    assert.deepEqual(body.current.map((n: Notification) => n.id), [a!.id, b!.id, c!.id], "due notes, oldest first; the held one is not due");
+    // Quiet hours hold Discord only: the page lists the held note at once. `inbox` (older pages) is unchanged: due notes only.
+    assert.deepEqual(body.current.map((n: Notification) => n.id), [held.id, a!.id, b!.id, c!.id], "unshown notes, oldest first, the held one too");
     assert.deepEqual(body.inbox.map((n: Notification) => n.id), [a!.id, b!.id, c!.id]);
     assert.ok(body.recent.some((n: Notification) => n.id === held.id));
     // A listing receipt keeps the note in `current` (until the page dismisses it) and takes it out of `inbox`, as before.
@@ -80,7 +81,7 @@ test("API: GET /notifications adds `current` (unshown or listed, due) and keeps 
     const old = await o.r.api(`/notifications/${b!.id}/ack`, "POST");
     assert.deepEqual([old.status, old.data.shown.detail, old.data.shown.listed], [200, "Shown in the ORBIT web page", undefined]);
     const after = (await o.r.api("/notifications")).data;
-    assert.deepEqual(after.current.map((n: Notification) => n.id), [a!.id, c!.id]);
+    assert.deepEqual(after.current.map((n: Notification) => n.id), [held.id, a!.id, c!.id]);
     assert.deepEqual(after.inbox.map((n: Notification) => n.id), [c!.id]);
   } finally {
     clock.t = new Date("2026-11-17T20:00:00Z").getTime();
