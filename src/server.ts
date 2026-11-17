@@ -59,6 +59,7 @@ import type { Embedder } from "./embeddings.ts";
 import { ZONE } from "./time.ts";
 import type { AttachmentRef, Attachments } from "./attachments.ts";
 import { JPEG_MAX_BYTES, normalizeJpeg } from "./jpeg.ts";
+import type { CheckRecord, SmokeRunner } from "./smoke.ts";
 
 export const STALE_AFTER_MS = 5 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -116,6 +117,8 @@ export type Deps = {
   // Opt-in semantic photo search (src/photo-semantic.ts, docs/photo-semantic-search.md). Absent (the default) means photos_search is not
   // offered and nothing changes. `status` is its /status line.
   photoSemantic?: { embedder: Embedder | undefined; cacheDir: string | undefined; status(): PortStatus };
+  // Startup smoke checks (docs/smoke-checks.md). Started once, when the server starts listening; /status only reads the records.
+  smoke?: SmokeRunner;
   // The clock for thread cards and the recent-context note. Tests inject one; it must be the clock the proposals use.
   now?: () => Date;
   // Chat tool execution deadline and abort grace period (docs/tool-deadlines.md). Tests lower them; production uses the defaults.
@@ -129,11 +132,22 @@ export function withStaleness(status: PortStatus, now: Date): PortStatus {
   return { ...status, state: "degraded", detail: `Not verified since ${status.verifiedAt}. ${status.detail}` };
 }
 
-// Staleness as /status and the watch apply it. The model port is exempt: an idle model is not unhealthy, and it
-// reports its own degradation from real errors (failed calls, failed login checks or renewals, an expired token).
-// Every other port keeps the 5-minute rule.
+// Staleness as /status and the watch apply it. The model and photo-embeddings ports are exempt: they are used on demand, so an idle
+// one is not unhealthy, and each reports its own degradation from real errors (failed calls, failed login checks or renewals, an
+// expired token, a refused or failed embeddings request). photo-embeddings is not live until a request has succeeded in this process
+// (src/embeddings.ts); its smoke record (`check`) says how old that evidence is. Every other port keeps the 5-minute rule.
+export const ON_DEMAND_PORTS: ReadonlySet<string> = new Set(["model", "photo-embeddings"]);
 export function withFreshness(status: PortStatus, now: Date): PortStatus {
-  return status.port === "model" ? status : withStaleness(status, now);
+  return ON_DEMAND_PORTS.has(status.port) ? status : withStaleness(status, now);
+}
+
+// Attaches this process's smoke record to a port status. Marked `superseded` when the port has real-operation evidence (a non-epoch
+// verifiedAt) newer than the attempt's start and the attempt did not pass: the newer real result is what `state` shows.
+export function withCheck(status: PortStatus, check: CheckRecord | undefined): PortStatus {
+  if (!check) return status;
+  const real = new Date(status.verifiedAt).getTime();
+  const superseded = check.state !== "passed" && check.state !== "stale" && check.startedAt !== undefined && real > 0 && real > new Date(check.startedAt).getTime();
+  return { ...status, check: superseded ? { ...check, superseded: true } : check };
 }
 
 function send(res: ServerResponse, code: number, body: unknown): void {
@@ -193,6 +207,7 @@ export function buildServer({
   attachments = attachmentStore(undefined),
   photoObservations = observationStore(undefined),
   photoSemantic,
+  smoke,
   recentContext: recentPort = stateRecentContext(jsonStore(undefined, "recent-context", null)),
   now,
   toolDeadlineMs,
@@ -212,7 +227,7 @@ export function buildServer({
       fixed("policy", "fail-closed", "Allows reads and chat replies; memory, vault writes, the config view, notify, schedule, runs, tools, devices and jobs for the owner only; refuses everything else."),
       fixed("channel", "web", "Web chat at /. Discord and CLI are not built."),
       ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...(jobs ? [launcherStatus(jobs.status())] : []), ...ports.map((p) => p.status()), ...(photoSemantic ? [photoSemantic.status()] : []), ...(watch ? [watch.status()] : [])].map((s) => withFreshness(s, now)),
-    ];
+    ].map((s) => withCheck(s, smoke?.forPort(s.port, now)));
   };
   watch?.attach(() => statuses().filter((st) => st.port !== "watch"));
   const limits = (isOwner: boolean): string[] => [
@@ -475,7 +490,7 @@ export function buildServer({
     return undefined;
   };
 
-  return createServer(async (req, res) => {
+  const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://orbit");
 
     // Owner identity comes from the Tailscale device, so a page on another site that Rai visits could make his
@@ -513,7 +528,8 @@ export function buildServer({
     }
 
     if (req.method === "GET" && url.pathname === "/status") {
-      return send(res, 200, { commit, deploy: deploy(), ports: statuses(), photos: photoStatus(model) });
+      // Read-only: it reports the smoke records and never starts or runs a check.
+      return send(res, 200, { commit, deploy: deploy(), ports: statuses(), photos: photoStatus(model), ...(smoke ? { smoke: smoke.summary() } : {}) });
     }
 
     if (req.method === "POST" && url.pathname === "/chat") {
@@ -1162,6 +1178,10 @@ export function buildServer({
 
     return send(res, 404, { error: "Not found" });
   });
+  // Post-deploy smoke checks start as soon as the service can accept requests, with no user activity. Not awaited: the suite has its
+  // own deadlines and never holds up listening or any request. start() is single-flight, so a second "listening" runs nothing new.
+  if (smoke) server.once("listening", () => void smoke.start());
+  return server;
 }
 
 // Photo capability for /status: what the running process would do with a photo now, and why. Model id, capability, source and
