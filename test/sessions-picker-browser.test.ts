@@ -252,7 +252,7 @@ test("browser: with no sessions the header says so and the picker offers New ses
   } finally { await ctx.close(); many.r.server.close(); }
 });
 
-test("browser: the header has a soft shadow under its separator in both colour schemes, without moving the layout or clipping the picker", { skip }, async () => {
+test("browser: the header has a clear shadow under its separator in both colour schemes, without moving the layout or clipping the picker", { skip }, async () => {
   const { r, made, base } = await setup(["Alpha"]);
   try {
     for (const scheme of ["light", "dark"] as const) {
@@ -260,9 +260,12 @@ test("browser: the header has a soft shadow under its separator in both colour s
         const { ctx, page } = await openAt(`${base}/sessions/${made[0]!.id}`, size, scheme);
         await ready(page, made[0]!.id);
         const h = await page.evaluate(() => { const cs = getComputedStyle(document.querySelector("header")!); return { shadow: cs.boxShadow, border: cs.borderBottomStyle, position: cs.position, z: cs.zIndex }; });
-        assert.match(h.shadow, /rgba\(\d+, \d+, \d+, 0?\.\d+\) 0px 2px 6px -2px/, `${scheme}/${size.name}: a soft downward shadow (${h.shadow})`);
+        const m = /rgba\(\d+, \d+, \d+, (0?\.\d+)\) 0px 4px 14px -4px/.exec(h.shadow);
+        assert.ok(m, `${scheme}/${size.name}: a clear downward shadow (${h.shadow})`);
+        assert.ok(Number(m[1]) >= 0.2, `${scheme}/${size.name}: strong enough to see (${h.shadow})`);
         assert.equal(h.border, "solid", "the separator line stays");
-        assert.equal(h.z, "auto", "no new stacking context");
+        assert.equal(h.position, "relative");
+        assert.equal(h.z, "10", "the header (and its shadow) paints above the positioned message rows");
         // The picker and focus rings are not clipped by the header.
         await page.click("#sessbtn");
         const vis = await page.evaluate(() => { const p = document.getElementById("sesspicker")!.getBoundingClientRect(); const at = document.elementFromPoint(p.left + p.width / 2, p.bottom - 10); return Boolean(at && document.getElementById("sesspicker")!.contains(at)); });

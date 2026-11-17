@@ -251,12 +251,44 @@ const rule = (selector: string) => {
 
 test("message cards wrap long prose and URLs and never widen the page", () => {
   const msg = rule(".msg");
-  assert.match(msg, /max-width:\s*min\(780px,\s*100%\)/);
+  assert.match(msg, /max-width:\s*100%/);
   assert.match(msg, /min-width:\s*0/);
   assert.match(msg, /overflow-wrap:\s*anywhere/);
   assert.match(rule(".card"), /min-width:\s*0/);
   assert.match(rule(".proposal pre"), /max-height:\s*240px/);
   assert.match(rule(".proposal pre"), /overflow-wrap:\s*anywhere/);
+});
+
+test("the main content uses the full available width: no fixed cap on rows, cards, banners or the context line", () => {
+  // The log's own padding (16px, 12px on a phone) keeps content off the edges; nothing narrows it to a fixed width.
+  for (const sel of [".msg", ".card", ".banner", ".compact", ".ctxline"]) {
+    const r = rule(sel);
+    assert.ok(r, `${sel} has a rule`);
+    assert.doesNotMatch(r, /max-width:\s*(?!100%)\S/, `${sel} is not capped below the log's width`);
+  }
+  for (const sel of ["#alog", "#log", "#jobs"]) {
+    assert.doesNotMatch(rule(sel), /max-width|width:\s*\d/, `${sel} spans the page`);
+    assert.match(rule(sel), /padding:\s*16px/, `${sel} keeps its edge padding`);
+  }
+  assert.doesNotMatch(css, /max-width:\s*(?:min\()?(?:7[0-9]{2}|6[0-9]{2})px/, "no old 720px/780px reading-width caps remain");
+});
+
+test("the header's downward shadow paints above the scrolling content", () => {
+  const header = rule("header");
+  // A stacking context above the (positioned) message rows; no overflow rule that could clip the shadow or focus rings.
+  assert.match(header, /position:\s*relative/);
+  assert.match(header, /z-index:\s*10\b/);
+  assert.doesNotMatch(header, /overflow/);
+  assert.match(header, /box-shadow:\s*0 4px 14px -4px var\(--header-shadow\)/);
+  const alphas = [...css.matchAll(/--header-shadow:\s*rgba\([^)]*,\s*(0?\.\d+)\)/g)].map((m) => Number(m[1]));
+  assert.equal(alphas.length, 2, "a light and a dark shadow colour");
+  assert.ok(alphas.every((a) => a >= 0.2), `the shadow is strong enough to see (${alphas})`);
+  // Overlays still stack above the header: the picker lives inside it, the photo viewer above it, and the time tip
+  // (inside the conversation) stays under it.
+  assert.match(rule("#sesspicker"), /position:\s*fixed;\s*z-index:\s*40/);
+  assert.match(html, /<header>[\s\S]*id="sesspicker"[\s\S]*<\/header>/);
+  assert.match(rule(".gviewer"), /z-index:\s*50/);
+  assert.match(rule(".mtip"), /z-index:\s*5;/);
 });
 
 test("wide code and tables scroll inside a bounded region; nothing is clipped without a scrollbar", () => {
