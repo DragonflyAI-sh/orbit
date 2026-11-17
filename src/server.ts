@@ -829,7 +829,7 @@ export function buildServer({
 
     if (url.pathname === "/notifications" && req.method === "GET") {
       if (!(await owned("notify", "inbox"))) return;
-      return send(res, 200, { inbox: notify.inbox(), recent: notify.recent() });
+      return send(res, 200, { inbox: notify.inbox(), current: notify.current(), recent: notify.recent() });
     }
     if (url.pathname === "/notifications" && req.method === "POST") {
       if (!(await owned("notify", "send"))) return;
@@ -841,8 +841,12 @@ export function buildServer({
     const ack = url.pathname.match(/^\/notifications\/([0-9a-f-]+)\/ack$/);
     if (ack && req.method === "POST") {
       if (!(await owned("notify", "ack"))) return;
-      const n = notify.ack(ack[1]);
-      return n ? send(res, 200, n) : send(res, 404, { error: "No unshown notification with that id." });
+      // An empty body is an older page's ack and keeps the original receipt; {listed: true} is the listing receipt.
+      // Repeating an ack is safe: the first receipt stands and the note is returned unchanged.
+      const input = await body();
+      if (!input) return;
+      const n = notify.ack(ack[1], { listed: input.listed === true });
+      return n ? send(res, 200, n) : send(res, 404, { error: "No notification with that id." });
     }
 
     if (url.pathname === "/schedule" && req.method === "GET") {

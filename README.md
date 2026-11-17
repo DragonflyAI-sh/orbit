@@ -49,7 +49,7 @@ Keyword search over the vault, owner only: ORBIT asks tailscaled who sent each r
 
 Owner only. `POST /notifications {text, urgent}` queues a message; `POST /schedule` takes `{text, at}`, `{text, everyMinutes}` (5 or more) or `{text, dailyAt: "HH:MM"}` (Pacific). Jobs are checked every 30 seconds and persist in the service's state directory.
 
-Quiet hours, 23:00-08:00 Pacific, hold non-urgent messages. Every notification records receipts only when delivery is proven: `shown` when the web page displayed it, `discord` with the message id when Discord accepted it. Discord is off until a webhook URL is installed at `/etc/credstore/orbit.discord-webhook` (root, 0600).
+Quiet hours, 23:00-08:00 Pacific, hold non-urgent messages. Every notification records receipts only when delivery is proven: `shown` when the web page listed it in the open notifications panel of a visible tab (a display receipt, not read; `docs/assistant.md`, "Notifications"), `discord` with the message id when Discord accepted it. Discord is off until a webhook URL is installed at `/etc/credstore/orbit.discord-webhook` (root, 0600).
 
 **Watch.** Every 30-second tick, ORBIT checks its own parts. A part `degraded` or `down` for 5 minutes sends one message (urgent only for `down`), and one more when it is `live` again, with how long it was out. A part that goes from degraded to down sends one more, urgent. Parts whose `verifiedAt` is the Unix epoch ("not exercised yet") are ignored.
 
