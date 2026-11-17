@@ -2,7 +2,7 @@
 
 Chat history used to live in a JavaScript array in the page and was sent to the server as text (the last 40 messages). A refresh, another device or a deploy lost it, and earlier tool calls and results never reached the model. Threads move the history to the server. They are shared by every device, owner only, kept until archived, and never deleted automatically.
 
-The Assistant page (one rolling conversation, `/#assistant`) is separate and described in `docs/assistant.md`; it shares the turn code but not this storage, compaction or the rolling note.
+The page shows threads as **sessions** on the Sessions page (`/sessions`, formerly Chat; see "Addresses"). The Assistant page (one rolling conversation, `/#assistant`) is separate and described in `docs/assistant.md`; it shares the turn code but not this storage, compaction or the rolling note.
 
 Code: `src/threads.ts` (store), `src/thread-context.ts` (model context, compaction), `src/thread-service.ts` (a turn, cards, live state), `src/recent-context.ts` (rolling note), `src/duplicates.ts` (duplicate-launch warning), routes in `src/server.ts`, page in `src/web/index.html`.
 
@@ -48,33 +48,60 @@ The old `POST /chat` (client-sent history) is kept unchanged for API callers and
 
 ## Addresses
 
-Each thread has its own page address: **`/#chat/<thread id>`** (the canonical form: the lowercase UUID, unencoded). The address is what a tab shows, so two tabs (or two windows) can have two different threads open at once and each keeps its own across a reload. The fragment is never sent to the HTTP server, so nothing changed on the server for the address; the page fetches `GET /threads/:id` and posts to `POST /threads/:id/messages` with the id from the address, as before.
+In the page these threads are called **sessions**, shown under the **Sessions** page link (it was called Chat before). Internal names and the API (`/threads/...`, `POST /chat`, `/chat/proposals`) are unchanged.
+
+Each session has its own page address: **`/sessions/<session id>`** (the canonical form: the lowercase UUID, unencoded). The address is what a tab shows, so two tabs (or two windows) can have two different sessions open at once and each keeps its own across a reload. The server serves the page itself at `/sessions` and `/sessions/<one path segment>` (`isPageRoute` in `src/server.ts`, the same page as `/`, for anyone: the thread routes still decide who may read what, with the same owner checks), so a direct link and a reload work. Which session a path names is the page's business: it fetches `GET /threads/:id` and posts to `POST /threads/:id/messages` with the id from the address, as before. Deeper paths (`/sessions/a/b`) are not page addresses (404).
 
 | Address | What the tab does |
 |---|---|
-| `/#chat/<id>` (a link, a typed address, a reload) | Opens that thread. The stored selection is ignored. An uppercase or percent-encoded copy of a real id opens it and the address is rewritten to the canonical form in place. |
-| `/#chat` (plain; the Chat link) | Fallback: if a thread is already open in this tab, keeps it; otherwise opens the thread last opened in this browser (`localStorage` `orbit.thread`, shared by all tabs), else the newest open thread, else the empty state. The address is then **replaced** with that thread's, so Back never lands on an unresolved `#chat`. With no threads, the address stays `#chat` until the first send creates one. |
-| `/#chat/<anything else>` (not a UUID, bad percent-encoding, extra path) | Nothing is fetched. The log and the bar say the address does not name a thread; Send is disabled. |
+| `/sessions/<id>` (a link, a typed address, a reload) | Opens that session. The stored selection is ignored. An uppercase or percent-encoded copy of a real id opens it and the address is rewritten to the canonical form in place. |
+| `/sessions` (plain; the Sessions link) | Fallback: if a session is already open in this tab, keeps it; otherwise opens the session last opened in this browser (`localStorage` `orbit.thread`, shared by all tabs), else the newest open session, else the empty state. The address is then **replaced** with that session's, so Back never lands on an unresolved `/sessions`. With no sessions, the address stays `/sessions` until the first send creates one. `/sessions/` is rewritten to `/sessions`. |
+| `/sessions/<anything else>` (not a UUID, bad percent-encoding) | Nothing is fetched. The conversation area and the status line under the header say the address does not name a session; Send is disabled. |
 
-- **Picking a thread or New** adds a history entry with the new address (only once the thread has opened). Starting a thread by sending from the empty state replaces `#chat`. Archive moves on like a pick.
-- **Back/Forward** open the thread the address names. They never create a thread, and the page's own address updates use `pushState`/`replaceState` (no `hashchange`), so there is no loop.
-- **The address is authoritative for its tab.** Other tabs write the shared stored selection; it is only the plain-`#chat` fallback, and the page has no `storage` listener, so another tab never moves this one.
-- **Missing, deleted or refused threads.** When the address names a thread that answers 404 (also when it is deleted while open: the next poll, within 10 seconds, reports it), 401/403, another error or no answer, the tab shows no thread, says why (with Try again) and sends nothing: a message is never sent to, and no new thread is started in place of, a thread other than the one the address names. Choosing a thread or New recovers. A failed pick from the menu keeps the old behaviour (the thread shown stays, the address stays on it).
-- **Requests are bound to their thread.** Every load, poll and send carries its thread id and the navigation generation it started in; an answer that arrives after the address (or the menu) moved on is dropped and draws nothing (transcript, errors, cards). As before, one tab sends one message at a time (Send stays disabled until the reply is in, whichever thread is shown); another tab is not held up. The late reply stays in its own thread and shows when that thread is opened again. Nothing is resent automatically. Text typed in the box stays with the box (it goes where the address is when Send is pressed).
-- Non-owners (no threads, the legacy page) given a `#chat/<id>` address are told threads are owner only and nothing is sent; plain `#chat` works as before. The Assistant and Jobs addresses are unchanged.
+**Old Chat addresses** keep working and land on the same session, never on a different one:
 
-Server side, nothing needed changing: every thread route takes the id from the path (`/threads/:id...`, `src/server.ts`), and the one-reply-at-a-time lock is per thread (`tryBegin(id)` in `src/threads.ts`, used by `turn()` in `src/thread-service.ts`), so two tabs on two threads run two turns at once and a busy thread blocks only itself (`test/threads.test.ts`, "a reply in progress in one thread does not block…"). Two tabs on the **same** thread share it as two devices always did: the second send while a reply runs gets 409.
+| Old address | What happens |
+|---|---|
+| `/#chat/<id>` (a bookmark; also a gallery's stored "Open conversation" link `#chat/<id>`, followed from any page address) | The page replaces the address, in place (no extra history entry, so Back cannot bounce to it), with `/sessions/<id>`, keeping the query. Same id rules as above. |
+| `/#chat`, `/#chat/` | Replaced with `/sessions` (keeping the query), then as plain `/sessions`. |
+| `/#chat/<anything else>` | Left as it is, and reported as above: an invalid fragment is never turned into a path. |
+| `GET /chat`, `GET /chat/` | The server answers `302` to `/sessions`, keeping the query (the browser keeps any fragment). |
+| `GET /chat/<id>` (any case) | `302` to `/sessions/<lowercase id>`, keeping the query. Only a UUID is redirected; the target is built from a fixed prefix and the validated id, so it is always same-origin. Anything else under `/chat` (for example `/chat/proposals`, or `/chat//elsewhere`) is not redirected and answers as before. `POST /chat` is the legacy API and is never redirected. |
 
-Tests: `test/chat-address.test.ts` (address parsing always runs; in Chromium against a fake server: direct link, reload, plain `#chat`, canonicalizing, the empty state, pick/New/Back/Forward, invalid, missing, deleted and refused addresses, late history/poll/send answers after the address moved, and two tabs of one browser sending concurrently).
+`#assistant` and `#jobs` followed from a Sessions address move to `/#assistant` and `/#jobs`, where those pages live; the Assistant is still `/`.
 
-Manual two-tab check (owner, two threads A and B):
+- **No reloads between pages.** Links within the page (the page links, a gallery's link to a session) switch views with `pushState` instead of loading the page again, so the draft in the message box, the photo tray and a reply in flight are kept. Modified clicks (new tab, new window) are left to the browser. Back and Forward (`popstate`, and `hashchange` for an edited fragment) apply the address; the page's own updates fire neither, so there is no loop.
+- **Picking a session or New** adds a history entry with the new address (only once the session has opened). Starting a session by sending from the empty state replaces `/sessions`. Archive moves on like a pick.
+- **Back/Forward** open the session the address names. They never create a session.
+- **The address is authoritative for its tab.** Other tabs write the shared stored selection; it is only the plain-`/sessions` fallback, and the page has no `storage` listener, so another tab never moves this one.
+- **Missing, deleted or refused sessions.** When the address names a session that answers 404 (also when it is deleted while open: the next poll, within 10 seconds, reports it), 401/403, another error or no answer, the tab shows no session, says why (with Try again) and sends nothing: a message is never sent to, and no new session is started in place of, a session other than the one the address names. Choosing a session or New recovers. A failed pick from the picker keeps the old behaviour (the session shown stays, the address stays on it).
+- **Requests are bound to their session.** Every load, poll and send carries its thread id and the navigation generation it started in; an answer that arrives after the address (or the picker) moved on is dropped and draws nothing (transcript, errors, cards). As before, one tab sends one message at a time (Send stays disabled until the reply is in, whichever session is shown); another tab is not held up. The late reply stays in its own session and shows when that session is opened again. Nothing is resent automatically. Text typed in the box stays with the box (it goes where the address is when Send is pressed).
+- Non-owners (no sessions, the legacy stateless page) given a `/sessions/<id>` address are told sessions are owner only and nothing is sent; plain `/sessions` works as the old plain `#chat` did. The Assistant and Jobs addresses are unchanged.
+- The tab's title is `<session title> · Sessions · ORBIT` on Sessions, `Jobs · ORBIT` on Jobs and `ORBIT` on the Assistant.
 
-1. Open A in tab 1; the address becomes `/#chat/<A>`. Copy it.
-2. Open a second tab at `/#chat`, pick B; its address becomes `/#chat/<B>`.
-3. Send a message in tab 1 and, before it answers, one in tab 2. Each reply appears only in its own tab and thread.
+### The session picker
+
+The header shows the open session's title and a chevron in the bar itself, between the page links and the notification and status toggles; there is no separate session toolbar. A long title is cut with an ellipsis to the room left in the bar (it never pushes the toggles or scrolls the page sideways); its full text is the button's hover text and its accessible name (`Session: <title>. Show sessions`, with "(archived)" for an archived one). The button (`aria-expanded`, `aria-controls`) opens the picker, which overlays the page under the header (it does not push the conversation down) and holds:
+
+- **New session**, and **Show archived** (archived sessions are listed only with it, marked "(archived)", as the old menu did);
+- the list of sessions (marked current with `aria-current`; "· n waiting" and "· replying…" as before), scrolling inside the picker when it is long;
+- **This session: Rename** (a prompt) and **Archive** / **Restore** (same server routes and semantics as before: archiving only flips the flag, an archived session takes no messages until restored).
+
+It closes with Escape, the button, a click outside it, focus moving out of it, or a choice; Escape and a choice put focus back on the button (New puts it in the message box, as before). Opening it focuses the open session's entry (or New session when there is none). Up/Down, Home and End move through the list; Down on the closed button opens it. Entries are at least 40px tall (44px on touch screens). Status messages ("Opening …", what failed) show on a line under the header only while there is one.
+
+Server side, nothing about sessions needed changing beyond serving the page at its addresses: every thread route takes the id from the path (`/threads/:id...`, `src/server.ts`), and the one-reply-at-a-time lock is per thread (`tryBegin(id)` in `src/threads.ts`, used by `turn()` in `src/thread-service.ts`), so two tabs on two sessions run two turns at once and a busy session blocks only itself (`test/threads.test.ts`, "a reply in progress in one thread does not block…"). Two tabs on the **same** session share it as two devices always did: the second send while a reply runs gets 409.
+
+Tests: `test/chat-address.test.ts` (address parsing and canonical forms always run; in Chromium against a fake server: direct link, reload, plain `/sessions`, canonicalizing, legacy `#chat` bookmarks and links, the empty state, pick/New/Back/Forward, switching pages without a reload, invalid, missing, deleted and refused addresses, late history/poll/send answers after the address moved, and two tabs of one browser sending concurrently); `test/server.test.ts` (the page at the `/sessions` paths, the `/chat` redirects, the `/chat` API routes unchanged); `test/acceptance-browser-real-server.test.ts` (canonical and legacy addresses, reload, Back/Forward and where a send lands, on the real server); `test/sessions-picker-browser.test.ts` (the header control and picker at desktop and phone widths, on the real server).
+
+Manual two-tab check (owner, two sessions A and B):
+
+1. Open A in tab 1; the address becomes `/sessions/<A>`. Copy it.
+2. Open a second tab at `/sessions`, pick B from the header picker; its address becomes `/sessions/<B>`.
+3. Send a message in tab 1 and, before it answers, one in tab 2. Each reply appears only in its own tab and session.
 4. Reload tab 1: it still shows A (although tab 2 opened B last). Reload tab 2: still B.
-5. In tab 2 pick A, then press Back: B again, with no new thread in the menu. Forward: A.
-6. Open `/#chat/not-a-thread` and `/#chat/<a made-up UUID>`: each says why, Send is disabled, and nothing appears in any thread.
+5. In tab 2 pick A, then press Back: B again, with no new session in the picker. Forward: A.
+6. Open `/sessions/not-a-thread` and `/sessions/<a made-up UUID>`: each says why, Send is disabled, and nothing appears in any session.
+7. Open an old bookmark `/#chat/<A>` and the path `/chat/<A>`: both end at `/sessions/<A>`, showing A.
 
 ## Concurrency and atomicity
 

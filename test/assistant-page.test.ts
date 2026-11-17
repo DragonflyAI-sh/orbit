@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
+import { isPagePath } from "./helpers/sessions-ui.ts";
 
 // The Assistant page (docs/assistant.md). The pure helpers (status aggregation, routing) are loaded from the page and always run;
 // the page itself runs in a real browser (Playwright's Chromium) against a scripted fake of ORBIT's routes, and is skipped, saying
@@ -15,7 +16,7 @@ const block = (name: string) => html.match(new RegExp(`// <${name}>([\\s\\S]*?)/
 // ---- pure helpers -----------------------------------------------------------------------------------------------------
 
 const { aggregateStatus } = new Function(`${block("status-dot")}; return { aggregateStatus };`)() as { aggregateStatus: (s: unknown) => { ok: boolean; label: string; detail: string } };
-const { pageFor } = new Function(`${block("routing")}; return { pageFor };`)() as { pageFor: (hash: string, jobs: boolean, assistant: boolean) => string };
+const { pageFor } = new Function(`${block("routing")}; return { pageFor };`)() as { pageFor: (path: string, hash: string, jobs: boolean, assistant: boolean) => string };
 
 test("status dot: green only when every entry is exactly live; anything else, or no usable answer, is red", () => {
   const live = (port: string) => ({ port, state: "live", detail: "", verifiedAt: "t" });
@@ -32,22 +33,25 @@ test("status dot: green only when every entry is exactly live; anything else, or
   assert.equal(aggregateStatus(null).label, "Status unknown");
 });
 
-test("routing: the root and unknown hashes open the Assistant; explicit #chat and #jobs are kept; owner-only pages fall back", () => {
-  assert.equal(pageFor("", true, true), "assistant");
-  assert.equal(pageFor("#assistant", true, true), "assistant");
-  assert.equal(pageFor("#nothing-here", true, true), "assistant");
-  assert.equal(pageFor("#chat", true, true), "chat");
-  assert.equal(pageFor("#jobs", true, true), "jobs");
-  assert.equal(pageFor("#jobs", false, true), "assistant", "Jobs not available (yet): the default page");
-  assert.equal(pageFor("", false, false), "chat", "not the owner: Chat, as before");
-  assert.equal(pageFor("#assistant", false, false), "chat");
-  assert.equal(pageFor("#chat", false, false), "chat");
+test("routing: the root and unknown hashes open the Assistant; /sessions, legacy #chat and #jobs are kept; owner-only pages fall back", () => {
+  assert.equal(pageFor("/", "", true, true), "assistant");
+  assert.equal(pageFor("/", "#assistant", true, true), "assistant");
+  assert.equal(pageFor("/", "#nothing-here", true, true), "assistant");
+  assert.equal(pageFor("/sessions", "", true, true), "chat");
+  assert.equal(pageFor("/sessions/anything", "", true, true), "chat");
+  assert.equal(pageFor("/", "#chat", true, true), "chat", "the legacy Chat address still opens Sessions");
+  assert.equal(pageFor("/", "#jobs", true, true), "jobs");
+  assert.equal(pageFor("/sessions/x", "#assistant", true, true), "assistant", "a fragment link to another page wins over the path");
+  assert.equal(pageFor("/", "#jobs", false, true), "assistant", "Jobs not available (yet): the default page");
+  assert.equal(pageFor("/", "", false, false), "chat", "not the owner: Sessions (the stateless chat), as before");
+  assert.equal(pageFor("/", "#assistant", false, false), "chat");
+  assert.equal(pageFor("/", "#chat", false, false), "chat");
 });
 
-test("the page markup: Assistant first in the nav, then Chat, Jobs (no Status link); the logo header stays; the dot toggles the status line", () => {
+test("the page markup: Assistant first in the nav, then Sessions, Jobs (no Status link); the logo header stays; the dot toggles the status line", () => {
   const nav = html.match(/<nav id="tabs"[^>]*>([\s\S]*?)<\/nav>/)![1]!;
   const labels = [...nav.matchAll(/<a [^>]*>([\s\S]*?)<\/a>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
-  assert.deepEqual(labels.map((l) => l.split(" ")[0]), ["Assistant", "Chat", "Jobs"]);
+  assert.deepEqual(labels.map((l) => l.split(" ")[0]), ["Assistant", "Sessions", "Jobs"]);
   assert.match(html, /<div class="brand"><img src="\/avatar.png" alt=""><h1>ORBIT<\/h1>/);
   const dot = html.match(/<button type="button" id="health"[^>]*>/)![0];
   assert.doesNotMatch(dot, /href=/, "a toggle, not a link");
@@ -91,7 +95,7 @@ const server = createServer(async (req, res) => {
   requests.push(`${req.method} ${url.pathname}${url.search}`);
   const json = (code: number, body: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
   const read = () => new Promise<any>((r) => { let d = ""; req.on("data", (c) => (d += c)); req.on("end", () => r(d ? JSON.parse(d) : {})); });
-  if (url.pathname === "/") { res.writeHead(200, { "content-type": "text/html" }); return res.end(html); }
+  if (isPagePath(url.pathname)) { res.writeHead(200, { "content-type": "text/html" }); return res.end(html); }
   if (url.pathname === "/avatar.png") { res.writeHead(404); return res.end(); }
   if (url.pathname === "/status") return status.code === 0 ? req.socket.destroy() : json(status.code, status.body);
   if (url.pathname === "/notifications") return json(200, { inbox: [] });
@@ -141,40 +145,40 @@ const reset = () => {
 };
 const shown = (sel: string) => page.evaluate((s: string) => { const e = document.querySelector(s) as HTMLElement | null; return Boolean(e && !e.hidden && e.offsetParent !== null); }, sel);
 
-test("browser: the root opens the Assistant first, with Assistant first in the nav, and no Chat thread bar", { skip }, async () => {
+test("browser: the root opens the Assistant first, with Assistant first in the nav, and no session control", { skip }, async () => {
   reset();
   await open();
-  assert.deepEqual(await page.$$eval("#tabs a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.textContent!.trim().split(/\s/)[0])), ["Assistant", "Chat", "Jobs"]);
+  assert.deepEqual(await page.$$eval("#tabs a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.textContent!.trim().split(/\s/)[0])), ["Assistant", "Sessions", "Jobs"]);
   assert.equal(await page.getAttribute("#assistanttab", "aria-current"), "page");
   assert.equal(await shown("#alog"), true);
   assert.equal(await shown("#aform"), true);
   assert.equal(await shown("#log"), false);
   assert.equal(await shown("#form"), false);
-  assert.equal(await shown("#threadbar"), false, "the Chat thread picker is not on the Assistant");
+  assert.equal(await shown("#sesswrap"), false, "the Sessions session control is not on the Assistant");
   assert.equal(await shown(".brand img"), true, "the ORBIT logo header stays");
   assert.match(await page.textContent("#alog"), /The Assistant conversation is empty/);
   assert.ok(requests.includes("GET /assistant"));
 });
 
-test("browser: explicit #chat keeps Chat exactly as before (thread bar, threads loaded); #jobs opens Jobs; links switch pages", { skip }, async () => {
+test("browser: /sessions opens Sessions (session control, sessions loaded); #jobs opens Jobs; links switch pages", { skip }, async () => {
   reset();
-  await open("#chat");
+  await open("sessions");
   await page.waitForFunction(() => document.querySelectorAll("#log .msg").length === 1);
   assert.equal(await page.getAttribute('#tabs a[data-tab="chat"]', "aria-current"), "page");
   assert.equal(await shown("#log"), true);
-  assert.equal(await shown("#threadbar"), true);
+  assert.equal(await shown("#sesswrap"), true);
   assert.equal(await shown("#alog"), false);
   assert.match(await page.textContent("#log"), /chat thread message/);
   await page.click("#assistanttab");
   await page.waitForFunction(() => location.hash === "#assistant");
   assert.equal(await shown("#alog"), true);
-  assert.equal(await shown("#threadbar"), false);
+  assert.equal(await shown("#sesswrap"), false);
   await open("#jobs");
   await page.waitForFunction(() => !(document.getElementById("jobs") as HTMLElement).hidden);
   assert.equal(await shown("#alog"), false);
 });
 
-test("browser: a viewer who is not the owner gets no Assistant link and lands on Chat, as before", { skip }, async () => {
+test("browser: a viewer who is not the owner gets no Assistant link and lands on Sessions, as before", { skip }, async () => {
   reset();
   owner = false;
   await open();

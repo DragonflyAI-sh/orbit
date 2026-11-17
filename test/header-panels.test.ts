@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
+import { isPagePath } from "./helpers/sessions-ui.ts";
 
 // The page header: page links in the bar, a notifications count button and the status indicator on the right, each toggling
 // its own panel below the bar (the status line with every pill and a new-tab link to /status; the notifications). The pure
@@ -96,7 +97,7 @@ let statusGets = 0;
 const server = createServer((req, res) => {
   const url = new URL(req.url!, "http://x");
   const json = (code: number, body: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
-  if (url.pathname === "/") { res.writeHead(200, { "content-type": "text/html" }); return res.end(html); }
+  if (isPagePath(url.pathname)) { res.writeHead(200, { "content-type": "text/html" }); return res.end(html); }
   if (url.pathname === "/status") { statusGets++; return json(200, { commit: "abc", ports }); }
   if (url.pathname === "/notifications") return json(200, { inbox: current.filter((n) => !acks.includes(n.id)), current });
   const ack = url.pathname.match(/^\/notifications\/([\w-]+)\/ack$/);
@@ -138,7 +139,7 @@ test("browser: page links sit in the header bar beside the toggles, with no Stat
   reset();
   for (const width of [900, 360]) {
     await open({ width });
-    assert.deepEqual(await page.$$eval("header .bar nav a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.getAttribute("href"))), ["/#assistant", "/#chat", "/#jobs"]);
+    assert.deepEqual(await page.$$eval("header .bar nav a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.getAttribute("href"))), ["/#assistant", "/sessions", "/#jobs"]);
     assert.equal(await page.$$eval('header nav a[href="/status"]', (as: unknown[]) => as.length), 0);
     assert.equal(await page.getAttribute("#assistanttab", "aria-current"), "page", "the current page cue stays");
     const box = await page.evaluate(() => { const r = (id: string) => document.getElementById(id)!.getBoundingClientRect(); return { health: r("health"), notes: r("notesbtn"), brand: document.querySelector(".brand")!.getBoundingClientRect(), width: document.documentElement.clientWidth }; });

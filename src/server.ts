@@ -69,6 +69,21 @@ const page = readFileSync(new URL("./web/index.html", import.meta.url), "utf8");
 const avatar = readFileSync(new URL("./web/avatar.png", import.meta.url));
 const photosJs = readFileSync(new URL("./web/photos.js", import.meta.url), "utf8");
 
+// The page's own addresses: / and the Sessions section, /sessions and /sessions/<one path segment>. Deeper paths are not
+// page addresses (404 as before). A bad segment still gets the page, which says the address names no session.
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export function isPageRoute(pathname: string): boolean {
+  return pathname === "/" || pathname === "/sessions" || /^\/sessions\/[^/]{0,200}$/.test(pathname);
+}
+// Where a legacy Chat path goes: /chat and /chat/ to /sessions, /chat/<session id> (any case) to /sessions/<id>.
+// Anything else under /chat (for example the /chat/proposals API) is not a page and is left alone (undefined).
+export function legacyChatRedirect(pathname: string): string | undefined {
+  if (pathname === "/chat" || pathname === "/chat/") return "/sessions";
+  const m = pathname.match(/^\/chat\/([^/]+)$/);
+  const id = m?.[1]?.toLowerCase();
+  return id && SESSION_ID.test(id) ? `/sessions/${id}` : undefined;
+}
+
 export type Deps = {
   ports: Port[];
   model: ModelPort & { login?(): Login; startLogin?(): Promise<Login>; finishLogin?(callbackUrl: string): Promise<Login> };
@@ -512,9 +527,23 @@ export function buildServer({
       }
     }
 
-    if (req.method === "GET" && url.pathname === "/") {
+    // The page is served at / (the Assistant, /#assistant, /#jobs) and at its Sessions addresses: /sessions and
+    // /sessions/<session id> (docs/threads.md, "Addresses"). Which session an address names is the page's business (an
+    // invalid one is reported there, never fetched); the server only serves the page, so a reload or a direct link works.
+    if (req.method === "GET" && isPageRoute(url.pathname)) {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       return res.end(page);
+    }
+    // Before Sessions, the section was Chat, addressed in the page as /#chat and /#chat/<id> (a fragment the server never
+    // sees; the page itself moves those to /sessions). A typed /chat or /chat/<id> is sent to the same session's address
+    // with its query; the browser keeps any fragment. The target is built here from a fixed prefix and a validated id, so
+    // it is always same-origin. POST /chat (the legacy chat API) and /chat/proposals are API routes and are untouched.
+    if (req.method === "GET") {
+      const legacy = legacyChatRedirect(url.pathname);
+      if (legacy) {
+        res.writeHead(302, { location: `${legacy}${url.search}`, "cache-control": "no-store" });
+        return res.end();
+      }
     }
 
     if (req.method === "GET" && url.pathname === "/photos.js") {

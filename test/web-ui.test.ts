@@ -263,8 +263,16 @@ test("wide code and tables scroll inside a bounded region; nothing is clipped wi
   assert.match(sx, /overflow:\s*auto/);
   assert.match(rule(".md pre"), /white-space:\s*pre;/);
   assert.match(rule(".compact pre"), /overflow:\s*auto/);
-  assert.doesNotMatch(css, /overflow(-x|-y)?:\s*hidden/, "no content is hidden by clipping");
-  assert.doesNotMatch(css, /text-overflow:\s*ellipsis/);
+  // The one exception: the open session's title in the header is cut with an ellipsis (it shares the bar with the page
+  // links and toggles); its full text stays available as the button's hover text and accessible name.
+  const title = rule("#sesstitle");
+  assert.match(title, /text-overflow:\s*ellipsis/);
+  assert.match(html, /sessBtn\.title = label;/);
+  assert.match(html, /sessBtn\.setAttribute\("aria-label", `Session: \$\{label\}/);
+  const rest = css.replace(/#sesstitle\s*\{[^}]*\}/, "");
+  assert.notEqual(rest, css);
+  assert.doesNotMatch(rest, /overflow(-x|-y)?:\s*hidden/, "no content is hidden by clipping");
+  assert.doesNotMatch(rest, /text-overflow:\s*ellipsis/);
   // Scroll regions are reachable by keyboard: the job summary and card briefs are focusable too.
   assert.match(html, /mdScroll\(el\("pre", \{ textContent: j\.summary\.text \}\), "Full summary", el\)/);
   assert.match(html, /brief\.tabIndex = 0;/);
@@ -311,11 +319,12 @@ const links = [...nav.matchAll(/<a ([^>]*)>([\s\S]*?)<\/a>/g)].map((m) => ({ att
 
 test("navigation is real links to the page's views, nothing invented; the status endpoint is linked from the status line", () => {
   assert.match(nav, /aria-label="ORBIT pages"/);
-  assert.deepEqual(links.map((l) => l.href), ["/#assistant", "/#chat", "/#jobs"]);
+  assert.deepEqual(links.map((l) => l.href), ["/#assistant", "/sessions", "/#jobs"]);
   assert.equal(nav.includes("<button"), false, "no button pretends to be navigation");
-  // Each destination is a GET route the server really has: "/" serves this page (Chat and Jobs are its views), and
-  // "/status" answers with JSON, which the link says.
-  assert.match(server, /req\.method === "GET" && url\.pathname === "\/"\)/);
+  // Each destination is a GET route the server really has: "/" and "/sessions" serve this page (Sessions and Jobs are its
+  // views), and "/status" answers with JSON, which the link says.
+  assert.match(server, /req\.method === "GET" && isPageRoute\(url\.pathname\)\)/);
+  assert.match(server, /return pathname === "\/" \|\| pathname === "\/sessions" \|\|/);
   assert.match(server, /req\.method === "GET" && url\.pathname === "\/status"\)/);
   assert.match(server, /url\.pathname === "\/jobs" && req\.method === "GET"/, "the Jobs view has its owner-only data route");
   const statusLine = html.match(/<div id="statusline"[^>]*>[\s\S]*?<\/a><\/div>/)?.[0] ?? "";
@@ -335,7 +344,8 @@ test("the Jobs link shows only for the owner and the views follow the address", 
   // The Assistant is the first link and the default page (docs/assistant.md); test/assistant-page.test.ts checks the routing itself.
   assert.match(links.find((l) => l.href === "/#assistant")!.attrs, /aria-current="page"/);
   assert.match(html, /jobsTab\.hidden = !pr\.ok;/);
-  assert.match(html, /const tabFromHash = \(\) => pageFor\(location\.hash, !jobsTab\.hidden, !assistantTab\.hidden\);/);
-  assert.match(html, /window\.addEventListener\("hashchange", \(\) => setTab\(tabFromHash\(\)\)\);/);
+  assert.match(html, /const tabFromHash = \(\) => pageFor\(location\.pathname, location\.hash, !jobsTab\.hidden, !assistantTab\.hidden\);/);
+  assert.match(html, /window\.addEventListener\("popstate", route\);/);
+  assert.match(html, /window\.addEventListener\("hashchange", route\);/);
   assert.match(html, /if \(a\.dataset\.tab === next\) a\.setAttribute\("aria-current", "page"\); else a\.removeAttribute\("aria-current"\);/);
 });

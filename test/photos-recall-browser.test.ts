@@ -89,7 +89,7 @@ for (const size of sizes) {
     assert.match(caption, /Caption: tomato bed <b>caption<\/b>/);
     assert.equal(await page.$$eval("#alog .gallery figcaption img, .gallery figcaption b", (x: any[]) => x.length), 0, "no markup from titles or captions");
     assert.equal(await page.evaluate(() => (window as any).__pwned), undefined);
-    assert.equal(await page.$eval("#alog .gallery figure.gitem figcaption a", (a: any) => a.getAttribute("href")), `#chat/${s.thread.id}`);
+    assert.equal(await page.$eval("#alog .gallery figure.gitem figcaption a", (a: any) => a.getAttribute("href")), `/sessions/${s.thread.id}`, "the stored #chat/<id> link opens the session's /sessions address");
     assert.match(await page.$eval("#alog .gallery .gnote", (n: any) => n.textContent), /does not mean the model looked at it/);
     // No horizontal scroll at this width.
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), "no horizontal scroll");
@@ -129,9 +129,9 @@ for (const size of sizes) {
     await page.waitForFunction(() => document.querySelectorAll("#alog .gallery").length === 2);
     const last = await page.$$eval("#alog .gallery", (gs: any[]) => [...gs.at(-1).querySelectorAll("figure.gitem")].map((f: any) => [f.dataset.ref, f.dataset.status]));
     assert.deepEqual(last, [[s.show[1], "unavailable"]]);
-    // The source link opens the chat thread, where its own photos still show.
+    // The source link opens the session (in this page, no reload), where its own photos still show.
     await page.click("#alog .gallery figure[data-status=ok] figcaption a");
-    await page.waitForFunction((id: string) => location.hash === `#chat/${id}`, s.thread.id);
+    await page.waitForFunction((id: string) => location.pathname === `/sessions/${id}` && document.body.dataset.tab === "chat", s.thread.id);
     await ctx.close();
   });
 }

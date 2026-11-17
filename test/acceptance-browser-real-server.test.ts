@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import type { Step } from "../src/model.ts";
 import { rig, say, scripted } from "./threads-fixture.ts";
+import { pickSession } from "./helpers/sessions-ui.ts";
 
 // Acceptance 2026-11-14 (docs/acceptance-2026-11-14.md, area 5). The chat page in a real browser (Playwright's Chromium) against the
 // REAL ORBIT server (buildServer, the real thread store and thread service, the real index.html), not a scripted fake of its routes.
@@ -54,8 +55,8 @@ async function setup() {
 async function openPage(base: string, threadId: string) {
   const page = await browser.newPage({ viewport: { width: 900, height: 600 } });
   await page.addInitScript(`localStorage.setItem("orbit.thread", ${JSON.stringify(threadId)})`);
-  await page.goto(`${base}#chat`);
-  await page.waitForFunction((id: string) => (document.getElementById("threadsel") as HTMLSelectElement)?.value === id, threadId);
+  await page.goto(`${base}sessions`);
+  await page.waitForFunction((id: string) => document.getElementById("sessbtn")?.dataset.session === id, threadId);
   return page;
 }
 
@@ -75,7 +76,7 @@ test("real server: a send in flight in Alpha, a switch to Beta, a blocked Enter 
     assert.equal((await r.api(`/threads/${alpha.id}`)).data.thread.busy, true, "Alpha is busy on the server while the model is held");
 
     // Switch to Beta while Alpha's request is in flight.
-    await page.selectOption("#threadsel", beta.id);
+    await pickSession(page, beta.id);
     await page.waitForFunction(() => !document.querySelector("#log")!.textContent!.includes("alpha HOLD question"));
     assert.deepEqual(await shown(page), [], "Beta is empty and shows nothing of Alpha");
 
@@ -93,7 +94,7 @@ test("real server: a send in flight in Alpha, a switch to Beta, a blocked Enter 
     await page.waitForTimeout(100);
     assert.deepEqual(await stored(r, alpha.id), ["user:alpha HOLD question", "assistant:reply to alpha HOLD question"]);
     assert.deepEqual(await shown(page), [], "the late Alpha reply is not drawn over Beta");
-    assert.equal(await page.evaluate(() => (document.getElementById("threadsel") as HTMLSelectElement).value), beta.id);
+    assert.equal(await page.evaluate(() => document.getElementById("sessbtn")!.dataset.session), beta.id);
 
     // Now Enter sends the kept text to Beta, the thread on screen.
     await page.press("#input", "Enter");
@@ -102,7 +103,7 @@ test("real server: a send in flight in Alpha, a switch to Beta, a blocked Enter 
     assert.deepEqual(await stored(r, alpha.id), ["user:alpha HOLD question", "assistant:reply to alpha HOLD question"], "Alpha is unchanged");
 
     // Back to Alpha: its history, including the reply that arrived while away, is drawn; nothing of Beta.
-    await page.selectOption("#threadsel", alpha.id);
+    await pickSession(page, alpha.id);
     await page.waitForFunction(() => document.querySelector("#log")!.textContent!.includes("reply to alpha HOLD question"));
     const alphaShown = (await shown(page)).join("|");
     assert.ok(!alphaShown.includes("beta question"), alphaShown);
@@ -110,7 +111,7 @@ test("real server: a send in flight in Alpha, a switch to Beta, a blocked Enter 
     // A reload restores Alpha and the same history from the server.
     await page.reload();
     await page.waitForFunction(() => document.querySelector("#log")!.textContent!.includes("reply to alpha HOLD question"));
-    assert.equal(await page.evaluate(() => (document.getElementById("threadsel") as HTMLSelectElement).value), alpha.id);
+    assert.equal(await page.evaluate(() => document.getElementById("sessbtn")!.dataset.session), alpha.id);
     assert.equal((await page.$$("#log .msg")).length, 2, "no duplicated message after reload");
   } finally {
     await page.close();
@@ -173,11 +174,71 @@ test("real server: a selection and scroll position in a long Alpha history survi
     assert.equal((await page.$$("#log .msg")).length, 4);
 
     // Switching away and back draws the right thread each time (a switch is a new view, so the selection is not expected to survive it).
-    await page.selectOption("#threadsel", beta.id);
+    await pickSession(page, beta.id);
     await page.waitForFunction(() => !document.querySelector("#log")!.textContent!.includes("SELECTME"));
-    await page.selectOption("#threadsel", alpha.id);
+    await pickSession(page, alpha.id);
     await page.waitForFunction(() => document.querySelector("#log")!.textContent!.includes("SELECTME"));
     assert.equal((await page.$$("#log .msg")).length, 4, "Alpha's four messages, no duplicates, nothing from Beta");
+  } finally {
+    await page.close();
+  }
+});
+
+// Sessions addresses on the REAL server (docs/threads.md, "Addresses"): the canonical /sessions/<id> loads directly and
+// survives a reload; an old /chat/<id> path is redirected by the server and an old /#chat/<id> bookmark is moved by the page,
+// both to the same session (query and fragment kept where the browser has them); Back and Forward move between sessions and
+// pages without a reload or a loop; a message sent after all that lands in the session the address names.
+test("real server: canonical and legacy session addresses, direct load, reload, Back/Forward, and sends landing in the named session", { skip }, async () => {
+  const { r, alpha, beta } = await setup();
+  const base = await baseOf(r);
+  const page = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  const on = (id: string) => page.waitForFunction((i: string) => document.getElementById("sessbtn")?.dataset.session === i && !(window as any).navPending(), id);
+  const addr = () => page.evaluate(() => location.pathname + location.search + location.hash);
+  try {
+    // Direct load of the canonical address, then a reload.
+    await page.goto(`${base}sessions/${beta.id}`);
+    await on(beta.id);
+    assert.equal(await addr(), `/sessions/${beta.id}`);
+    assert.equal(await page.title(), "Beta · Sessions · ORBIT");
+    await page.reload();
+    await on(beta.id);
+    assert.equal(await addr(), `/sessions/${beta.id}`);
+    // A legacy path: the server redirects to the same session, keeping the query; the browser keeps the fragment.
+    const res = await page.goto(`${base}chat/${alpha.id.toUpperCase()}?from=old`);
+    assert.equal(res.status(), 200);
+    assert.equal(res.request().redirectedFrom()?.url(), `${base}chat/${alpha.id.toUpperCase()}?from=old`);
+    await on(alpha.id);
+    assert.equal(await addr(), `/sessions/${alpha.id}?from=old`);
+    // A legacy fragment bookmark: the page moves it to the canonical address in place.
+    await page.goto(`${base}#chat/${beta.id}`);
+    await on(beta.id);
+    assert.equal(await addr(), `/sessions/${beta.id}`);
+    // Picking from the header picker pushes an entry; Back and Forward follow, and the page is never reloaded.
+    await page.evaluate(() => ((window as any).__doc = 1));
+    await pickSession(page, alpha.id);
+    await on(alpha.id);
+    assert.equal(await addr(), `/sessions/${alpha.id}`);
+    await page.click("#assistanttab");
+    await page.waitForFunction(() => document.body.dataset.tab === "assistant" && location.hash === "#assistant");
+    await page.goBack();
+    await page.waitForFunction(() => document.body.dataset.tab === "chat");
+    await on(alpha.id);
+    await page.goBack();
+    await on(beta.id);
+    assert.equal(await addr(), `/sessions/${beta.id}`);
+    await page.goForward();
+    await on(alpha.id);
+    assert.equal(await page.evaluate(() => (window as any).__doc), 1, "the same document throughout: no reload");
+    // The session the address names is the one a message goes to.
+    await page.fill("#input", "sent at the new address");
+    await page.press("#input", "Enter");
+    await page.waitForFunction(() => /reply to sent at the new address/.test(document.getElementById("log")!.textContent ?? ""));
+    assert.ok((await stored(r, alpha.id)).includes("user:sent at the new address"));
+    assert.ok(!(await stored(r, beta.id)).some((m) => m.includes("sent at the new address")));
+    // A deep link to an id that is not a session is reported, never fetched as a page elsewhere, and sends nothing.
+    await page.goto(`${base}sessions/not-a-session`);
+    await page.waitForFunction(() => /does not name a session/.test(document.getElementById("tstatus")?.textContent ?? ""));
+    assert.equal(await addr(), "/sessions/not-a-session");
   } finally {
     await page.close();
   }
