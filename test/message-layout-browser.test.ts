@@ -204,6 +204,51 @@ for (const surface of ["assistant", "chat"] as const) {
     assert.equal(await time.getAttribute("aria-expanded"), "false", "Escape closes it");
   });
 
+  test(`browser (${surface}): on a wide screen every row uses the log's full width, and the header's shadow shades the content scrolling under it`, { skip }, async () => {
+    reset();
+    const sel = await open(hash, { width: 1600, height: 700 });
+    const w = await page.$eval(sel, (log: HTMLElement) => {
+      const cs = getComputedStyle(log);
+      return {
+        inner: log.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), pad: parseFloat(cs.paddingLeft),
+        page: document.documentElement.clientWidth, rows: [...log.querySelectorAll(".msg")].map((m) => m.getBoundingClientRect().width),
+        cards: [...log.querySelectorAll(".proposal")].map((c) => c.getBoundingClientRect().width),
+        sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      };
+    });
+    assert.equal(w.pad, 16, "the log keeps its edge padding");
+    assert.ok(w.inner >= w.page - 2 * 16 - 20, `the log spans the page (${w.inner} of ${w.page})`);
+    assert.ok(w.rows.every((x: number) => Math.abs(x - w.inner) <= 1), `every row is as wide as the log (${w.inner}): ${w.rows}`);
+    assert.ok(w.cards.length > 0 && w.cards.every((x: number) => x > w.inner * 0.9), `proposal cards fill their row too: ${w.cards}`);
+    assert.equal(w.sideways, false, "nothing scrolls sideways");
+    // An opaque, positioned block at the very top of the log, positioned the way message rows are (relative, z-index auto),
+    // so it is painted after the header unless the header stacks above it. The header's shadow must still shade it.
+    await page.$eval(sel, (log: HTMLElement) => {
+      const b = document.createElement("div");
+      b.style.cssText = `position: relative; flex: none; height: 80px; margin-top: -${getComputedStyle(log).paddingTop}; background: #ffffff;`;
+      log.prepend(b);
+      log.scrollTop = 0;
+    });
+    const hb = await page.$eval("header", (h: Element) => h.getBoundingClientRect().bottom);
+    const png: Buffer = await page.screenshot({ clip: { x: 800, y: Math.ceil(hb), width: 1, height: 40 } });
+    const probe = await context.newPage();
+    const px: number[] = await probe.evaluate(async (b64: string) => {
+      const img = new Image();
+      img.src = `data:image/png;base64,${b64}`;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      const g = c.getContext("2d")!;
+      g.drawImage(img, 0, 0);
+      return Array.from({ length: img.naturalHeight }, (_, y) => { const d = g.getImageData(0, y, 1, 1).data; return 765 - (d[0]! + d[1]! + d[2]!); });
+    }, png.toString("base64"));
+    await probe.close();
+    // px[y]: how much darker than white, y pixels below the header's bottom edge.
+    assert.equal(px[px.length - 1], 0, `well below the header the block is plain white (${px})`);
+    assert.ok(px[1]! >= 40, `just under the header the shadow visibly darkens the content (${px})`);
+    assert.ok(px[6]! > 0, `and it reaches several pixels down (${px})`);
+  });
+
   test(`browser (${surface}): on a phone-sized screen nothing scrolls sideways, even with the full time open`, { skip }, async () => {
     reset();
     const sel = await open(hash, { width: 360, height: 740 });
