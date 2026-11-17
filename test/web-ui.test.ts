@@ -319,7 +319,7 @@ const links = [...nav.matchAll(/<a ([^>]*)>([\s\S]*?)<\/a>/g)].map((m) => ({ att
 
 test("navigation is real links to the page's views, nothing invented; the status endpoint is linked from the status line", () => {
   assert.match(nav, /aria-label="ORBIT pages"/);
-  assert.deepEqual(links.map((l) => l.href), ["/#assistant", "/sessions", "/#jobs"]);
+  assert.deepEqual(links.map((l) => l.href), ["/#assistant", "/#jobs", "/sessions"]);
   assert.equal(nav.includes("<button"), false, "no button pretends to be navigation");
   // Each destination is a GET route the server really has: "/" and "/sessions" serve this page (Sessions and Jobs are its
   // views), and "/status" answers with JSON, which the link says.
