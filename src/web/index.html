@@ -262,6 +262,20 @@
   #form .phbtn::before, #aform .phbtn::before, .sendbtn::before { content: ""; position: absolute; inset: calc(-1 * var(--chit)) -4px; }
   #form .ico, #aform .ico { width: 17px; height: 17px; }
   @media (max-width: 480px) { #form, #aform { gap: 4px; padding-left: 8px; padding-right: 8px; } }
+  /* "↓ click to latest" (latestControl in the script): shown while a conversation (Sessions #log, Assistant #alog) is scrolled
+     back from its newest message, whether or not anything new has arrived. It sits in a zero-height dock between the
+     conversation and its composer (and the Assistant's status line), so it floats over the bottom of the messages, just
+     above the input, and stays put while the messages scroll under it. Only the button itself takes pointer events; the
+     dock lets clicks through to the messages around it, and the button never reaches down over the composer. It is
+     centered without a transform (the shared pressed look uses one). Colors are the page's text on a card, for contrast in
+     both themes; the shared button states give it the hover ring and the keyboard focus ring. */
+  .latestdock { position: relative; z-index: 5; flex: none; height: 0; pointer-events: none; }
+  .tolatest { position: absolute; left: 0; right: 0; bottom: 10px; width: max-content; max-width: calc(100% - 24px); margin: 0 auto;
+              display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 16px;
+              border-radius: 999px; border: 1px solid var(--accent-2); background: var(--card); color: var(--fg);
+              font-size: 14px; font-weight: 600; white-space: nowrap; pointer-events: auto; box-shadow: 0 4px 14px -4px var(--header-shadow); }
+  .tolatest[hidden] { display: none; }
+  @media (pointer: coarse) { .tolatest { min-height: 44px; padding: 0 20px; } }
 
   /* Markdown replies (see the markdown block in the script). Paragraph line breaks are kept, as in plain replies. */
   .md { white-space: pre-line; min-width: 0; }
@@ -307,7 +321,9 @@
 <body>
 <header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions</a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: not read yet" title="Notifications: not read yet. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">?</span></button><button type="button" id="health" class="bad" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header>
 <main id="log" hidden></main>
+<div class="latestdock"><button type="button" class="tolatest" id="tolatest" title="Scroll to the latest message" hidden><span aria-hidden="true">↓</span> click to latest</button></div>
 <main id="alog" aria-label="Assistant conversation"></main>
+<div class="latestdock"><button type="button" class="tolatest" id="atolatest" title="Scroll to the latest message" hidden><span aria-hidden="true">↓</span> click to latest</button></div>
 <section id="jobs" hidden aria-live="off"></section>
 <form id="form" hidden><div id="tray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="pick" accept="image/*" multiple hidden><button type="button" class="phbtn" id="pickbtn" title="Add image (up to 10)" aria-label="Add image"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14 M5 12h14"/></svg></button><textarea id="input" rows="1" placeholder="Message ORBIT" aria-label="Message ORBIT"></textarea><button id="send" class="sendbtn" title="Send" aria-label="Send"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13 M22 2l-7 20-4-9-9-4z"/></svg></button></form>
 <div id="astatus" role="status" aria-live="polite"></div>
@@ -316,6 +332,82 @@
 <script>
   const history = [];
   const log = document.getElementById("log");
+
+  // ---- Jump to the latest message. Each conversation (Sessions #log, Assistant #alog) has a "↓ click to latest" button
+  // that shows whenever the conversation is scrolled back from its bottom by more than AT_LATEST_PX, new messages or not,
+  // and hides at the bottom, while the conversation is hidden, and when it does not overflow. Clicking it scrolls to the
+  // newest message (smoothly, unless the reader asks for reduced motion) and hides it. New messages never move a reader
+  // who is scrolled back (renderThread and drawAssistant follow only at the bottom, judged by atLatest below); the button
+  // just stays. A reader at the bottom is kept there when the conversation's box or its content changes size (the composer
+  // growing, a rotated phone, an on-screen keyboard, an image or a details element opening). The same small tolerance
+  // decides both "at the bottom" for following and the button, so they never disagree.
+  const AT_LATEST_PX = 24;
+  const fromLatest = (s) => s.scrollHeight - s.scrollTop - s.clientHeight;
+  function latestControl(scroller, button, input) {
+    let stuck = true;      // at the bottom as last measured while showing: kept there across size changes
+    let jumping = false;   // a click's smooth scroll is under way: the button stays hidden until it ends or the reader takes over
+    let jumpTimer = 0;
+    const showing = () => scroller.getClientRects().length > 0;
+    const distanceOk = () => fromLatest(scroller) <= AT_LATEST_PX;
+    // A focused button that hides hands keyboard focus to the message box (keyboard users only: on a touch screen that
+    // would open the keyboard), rather than dropping it on the page.
+    const hide = () => {
+      if (button.hidden) return;
+      const kb = document.activeElement === button && button.matches(":focus-visible");
+      button.hidden = true;
+      if (kb && input) input.focus({ preventScroll: true });
+    };
+    const update = () => {
+      if (!showing()) { hide(); return; }
+      const at = distanceOk();
+      if (jumping) { if (!at) { hide(); return; } jumping = false; clearTimeout(jumpTimer); }
+      stuck = at;
+      if (at) hide(); else button.hidden = false;
+    };
+    const pin = () => { scroller.scrollTop = scroller.scrollHeight; };
+    // A size change: keep a reader who was at the bottom there, then re-measure.
+    const resized = () => { if (showing() && (stuck || jumping) && !distanceOk()) pin(); update(); };
+    scroller.addEventListener("scroll", update, { passive: true });
+    // The reader taking over (wheel, touch, a key, the scrollbar) ends a jump in progress.
+    const takeOver = () => { if (jumping) { jumping = false; clearTimeout(jumpTimer); update(); } };
+    for (const t of ["wheel", "touchstart", "pointerdown", "keydown"]) scroller.addEventListener(t, takeOver, { passive: true });
+    if (typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(resized);
+      ro.observe(scroller);
+      for (const c of scroller.children) ro.observe(c, { box: "border-box" });
+      // Messages added or removed (a poll, a send, a thread switch) re-measure at once; their later size changes come
+      // through the observer. Following new messages is the drawing code's decision, made before this runs.
+      new MutationObserver((rs) => {
+        for (const r of rs) {
+          for (const n of r.removedNodes) if (n.nodeType === 1) ro.unobserve(n);
+          for (const n of r.addedNodes) if (n.nodeType === 1 && n.parentNode === scroller) ro.observe(n, { box: "border-box" });
+        }
+        update();
+      }).observe(scroller, { childList: true, subtree: true, characterData: true });
+    } else {
+      window.addEventListener("resize", resized);
+      new MutationObserver(update).observe(scroller, { childList: true, subtree: true, characterData: true });
+    }
+    // Images in messages finish loading after they are drawn.
+    scroller.addEventListener("load", resized, true);
+    if (window.visualViewport) window.visualViewport.addEventListener("resize", resized);
+    button.addEventListener("click", () => {
+      const smooth = !(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
+      jumping = smooth;
+      stuck = true;
+      hide();
+      if (smooth) {
+        scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
+        // A smooth scroll that never reaches the bottom (content grew under it, or the browser dropped it) ends on its own.
+        clearTimeout(jumpTimer);
+        jumpTimer = setTimeout(() => { if (jumping) { jumping = false; if (showing()) pin(); update(); } }, 1500);
+      } else { pin(); update(); }
+    });
+    update();
+    // Whether the conversation counts as at its newest message, for following: within the tolerance, or on its way there
+    // after a click.
+    return { atLatest: () => jumping || !showing() || distanceOk(), update };
+  }
 
   async function refreshStatus() {
     try {
@@ -621,7 +713,8 @@
   const shownMeta = new WeakMap();
   let shownThreadId = null;   // the thread whose nodes are in the log; null when the log holds something else
   let loadSeq = 0;            // bumped by every draw, so an older, slower load cannot overwrite a newer view
-  const nearBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+  const logLatest = latestControl(log, document.getElementById("tolatest"), document.getElementById("input"));
+  const nearBottom = () => logLatest.atLatest();
   const selectingInLog = () => {
     try { const s = window.getSelection(); return Boolean(s && !s.isCollapsed && s.rangeCount && log.contains(s.getRangeAt(0).commonAncestorContainer)); } catch { return false; }
   };
@@ -1174,7 +1267,7 @@
     const cs = getComputedStyle(ta);
     const borders = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
     const max = parseFloat(cs.lineHeight) * COMPOSER_LINES + parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) + borders;
-    const log = scroller && !scroller.hidden ? { top: scroller.scrollTop, atBottom: scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 4 } : null;
+    const log = scroller && !scroller.hidden ? { top: scroller.scrollTop, atBottom: fromLatest(scroller) <= AT_LATEST_PX } : null;
     const caretAtEnd = ta.selectionEnd === ta.value.length, innerTop = ta.scrollTop;
     ta.style.overflowY = "hidden";
     ta.style.height = "auto";
@@ -2127,7 +2220,8 @@
   let asending = false;
   let aloadSeq = 0, ashownSeq = 0;
   let aerror = "";
-  const aNearBottom = () => alog.scrollHeight - alog.scrollTop - alog.clientHeight < 80;
+  const alogLatest = latestControl(alog, document.getElementById("atolatest"), ainput);
+  const aNearBottom = () => alogLatest.atLatest();
   function setAStatus(text, bad) { astatus.textContent = text; astatus.className = bad ? "bad" : ""; astatus.setAttribute("role", bad ? "alert" : "status"); }
   var atray = wirePhotos("a", document.getElementById("atray"), { uploadUrl: () => "/assistant/attachments", scope: () => "assistant", onChange: () => aBar() });
   function aBar() {
