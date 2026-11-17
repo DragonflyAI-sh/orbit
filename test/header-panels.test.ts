@@ -139,7 +139,7 @@ test("browser: page links sit in the header bar beside the toggles, with no Stat
   reset();
   for (const width of [900, 360]) {
     await open({ width });
-    assert.deepEqual(await page.$$eval("header .bar nav a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.getAttribute("href"))), ["/#assistant", "/sessions", "/#jobs"]);
+    assert.deepEqual(await page.$$eval("header .bar nav a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.getAttribute("href"))), ["/#assistant", "/#jobs", "/sessions"]);
     assert.equal(await page.$$eval('header nav a[href="/status"]', (as: unknown[]) => as.length), 0);
     assert.equal(await page.getAttribute("#assistanttab", "aria-current"), "page", "the current page cue stays");
     const box = await page.evaluate(() => { const r = (id: string) => document.getElementById(id)!.getBoundingClientRect(); return { health: r("health"), notes: r("notesbtn"), brand: document.querySelector(".brand")!.getBoundingClientRect(), width: document.documentElement.clientWidth }; });

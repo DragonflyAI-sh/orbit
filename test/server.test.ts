@@ -303,7 +303,7 @@ test("every navigation link on the page leads to a real GET route that answers, 
     const html = await page.text();
     const nav = html.match(/<nav id="tabs"[^>]*>[\s\S]*?<\/nav>/)?.[0] ?? "";
     const navHrefs = [...nav.matchAll(/<a [^>]*href="([^"]+)"/g)].map((m) => m[1]!);
-    assert.deepEqual(navHrefs, ["/#assistant", "/sessions", "/#jobs"]);
+    assert.deepEqual(navHrefs, ["/#assistant", "/#jobs", "/sessions"]);
     // The status page is linked from the status line under the header, not from the page links.
     const statusLink = html.match(/<a id="statusopen" href="([^"]+)"/)?.[1];
     assert.equal(statusLink, "/status");
