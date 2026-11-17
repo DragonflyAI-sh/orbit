@@ -28,14 +28,16 @@
     display: flex; flex-direction: column; height: 100dvh;
     background: radial-gradient(ellipse 80% 60% at 50% 30%, var(--bg-glow), transparent 70%), var(--bg);
   }
-  header { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  /* Compact header: tight outer padding so the conversation keeps the room. Toggles and links stay at least 28px tall. */
+  header { padding: 6px 12px; border-bottom: 1px solid var(--line); }
+  @media (max-width: 480px) { header { padding: 6px 10px; } }
   /* The header bar: logo, the page links, then (right-aligned) the notifications and status toggles. The status line and the
      notifications panel open directly below the bar; both are collapsed by default. On narrow screens the links take their
      own row under the logo and the toggles, so nothing scrolls sideways. */
-  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
   .brand { display: flex; align-items: center; gap: 8px; flex: none; }
   .bar nav { flex: 1 1 auto; min-width: 0; }
-  .hctl { display: flex; align-items: center; gap: 6px; margin-left: auto; flex: none; }
+  .hctl { display: flex; align-items: center; gap: 4px; margin-left: auto; flex: none; }
   @media (max-width: 560px) { .bar nav { order: 3; flex-basis: 100%; } }
   .ico { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
   #statusline { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; min-width: 0; }
@@ -43,7 +45,7 @@
   #statusopen { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; border-radius: 8px; color: var(--accent-2); border: 1px solid var(--line); background: var(--card); }
   #statusopen:hover { box-shadow: 0 0 0 2px var(--ring); }
   #inbox .empty { color: var(--muted); font-size: 13px; }
-  .brand img { width: 30px; height: 30px; flex: none; border-radius: 50%; box-shadow: 0 0 0 1px var(--line), 0 0 12px var(--bg-glow); }
+  .brand img { width: 28px; height: 28px; flex: none; border-radius: 50%; box-shadow: 0 0 0 1px var(--line), 0 0 12px var(--bg-glow); }
   h1 {
     margin: 0; font-size: 16px; letter-spacing: .18em;
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
@@ -108,11 +110,11 @@
   .ph .phx { position: absolute; top: -6px; right: -6px; min-width: 28px; min-height: 28px; padding: 0; border-radius: 50%; font-size: 16px; line-height: 1; }
   .ph .phretry { padding: 2px 8px; min-height: 28px; font-size: 12px; }
   .phnote { flex: 1 1 100%; font-size: 12px; color: var(--mock); }
-  .phbtn { flex: none; padding: 0 10px; min-width: 44px; min-height: 44px; font-size: 18px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
+  .phbtn { flex: none; padding: 0; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
   .photos { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
   .photos img { width: 96px; height: 96px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); background: var(--card); display: block; }
   .photos a { display: block; line-height: 0; }
-  @media (max-width: 480px) { .phbtn { padding: 0 6px; min-width: 40px; } .photos img { width: 72px; height: 72px; } }
+  @media (max-width: 480px) { .photos img { width: 72px; height: 72px; } }
   /* Galleries photos_show displayed under a reply (docs/photo-recall.md): stored photos loaded through the conversation's own route. */
   .gallery { margin-top: 8px; display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; max-width: 100%; }
   .gallery .gnote { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
@@ -130,7 +132,7 @@
   body:not([data-tab="chat"]) #threadbar { display: none !important; }
   /* Overall status: green only when every /status entry is exactly "live"; anything else, or no answer, is red. */
   /* The header toggles (notifications, status): compact pill buttons, not navigation. aria-expanded shows which panel is open. */
-  #health, .hbtn { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; background: var(--card); }
+  #health, .hbtn { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; background: var(--card); }
   #health[aria-expanded="true"], .hbtn[aria-expanded="true"] { border-color: var(--accent-2); color: var(--fg); }
   .hbtn .count { min-width: 1.5em; padding: 0 4px; border-radius: 999px; text-align: center; font-weight: 600; line-height: 1.4; }
   .hbtn.has .count { background: var(--gold); color: #1c1838; }
@@ -150,7 +152,7 @@
   #astatus.bad { color: var(--down); font-weight: 600; }
   @media (max-width: 480px) { #alog { padding: 12px; } #health .label { display: none; } }
   nav { display: flex; flex-wrap: wrap; gap: 6px; }
-  nav a { padding: 4px 14px; border-radius: 10px; background: var(--card); color: var(--fg); border: 1px solid var(--line); text-decoration: none; }
+  nav a { padding: 3px 10px; border-radius: 10px; background: var(--card); color: var(--fg); border: 1px solid var(--line); text-decoration: none; }
   nav a[aria-current="page"] { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: var(--on-accent); border-color: transparent; }
   nav a:hover { box-shadow: 0 0 0 2px var(--ring); }
   nav a:active { transform: translateY(1px); }
@@ -182,6 +184,19 @@
   textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
   button { font: inherit; padding: 0 16px; border-radius: 10px; border: 0; color: var(--on-accent);
            background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+  /* The message composers (Chat #form, Assistant #aform): compact padding, then one row of "+" (add image), the message box
+     and Send. The box starts one line tall and grows upward with its text, to at most eight lines, then scrolls inside
+     (fitComposer in the script, which hides the scrollbar only while the text fits; the CSS never clips). The row is
+     bottom-aligned, so "+" and Send stay level with the box's last line while the composer's bottom edge stays put. The
+     bottom padding leaves room for a phone's home indicator. */
+  #form, #aform { --cline: 22px; --cpad: 8px; --cctl: calc(var(--cline) + 2 * var(--cpad) + 2px);
+                  gap: 6px; align-items: flex-end; padding: 6px 12px max(6px, env(safe-area-inset-bottom)); }
+  #form textarea, #aform textarea { min-width: 0; line-height: var(--cline); padding: var(--cpad) 10px; height: var(--cctl);
+                                    max-height: calc(8 * var(--cline) + 2 * var(--cpad) + 2px); }
+  #form .phbtn, #aform .phbtn, .sendbtn { flex: none; display: inline-flex; align-items: center; justify-content: center;
+                                          width: var(--cctl); min-width: var(--cctl); height: var(--cctl); min-height: var(--cctl); padding: 0; }
+  #form .ico, #aform .ico { width: 20px; height: 20px; }
+  @media (max-width: 480px) { #form, #aform { gap: 4px; padding-left: 8px; padding-right: 8px; } }
 
   /* Markdown replies (see the markdown block in the script). Paragraph line breaks are kept, as in plain replies. */
   .md { white-space: pre-line; min-width: 0; }
@@ -229,9 +244,9 @@
 <main id="log" hidden></main>
 <main id="alog" aria-label="Assistant conversation"></main>
 <section id="jobs" hidden aria-live="off"></section>
-<form id="form" hidden><div id="tray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="pick" accept="image/*" multiple hidden><input type="file" id="cam" accept="image/*" capture="environment" hidden><button type="button" class="phbtn" id="pickbtn" title="Attach photos (up to 10)" aria-label="Attach photos from your library">🖼</button><button type="button" class="phbtn" id="cambtn" title="Take a photo" aria-label="Take a photo with the camera">📷</button><textarea id="input" rows="2" placeholder="Message ORBIT" aria-label="Message ORBIT"></textarea><button id="send">Send</button></form>
+<form id="form" hidden><div id="tray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="pick" accept="image/*" multiple hidden><button type="button" class="phbtn" id="pickbtn" title="Add image (up to 10)" aria-label="Add image"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14 M5 12h14"/></svg></button><textarea id="input" rows="1" placeholder="Message ORBIT" aria-label="Message ORBIT"></textarea><button id="send" class="sendbtn" title="Send" aria-label="Send"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13 M22 2l-7 20-4-9-9-4z"/></svg></button></form>
 <div id="astatus" role="status" aria-live="polite"></div>
-<form id="aform"><div id="atray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="apick" accept="image/*" multiple hidden><input type="file" id="acam" accept="image/*" capture="environment" hidden><button type="button" class="phbtn" id="apickbtn" title="Attach photos (up to 10)" aria-label="Attach photos from your library">🖼</button><button type="button" class="phbtn" id="acambtn" title="Take a photo" aria-label="Take a photo with the camera">📷</button><textarea id="ainput" rows="2" placeholder="Message the Assistant" aria-label="Message the Assistant"></textarea><button id="asend">Send</button></form>
+<form id="aform"><div id="atray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="apick" accept="image/*" multiple hidden><button type="button" class="phbtn" id="apickbtn" title="Add image (up to 10)" aria-label="Add image"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14 M5 12h14"/></svg></button><textarea id="ainput" rows="1" placeholder="Message the Assistant" aria-label="Message the Assistant"></textarea><button id="asend" class="sendbtn" title="Send" aria-label="Send"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13 M22 2l-7 20-4-9-9-4z"/></svg></button></form>
 <script src="/photos.js"></script>
 <script>
   const history = [];
@@ -955,13 +970,13 @@
   // conversation only, and sent with the next message once all of them are ready. Without photos.js the buttons stay hidden.
   const Photos = window.OrbitPhotos;
   function wirePhotos(prefix, root, opts) {
-    const pick = document.getElementById(`${prefix}pick`), cam = document.getElementById(`${prefix}cam`);
-    const pickBtn = document.getElementById(`${prefix}pickbtn`), camBtn = document.getElementById(`${prefix}cambtn`);
-    if (!Photos) { pickBtn.hidden = camBtn.hidden = true; return null; }
+    // One "+" button per composer opens the image picker (`image/*`, several at once, no `capture`, so a phone offers both its
+    // library and its camera). There is no separate camera button.
+    const pick = document.getElementById(`${prefix}pick`), pickBtn = document.getElementById(`${prefix}pickbtn`);
+    if (!Photos) { pickBtn.hidden = true; return null; }
     const trayApi = Photos.createTray({ root, mk: el, ...opts });
     pickBtn.addEventListener("click", () => pick.click());
-    camBtn.addEventListener("click", () => cam.click());
-    for (const input of [pick, cam]) input.addEventListener("change", () => { trayApi.add(input.files); input.value = ""; });
+    pick.addEventListener("change", () => { trayApi.add(pick.files); pick.value = ""; });
     return trayApi;
   }
   var chatTray = wirePhotos("", document.getElementById("tray"), {
@@ -972,8 +987,47 @@
   function chatPhotoBar() {
     if (typeof chatTray === "undefined") return;
     const off = !(threadMode === "server" && current && !current.archived && !pending);
-    for (const id of ["pickbtn", "cambtn"]) { const b = document.getElementById(id); if (b) { b.disabled = off || sending; b.title = off ? "Open or start a thread to attach photos" : id === "pickbtn" ? "Attach photos (up to 10)" : "Take a photo"; } }
+    const b = document.getElementById("pickbtn");
+    if (b) { b.disabled = off || sending; b.title = off ? "Open or start a thread to add images" : "Add image (up to 10)"; }
   }
+  // ---- Composer height. Each message box starts one line tall and grows upward as its text wraps or gains lines (typing,
+  // newlines, paste), up to COMPOSER_LINES lines; past that it scrolls inside. Deleting text shrinks it, and so does clearing
+  // it after a send. Text put back by the page (a refused send) is measured too, because every write to `.value` refits, and
+  // a width change (window resize, rotation, the composer being shown again) or a new placeholder re-measures it. The conversation
+  // above keeps its place: pinned to the bottom if it was there, otherwise at the same scroll position.
+  const COMPOSER_LINES = 8;
+  function fitComposer(ta, scroller) {
+    if (!ta.getClientRects().length) return; // hidden: measured when it is shown again (the width observer below)
+    const cs = getComputedStyle(ta);
+    const borders = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+    const max = parseFloat(cs.lineHeight) * COMPOSER_LINES + parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) + borders;
+    const log = scroller && !scroller.hidden ? { top: scroller.scrollTop, atBottom: scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 4 } : null;
+    const caretAtEnd = ta.selectionEnd === ta.value.length, innerTop = ta.scrollTop;
+    ta.style.overflowY = "hidden";
+    ta.style.height = "auto";
+    const want = ta.scrollHeight + borders;
+    ta.style.height = `${Math.ceil(Math.min(want, max))}px`;
+    const scrolls = want > max + 0.5;
+    ta.style.overflowY = scrolls ? "auto" : "hidden";
+    if (scrolls) ta.scrollTop = caretAtEnd ? ta.scrollHeight : innerTop;
+    if (log) scroller.scrollTop = log.atBottom ? scroller.scrollHeight : log.top;
+  }
+  function autoGrow(ta, scroller) {
+    const fit = () => fitComposer(ta, scroller);
+    const native = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+    Object.defineProperty(ta, "value", { configurable: true, get() { return native.get.call(this); }, set(v) { native.set.call(this, v); fit(); } });
+    ta.addEventListener("input", fit);
+    // An empty box is as tall as its placeholder (the browser measures it), so a new placeholder ("This thread is archived…")
+    // is refitted too.
+    new MutationObserver((rs) => { if (rs.some((m) => m.oldValue !== ta.placeholder)) fit(); }).observe(ta, { attributes: true, attributeFilter: ["placeholder"], attributeOldValue: true });
+    let width = -1;
+    const onWidth = () => { const w = ta.form.clientWidth; if (w !== width) { width = w; fit(); } };
+    if (typeof ResizeObserver === "function") new ResizeObserver(onWidth).observe(ta.form); else window.addEventListener("resize", onWidth);
+    fit();
+    return fit;
+  }
+  autoGrow(document.getElementById("input"), document.getElementById("log"));
+  autoGrow(document.getElementById("ainput"), document.getElementById("alog"));
   const safeLink = (url, text) => /^https:\/\/(claude\.ai|github\.com)\//.test(url || "")
     ? el("a", { href: url, target: "_blank", rel: "noopener noreferrer", textContent: text }) : null;
 
@@ -1732,7 +1786,7 @@
     const photos = atray ? atray.count() : 0;
     const photosWaiting = photos > 0 && !atray.ready();
     asendButton.disabled = asending || busy || !aview || photosWaiting;
-    for (const id of ["apickbtn", "acambtn"]) { const b = document.getElementById(id); if (b) b.disabled = asending || !aview; }
+    document.getElementById("apickbtn").disabled = asending || !aview;
     ainput.placeholder = busy && !asending ? "A reply is in progress (maybe on another device)…" : photos ? "Add a caption or question (optional)" : "Message the Assistant";
     if (aerror) setAStatus(aerror, true);
     else setAStatus(asending ? "Waiting for the reply…" : busy ? "A reply is in progress on another tab or device. Send is paused until it finishes." : photosWaiting ? (atray.busy() ? `Preparing photos: ${atray.readyCount()} of ${photos} ready. Send waits for all of them.` : `${atray.failed()} photo(s) failed. Retry or remove them to send.`) : "", false);

@@ -292,7 +292,8 @@ test("buttons have hover, pressed, keyboard focus and disabled states, and respe
 });
 
 test("Send is disabled while a message is in flight, while the thread is archived and while a thread is opening", () => {
-  assert.match(html, /<button id="send">Send<\/button>/);
+  // Send is an icon button: its name and tooltip are "Send" (test/composer-browser.test.ts checks the icon and behaviour).
+  assert.match(html, /<button id="send" class="sendbtn" title="Send" aria-label="Send"><svg [^>]*aria-hidden="true"/);
   assert.match(html, /sendButton\.disabled = true;/);
   // Afterwards the owner's bar decides (it knows about a pending navigation); the stateless chat re-enables directly.
   assert.match(html, /finally \{\s*sending = false;\s*if \(threadMode === "server"\) renderBar\(\); else sendButton\.disabled = input\.disabled;/);
