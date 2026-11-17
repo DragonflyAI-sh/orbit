@@ -89,10 +89,12 @@ export function notifier(store: Store<Notification[]>, discord?: Sink, now: () =
     // Due and not yet shown (unchanged, for older pages and callers).
     inbox: (): Notification[] => list().filter((n) => due(n) && !n.shown),
 
-    // What the web page lists until it is dismissed there: due notes not yet shown, plus those shown under the listing
-    // receipt, oldest first. Notes acknowledged by an older page (a receipt without `listed`) are not included: their
-    // receipts may predate this rule, and nothing here claims to recover them.
-    current: (): Notification[] => list().filter((n) => due(n) && (!n.shown || n.shown.listed === true)),
+    // What the web page lists until it is dismissed there: notes not yet shown, plus those shown under the listing receipt,
+    // oldest first. Quiet hours hold only pushed delivery (Discord, `pump`): a held note is listed at once, because the page
+    // is only read when someone opens it, so a job that finishes at 23:30 Pacific is on the page then, not at 08:00. Notes
+    // acknowledged by an older page (a receipt without `listed`) are not included: their receipts may predate this rule, and
+    // nothing here claims to recover them.
+    current: (): Notification[] => list().filter((n) => !n.shown || n.shown.listed === true),
 
     recent: (): Notification[] => list().slice(-50).reverse(),
 

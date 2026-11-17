@@ -52,6 +52,7 @@
   #statusopen { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; border-radius: 8px; color: var(--accent-2); border: 1px solid var(--line); background: var(--card); }
   #statusopen:hover { box-shadow: 0 0 0 2px var(--ring); }
   #inbox .empty { color: var(--muted); font-size: 13px; }
+  #inbox .readerr { color: var(--down); font-size: 13px; }
   .brand img { width: 28px; height: 28px; flex: none; border-radius: 50%; box-shadow: 0 0 0 1px var(--line), 0 0 12px var(--bg-glow); }
   h1 {
     margin: 0; font-size: 16px; letter-spacing: .18em;
@@ -300,7 +301,7 @@
 </style>
 </head>
 <body>
-<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions</a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: none" title="Notifications: none. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">0</span></button><button type="button" id="health" class="bad" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">No notifications.</div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header>
+<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions</a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: not read yet" title="Notifications: not read yet. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">?</span></button><button type="button" id="health" class="bad" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header>
 <main id="log" hidden></main>
 <main id="alog" aria-label="Assistant conversation"></main>
 <section id="jobs" hidden aria-live="off"></section>
@@ -373,6 +374,22 @@
   // read or unread, so the label never says "unread".
   function noteCountLabel(total) {
     return total ? `Notifications: ${total}` : "Notifications: none";
+  }
+  // What the count button says, given what the page knows: `read` is whether ORBIT's list has been read at least once,
+  // `failed` whether the latest read failed. Until a read succeeds the count is "?", never 0: a page that could not read the
+  // list does not know there are none. After a failure the last list read stays, and the label says it may be out of date.
+  function noteCountView(total, state) {
+    if (!state || !state.read) return { text: "?", has: false, label: state && state.failed ? "Notifications: could not be read" : "Notifications: not read yet" };
+    if (state.failed) return { text: String(total), has: total > 0, label: `${noteCountLabel(total)} (the last list read; the latest refresh failed)` };
+    return { text: String(total), has: total > 0, label: noteCountLabel(total) };
+  }
+  // The panel's status line for a failed read of GET /notifications (null when the latest read worked).
+  function noteReadError(status) {
+    if (status === 403) return "Notifications are for ORBIT's owner; this sign-in cannot read them.";
+    if (typeof status === "number") return `ORBIT's notifications could not be read (HTTP ${status}).`;
+    if (status === "bad-body") return "ORBIT's answer about notifications could not be read.";
+    if (status === "network") return "ORBIT could not be reached for notifications.";
+    return null;
   }
   // </panels>
 
@@ -966,6 +983,9 @@
   const ackDone = new Set();
   const ackPending = new Set();
   let inboxGen = 0;
+  // Whether ORBIT's list has been read at least once, and why the latest read failed (null when it worked). A failed read
+  // keeps the last list and says so; it never turns into "No notifications."
+  const inboxRead = { read: false, error: null };
   let showAllNotes = false;
   const expandedNotes = new Set();
   const dismissedKey = "orbit.dismissed-notes";
@@ -1005,7 +1025,10 @@
       return el("div", { className: "note" }, top, ...(rest && open ? [el("div", { className: "rest" }, ...linkify(rest, el))] : []));
     });
     if (total > NOTES_SHOWN) nodes.push(tag(el("button", { type: "button", className: "showall", textContent: showAllNotes ? "show fewer" : `show all (${total})`, onclick: () => { showAllNotes = !showAllNotes; renderInbox(); } }), "showall"));
-    if (!total) nodes.push(el("div", { className: "empty", textContent: "No notifications." }));
+    const problem = noteReadError(inboxRead.error);
+    if (problem) nodes.unshift(el("div", { className: "readerr", role: "alert", textContent: inboxRead.read ? `${problem} Showing the last list read.` : problem }));
+    if (!total && inboxRead.read && !problem) nodes.push(el("div", { className: "empty", textContent: "No notifications." }));
+    if (!total && !inboxRead.read && !problem) nodes.push(el("div", { className: "empty", textContent: "Reading notifications…" }));
     box.replaceChildren(...nodes);
     if (was) (focusable.get(was) || box.querySelector("button") || notesButton).focus({ preventScroll: true });
     showNoteCount(total);
@@ -1030,31 +1053,38 @@
     }
   }
   function showNoteCount(total) {
-    const label = noteCountLabel(total);
-    notesButton.classList.toggle("has", total > 0);
-    document.getElementById("notecount").textContent = String(total);
+    const view = noteCountView(total, { read: inboxRead.read, failed: inboxRead.error !== null });
+    const label = view.label;
+    notesButton.classList.toggle("has", view.has);
+    document.getElementById("notecount").textContent = view.text;
     notesButton.setAttribute("aria-label", label);
     notesButton.title = `${label}. Show or hide the notifications.`;
   }
   async function refreshInbox() {
     const gen = ++inboxGen;
-    try {
-      const res = await fetch("/notifications");
-      if (!res.ok || gen !== inboxGen) return;
-      const body = await res.json();
-      if (gen !== inboxGen) return; // a newer refresh started; its answer wins
-      const items = Array.isArray(body.current) ? body.current : Array.isArray(body.inbox) ? body.inbox : [];
-      const seen = new Set();
-      const next = [];
-      for (const n of items) {
-        if (!n || typeof n.id !== "string" || seen.has(n.id)) continue;
-        seen.add(n.id);
-        next.push({ id: n.id, text: String(n.text ?? "") });
-        if (n.shown && n.shown.listed === true) ackDone.add(n.id);
-      }
-      noteList.splice(0, noteList.length, ...next);
-      renderInbox();
-    } catch { /* the next refresh tries again */ }
+    // A failure is shown, never rendered as an empty list; the last list read (if any) stays.
+    const failed = (why) => { if (gen !== inboxGen) return; inboxRead.error = why; renderInbox(); };
+    let res;
+    try { res = await fetch("/notifications"); } catch { return failed("network"); } // the next refresh tries again
+    if (gen !== inboxGen) return;
+    if (!res.ok) return failed(res.status);
+    let body;
+    try { body = await res.json(); } catch { return failed("bad-body"); }
+    if (gen !== inboxGen) return; // a newer refresh started; its answer wins
+    const items = body && Array.isArray(body.current) ? body.current : body && Array.isArray(body.inbox) ? body.inbox : null;
+    if (!items) return failed("bad-body");
+    const seen = new Set();
+    const next = [];
+    for (const n of items) {
+      if (!n || typeof n.id !== "string" || seen.has(n.id)) continue;
+      seen.add(n.id);
+      next.push({ id: n.id, text: String(n.text ?? "") });
+      if (n.shown && n.shown.listed === true) ackDone.add(n.id);
+    }
+    noteList.splice(0, noteList.length, ...next);
+    inboxRead.read = true;
+    inboxRead.error = null;
+    renderInbox();
   }
 
   // ChatGPT sign-in, owner only: the same device-code flow OpenClaw uses.
