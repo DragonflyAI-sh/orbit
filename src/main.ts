@@ -40,6 +40,8 @@ import { workFile, workSessions } from "./work-sessions.ts";
 import { join } from "node:path";
 import { watcher } from "./watch.ts";
 import { githubRepoStatus, toolbox } from "./tools.ts";
+import { processIdentity, smokeRunner } from "./smoke.ts";
+import { orbitSmokeChecks } from "./smoke-checks.ts";
 
 const port = Number(process.env.PORT ?? 8790);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -195,6 +197,26 @@ const photoSemantic =
     ? undefined
     : { embedder: semanticEmbedder, cacheDir: stateDir ? join(stateDir, "photo-vectors") : undefined, status: () => embeddingsStatus(semanticConfig, semanticEmbedder, semanticBudget) };
 
+// Post-deploy smoke checks (docs/smoke-checks.md): run once by buildServer as soon as it is listening, so /status carries evidence from
+// THIS process without a user touching anything. Bounded and non-fatal: a failed check is reported, never a reason to stop serving.
+// The embeddings check uses the same adapter instance as photos_search, and only when semantic search is on and configured.
+const identity = processIdentity(commit);
+const loopback = host === "0.0.0.0" || host === "::" || host === "" ? "127.0.0.1" : host;
+const smoke = smokeRunner({
+  identity,
+  checks: orbitSmokeChecks({
+    base: () => `http://${loopback.includes(":") ? `[${loopback}]` : loopback}:${port}`,
+    processStart: new Date(identity.startedAt),
+    memory,
+    modelMock: () => model.status().state === "mock",
+    schedule,
+    runs,
+    nodes,
+    watch,
+    embeddings: { config: semanticConfig, embedder: semanticEmbedder, budget: semanticBudget },
+  }),
+});
+
 buildServer({
   ports: MOCK_PORT_NAMES.map((name) => mockPort(name)),
   model,
@@ -214,6 +236,7 @@ buildServer({
   // Saved photo observations: <state>/photo-observations (docs/photo-recall.md). Without a state directory they are kept in memory only.
   photoObservations: observationStore(stateDir ? join(stateDir, "photo-observations") : undefined),
   photoSemantic,
+  smoke,
   // Work sessions and run links: <state>/work-sessions.json (docs/adr/0002-work-sessions.md).
   workSessions: workSessions(workFile(stateDir)),
   vaultEdits,

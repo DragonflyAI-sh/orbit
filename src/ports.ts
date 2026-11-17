@@ -1,3 +1,5 @@
+import type { CheckRecord } from "./smoke.ts";
+
 export type PortState = "live" | "mock" | "degraded" | "down";
 
 export type PortStatus = {
@@ -6,6 +8,9 @@ export type PortStatus = {
   impl: string;
   detail: string;
   verifiedAt: string;
+  // Optional, added by /status only: this process's startup smoke-check record for the port (docs/smoke-checks.md). Additive: `state`
+  // keeps its four values and its meaning, so consumers that ignore `check` are unchanged.
+  check?: CheckRecord;
 };
 
 export type Result<T> = {

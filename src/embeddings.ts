@@ -43,7 +43,9 @@ const DAILY_TOKENS_MAX = 10_000_000;
 const responseBytesMax = (dims: number, n: number) => n * dims * 26 + 64 * 1024;
 
 export type EmbedderId = { model: string; dims: number; format: string };
-export type Embedder = { id: EmbedderId; embed(texts: string[], signal?: AbortSignal): Promise<number[][]> };
+// `attempts` can only lower the adapter's own retry bound (the startup smoke check uses 1: no retries).
+export type EmbedOptions = { attempts?: number };
+export type Embedder = { id: EmbedderId; embed(texts: string[], signal?: AbortSignal, opts?: EmbedOptions): Promise<number[][]> };
 export type EmbeddingFailure = "disabled" | "budget" | "auth" | "quota" | "config" | "rate-limit" | "timeout" | "network" | "server" | "malformed" | "input" | "aborted";
 // Every way an embedding can fail. `kind` lets callers (and tests) tell budget, auth and quota apart without parsing text.
 export class EmbeddingUnavailable extends Error {
@@ -237,7 +239,10 @@ export function parseEmbeddings(body: string, n: number, dims: number, model: st
   return { vectors: out as number[][], ...(Number.isInteger(pt) && (pt as number) >= 0 ? { promptTokens: pt as number } : {}) };
 }
 
-export type EmbedderStats = { requests: number; attempts: number; retries: number; texts: number; failures: Record<string, number>; lastOkAt?: string; lastError?: string; haltedUntil?: string; haltReason?: string };
+// `latest` is the outcome of the most recently STARTED call that reached a result (success or a non-cancellation failure). Calls are
+// ordered by when they started, so a slow call (for example a startup smoke check) that finishes late cannot overwrite the outcome of
+// a call that started after it. A cancelled call ("aborted") is not evidence about the provider and never changes it.
+export type EmbedderStats = { requests: number; attempts: number; retries: number; texts: number; failures: Record<string, number>; lastOkAt?: string; lastError?: string; haltedUntil?: string; haltReason?: string; latest?: { ok: boolean; startedAt: string; at: string } };
 
 export function openaiEmbedder(o: {
   key: string;
@@ -270,16 +275,22 @@ export function openaiEmbedder(o: {
     inFlight--;
     waiters.shift()?.();
   };
-  const fail = (e: EmbeddingUnavailable): never => {
+  const record = (ok: boolean, startedAt: Date | undefined) => {
+    if (!startedAt) return;
+    if (stats.latest && new Date(stats.latest.startedAt).getTime() > startedAt.getTime()) return;
+    stats.latest = { ok, startedAt: startedAt.toISOString(), at: now().toISOString() };
+  };
+  const fail = (e: EmbeddingUnavailable, startedAt?: Date): never => {
     stats.failures[e.kind] = (stats.failures[e.kind] ?? 0) + 1;
     stats.lastError = `${now().toISOString()} ${e.kind}: ${e.message}`;
+    if (e.kind !== "aborted") record(false, startedAt);
     throw e;
   };
-  const halt = (kind: EmbeddingFailure, reason: string): never => {
+  const halt = (kind: EmbeddingFailure, reason: string, startedAt: Date): never => {
     halted = { until: now().getTime() + EMBED_HALT_MS, kind, reason };
     stats.haltedUntil = new Date(halted.until).toISOString();
     stats.haltReason = reason;
-    return fail(new EmbeddingUnavailable(kind, reason));
+    return fail(new EmbeddingUnavailable(kind, reason), startedAt);
   };
 
   const once = async (texts: string[], signal: AbortSignal | undefined, reserved: number) => {
@@ -307,10 +318,14 @@ export function openaiEmbedder(o: {
     id,
     stats,
     halted: () => (halted && halted.until > now().getTime() ? halted : undefined),
-    async embed(texts: string[], signal?: AbortSignal): Promise<number[][]> {
+    async embed(texts: string[], signal?: AbortSignal, opts?: EmbedOptions): Promise<number[][]> {
+      // Input refusals are about the caller, not the provider, so they are not recorded as an outcome (no start time).
+      const started = now();
+      const failAt = (e: EmbeddingUnavailable) => fail(e, started);
+      const maxAttempts = Math.max(1, Math.min(opts?.attempts ?? attemptsMax, attemptsMax));
       if (!Array.isArray(texts) || texts.length < 1 || texts.length > EMBED_BATCH_MAX) return fail(new EmbeddingUnavailable("input", `embed takes 1 to ${EMBED_BATCH_MAX} texts`));
       if (!texts.every((t) => typeof t === "string" && t.trim().length > 0 && t.length <= EMBED_INPUT_CHARS_MAX)) return fail(new EmbeddingUnavailable("input", `every text must be non-empty and at most ${EMBED_INPUT_CHARS_MAX} characters`));
-      if (halted && halted.until > now().getTime()) return fail(new EmbeddingUnavailable(halted.kind, `embeddings are paused until ${new Date(halted.until).toISOString()}: ${halted.reason}`));
+      if (halted && halted.until > now().getTime()) return failAt(new EmbeddingUnavailable(halted.kind, `embeddings are paused until ${new Date(halted.until).toISOString()}: ${halted.reason}`));
       halted = undefined;
       const estimate = texts.reduce((n, t) => n + Buffer.byteLength(t, "utf8"), 0);
       await acquire();
@@ -320,7 +335,7 @@ export function openaiEmbedder(o: {
           try {
             o.budget.reserve(estimate);
           } catch (err) {
-            return fail(err as EmbeddingUnavailable);
+            return failAt(err as EmbeddingUnavailable);
           }
           const day = o.budget.day();
           stats.attempts++;
@@ -331,7 +346,7 @@ export function openaiEmbedder(o: {
             r = await once(texts, signal, estimate);
           } catch (err) {
             const e = err as EmbeddingUnavailable;
-            if (e.kind === "aborted" || e.kind === "malformed") return fail(e);
+            if (e.kind === "aborted" || e.kind === "malformed") return failAt(e);
             transient = e;
             r = undefined as never;
           }
@@ -341,11 +356,12 @@ export function openaiEmbedder(o: {
               try {
                 parsed = parseEmbeddings(r.text, texts.length, s.dims, s.model);
               } catch (err) {
-                return fail(err as EmbeddingUnavailable);
+                return failAt(err as EmbeddingUnavailable);
               }
               if (parsed.promptTokens !== undefined) o.budget.settle(estimate, parsed.promptTokens, day);
               stats.texts += texts.length;
               stats.lastOkAt = now().toISOString();
+              record(true, started);
               return parsed.vectors;
             }
             let code = "";
@@ -355,22 +371,22 @@ export function openaiEmbedder(o: {
             } catch {
               // not JSON: the status decides
             }
-            if (r.status === 401 || r.status === 403) return halt("auth", `the embeddings key was refused (HTTP ${r.status}); no retry. Check the ${EMBEDDINGS_CREDENTIAL} credential and its project permissions.`);
-            if (r.status === 429 && /insufficient_quota|billing/.test(code)) return halt("quota", "the embeddings project has no quota left (HTTP 429 insufficient_quota); no retry. Check the project's billing and limits.");
-            if (r.status === 400 || r.status === 404 || r.status === 422) return halt("config", `the embeddings request was refused as invalid (HTTP ${r.status}${code.trim() ? ` ${scrub(code, o.key, 60)}` : ""}); no retry. Check ORBIT_EMBEDDINGS_MODEL and ORBIT_EMBEDDINGS_DIMENSIONS.`);
+            if (r.status === 401 || r.status === 403) return halt("auth", `the embeddings key was refused (HTTP ${r.status}); no retry. Check the ${EMBEDDINGS_CREDENTIAL} credential and its project permissions.`, started);
+            if (r.status === 429 && /insufficient_quota|billing/.test(code)) return halt("quota", "the embeddings project has no quota left (HTTP 429 insufficient_quota); no retry. Check the project's billing and limits.", started);
+            if (r.status === 400 || r.status === 404 || r.status === 422) return halt("config", `the embeddings request was refused as invalid (HTTP ${r.status}${code.trim() ? ` ${scrub(code, o.key, 60)}` : ""}); no retry. Check ORBIT_EMBEDDINGS_MODEL and ORBIT_EMBEDDINGS_DIMENSIONS.`, started);
             if (r.status === 429) {
               transient = new EmbeddingUnavailable("rate-limit", "embeddings rate limit (HTTP 429)");
               const ra = Number(r.retryAfter);
               if (Number.isFinite(ra) && ra >= 0) wait = Math.min(ra * 1000, EMBED_RETRY_AFTER_MAX_MS);
             } else if (r.status >= 500) transient = new EmbeddingUnavailable("server", `embeddings server error (HTTP ${r.status})`);
-            else return halt("config", `unexpected embeddings response (HTTP ${r.status}); no retry`);
+            else return halt("config", `unexpected embeddings response (HTTP ${r.status}); no retry`, started);
           }
-          if (attempt >= attemptsMax) return fail(new EmbeddingUnavailable(transient.kind, `${transient.message}; gave up after ${attempt} attempt(s)`));
+          if (attempt >= maxAttempts) return failAt(new EmbeddingUnavailable(transient.kind, `${transient.message}; gave up after ${attempt} attempt(s)`));
           stats.retries++;
           try {
             await sleep(wait, signal);
           } catch (err) {
-            return fail(err as EmbeddingUnavailable);
+            return failAt(err as EmbeddingUnavailable);
           }
         }
       } finally {
@@ -382,7 +398,9 @@ export function openaiEmbedder(o: {
 }
 export type OpenAIEmbedder = ReturnType<typeof openaiEmbedder>;
 
-// The /status line for semantic photo search. Not exercised yet (epoch) until the first request, so the watch ignores an idle port.
+// The /status line for semantic photo search. verifiedAt is the epoch ("not exercised yet", which the watch ignores) until a request
+// succeeds in this process, and then the time of the last real success. The port is on-demand, so /status does not age it into
+// "degraded" (src/server.ts withFreshness); the latest outcome decides its state, and the smoke record says how old the evidence is.
 export function embeddingsStatus(cfg: EmbeddingsConfig, e: OpenAIEmbedder | undefined, budget: EmbeddingBudget | undefined, now: () => Date = () => new Date()): PortStatus {
   const port = "photo-embeddings";
   if (cfg.state === "off") return { port, state: "down", impl: "off", detail: cfg.detail, verifiedAt: new Date(0).toISOString() };
@@ -393,6 +411,12 @@ export function embeddingsStatus(cfg: EmbeddingsConfig, e: OpenAIEmbedder | unde
   if (budget.unreadable()) return { port, state: "down", impl, detail: `The budget ledger is unreadable, so no request is sent. ${usage}`, verifiedAt: now().toISOString() };
   const h = e.halted();
   if (h) return { port, state: "degraded", impl, detail: `Paused until ${new Date(h.until).toISOString()}: ${h.reason} Photo search falls back to keyword ranking. ${usage}`, verifiedAt: now().toISOString() };
-  if (!e.stats.lastOkAt) return { port, state: "live", impl, detail: `Configured; no embeddings request has succeeded yet in this process.${e.stats.lastError ? ` Last error: ${e.stats.lastError}.` : ""} ${usage}`, verifiedAt: new Date(0).toISOString() };
-  return { port, state: e.stats.lastError && e.stats.lastError > e.stats.lastOkAt ? "degraded" : "live", impl, detail: `Last success ${e.stats.lastOkAt}.${e.stats.lastError ? ` Last error: ${e.stats.lastError}.` : ""} ${usage}`, verifiedAt: e.stats.lastOkAt };
+  // No outcome yet in this process: NOT verified, and not live from configuration alone. The startup smoke check (src/smoke-checks.ts)
+  // normally supplies the first outcome within seconds of the server listening. verifiedAt stays the epoch ("not exercised yet").
+  const latest = e.stats.latest;
+  if (!latest) return { port, state: "degraded", impl, detail: `Configured; not verified yet in this process: no embeddings request has completed since it started.${e.stats.lastError ? ` Last error: ${e.stats.lastError}.` : ""} ${usage}`, verifiedAt: new Date(0).toISOString() };
+  const last = `${e.stats.lastOkAt ? `Last success ${e.stats.lastOkAt}.` : "No success yet in this process."}${e.stats.lastError ? ` Last error: ${e.stats.lastError}.` : ""}`;
+  // The most recently started call decides: a late failure of an older call does not hide a newer success, and vice versa.
+  if (!latest.ok) return { port, state: "degraded", impl, detail: `The latest embeddings request (started ${latest.startedAt}) failed. Photo search falls back to keyword ranking. ${last} ${usage}`, verifiedAt: e.stats.lastOkAt ?? new Date(0).toISOString() };
+  return { port, state: "live", impl, detail: `${last} ${usage}`, verifiedAt: e.stats.lastOkAt ?? latest.at };
 }

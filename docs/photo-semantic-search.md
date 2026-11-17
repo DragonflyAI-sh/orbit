@@ -67,14 +67,14 @@ The two lists are fused with reciprocal rank fusion (k = 60) and deduplicated by
 | `ORBIT_EMBEDDINGS_DAILY_TOKENS` | 100000 | Reserved input tokens per UTC day (1–10,000,000). |
 | credential `orbit.openai-embeddings` | absent | A single-line API key. |
 
-`/status` gains a `photo-embeddings` part only when `ORBIT_PHOTO_SEMANTIC` is set. It shows the model, the halt state and today's counts, and is "not exercised" (epoch) until the first success, so the watch ignores an idle port.
+`/status` gains a `photo-embeddings` part only when `ORBIT_PHOTO_SEMANTIC` is set. It shows the model, the halt state and today's counts. Until a request has succeeded in this process it is `degraded` with an epoch `verifiedAt` ("not verified yet in this process"), which the watch ignores. It is on-demand, like `model`, so `/status` does not age it into degraded while idle; the most recently started request decides its state. When it is on and configured, the startup smoke check (`docs/smoke-checks.md`) sends one 19-byte synthetic string through this adapter, with no retry, once per process, so the port has fresh evidence right after a deploy.
 
 ## Secure provisioning (owner, on the host; not done by this change)
 
 1. In the OpenAI platform, use a **dedicated project** for ORBIT embeddings, with an API key restricted to that project. If the console offers per-endpoint key permissions, allow only embeddings. Set the project's **monthly budget / hard limit** and the usage limits as low as practical. Confirm in the console how the grant or credits apply and **whether usage beyond them is billed**. **ORBIT cannot verify billing coverage.** A successful request does not show that a grant paid for it, and credits do not by themselves prevent paid overage.
 2. Install the key without echoing it:
    `sudo sh -c 'umask 077; read -rs K; printf "%s" "$K" > /etc/credstore/orbit.openai-embeddings; unset K'`, then paste the key and press Enter. Then check `sudo stat -c '%a %U' /etc/credstore/orbit.openai-embeddings`, which should print `600 root`.
-3. Add `ORBIT_PHOTO_SEMANTIC=on` to `orbit.env` (and optionally the budget settings above). Restart: `sudo systemctl restart orbit`. Check `curl -s localhost:8790/status`: `photo-embeddings` should be `live` (not exercised).
+3. Add `ORBIT_PHOTO_SEMANTIC=on` to `orbit.env` (and optionally the budget settings above). Restart: `sudo systemctl restart orbit`. Check `curl -s localhost:8790/status`: within about a minute, `smoke.checks` shows `photo-embeddings` `passed` and the port is `live`, or `failed` with the reason (`docs/smoke-checks.md`).
 4. Rollback: remove `ORBIT_PHOTO_SEMANTIC` and restart. Optionally delete `/var/lib/private/orbit/photo-vectors` and `embeddings-budget.json`; both are derived data.
 
 Never copy this key to a runner, a job brief, chat or the vault.

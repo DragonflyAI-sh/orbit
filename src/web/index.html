@@ -233,7 +233,9 @@
         const el = document.createElement("span");
         el.className = `pill ${p.state}`;
         el.textContent = `${p.port}: ${p.state}`;
-        el.title = p.detail;
+        // The startup smoke record, when there is one (docs/smoke-checks.md): shown on hover, never changes the pill's state.
+        const c = p.check;
+        el.title = c && typeof c.state === "string" ? `${p.detail}\nStartup check: ${c.state}${c.superseded ? " (newer real result shown above)" : ""}${c.reason ? `: ${c.reason}` : ""}` : p.detail;
         return el;
       }));
     } catch { renderHealth(null); /* the next refresh tries again */ }
