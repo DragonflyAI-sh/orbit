@@ -225,7 +225,7 @@
 </style>
 </head>
 <body>
-<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#chat" data-tab="chat">Chat</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a></nav><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: none" title="Notifications: none. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">0</span></button><button type="button" id="health" class="bad" aria-expanded="false" aria-controls="statusline" title="ORBIT's status could not be read, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status could not be read, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">No notifications.</div></div><div id="threadbar" hidden><select id="threadsel" aria-label="Thread"></select><button type="button" id="tnew">New</button><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button><label><input type="checkbox" id="tshowarch"> archived</label><span id="tstatus" role="status" aria-live="polite"></span></div><div id="signin"></div></header>
+<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#chat" data-tab="chat">Chat</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a></nav><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: none" title="Notifications: none. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">0</span></button><button type="button" id="health" class="bad" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">No notifications.</div></div><div id="threadbar" hidden><select id="threadsel" aria-label="Thread"></select><button type="button" id="tnew">New</button><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button><label><input type="checkbox" id="tshowarch"> archived</label><span id="tstatus" role="status" aria-live="polite"></span></div><div id="signin"></div></header>
 <main id="log" hidden></main>
 <main id="alog" aria-label="Assistant conversation"></main>
 <section id="jobs" hidden aria-live="off"></section>
@@ -281,9 +281,10 @@
   // <panels>
   // The header's two panels: the status line (toggled by the status indicator) and the notifications (toggled by the count
   // button). Each is independent, collapsed by default, and remembered for this tab's session (sessionStorage), so moving between
-  // the page's views or reloading keeps it. Opening or closing a panel only shows or hides it: it never dismisses, acknowledges
-  // or changes a notification, and a closed panel keeps updating, so it is current whenever it opens. Nothing here opens a panel
-  // by itself; new notifications only change the count. Tests load this block.
+  // the page's views or reloading keeps it. Opening or closing a panel only shows or hides it: it never dismisses a
+  // notification, and a closed panel keeps updating, so it is current whenever it opens. Nothing here opens a panel by itself;
+  // new notifications only change the count. The shown receipt is sent only for notes listed in the open notifications panel
+  // of a visible tab (see refreshInbox), so opening the panel can send receipts for the notes it lists. Tests load this block.
   const PANELS_KEY = "orbit.header-panels";
   function readPanels(store) {
     let v = null;
@@ -796,9 +797,21 @@
   document.getElementById("input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.target.form.requestSubmit(); }
   });
-  // Shows due notifications, then acknowledges each so ORBIT records a shown receipt. Each note shows its first line
-  // with "more" and "×"; at most 3 show unless "show all". Dismissing only hides the note in this browser.
+  // The notifications panel. The list is ORBIT's `current` notifications (due, not yet shown, or shown by this kind of page),
+  // replaced on every refresh, so a reload or another tab or device gets the same notes back from the server. Each note shows
+  // its first line with "more" and "×"; at most 3 show unless "show all".
+  // Shown and dismissed are different things (docs/assistant.md, "Notifications"):
+  // - Shown: ORBIT's receipt that the note was listed in the open notifications panel of a visible tab. It is sent once per
+  //   note (retried after a failure; ORBIT keeps the first receipt), only for the notes actually listed: never while the panel
+  //   is collapsed or the tab is hidden, and never for notes past the "show all" limit. It does not mean read, and a shown note
+  //   stays in the list until dismissed. It is what moves a run from reviewed to delivered.
+  // - Dismissed (×): hides the note in this browser only (localStorage). It is not a receipt and ORBIT is not told.
+  // Collapsing the panel neither shows nor dismisses anything.
   const noteList = [];
+  // Notes needing no ack from this page (ORBIT has a listing receipt, or does not know the id), and acks in flight.
+  const ackDone = new Set();
+  const ackPending = new Set();
+  let inboxGen = 0;
   let showAllNotes = false;
   const expandedNotes = new Set();
   const dismissedKey = "orbit.dismissed-notes";
@@ -816,14 +829,16 @@
     }
   }
   for (const [name, [buttonId]] of Object.entries(panelParts)) {
-    document.getElementById(buttonId).addEventListener("click", () => { panels[name] = !panels[name]; writePanels(sessionStore, panels); showPanels(); });
+    document.getElementById(buttonId).addEventListener("click", () => { panels[name] = !panels[name]; writePanels(sessionStore, panels); showPanels(); ackListedNotes(); });
   }
   showPanels();
+  document.addEventListener("visibilitychange", () => ackListedNotes());
   function renderInbox() {
     const box = document.getElementById("inbox");
     const { shown, total } = pickNotes(noteList, dismissedNotes, showAllNotes);
-    // Re-rendering replaces the panel's buttons. If the keyboard was on one, it goes back to the same control (or, when that note
-    // was just dismissed, to the next control in the panel, else the notifications button); focus elsewhere is never touched.
+    // Re-rendering replaces the panel's buttons. If the keyboard was on one, it goes back to the same control; when that control
+    // is gone (its note was just dismissed), to the first button left in the panel, else to the notifications button. Focus
+    // that is not in the panel (the message box, say) is never touched.
     const was = box.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
     const focusable = new Map();
     const tag = (b, key) => { b.dataset.focus = key; focusable.set(key, b); return b; };
@@ -840,6 +855,25 @@
     box.replaceChildren(...nodes);
     if (was) (focusable.get(was) || box.querySelector("button") || notesButton).focus({ preventScroll: true });
     showNoteCount(total);
+    ackListedNotes();
+  }
+  // The notes the panel lists right now, if it is open in a visible tab; otherwise none.
+  function listedNotes() {
+    const box = document.getElementById("inbox");
+    if (!panels.notes || box.hidden || !box.getClientRects().length || document.visibilityState !== "visible") return [];
+    return pickNotes(noteList, dismissedNotes, showAllNotes).shown;
+  }
+  // Sends the listing receipt for each listed note that has none yet. One request per note at a time; a failure is retried at
+  // the next render, panel change or visibility change. A 404 means ORBIT no longer has the note, so it is not asked again.
+  function ackListedNotes() {
+    for (const n of listedNotes()) {
+      if (ackDone.has(n.id) || ackPending.has(n.id)) continue;
+      ackPending.add(n.id);
+      fetch(`/notifications/${encodeURIComponent(n.id)}/ack`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ listed: true }) })
+        .then((res) => { if (res.ok || res.status === 404) ackDone.add(n.id); })
+        .catch(() => { /* retried later */ })
+        .finally(() => ackPending.delete(n.id));
+    }
   }
   function showNoteCount(total) {
     const label = noteCountLabel(total);
@@ -849,15 +883,23 @@
     notesButton.title = `${label}. Show or hide the notifications.`;
   }
   async function refreshInbox() {
+    const gen = ++inboxGen;
     try {
       const res = await fetch("/notifications");
-      if (!res.ok) return;
-      const { inbox } = await res.json();
-      for (const n of inbox) {
-        noteList.push({ id: n.id, text: String(n.text ?? "") });
-        renderInbox();
-        await fetch(`/notifications/${n.id}/ack`, { method: "POST" });
+      if (!res.ok || gen !== inboxGen) return;
+      const body = await res.json();
+      if (gen !== inboxGen) return; // a newer refresh started; its answer wins
+      const items = Array.isArray(body.current) ? body.current : Array.isArray(body.inbox) ? body.inbox : [];
+      const seen = new Set();
+      const next = [];
+      for (const n of items) {
+        if (!n || typeof n.id !== "string" || seen.has(n.id)) continue;
+        seen.add(n.id);
+        next.push({ id: n.id, text: String(n.text ?? "") });
+        if (n.shown && n.shown.listed === true) ackDone.add(n.id);
       }
+      noteList.splice(0, noteList.length, ...next);
+      renderInbox();
     } catch { /* the next refresh tries again */ }
   }
 

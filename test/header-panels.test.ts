@@ -7,8 +7,10 @@ import { after, before, test } from "node:test";
 
 // The page header: page links in the bar, a notifications count button and the status indicator on the right, each toggling
 // its own panel below the bar (the status line with every pill and a new-tab link to /status; the notifications). The pure
-// <panels> helpers always run; the page itself runs in a real browser (Playwright's Chromium) against a scripted fake of
-// ORBIT's routes, and is skipped, saying so, where Playwright is not installed. Offline: no model, no real ORBIT.
+// <panels> helpers always run; the page's layout and toggles run in a real browser (Playwright's Chromium) against a scripted
+// fake of ORBIT's routes, and are skipped, saying so, where Playwright is not installed. Offline: no model, no real ORBIT.
+// The fake keeps its notifications as ORBIT does (GET /notifications returns `current` on every read; a read consumes nothing).
+// Receipts, reloads, restarts and run delivery against the REAL server are in test/notifications-real-server.test.ts.
 
 const html = readFileSync(new URL("../src/web/index.html", import.meta.url), "utf8");
 const block = (name: string) => html.match(new RegExp(`// <${name}>([\\s\\S]*?)// </${name}>`))![1]!;
@@ -70,6 +72,11 @@ test("the markup: page links in the header bar with no Status link; two toggle b
   }
   // The status line holds the pills and the page link, and comes straight after the bar.
   assert.match(header, /<\/div><\/div><div id="statusline"[^>]*><div id="ports"><\/div><a id="statusopen" href="\/status" target="_blank" rel="noopener noreferrer"/);
+  // Before the first /status request the indicator says the status has not been read yet, not that reading it failed.
+  const health = bar.match(/<button type="button" id="health"[^>]*>/)![0];
+  assert.match(health, /title="ORBIT's status has not been read yet, so it is not known to be all live\. Show or hide the status line\."/);
+  assert.match(health, /aria-label="Overall status: unknown, not all live\. ORBIT's status has not been read yet, so it is not known to be all live\."/);
+  assert.doesNotMatch(health, /could not be read/);
   // Icons are decoration; the controls carry the words.
   for (const svg of header.match(/<svg[^>]*>/g) ?? []) assert.match(svg, /aria-hidden="true"/);
 });
@@ -82,7 +89,8 @@ try { playwright = createRequire(import.meta.url)("playwright"); } catch { /* sk
 const skip = playwright ? false : "Playwright is not installed here; browser-level header checks skipped";
 
 let ports: unknown[] = [];
-let queued: { id: string; text: string }[] = [];
+// The notes ORBIT is holding for the page. Not consumed by a read, as on the real server.
+let current: { id: string; text: string }[] = [];
 let acks: string[] = [];
 let statusGets = 0;
 const server = createServer((req, res) => {
@@ -90,9 +98,9 @@ const server = createServer((req, res) => {
   const json = (code: number, body: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
   if (url.pathname === "/") { res.writeHead(200, { "content-type": "text/html" }); return res.end(html); }
   if (url.pathname === "/status") { statusGets++; return json(200, { commit: "abc", ports }); }
-  if (url.pathname === "/notifications") { const inbox = queued; queued = []; return json(200, { inbox }); }
+  if (url.pathname === "/notifications") return json(200, { inbox: current.filter((n) => !acks.includes(n.id)), current });
   const ack = url.pathname.match(/^\/notifications\/([\w-]+)\/ack$/);
-  if (ack && req.method === "POST") { acks.push(ack[1]!); return json(200, { ok: true }); }
+  if (ack && req.method === "POST") { acks.push(ack[1]!); return json(200, { id: ack[1], shown: { listed: true } }); }
   if (url.pathname === "/model/login") return json(403, { error: "no" });
   if (url.pathname === "/chat/proposals") return json(200, { proposals: [] });
   if (url.pathname === "/jobs") return json(200, { jobs: [] });
@@ -120,7 +128,7 @@ async function open(opts: { hash?: string; width?: number; colorScheme?: string 
   await page.waitForFunction(() => document.readyState === "complete");
   await page.waitForFunction(() => document.querySelectorAll("#ports .pill").length > 0);
 }
-const reset = () => { ports = [live("model"), live("memory"), live("watch")]; queued = []; acks = []; statusGets = 0; };
+const reset = () => { ports = [live("model"), live("memory"), live("watch")]; current = []; acks = []; statusGets = 0; };
 const notes = (n: number, from = 1) => Array.from({ length: n }, (_, i) => ({ id: `n${from + i}`, text: `Note ${from + i}\nmore text ${from + i}` }));
 const visible = (sel: string) => page.evaluate((s: string) => { const e = document.querySelector(s) as HTMLElement | null; return Boolean(e && e.offsetParent !== null); }, sel);
 const expanded = (sel: string) => page.getAttribute(sel, "aria-expanded");
@@ -138,7 +146,7 @@ test("browser: page links sit in the header bar beside the toggles, with no Stat
     assert.ok(box.notes.right <= box.health.left, `notifications button beside it at ${width}px`);
     // Open both panels with many notes and a long pill: still no sideways scroll.
     ports = [...ports, live("a-very-long-port-name-that-should-wrap-rather-than-overflow", "degraded")];
-    queued = notes(5);
+    current = notes(5);
     await page.evaluate("refreshStatus(); refreshInbox()");
     await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "5");
     await page.click("#health");
@@ -202,7 +210,7 @@ test("browser: the notification count is every undismissed note, not just the fe
   await page.click("#notesbtn");
   assert.equal(await page.textContent("#inbox"), "No notifications.", "an empty state, not a blank box");
   await page.click("#notesbtn");
-  queued = notes(5);
+  current = notes(5);
   await page.evaluate("refreshInbox()");
   await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "5");
   assert.equal(await page.getAttribute("#notesbtn", "aria-label"), "Notifications: 5");
@@ -223,32 +231,40 @@ test("browser: the notification count is every undismissed note, not just the fe
   await page.keyboard.press("Enter");
   assert.equal(await count(), "3");
   assert.equal(await page.evaluate(() => document.getElementById("inbox")!.contains(document.activeElement)), true);
-  queued = notes(2, 6);
+  // Two more arrive; ORBIT still holds all seven, two of them dismissed here.
+  current = notes(5).concat(notes(2, 6));
   await page.evaluate("refreshInbox()");
   await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "5");
-  // Dismissed notes stay dismissed across a reload, and the count agrees.
-  await page.reload();
-  await page.waitForFunction(() => document.readyState === "complete");
-  queued = notes(5).concat(notes(2, 6));
+  // A repeated refresh with the same answer never doubles a note.
   await page.evaluate("refreshInbox()");
+  await page.evaluate("refreshInbox()");
+  assert.equal(await count(), "5");
+  // Dismissed notes stay dismissed across a reload (this browser's dismissals), and the count agrees. The notes come back
+  // because the server still holds them; this fake re-adds nothing after the reload.
+  await page.reload();
   await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "5");
 });
 
-test("browser: showing or hiding the notifications never dismisses or acknowledges anything", { skip }, async () => {
+test("browser: a collapsed panel sends no receipt; opening it sends one for each listed note only; hiding never dismisses", { skip }, async () => {
   reset();
   await open();
-  queued = notes(4);
+  current = notes(4);
   await page.evaluate("refreshInbox()");
   await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "4");
-  for (let i = 0; acks.length < 4 && i < 100; i++) await page.waitForTimeout(20);
-  const before = { acks: [...acks].sort(), dismissed: await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")) };
-  assert.deepEqual(before.acks, ["n1", "n2", "n3", "n4"], "delivery receipts as before");
-  for (let i = 0; i < 4; i++) await page.click("#notesbtn");
-  assert.deepEqual([...acks].sort(), before.acks);
-  assert.equal(await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")), before.dismissed);
-  assert.equal(await count(), "4");
-  // "more" still opens a note's rest, and says whether it is open.
+  await page.waitForTimeout(300);
+  assert.deepEqual(acks, [], "a count change is not display evidence: no receipt while collapsed");
+  const dismissed = await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes"));
   await page.click("#notesbtn");
+  for (let i = 0; acks.length < 3 && i < 100; i++) await page.waitForTimeout(20);
+  assert.deepEqual([...acks].sort(), ["n2", "n3", "n4"], "the three listed (newest) notes, not the one past the limit");
+  for (let i = 0; i < 4; i++) await page.click("#notesbtn");
+  await page.evaluate("refreshInbox()");
+  await page.waitForTimeout(200);
+  assert.deepEqual([...acks].sort(), ["n2", "n3", "n4"], "toggling again sends nothing more and no duplicates");
+  assert.equal(await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")), dismissed, "hiding is not dismissing");
+  assert.equal(await count(), "4");
+  // "more" still opens a note's rest, and says whether it is open (the panel is open again after the even number of toggles).
+  assert.equal(await expanded("#notesbtn"), "true");
   const more = '#inbox .note button:not(.x)';
   assert.equal(await page.getAttribute(more, "aria-expanded"), "false");
   await page.click(more);
@@ -263,7 +279,7 @@ test("browser: the two toggles are independent and survive refreshes, page switc
   await page.click("#notesbtn");
   assert.equal(await visible("#inbox"), true);
   assert.equal(await visible("#statusline"), false, "opening one leaves the other alone");
-  queued = notes(2);
+  current = notes(2);
   await page.evaluate("refreshStatus(); refreshInbox()");
   await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "2");
   assert.equal(await expanded("#notesbtn"), "true");
@@ -300,7 +316,7 @@ test("browser: refreshes never take focus from the message box, and note text is
   await page.click("#health");
   await page.focus("#ainput");
   await page.keyboard.type("half-typed");
-  queued = [{ id: "evil", text: `<img src=x onerror="window.pwned=1"> https://github.com/o/r/pull/7 javascript:alert(1)` }];
+  current = [{ id: "evil", text: `<img src=x onerror="window.pwned=1"> https://github.com/o/r/pull/7 javascript:alert(1)` }];
   ports = [live("model", "down")];
   await page.evaluate("refreshStatus(); refreshInbox()");
   await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "1");
@@ -318,7 +334,7 @@ test("browser: dark and light themes both style the header toggles from the them
   const colours: Record<string, string> = {};
   for (const scheme of ["light", "dark"]) {
     await open({ colorScheme: scheme });
-    queued = notes(1);
+    current = notes(1);
     await page.evaluate("refreshInbox()");
     await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "1");
     const c = await page.evaluate(() => {

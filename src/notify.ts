@@ -14,7 +14,10 @@ export type Notification = {
   createdAt: string;
   holdUntil?: string;
   // A receipt exists only once a sink proves delivery; a failure is recorded, never a guess.
-  shown?: Receipt;
+  // `shown` is a display receipt, not a read receipt. With `listed: true` the web page reported that the note was listed in
+  // its open notifications panel in a visible tab (docs/assistant.md, "Notifications"). Without it, the receipt came from an
+  // older page that acknowledged on arrival; what it means cannot be told afterwards, so such receipts are kept as written.
+  shown?: Receipt & { listed?: true };
   discord?: Receipt & { ok: boolean; messageId?: string };
 };
 
@@ -83,23 +86,30 @@ export function notifier(store: Store<Notification[]>, discord?: Sink, now: () =
       }
     },
 
-    // What the web inbox should show: due and not yet shown.
+    // Due and not yet shown (unchanged, for older pages and callers).
     inbox: (): Notification[] => list().filter((n) => due(n) && !n.shown),
+
+    // What the web page lists until it is dismissed there: due notes not yet shown, plus those shown under the listing
+    // receipt, oldest first. Notes acknowledged by an older page (a receipt without `listed`) are not included: their
+    // receipts may predate this rule, and nothing here claims to recover them.
+    current: (): Notification[] => list().filter((n) => due(n) && (!n.shown || n.shown.listed === true)),
 
     recent: (): Notification[] => list().slice(-50).reverse(),
 
     get: (id: string): Notification | undefined => list().find((n) => n.id === id),
 
-    ack(id: string): Notification | undefined {
+    // Records the shown receipt. Idempotent: a note that already has one keeps it unchanged (a retry or a second tab never
+    // rewrites it, and an old receipt is never upgraded), and the note is returned as it is. `listed` is the web page saying
+    // the note was listed in its open, visible panel. Undefined only for an unknown id.
+    ack(id: string, opts: { listed?: boolean } = {}): Notification | undefined {
+      const existing = list().find((n) => n.id === id);
+      if (!existing || existing.shown) return existing;
+      const shown: Notification["shown"] = opts.listed
+        ? { at: now().toISOString(), detail: "Listed in the open notifications panel of the ORBIT web page", listed: true }
+        : { at: now().toISOString(), detail: "Shown in the ORBIT web page" };
       let found: Notification | undefined;
-      save(
-        list().map((n) => {
-          if (n.id !== id || n.shown) return n;
-          found = { ...n, shown: { at: now().toISOString(), detail: "Shown in the ORBIT web page" } };
-          return found;
-        }),
-      );
-      return found;
+      save(list().map((n) => (n.id === id && !n.shown ? (found = { ...n, shown }) : n)));
+      return found ?? list().find((n) => n.id === id);
     },
 
     status(): PortStatus {

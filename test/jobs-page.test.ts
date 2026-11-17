@@ -63,6 +63,10 @@ test("a slow request is not overlapped by the next tick", async () => {
 test("the page has one place that fetches the job rows, no extra timers or visibility refreshes", () => {
   assert.equal(html.split("/jobs?view=rows").length - 1, 1);
   assert.equal(html.match(/setInterval\(/g)?.length, 2, "only the status and inbox timers; the jobs timer is the poller");
-  assert.doesNotMatch(html, /visibilitychange/);
+  // The page's only visibility listener is the notifications receipt (docs/assistant.md, "Notifications"): it acks notes the
+  // page already holds when they become visible on screen, and refreshes nothing (no rows, no lists).
+  assert.deepEqual(html.match(/[^\n]*visibilitychange[^\n]*/g)?.map((l) => l.trim()), ['document.addEventListener("visibilitychange", () => ackListedNotes());']);
+  const ackFn = html.match(/function ackListedNotes\(\) \{[\s\S]*?\n  \}/)![0];
+  assert.deepEqual(ackFn.match(/fetch\(`[^`]*`/g), ["fetch(`/notifications/${encodeURIComponent(n.id)}/ack`"]);
   assert.match(html, /makePoller\(refreshJobs, \(\) => tab === "jobs" && document\.visibilityState === "visible", setInterval, 15000\)/);
 });
