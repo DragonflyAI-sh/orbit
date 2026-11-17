@@ -145,11 +145,13 @@ All are refused with 403 for anyone but the owner (`decide("assistant", …)`), 
 
 ## The page
 
-- Navigation: Assistant, Chat, Jobs, Status (in that order). `/` with no hash, or with a hash that names no page, opens the Assistant; `#chat` and `#jobs` open those pages as before. For a viewer who is not the owner the Assistant link hides and the page falls back to Chat (the old behaviour).
+- Navigation: Assistant, Chat, Jobs (in that order), in the header bar beside the logo. There is no Status link in the page links; `/status` is linked from the status line (below). `/` with no hash, or with a hash that names no page, opens the Assistant; `#chat` and `#jobs` open those pages as before. For a viewer who is not the owner the Assistant link hides and the page falls back to Chat (the old behaviour).
 - The ORBIT logo header is kept. The Chat thread bar shows only on Chat.
 - Assistant: scrolling conversation, the input and Send; no session picker, New or delete. Replies render with the existing Markdown renderer. Each reply has two collapsible panes, closed by default: Tool output (each call with its state, including outcome unknown) and Resource usage (model and provenance, fallback model and cost when reported, tool call count, context characters sent of the budget, shortened or omitted turns, vault notes read, spend-accounting and incomplete notes). Spend-accounting and incomplete warnings, errors and proposal cards (with Confirm and Cancel) are never inside a pane.
 - A line marks where the model's context begins; turns above it (archived, or over budget) are dimmed and labelled as not sent.
-- Status dot (header, every page): green only when `/status` answered with at least one entry and every entry's `state` is exactly `live`. Any other state, an error, an unreadable answer, no answer, or before the first answer: red. It is a link to `/status`, with the state in its text, tooltip and accessible name ("All live", "2 not live" with the names, "Status unknown"). It uses the existing 30-second status refresh.
+- Status dot (header, right, every page): green only when `/status` answered with at least one entry and every entry's `state` is exactly `live`. Any other state, an error, an unreadable answer, no answer, or before the first answer: red. The state is in its text, tooltip and accessible name ("All live", "2 not live" with the names, "Status unknown"). It uses the existing 30-second status refresh. It is a toggle button (`aria-expanded`, `aria-controls`), not a link: it shows or hides the status line directly below the header bar, which holds every status pill and an external-link icon that opens `/status` (raw JSON) in a new tab (`target="_blank"`, `rel="noopener noreferrer"`).
+- Notifications (header, right, beside the dot): a button with the number of notifications not dismissed in this browser (all of them, not only the three listed), which shows or hides the notifications panel (the existing list with more, ×, show all). ORBIT has no read/unread tracking, so the count says nothing about read. Showing or hiding never dismisses or acknowledges anything; delivery receipts are sent on arrival, as before. At zero the button says "Notifications: none" and the open panel says "No notifications."
+- Both panels are collapsed by default, independent of each other, and remembered for the tab's session (`sessionStorage`), so switching pages or reloading keeps them. Neither opens by itself: a status change or a new notification only updates the dot or the count, and a closed panel keeps updating. Refreshes never move focus.
 - The Assistant refreshes every 10 seconds while it is showing and the page is visible (the existing poller), so another device's turns, a reply in progress and card changes appear.
 
 ## Tests (all offline, mocked model)
@@ -158,6 +160,7 @@ All are refused with 403 for anyone but the owner (`decide("assistant", …)`), 
 - `test/assistant-server.test.ts`: owner-only routes and cross-site refusal, server-named singleton, isolation from chat threads in both directions, restart continuity, concurrent sends (one runs, the other 409), model failure, end-to-end bound with huge tool output over many turns with rotation, confirm and cancel of Assistant proposals through the existing routes (single use), expired cards after restart, duplicate request ids.
 - `test/assistant-restart.test.ts`: revisions across restarts. A store and a real server reopened on the same state directory serve revisions above every earlier one (the regression); repeated restarts, several within a second and with the clock set back; a store from before epochs and an unreadable `epoch.json`; an epoch that fills up; memory-only stores. The page's own `aNewer` rule (loaded from the page) and the PR #83 rule both accept the restarted server and reject a late answer from the old process. Send versus poll ordering across a restart; a turn interrupted by a restart is not re-run. In Chromium against the real server behind a stable address: two open tabs keep updating across three restarts without reload or sending, an answer from the old process does not roll a tab back, a poll held back during a send and a send answer held back behind a newer poll are both ignored.
 - `test/assistant-page.test.ts`: status aggregation and routing (pure, always run); in Chromium against a fake server: default page and nav order, explicit `#chat` and `#jobs`, non-owner fallback, status dot transitions (live, degraded, HTTP error, no answer), collapsed panes with visible warnings and a working Confirm, send, 409 and no-answer handling, busy elsewhere, loading archived turns.
+- `test/header-panels.test.ts`: the header panels' pure helpers (default collapsed, unreadable storage, count label) and markup (page links in the bar, no Status link, toggles with `aria-expanded`/`aria-controls`); in Chromium against a fake server: link placement and no sideways scroll at 900 and 360 px, the status toggle and its new-tab `/status` link, keyboard use, a collapsed line that keeps updating, a count over the listed limit that follows arrivals and dismissals, toggling that never dismisses or acknowledges, independent toggles across refreshes, page switches and a reload, refreshes that leave the message box focused, note text kept as text, light and dark themes.
 - `test/session-durability.test.ts`: durability and pagination acceptance with a synthetic long chat (see `docs/adr/0001-session-registry.md`, "Durability and pagination acceptance").
 - `test/session-digest.test.ts`: the session activity digest (selection, bounds, runs, failing sources, visibility, adversarial titles, Assistant integration, restart, fallback).
 - Existing tests: the nav tests now expect the Assistant link first; the Chat browser tests open `/#chat` explicitly. Nothing else in them changed.
@@ -166,17 +169,18 @@ All are refused with 403 for anyone but the owner (`decide("assistant", …)`), 
 
 On a deployed ORBIT, as the owner:
 
-1. Open `/`: the Assistant is selected, first in the nav; the conversation is empty on first use; the header shows the ORBIT logo and the status dot.
-2. Compare the dot with `/status`: green only if every entry says `live`; stop a non-model port or wait for a stale one and check it turns red with the port named in its tooltip.
-3. Send a message; reload the page; open `/` on a second device: the same conversation appears.
-4. Ask for something that uses a tool: the reply shows "Tool output" and "Resource usage" closed; open them with the keyboard (Tab, Enter).
-5. Ask ORBIT to propose a job; check the card is visible outside the panes; Cancel it, then propose again and Confirm; check the card shows the job id and that the job exists under Jobs.
-6. Send from two tabs at once: one gets the reply, the other says a reply is in progress and keeps its text.
-7. Open `/#chat`: threads, picker, New, Rename and Archive work as before and the Assistant's messages are not there.
-8. After many long turns, check "Load earlier messages" appears and loads older turns marked as not sent; check `<state>/assistant/archive/` holds them.
-9. Restart ORBIT during a reply: after restart the reply shows as interrupted and nothing was repeated.
-10. Check the page at phone width: no horizontal scrolling; Send and the panes are reachable.
-11. Leave two tabs open on the Assistant, restart ORBIT, and send from a third device: both tabs show the new turn within about 10 seconds without reloading (repeat for a second and third restart; full steps in `docs/assistant-architecture.md`).
+1. Open `/`: the Assistant is selected, first in the nav; the conversation is empty on first use; the header shows the ORBIT logo, the page links, the notifications count and the status dot; the status line and notifications are closed.
+2. Click the dot: the status line opens under the header with every pill; its link icon opens `/status` in a new tab. Click the notifications count: the list opens; dismiss one and check the count drops. Reload: both stay as you left them.
+3. Compare the dot with `/status`: green only if every entry says `live`; stop a non-model port or wait for a stale one and check it turns red with the port named in its tooltip.
+4. Send a message; reload the page; open `/` on a second device: the same conversation appears.
+5. Ask for something that uses a tool: the reply shows "Tool output" and "Resource usage" closed; open them with the keyboard (Tab, Enter).
+6. Ask ORBIT to propose a job; check the card is visible outside the panes; Cancel it, then propose again and Confirm; check the card shows the job id and that the job exists under Jobs.
+7. Send from two tabs at once: one gets the reply, the other says a reply is in progress and keeps its text.
+8. Open `/#chat`: threads, picker, New, Rename and Archive work as before and the Assistant's messages are not there.
+9. After many long turns, check "Load earlier messages" appears and loads older turns marked as not sent; check `<state>/assistant/archive/` holds them.
+10. Restart ORBIT during a reply: after restart the reply shows as interrupted and nothing was repeated.
+11. Check the page at phone width: no horizontal scrolling; Send and the panes are reachable.
+12. Leave two tabs open on the Assistant, restart ORBIT, and send from a third device: both tabs show the new turn within about 10 seconds without reloading (repeat for a second and third restart; full steps in `docs/assistant-architecture.md`).
 
 ## Limits
 

@@ -29,7 +29,20 @@
     background: radial-gradient(ellipse 80% 60% at 50% 30%, var(--bg-glow), transparent 70%), var(--bg);
   }
   header { padding: 12px 16px; border-bottom: 1px solid var(--line); }
-  .brand { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  /* The header bar: logo, the page links, then (right-aligned) the notifications and status toggles. The status line and the
+     notifications panel open directly below the bar; both are collapsed by default. On narrow screens the links take their
+     own row under the logo and the toggles, so nothing scrolls sideways. */
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; }
+  .brand { display: flex; align-items: center; gap: 8px; flex: none; }
+  .bar nav { flex: 1 1 auto; min-width: 0; }
+  .hctl { display: flex; align-items: center; gap: 6px; margin-left: auto; flex: none; }
+  @media (max-width: 560px) { .bar nav { order: 3; flex-basis: 100%; } }
+  .ico { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  #statusline { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; min-width: 0; }
+  #statusline #ports { flex: 1 1 auto; min-width: 0; }
+  #statusopen { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; border-radius: 8px; color: var(--accent-2); border: 1px solid var(--line); background: var(--card); }
+  #statusopen:hover { box-shadow: 0 0 0 2px var(--ring); }
+  #inbox .empty { color: var(--muted); font-size: 13px; }
   .brand img { width: 30px; height: 30px; flex: none; border-radius: 50%; box-shadow: 0 0 0 1px var(--line), 0 0 12px var(--bg-glow); }
   h1 {
     margin: 0; font-size: 16px; letter-spacing: .18em;
@@ -49,7 +62,7 @@
   .note button.x { color: var(--muted); font-size: 16px; line-height: 1; }
   .note a, .ev a, .latest a { color: var(--accent-2); }
   #inbox .showall { align-self: flex-start; background: none; border: 0; padding: 2px 0; color: var(--accent-2); font: inherit; font-size: 13px; cursor: pointer; }
-  #threadbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; align-items: center; }
+  #threadbar { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
   #threadbar select { flex: 1 1 160px; min-width: 0; padding: 6px 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font: inherit; }
   #threadbar button { padding: 5px 12px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
   #threadbar label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
@@ -116,10 +129,13 @@
   /* The Chat thread bar belongs to the Chat page only. */
   body:not([data-tab="chat"]) #threadbar { display: none !important; }
   /* Overall status: green only when every /status entry is exactly "live"; anything else, or no answer, is red. */
-  #health { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; background: var(--card); }
+  /* The header toggles (notifications, status): compact pill buttons, not navigation. aria-expanded shows which panel is open. */
+  #health, .hbtn { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; background: var(--card); }
+  #health[aria-expanded="true"], .hbtn[aria-expanded="true"] { border-color: var(--accent-2); color: var(--fg); }
+  .hbtn .count { min-width: 1.5em; padding: 0 4px; border-radius: 999px; text-align: center; font-weight: 600; line-height: 1.4; }
+  .hbtn.has .count { background: var(--gold); color: #1c1838; }
   #health .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--red-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--red-dot) 25%, transparent); }
   #health.ok .dot { background: var(--green-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--green-dot) 25%, transparent); }
-  #health:hover { box-shadow: 0 0 0 2px var(--ring); }
   :root { --green-dot: #1f9d55; --red-dot: #d23c3c; }
   #alog { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   #alog .older { align-self: center; padding: 4px 14px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
@@ -133,12 +149,11 @@
   #astatus:empty { display: none; }
   #astatus.bad { color: var(--down); font-weight: 600; }
   @media (max-width: 480px) { #alog { padding: 12px; } #health .label { display: none; } }
-  nav { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  nav { display: flex; flex-wrap: wrap; gap: 6px; }
   nav a { padding: 4px 14px; border-radius: 10px; background: var(--card); color: var(--fg); border: 1px solid var(--line); text-decoration: none; }
   nav a[aria-current="page"] { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: var(--on-accent); border-color: transparent; }
   nav a:hover { box-shadow: 0 0 0 2px var(--ring); }
   nav a:active { transform: translateY(1px); }
-  nav .kind { font: 600 10px/1 ui-monospace, monospace; letter-spacing: .06em; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); vertical-align: 1px; }
   #jobs { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   #jobs h2 { margin: 6px 0 0; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
   .card { max-width: 720px; width: 100%; min-width: 0; padding: 10px 12px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); overflow-wrap: anywhere; }
@@ -210,7 +225,7 @@
 </style>
 </head>
 <body>
-<header><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1><a id="health" href="/status" title="Status unknown: ORBIT's status has not been read yet. Open the status page." aria-label="Overall status: unknown, not all live. Open the status page."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></a></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#chat" data-tab="chat">Chat</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/status" id="statuslink" title="ORBIT's status as raw JSON: running commit, deploy and port states">Status <span class="kind">JSON</span></a></nav><div id="threadbar" hidden><select id="threadsel" aria-label="Thread"></select><button type="button" id="tnew">New</button><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button><label><input type="checkbox" id="tshowarch"> archived</label><span id="tstatus" role="status" aria-live="polite"></span></div><div id="ports"></div><div id="signin"></div><div id="inbox"></div></header>
+<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#chat" data-tab="chat">Chat</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a></nav><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: none" title="Notifications: none. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">0</span></button><button type="button" id="health" class="bad" aria-expanded="false" aria-controls="statusline" title="ORBIT's status could not be read, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status could not be read, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">No notifications.</div></div><div id="threadbar" hidden><select id="threadsel" aria-label="Thread"></select><button type="button" id="tnew">New</button><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button><label><input type="checkbox" id="tshowarch"> archived</label><span id="tstatus" role="status" aria-live="polite"></span></div><div id="signin"></div></header>
 <main id="log" hidden></main>
 <main id="alog" aria-label="Assistant conversation"></main>
 <section id="jobs" hidden aria-live="off"></section>
@@ -252,15 +267,38 @@
     const names = bad.map((p) => `${p && typeof p.port === "string" ? p.port : "unknown"}: ${p && typeof p.state === "string" ? p.state : "unknown"}`);
     return { ok: false, label: `${bad.length} not live`, detail: `Not all live. ${names.join(", ")}.` };
   }
+  // The indicator is the toggle for the status line (pills and the status page link); its own text never says "open the page".
   function renderHealth(s) {
     const a = aggregateStatus(s);
-    const link = document.getElementById("health");
-    link.className = a.ok ? "ok" : "bad";
-    link.querySelector(".label").textContent = a.label;
-    link.title = `${a.detail} Open the status page.`;
-    link.setAttribute("aria-label", `Overall status: ${a.ok ? "all live" : a.label}. ${a.detail} Open the status page.`);
+    const button = document.getElementById("health");
+    button.className = a.ok ? "ok" : "bad";
+    button.querySelector(".label").textContent = a.label;
+    button.title = `${a.detail} Show or hide the status line.`;
+    button.setAttribute("aria-label", `Overall status: ${a.ok ? "all live" : a.label}. ${a.detail}`);
   }
   // </status-dot>
+
+  // <panels>
+  // The header's two panels: the status line (toggled by the status indicator) and the notifications (toggled by the count
+  // button). Each is independent, collapsed by default, and remembered for this tab's session (sessionStorage), so moving between
+  // the page's views or reloading keeps it. Opening or closing a panel only shows or hides it: it never dismisses, acknowledges
+  // or changes a notification, and a closed panel keeps updating, so it is current whenever it opens. Nothing here opens a panel
+  // by itself; new notifications only change the count. Tests load this block.
+  const PANELS_KEY = "orbit.header-panels";
+  function readPanels(store) {
+    let v = null;
+    try { v = JSON.parse((store && store.getItem(PANELS_KEY)) || "null"); } catch { v = null; }
+    return { status: !!v && v.status === true, notes: !!v && v.notes === true };
+  }
+  function writePanels(store, panels) {
+    try { if (store) store.setItem(PANELS_KEY, JSON.stringify({ status: panels.status === true, notes: panels.notes === true })); } catch { /* private mode: this page only */ }
+  }
+  // The count is of notifications not dismissed in this browser (all of them, not just the few listed). ORBIT does not track
+  // read or unread, so the label never says "unread".
+  function noteCountLabel(total) {
+    return total ? `Notifications: ${total}` : "Notifications: none";
+  }
+  // </panels>
 
   function showCalls(el, calls) {
     if (!calls?.length) return;
@@ -767,19 +805,48 @@
   const loadDismissed = () => { try { return new Set(JSON.parse(localStorage.getItem(dismissedKey) || "[]")); } catch { return new Set(); } };
   const saveDismissed = (set) => { try { localStorage.setItem(dismissedKey, JSON.stringify([...set].slice(-200))); } catch { /* private mode: dismissed for this page only */ } };
   const dismissedNotes = loadDismissed();
+  const notesButton = document.getElementById("notesbtn");
+  const sessionStore = (() => { try { return window.sessionStorage; } catch { return null; } })();
+  const panels = readPanels(sessionStore);
+  const panelParts = { status: ["health", "statusline"], notes: ["notesbtn", "inbox"] };
+  function showPanels() {
+    for (const [name, [buttonId, panelId]] of Object.entries(panelParts)) {
+      document.getElementById(buttonId).setAttribute("aria-expanded", String(panels[name]));
+      document.getElementById(panelId).hidden = !panels[name];
+    }
+  }
+  for (const [name, [buttonId]] of Object.entries(panelParts)) {
+    document.getElementById(buttonId).addEventListener("click", () => { panels[name] = !panels[name]; writePanels(sessionStore, panels); showPanels(); });
+  }
+  showPanels();
   function renderInbox() {
     const box = document.getElementById("inbox");
     const { shown, total } = pickNotes(noteList, dismissedNotes, showAllNotes);
+    // Re-rendering replaces the panel's buttons. If the keyboard was on one, it goes back to the same control (or, when that note
+    // was just dismissed, to the next control in the panel, else the notifications button); focus elsewhere is never touched.
+    const was = box.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
+    const focusable = new Map();
+    const tag = (b, key) => { b.dataset.focus = key; focusable.set(key, b); return b; };
     const nodes = shown.map((n) => {
       const { first, rest } = firstLine(n.text);
       const open = expandedNotes.has(n.id);
       const top = el("div", { className: "top" }, el("div", { className: "first" }, ...linkify(first, el)));
-      if (rest) top.append(el("button", { type: "button", textContent: open ? "less" : "more", onclick: () => { open ? expandedNotes.delete(n.id) : expandedNotes.add(n.id); renderInbox(); } }));
-      top.append(el("button", { type: "button", className: "x", title: "Dismiss", textContent: "×", onclick: () => { dismissedNotes.add(n.id); saveDismissed(dismissedNotes); renderInbox(); } }));
+      if (rest) top.append(tag(el("button", { type: "button", textContent: open ? "less" : "more", ariaExpanded: String(open), onclick: () => { open ? expandedNotes.delete(n.id) : expandedNotes.add(n.id); renderInbox(); } }), `more:${n.id}`));
+      top.append(tag(el("button", { type: "button", className: "x", title: "Dismiss", ariaLabel: "Dismiss this notification", textContent: "×", onclick: () => { dismissedNotes.add(n.id); saveDismissed(dismissedNotes); renderInbox(); } }), `x:${n.id}`));
       return el("div", { className: "note" }, top, ...(rest && open ? [el("div", { className: "rest" }, ...linkify(rest, el))] : []));
     });
-    if (total > NOTES_SHOWN) nodes.push(el("button", { type: "button", className: "showall", textContent: showAllNotes ? "show fewer" : `show all (${total})`, onclick: () => { showAllNotes = !showAllNotes; renderInbox(); } }));
+    if (total > NOTES_SHOWN) nodes.push(tag(el("button", { type: "button", className: "showall", textContent: showAllNotes ? "show fewer" : `show all (${total})`, onclick: () => { showAllNotes = !showAllNotes; renderInbox(); } }), "showall"));
+    if (!total) nodes.push(el("div", { className: "empty", textContent: "No notifications." }));
     box.replaceChildren(...nodes);
+    if (was) (focusable.get(was) || box.querySelector("button") || notesButton).focus({ preventScroll: true });
+    showNoteCount(total);
+  }
+  function showNoteCount(total) {
+    const label = noteCountLabel(total);
+    notesButton.classList.toggle("has", total > 0);
+    document.getElementById("notecount").textContent = String(total);
+    notesButton.setAttribute("aria-label", label);
+    notesButton.title = `${label}. Show or hide the notifications.`;
   }
   async function refreshInbox() {
     try {
@@ -1536,7 +1603,8 @@
   jobsPoller.start();
 
   // The Jobs link shows only for the owner. /chat/proposals is owner-only and cheap, so it answers that once on load
-  // without touching the jobs list; the badge fills in when the Jobs tab opens. Chat and the public status link always show.
+  // without touching the jobs list; the badge fills in when the Jobs tab opens. Chat always shows; the status page link is in the
+  // status line under the header, not in the page links.
   (async () => {
     try {
       const pr = await fetch("/chat/proposals");
@@ -1754,6 +1822,7 @@
   initThreads();
   // Another device's messages and card changes show up within 10 seconds while the Chat tab is visible. Never two polls at once.
   makePoller(pollThreads, () => threadMode === "server" && !sending && tab === "chat" && document.visibilityState === "visible", setInterval, 10000).start();
+  renderInbox();
   refreshInbox();
   refreshSignin();
   setInterval(refreshStatus, 30000);
