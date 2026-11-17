@@ -142,10 +142,11 @@ test("phone flow in the Assistant: pick, preview, remove, retry a failed upload,
   const { r, model, store } = setup();
   const { page, ctx, uploads } = await phonePage(`${await base(r)}/#assistant`);
   await page.waitForFunction(() => !(document.getElementById("apickbtn") as HTMLButtonElement).disabled);
-  // Library input: multiple, no capture (does not force the camera); camera input: capture.
+  // One image input behind the "+" button: multiple, no capture (does not force the camera; a phone offers library and
+  // camera itself). There is no separate camera input or button.
   assert.equal(await page.getAttribute("#apick", "multiple"), "");
   assert.equal(await page.getAttribute("#apick", "capture"), null);
-  assert.equal(await page.getAttribute("#acam", "capture"), "environment");
+  assert.equal(await page.locator("#acam, #acambtn, #aform input[capture]").count(), 0);
   // The first upload fails (server error), the rest go through.
   let failNext = true;
   await page.route("**/assistant/attachments", async (route: any) => {
