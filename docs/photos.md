@@ -1,6 +1,6 @@
 # Photo attachments
 
-Rai can attach 1–10 photos to a message in the **Assistant** or in a **Chat** thread, with an optional caption or question. Each photo is shrunk and re-encoded in the browser before upload. Only that compressed copy is stored, privately, on ORBIT's server. The model receives the stored copy as real image input alongside the text. Originals are never uploaded or kept.
+Rai can attach 1–10 photos to a message in the **Assistant** or in a session (the **Sessions** page, formerly Chat), with an optional caption or question. Each photo is shrunk and re-encoded in the browser before upload. Only that compressed copy is stored, privately, on ORBIT's server. The model receives the stored copy as real image input alongside the text. Originals are never uploaded or kept.
 
 Source: `src/web/photos.js` (browser), `src/jpeg.ts` (server check and normalization), `src/attachments.ts` (store), `src/photo-context.ts` (what a model request carries), `src/server.ts` (routes), `src/thread-service.ts` (turns), `src/model.ts`, `src/chatgpt.ts`, `src/fallback.ts`, `src/openrouter.ts` (providers). Tests: `test/photos-unit.test.ts`, `test/photos-decode.test.ts`, `test/photos-server.test.ts`, `test/photos-restart.test.ts`, `test/photos-browser.test.ts`, `test/photos-browser-decode.test.ts`.
 
@@ -225,11 +225,11 @@ How `photos_list` reads each field (`listArgs`): every field may be left out or 
 
 Use non-private test photos. Report only what the page shows. Change no configuration.
 
-1. **Upload in one chat.** In a Chat thread, send two distinctive photos (for example a red mug and a numbered sticky note) with a caption.
+1. **Upload in one chat.** In a session, send two distinctive photos (for example a red mug and a numbered sticky note) with a caption.
 2. **Ask from another conversation.** Open the Assistant and ask "Can you see the images I uploaded today?". The reply should list calls to `photos_list` and then `photos_inspect`, name the thread, message and time, and describe the photos correctly. A reply that describes them after only `photos_list` is a failure (it would be guessing from the caption).
 3. **Inspect a selected image.** Ask "Look only at the second one: what number is on it?". The reply should inspect that one photo and answer from it.
 4. **Follow up without re-upload.** In a later message ask "And what colour was the mug?". It should call `photos_inspect` again (no upload) and answer.
-5. **Isolation.** In a different Chat thread ask the same question as step 2. It should list only that thread's own photos (or none) and say other conversations are only reachable from the Assistant.
+5. **Isolation.** In a different session ask the same question as step 2. It should list only that thread's own photos (or none) and say other conversations are only reachable from the Assistant.
 6. **Unavailable file.** Only on a test install, never with production data: move one stored test photo's `.jpg` out of `<state>/attachments/` by hand, then ask the Assistant to inspect it. The reply should say that photo is unavailable and not describe it, while other photos in the same request are still inspected. Move the file back afterwards.
 7. **Blocked model.** If the configured model is not image-capable, step 2 should say "ORBIT blocked the photos locally, before any request: …" and not describe any photo.
 8. **Today, no time zone given.** Send a test photo, then in the Assistant ask "Show me the photos I uploaded today" without naming a zone. The `photos_list` call should succeed (its arguments may show `timezone` as `null` or `""`), its result should say `America/Los_Angeles`, "ORBIT's configured owner time zone", and today's date in Los Angeles (also check this between 16:00 and 24:00 Pacific, when the UTC date is already tomorrow). An error "timezone must be an IANA time zone name" is a failure.
@@ -268,7 +268,7 @@ Use non-private test photos. Do not report the bytes, only what the page shows. 
 2. **Resolution.** In `/status`, read `photos.backend`, `photos.configuredModel`, `photos.capability` and `photos.source`. For `gpt-6-astra` on `chatgpt-token-sharing` expect `supported` from `bundled` and `provider: "not-available"`. Ask the Assistant to run `orbit_config_view` and check `photoCapability` shows the same, with the evidence and no conflicts.
 3. **One photo.** In the Assistant, attach one photo of something distinctive and ask "What is in this photo?". The reply should describe it correctly. A message starting "ORBIT blocked the photos locally" is ORBIT's own check (compare with step 2); one starting "The model call failed after ORBIT's own photo check passed" is the provider refusing (its reason follows).
 4. **Already-stored photo retry.** Open the thread or Assistant conversation where the earlier photo message was blocked (its old error, possibly with the doubled period, stays visible as history). Send "Please try that photo again." with no new photo. The reply should describe that stored photo, with no re-upload.
-5. **Ten photos.** In a Chat thread, attach 10 numbered photos and ask "List the number shown in each photo, in order." The answer should list 1 to 10 in tray order.
+5. **Ten photos.** In a session, attach 10 numbered photos and ask "List the number shown in each photo, in order." The answer should list 1 to 10 in tray order.
 6. **If the provider refuses images for the model** (step 3 gives a provider rejection), record the status and reason. Do not add an operator declaration for it: a provider rejection is evidence against support. Only after a successful live photo answer on a model the registry does not list should the operator add a `supported` declaration, with that evidence.
 
 Live analysis is **not confirmed** until steps 3–5 pass.
@@ -291,7 +291,7 @@ Use non-private test photos (a printed page, a whiteboard, an object).
 5. Turn on Airplane mode, add a photo and confirm "Failed: no connection" and that Send is disabled. Turn Airplane mode off, tap Retry and confirm "Ready".
 6. Send with a question such as "What does the text say?". Confirm the reply describes the photos (this needs a vision-capable `ORBIT_MODEL`). Reload the page and confirm the photos still show.
 7. On a computer, download one stored photo (tap a thumbnail, then save it). Check it with an EXIF viewer: there should be no GPS or camera data, the longest edge should be at most 1600 px, and the file should be at most about 500 KB.
-8. Repeat steps 1 and 6 in a Chat thread. Open another thread and confirm the photos are not there.
+8. Repeat steps 1 and 6 in a session. Open another session and confirm the photos are not there.
 9. While ChatGPT is limited (if that happens), sending a photo should fail with the "not given photos" reason and no fallback reply.
 
 ## Limits

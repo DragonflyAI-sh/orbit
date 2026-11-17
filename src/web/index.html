@@ -28,15 +28,20 @@
     display: flex; flex-direction: column; height: 100dvh;
     background: radial-gradient(ellipse 80% 60% at 50% 30%, var(--bg-glow), transparent 70%), var(--bg);
   }
-  /* Compact header: tight outer padding so the conversation keeps the room. Toggles and links stay at least 28px tall. */
-  header { padding: 6px 12px; border-bottom: 1px solid var(--line); }
+  /* Compact header: tight outer padding so the conversation keeps the room. Toggles and links stay at least 28px tall.
+     Under the separator line, a soft downward shadow (only below: the negative spread keeps it off the sides) sets the
+     header apart from the content. position: relative (no z-index, so no new stacking context) paints it over the
+     conversation as it scrolls under; the session picker is position: fixed and is not affected. */
+  :root { --header-shadow: rgba(28, 24, 56, .10); }
+  @media (prefers-color-scheme: dark) { :root { --header-shadow: rgba(0, 0, 0, .55); } }
+  header { position: relative; padding: 6px 12px; border-bottom: 1px solid var(--line); box-shadow: 0 2px 6px -2px var(--header-shadow); }
   @media (max-width: 480px) { header { padding: 6px 10px; } }
   /* The header bar: logo, the page links, then (right-aligned) the notifications and status toggles. The status line and the
      notifications panel open directly below the bar; both are collapsed by default. On narrow screens the links take their
      own row under the logo and the toggles, so nothing scrolls sideways. */
   .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
   .brand { display: flex; align-items: center; gap: 8px; flex: none; }
-  .bar nav { flex: 1 1 auto; min-width: 0; }
+  .bar nav { flex: 0 1 auto; min-width: 0; }
   .hctl { display: flex; align-items: center; gap: 4px; margin-left: auto; flex: none; }
   @media (max-width: 560px) { .bar nav { order: 3; flex-basis: 100%; } }
   .ico { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
@@ -64,11 +69,33 @@
   .note button.x { color: var(--muted); font-size: 16px; line-height: 1; }
   .note a, .ev a, .latest a { color: var(--accent-2); }
   #inbox .showall { align-self: flex-start; background: none; border: 0; padding: 2px 0; color: var(--accent-2); font: inherit; font-size: 13px; cursor: pointer; }
-  #threadbar { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
-  #threadbar select { flex: 1 1 160px; min-width: 0; padding: 6px 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font: inherit; }
-  #threadbar button { padding: 5px 12px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
-  #threadbar label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
-  #tstatus { flex: 1 1 100%; font-size: 12px; color: var(--muted); }
+  /* Sessions: the open session's title and a chevron sit in the header bar (no row of their own). The title takes the room
+     left between the page links and the toggles and is cut with an ellipsis; its full text is the button's hover text and
+     accessible name. The button opens the session picker, which overlays the page under the header (it never pushes the
+     conversation down) and holds New session, the list, Show archived, and Rename / Archive for the open session. */
+  #sesswrap { flex: 1 1 0; min-width: 5em; display: flex; }
+  #sessbtn { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; min-height: 32px; padding: 2px 8px 2px 10px;
+             background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; font-weight: 600; }
+  #sessbtn[aria-expanded="true"] { border-color: var(--accent-2); }
+  #sesstitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #sessbtn .chev { transition: transform .12s ease; }
+  #sessbtn[aria-expanded="true"] .chev { transform: rotate(180deg); }
+  #sesspicker { position: fixed; z-index: 40; display: flex; flex-direction: column; gap: 6px; padding: 8px; max-height: min(70dvh, 520px);
+                border: 1px solid var(--line); border-radius: 12px; background: var(--card); box-shadow: 0 8px 28px rgba(0, 0, 0, .28); }
+  #sesspicker .prow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  #sesspicker .prow button { min-height: 36px; padding: 4px 12px; }
+  #sesspicker .pcur { border-top: 1px solid var(--line); padding-top: 6px; }
+  #sesspicker .pcur button { background: var(--card); color: var(--fg); border: 1px solid var(--line); }
+  #pcurlabel { flex: 1 1 auto; font-size: 12px; color: var(--muted); }
+  .parch { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; min-height: 36px; margin-left: auto; }
+  .parch input { width: 18px; height: 18px; margin: 0; }
+  #sesslist { list-style: none; margin: 0; padding: 3px; overflow-y: auto; overscroll-behavior: contain; min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; }
+  #sesslist .sitem { display: block; width: 100%; min-height: 40px; padding: 6px 10px; text-align: left; border-radius: 8px; background: none; color: var(--fg);
+                     border: 1px solid transparent; overflow-wrap: anywhere; font-weight: 400; }
+  #sesslist .sitem[aria-current="true"] { background: var(--press-bg); border-color: var(--accent-2); font-weight: 600; }
+  #sesslist .sempty { padding: 6px 10px; font-size: 13px; color: var(--muted); }
+  @media (pointer: coarse) { #sessbtn { min-height: 40px; } #sesslist .sitem, #sesspicker .prow button, .parch { min-height: 44px; } }
+  #tstatus { margin-top: 6px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
   #tstatus:empty { display: none; }
   #log[aria-busy="true"] { opacity: 0.6; }
   .banner { align-self: stretch; max-width: 720px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--gold); background: var(--card); font-size: 14px; overflow-wrap: anywhere; }
@@ -128,8 +155,8 @@
   .gviewer img { max-width: 100%; max-height: calc(100% - 72px); object-fit: contain; }
   .gviewer .glabel { color: #eee; font-size: 13px; text-align: center; overflow-wrap: anywhere; max-width: 100%; }
   .gviewer button { position: absolute; top: 8px; right: 8px; min-width: 44px; min-height: 44px; }
-  /* The Chat thread bar belongs to the Chat page only. */
-  body:not([data-tab="chat"]) #threadbar { display: none !important; }
+  /* The session control, its picker and its status line belong to the Sessions page only. */
+  body:not([data-tab="chat"]) #sesswrap, body:not([data-tab="chat"]) #sesspicker, body:not([data-tab="chat"]) #tstatus { display: none !important; }
   /* Overall status: green only when every /status entry is exactly "live"; anything else, or no answer, is red. */
   /* The header toggles (notifications, status): compact pill buttons, not navigation. aria-expanded shows which panel is open. */
   #health, .hbtn { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; background: var(--card); }
@@ -184,18 +211,22 @@
   textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
   button { font: inherit; padding: 0 16px; border-radius: 10px; border: 0; color: var(--on-accent);
            background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
-  /* The message composers (Chat #form, Assistant #aform): compact padding, then one row of "+" (add image), the message box
-     and Send. The box starts one line tall and grows upward with its text, to at most eight lines, then scrolls inside
+  /* The message composers (Sessions #form, Assistant #aform): compact padding, then one row of "+" (add image), the message
+     box and Send. The box starts one line tall and grows upward with its text, to at most eight lines, then scrolls inside
      (fitComposer in the script, which hides the scrollbar only while the text fits; the CSS never clips). The row is
      bottom-aligned, so "+" and Send stay level with the box's last line while the composer's bottom edge stays put. The
-     bottom padding leaves room for a phone's home indicator. */
-  #form, #aform { --cline: 22px; --cpad: 8px; --cctl: calc(var(--cline) + 2 * var(--cpad) + 2px);
+     bottom padding leaves room for a phone's home indicator. The box's inner padding and the two icon buttons are kept
+     small (34px, 17px icons) to match the compact header; each button's tap area is larger than it looks (an invisible
+     ::before: 42px wide, reaching up to but never into the box, and 42px tall, 46px on touch screens), so it stays easy to hit. */
+  #form, #aform { --cline: 22px; --cpad: 5px; --cctl: calc(var(--cline) + 2 * var(--cpad) + 2px); --chit: 4px;
                   gap: 6px; align-items: flex-end; padding: 6px 12px max(6px, env(safe-area-inset-bottom)); }
-  #form textarea, #aform textarea { min-width: 0; line-height: var(--cline); padding: var(--cpad) 10px; height: var(--cctl);
+  @media (pointer: coarse) { #form, #aform { --chit: 6px; } }
+  #form textarea, #aform textarea { min-width: 0; line-height: var(--cline); padding: var(--cpad) 8px; height: var(--cctl);
                                     max-height: calc(8 * var(--cline) + 2 * var(--cpad) + 2px); }
-  #form .phbtn, #aform .phbtn, .sendbtn { flex: none; display: inline-flex; align-items: center; justify-content: center;
+  #form .phbtn, #aform .phbtn, .sendbtn { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center;
                                           width: var(--cctl); min-width: var(--cctl); height: var(--cctl); min-height: var(--cctl); padding: 0; }
-  #form .ico, #aform .ico { width: 20px; height: 20px; }
+  #form .phbtn::before, #aform .phbtn::before, .sendbtn::before { content: ""; position: absolute; inset: calc(-1 * var(--chit)) -4px; }
+  #form .ico, #aform .ico { width: 17px; height: 17px; }
   @media (max-width: 480px) { #form, #aform { gap: 4px; padding-left: 8px; padding-right: 8px; } }
 
   /* Markdown replies (see the markdown block in the script). Paragraph line breaks are kept, as in plain replies. */
@@ -240,7 +271,7 @@
 </style>
 </head>
 <body>
-<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#chat" data-tab="chat">Chat</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a></nav><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: none" title="Notifications: none. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">0</span></button><button type="button" id="health" class="bad" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">No notifications.</div></div><div id="threadbar" hidden><select id="threadsel" aria-label="Thread"></select><button type="button" id="tnew">New</button><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button><label><input type="checkbox" id="tshowarch"> archived</label><span id="tstatus" role="status" aria-live="polite"></span></div><div id="signin"></div></header>
+<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: none" title="Notifications: none. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">0</span></button><button type="button" id="health" class="bad" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">No notifications.</div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header>
 <main id="log" hidden></main>
 <main id="alog" aria-label="Assistant conversation"></main>
 <section id="jobs" hidden aria-live="off"></section>
@@ -418,20 +449,23 @@
   const owns = (targetId, gen) => gen === navGen && !pending && current?.id === targetId && shownThreadId === targetId;
   // For tests (test/chat-browser.test.ts waits on it); the page itself reads `pending`.
   function navPending() { return Boolean(pending); }
-  const tsel = document.getElementById("threadsel");
   const readSel = () => { try { return localStorage.getItem(THREAD_KEY); } catch { return null; } };
   const writeSel = (id) => { try { id ? localStorage.setItem(THREAD_KEY, id) : localStorage.removeItem(THREAD_KEY); } catch { /* per-device convenience only */ } };
-  // The stored selection is shared by every tab of this browser and is only the fallback for plain #chat. The address
-  // (#chat/<id>) is what this tab shows; another tab writing the stored selection never moves it (no storage listener).
-  const onChatAddress = () => location.hash === "#chat" || location.hash.startsWith("#chat/");
-  // Puts this tab's address on a thread (or plain #chat for none). Only while the address is a Chat one, so loading
-  // threads behind the Assistant never changes the address. push adds a history entry (an explicit choice: picking a
-  // thread, New); otherwise the entry is replaced (resolving plain #chat, canonicalizing). Plain #chat is always replaced.
+  // The stored selection is shared by every tab of this browser and is only the fallback for plain /sessions. The address
+  // (/sessions/<id>) is what this tab shows; another tab writing the stored selection never moves it (no storage listener).
+  const onChatAddress = () => isLegacyChat(location.hash) || (isSessionsPath(location.pathname) && location.hash !== "#assistant" && location.hash !== "#jobs");
+  // Puts this tab's address on a session (or plain /sessions for none). Only while the address is a Sessions one, so
+  // loading sessions behind the Assistant never changes the address. push adds a history entry (an explicit choice:
+  // picking a session, New); otherwise the entry is replaced (resolving plain /sessions, canonicalizing). Plain /sessions
+  // is always replaced. The query is kept.
   function setChatAddress(id, push) {
     if (!onChatAddress()) return;
-    const want = chatHash(id);
-    if (location.hash === want) return;
-    try { window.history[push && location.hash !== "#chat" ? "pushState" : "replaceState"](null, "", want); } catch { /* the address just does not follow */ }
+    const want = sessionPath(id);
+    if (location.pathname === want && !isLegacyChat(location.hash)) return;
+    const plain = location.pathname === "/sessions" && !isLegacyChat(location.hash);
+    try { window.history[push && !plain ? "pushState" : "replaceState"](null, "", want + location.search); } catch { /* the address just does not follow */ }
+    routed = location.href;
+    updateTitle();
   }
   const shortId = (id) => String(id).slice(0, 80);
   function showBlocked(text) {
@@ -440,12 +474,12 @@
       el("button", { type: "button", textContent: "Try again", onclick: () => (threadMode === null ? initThreads() : applyChatAddress()) })));
     renderBar();
   }
-  // Applies the address to Chat: on load (after the list), and on every hashchange while Chat shows.
+  // Applies the address to Sessions: on load (after the list), and on every address change while Sessions shows.
   function applyChatAddress() {
-    const t = chatTarget(location.hash);
-    if (t.kind === "invalid") { navGen++; showBlocked(`This address does not name a thread ("${shortId(t.raw)}"). Nothing is sent from it: pick a thread or start a New one.`); return; }
+    const t = chatAddress();
+    if (t.kind === "invalid") { navGen++; showBlocked(`This address does not name a session ("${shortId(t.raw)}"). Nothing is sent from it: pick a session or start a New session.`); return; }
     if (threadMode !== "server") {
-      if (t.kind === "thread") { navGen++; showBlocked(threadMode === "legacy" ? "Threads are owner only, so this thread cannot be opened here. Nothing is sent from this address." : "ORBIT's threads could not be loaded, so this thread is not open. Nothing is sent until it is."); }
+      if (t.kind === "thread") { navGen++; showBlocked(threadMode === "legacy" ? "Sessions are owner only, so this session cannot be opened here. Nothing is sent from this address." : "ORBIT's sessions could not be loaded, so this session is not open. Nothing is sent until it is."); }
       else if (routeBlock) { routeBlock = ""; log.replaceChildren(); renderBar(); }
       return;
     }
@@ -467,29 +501,52 @@
     return { ok: res.ok, status: res.status, data };
   }
 
+  // The header's session control: the title of the session the reader is on (or going to), and the picker's list.
+  const sessBtn = document.getElementById("sessbtn"), sessTitle = document.getElementById("sesstitle");
+  const sessPicker = document.getElementById("sesspicker"), sessList = document.getElementById("sesslist");
+  // The title the header and the page title show: where the reader is going (a pending navigation), else the open session.
+  function sessionLabel() {
+    if (pending) return pending.id ? pending.title : "New session";
+    if (current) return current.title || "Untitled session";
+    if (routeBlock) return "No session open";
+    return threadList.length ? "No session open" : "No sessions yet";
+  }
+  function updateTitle() {
+    document.title = tab === "chat" ? (threadMode === "server" ? `${sessionLabel()} · Sessions · ORBIT` : "Sessions · ORBIT") : tab === "jobs" ? "Jobs · ORBIT" : "ORBIT";
+  }
   function renderBar() {
-    // The menu shows where the reader is going (a pending navigation), otherwise the thread that is drawn.
+    // The picker marks where the reader is going (a pending navigation), otherwise the session that is drawn.
     const sel = pending?.id ?? current?.id ?? null;
     const rows = threadList.filter((t) => showArchived || !t.archived || t.id === current?.id || t.id === sel);
-    // No thread open (a blocked address): the menu says so instead of showing a thread that is not open.
-    if (!sel && rows.length) rows.unshift(null);
-    // The options are rebuilt only when they changed, so a poll does not reset the menu while it has focus.
-    const optionsSig = JSON.stringify([sel, rows.map((t) => (t ? [t.id, threadOption(t)] : null))]);
-    if (optionsSig !== barSig) {
-      barSig = optionsSig;
-      tsel.replaceChildren(...rows.map((t) => (t ? Object.assign(document.createElement("option"), { value: t.id, textContent: threadOption(t), selected: t.id === sel }) : Object.assign(document.createElement("option"), { value: "", textContent: "No thread open", selected: true }))));
-      if (!rows.length) tsel.append(Object.assign(document.createElement("option"), { value: "", textContent: "No threads yet" }));
+    // The list is rebuilt only when it changed, so a poll does not move the reader's focus or scroll in an open picker.
+    const listSig = JSON.stringify([sel, rows.map((t) => [t.id, threadOption(t)])]);
+    if (listSig !== barSig) {
+      barSig = listSig;
+      const focusedId = sessList.contains(document.activeElement) ? document.activeElement.dataset.id : null;
+      const top = sessList.scrollTop;
+      sessList.replaceChildren(...rows.map((t) => {
+        const b = el("button", { type: "button", className: "sitem", textContent: threadOption(t) });
+        b.dataset.id = t.id;
+        if (t.id === sel) b.setAttribute("aria-current", "true");
+        return el("li", {}, b);
+      }));
+      if (!rows.length) sessList.append(el("li", { className: "sempty", textContent: "No sessions yet. Start one with New session, or just send a message." }));
+      sessList.scrollTop = top;
+      if (focusedId) sessList.querySelector(`.sitem[data-id="${focusedId}"]`)?.focus();
     }
-    // The signature can match while the menu does not: the reader picked an option and that navigation failed or was
-    // replaced. Put the menu back on the intended thread.
-    if (sel && tsel.value !== sel && rows.some((t) => t?.id === sel)) tsel.value = sel;
+    const label = sessionLabel();
+    if (sessTitle.textContent !== label) sessTitle.textContent = label;
+    sessBtn.dataset.session = sel ?? "";
+    sessBtn.title = label;
+    sessBtn.setAttribute("aria-label", `Session: ${label}${current?.archived && !pending ? " (archived)" : ""}. Show sessions`);
     document.getElementById("tarchive").textContent = current?.archived ? "Restore" : "Archive";
+    updateTitle();
     chatPhotoBar();
     document.getElementById("trename").disabled = document.getElementById("tarchive").disabled = !current || Boolean(pending);
     const input = document.getElementById("input");
     input.disabled = (Boolean(current?.archived) || Boolean(routeBlock)) && !pending;
     document.getElementById("send").disabled = input.disabled || sending || Boolean(pending);
-    input.placeholder = pending ? `Opening ${pending.title}…` : routeBlock ? "No thread is open: pick one or start a New one." : current?.archived ? "This thread is archived. Restore it to continue." : "Message ORBIT";
+    input.placeholder = pending ? `Opening ${pending.title}…` : routeBlock ? "No session is open: pick one or start a New session." : current?.archived ? "This session is archived. Restore it to continue." : "Message ORBIT";
     const status = pending ? `Opening ${pending.title}…` : routeBlock || navError;
     const statusEl = document.getElementById("tstatus");
     if (statusEl.textContent !== status) statusEl.textContent = status;
@@ -550,7 +607,7 @@
       specs.push({ key: `m:${view.id}:${m.id}`, sig: JSON.stringify([messageClass(m), parts.map((p) => [p.key, p.sig])]), build: () => { const node = el("div"); update(node); return node; }, update });
     });
     if (view.summary && !view.summaryUnusable && view.summary.covers >= view.messages.length) specs.push(compact());
-    if (!view.messages.length) specs.push({ key: "empty", sig: "", build: () => el("div", { className: "compact", textContent: "This thread is empty. Messages are saved on ORBIT's server and show on your other devices." }) });
+    if (!view.messages.length) specs.push({ key: "empty", sig: "", build: () => el("div", { className: "compact", textContent: "This session is empty. Messages are saved on ORBIT's server and show on your other devices." }) });
     reconcileChildren(log, specs, shownMeta, carryOver);
     // Follow new messages only when the reader was already at the bottom and is not selecting text; a thread switch or
     // the reader's own send goes to the newest message.
@@ -565,7 +622,7 @@
   function showEmpty() {
     shownThreadId = null;
     routeBlock = "";
-    log.replaceChildren(...(pendingNotice ? [noticeBanner(pendingNotice)] : []), el("div", { className: "compact", textContent: "No thread is open. Send a message to start one; it is saved on ORBIT's server." }));
+    log.replaceChildren(...(pendingNotice ? [noticeBanner(pendingNotice)] : []), el("div", { className: "compact", textContent: "No session is open. Send a message to start one; it is saved on ORBIT's server." }));
     renderBar();
   }
 
@@ -579,7 +636,7 @@
     threadMode = "server";
     threadList = r.data.threads;
     pendingNotice = r.data.notice;
-    document.getElementById("threadbar").hidden = false;
+    document.getElementById("sesswrap").hidden = false;
     return true;
   }
   // Re-fetches the thread that is showing (a poll, a card decision, a send's fallback). Never a navigation: see openThread.
@@ -592,7 +649,7 @@
     if (seq !== loadSeq) return true;
     if (current?.id !== id) return true;
     // The thread is gone (deleted on the server): say so and send nothing, rather than starting a new thread on the next send.
-    if (!r.ok) { if (r.status === 404) { if (readSel() === id) writeSel(null); showBlocked(`Thread ${id} no longer exists on ORBIT's server. Nothing is sent from this address: pick a thread or start a New one.`); } return false; }
+    if (!r.ok) { if (r.status === 404) { if (readSel() === id) writeSel(null); showBlocked(`Session ${id} no longer exists on ORBIT's server. Nothing is sent from this address: pick a session or start a New session.`); } return false; }
     const view = r.data.thread;
     // An answer older than what is showing (a delayed poll) never rolls the thread back.
     if (current && current.id === view.id && shownThreadId === view.id && view.rev < current.rev) return true;
@@ -612,7 +669,7 @@
     navError = "";
     // Back to the thread already drawn (A, B, then A again before B answered): cancel the pending switch, nothing to fetch.
     if (current && current.id === id && shownThreadId === id) { pending = null; writeSel(id); setChatAddress(id, how === "menu"); renderBar(); return true; }
-    const title = threadList.find((t) => t.id === id)?.title || (how === "address" ? `thread ${id}` : "the thread");
+    const title = threadList.find((t) => t.id === id)?.title || (how === "address" ? `session ${id}` : "the session");
     pending = { gen, id, title };
     renderBar();
     let r;
@@ -622,9 +679,9 @@
     if (!r.ok) {
       if (how === "address") {
         if (r.status === 404 && readSel() === id) writeSel(null);
-        showBlocked(r.status === 404 ? `No thread ${id} exists on ORBIT's server (it may have been deleted). Nothing is sent from this address: pick a thread or start a New one.`
-          : r.status === 401 || r.status === 403 ? `You cannot open thread ${id} (HTTP ${r.status}): threads are owner only. Nothing is sent from this address.`
-          : `Could not open thread ${id} (${r.status ? `HTTP ${r.status}` : "no connection"}). Nothing is sent until it opens.`);
+        showBlocked(r.status === 404 ? `No session ${id} exists on ORBIT's server (it may have been deleted). Nothing is sent from this address: pick a session or start a New session.`
+          : r.status === 401 || r.status === 403 ? `You cannot open session ${id} (HTTP ${r.status}): sessions are owner only. Nothing is sent from this address.`
+          : `Could not open session ${id} (${r.status ? `HTTP ${r.status}` : "no connection"}). Nothing is sent until it opens.`);
         return false;
       }
       if (r.status === 404 && readSel() === id) writeSel(current?.id ?? null);
@@ -651,7 +708,7 @@
     let ok = false;
     try { ok = await loadList(); } catch { /* no connection: below */ }
     // Plain #chat (or another page) for the owner: the default thread. Anything the address names: applyChatAddress.
-    if (ok && chatTarget(location.hash).kind === "none") { await openDefault(); return; }
+    if (ok && chatAddress().kind === "none") { await openDefault(); return; }
     applyChatAddress();
   }
   async function pollThreads() {
@@ -667,19 +724,69 @@
     } catch { /* the next poll tries again */ }
   }
 
-  tsel.addEventListener("change", () => { if (tsel.value) openThread(tsel.value); });
+  // The session picker: a disclosure under the header's session button. It opens with the button (click, Enter or Space),
+  // and closes with Escape, the button again, a click outside it, focus moving out of it, or a choice. Escape and a choice
+  // put focus back on the button. Up/Down, Home and End move through the list.
+  const pickerOpen = () => !sessPicker.hidden;
+  function placePicker() {
+    const r = sessBtn.getBoundingClientRect(), vw = document.documentElement.clientWidth;
+    const width = Math.min(420, vw - 16);
+    sessPicker.style.width = `${width}px`;
+    sessPicker.style.left = `${Math.max(8, Math.min(r.left, vw - width - 8))}px`;
+    sessPicker.style.top = `${Math.round(r.bottom + 6)}px`;
+  }
+  function openPicker() {
+    if (pickerOpen()) return;
+    renderBar();
+    sessPicker.hidden = false;
+    sessBtn.setAttribute("aria-expanded", "true");
+    placePicker();
+    const mark = sessList.querySelector('.sitem[aria-current="true"]');
+    if (mark) mark.scrollIntoView({ block: "nearest" });
+    (mark || sessList.querySelector(".sitem") || document.getElementById("tnew")).focus();
+  }
+  function closePicker(refocus) {
+    if (!pickerOpen()) return;
+    const hadFocus = sessPicker.contains(document.activeElement);
+    sessPicker.hidden = true;
+    sessBtn.setAttribute("aria-expanded", "false");
+    if (refocus || hadFocus) sessBtn.focus();
+  }
+  sessBtn.addEventListener("click", () => (pickerOpen() ? closePicker(true) : openPicker()));
+  sessBtn.addEventListener("keydown", (e) => { if (e.key === "ArrowDown" && !pickerOpen()) { e.preventDefault(); openPicker(); } });
+  sessList.addEventListener("click", (e) => {
+    const b = e.target instanceof Element ? e.target.closest(".sitem") : null;
+    if (!b) return;
+    closePicker(true);
+    openThread(b.dataset.id);
+  });
+  sessPicker.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); closePicker(true); return; }
+    const items = [...sessList.querySelectorAll(".sitem")];
+    const at = items.indexOf(document.activeElement);
+    if (!items.length || !["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key) || (at < 0 && (e.key === "Home" || e.key === "End"))) return;
+    e.preventDefault();
+    const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : at < 0 ? (e.key === "ArrowDown" ? 0 : items.length - 1)
+      : Math.max(0, Math.min(items.length - 1, at + (e.key === "ArrowDown" ? 1 : -1)));
+    items[next].focus();
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && pickerOpen() && document.activeElement === sessBtn) closePicker(true); });
+  document.addEventListener("pointerdown", (e) => { if (pickerOpen() && !sessPicker.contains(e.target) && !sessBtn.contains(e.target)) closePicker(false); });
+  sessPicker.addEventListener("focusout", (e) => { if (e.relatedTarget && !sessPicker.contains(e.relatedTarget) && e.relatedTarget !== sessBtn) closePicker(false); });
+  window.addEventListener("resize", () => { if (pickerOpen()) placePicker(); });
   document.getElementById("tshowarch").addEventListener("change", (e) => { showArchived = e.target.checked; renderBar(); });
   const listQuietly = async () => { try { await loadList(); } catch { /* the next poll tries again */ } };
   document.getElementById("tnew").addEventListener("click", async () => {
+    closePicker(true);
     const gen = ++navGen;
     navError = "";
-    pending = { gen, id: null, title: "a new thread" };
+    pending = { gen, id: null, title: "a new session" };
     renderBar();
     let r;
     try { r = await tapi("/threads", "POST", {}); } catch { r = { ok: false, status: 0, data: {} }; }
     // The reader picked another thread meanwhile: that choice stands; the new thread is just in the list.
     if (gen !== navGen) { await listQuietly(); renderBar(); return; }
-    if (!r.ok) { pending = null; navError = r.data.error || "Could not start a new thread."; renderBar(); return; }
+    if (!r.ok) { pending = null; navError = r.data.error || "Could not start a new session."; renderBar(); return; }
     await listQuietly();
     if (gen !== navGen) { renderBar(); return; }
     pending = null;
@@ -694,7 +801,7 @@
   document.getElementById("trename").addEventListener("click", async () => {
     if (!current || pending) return;
     const targetId = current.id, gen = navGen;
-    const title = window.prompt("Rename thread", current.title);
+    const title = window.prompt("Rename session", current.title);
     if (!title || !title.trim()) return;
     let r;
     try { r = await tapi(`/threads/${encodeURIComponent(targetId)}/rename`, "POST", { title }); } catch { r = { ok: false, status: 0, data: {} }; }
@@ -707,6 +814,7 @@
   });
   document.getElementById("tarchive").addEventListener("click", async () => {
     if (!current || pending) return;
+    closePicker(true);
     const target = current, restoring = target.archived;
     const gen = ++navGen;
     navError = "";
@@ -734,7 +842,7 @@
       if (!current) {
         const gen = navGen;
         const made = await tapi("/threads", "POST", {});
-        if (!made.ok) { add("orbit", made.data.error || "Could not start a thread.", "error", "down"); return; }
+        if (!made.ok) { add("orbit", made.data.error || "Could not start a session.", "error", "down"); return; }
         // The reader opened a thread while this one was being made: send nothing; the text goes back in the box.
         if (gen !== navGen) { const input = document.getElementById("input"); if (!input.value) input.value = content; await listQuietly(); renderBar(); return; }
         current = made.data.thread;
@@ -774,10 +882,10 @@
     const photoCount = chatTray ? chatTray.count() : 0;
     if ((!content && !photoCount) || sending) return;
     // Nothing is sent until every retained photo is processed and uploaded into this thread.
-    if (photoCount && !chatTray.ready()) { chatTray.setNote(chatTray.foreign() ? "These photos were attached in another thread. Remove them and attach again." : `Wait until every photo is ready (${chatTray.readyCount()} of ${photoCount}), or remove the failed ones.`); return; }
+    if (photoCount && !chatTray.ready()) { chatTray.setNote(chatTray.foreign() ? "These photos were attached in another session. Remove them and attach again." : `Wait until every photo is ready (${chatTray.readyCount()} of ${photoCount}), or remove the failed ones.`); return; }
     // The address decides where a message goes. A blocked or invalid address, or one naming a thread that is not the one
     // open, sends nothing and the text stays (this cannot happen through the page's own controls; it guards the invariant).
-    const addr = chatTarget(location.hash);
+    const addr = chatAddress();
     if (routeBlock || addr.kind === "invalid" || (addr.kind === "thread" && (threadMode !== "server" || current?.id !== addr.id))) { renderBar(); return; }
     // While a thread is opening, Enter or Send does nothing and the text stays: it must not go to the thread being left.
     if (threadMode === "server" && pending) { renderBar(); return; }
@@ -789,7 +897,7 @@
     sendButton.disabled = true;
     try {
       if (threadMode === "server") { await sendThreaded(content, photoCount ? chatTray.ids() : []); refreshStatus(); return; }
-      if (photoCount) { input.value = content; chatTray.setNote("Photos can only be sent in a saved thread."); return; }
+      if (photoCount) { input.value = content; chatTray.setNote("Photos can only be sent in a saved session."); return; }
       sending = true;
       history.push({ role: "user", content });
       add("user", content);
@@ -988,7 +1096,7 @@
     if (typeof chatTray === "undefined") return;
     const off = !(threadMode === "server" && current && !current.archived && !pending);
     const b = document.getElementById("pickbtn");
-    if (b) { b.disabled = off || sending; b.title = off ? "Open or start a thread to add images" : "Add image (up to 10)"; }
+    if (b) { b.disabled = off || sending; b.title = off ? "Open or start a session to add images" : "Add image (up to 10)"; }
   }
   // ---- Composer height. Each message box starts one line tall and grows upward as its text wraps or gains lines (typing,
   // newlines, paste), up to COMPOSER_LINES lines; past that it scrolls inside. Deleting text shrinks it, and so does clearing
@@ -1017,7 +1125,7 @@
     const native = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
     Object.defineProperty(ta, "value", { configurable: true, get() { return native.get.call(this); }, set(v) { native.set.call(this, v); fit(); } });
     ta.addEventListener("input", fit);
-    // An empty box is as tall as its placeholder (the browser measures it), so a new placeholder ("This thread is archived…")
+    // An empty box is as tall as its placeholder (the browser measures it), so a new placeholder ("This session is archived…")
     // is refitted too.
     new MutationObserver((rs) => { if (rs.some((m) => m.oldValue !== ta.placeholder)) fit(); }).observe(ta, { attributes: true, attributeFilter: ["placeholder"], attributeOldValue: true });
     let width = -1;
@@ -1035,6 +1143,8 @@
   function setTab(next) {
     tab = next;
     document.body.dataset.tab = next;
+    if (next !== "chat") closePicker(false);
+    updateTitle();
     for (const a of tabs.querySelectorAll("a[data-tab]")) { if (a.dataset.tab === next) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); }
     document.getElementById("log").hidden = next !== "chat";
     chatForm.hidden = next !== "chat";
@@ -1043,35 +1153,104 @@
     if (next === "jobs") jobsPoller.poll();
     if (next === "assistant" && assistantPoller) assistantPoller.poll();
   }
-  // Assistant, Chat and Jobs are views of this one page (/), addressed as /#assistant, /#chat and /#jobs so they are real
-  // links: they can be opened with the keyboard, bookmarked, and the back button moves between them. The root (no hash, or a
-  // hash that names no page) opens the Assistant. Assistant and Jobs are owner only: when the server refuses them their links
-  // hide and those addresses fall back to Chat (Jobs while it is not known yet: the Assistant, until the owner check answers).
+  // Assistant, Sessions and Jobs are views of this one page, so they are real links: they can be opened with the keyboard,
+  // bookmarked, and the back button moves between them. The Assistant is / (or /#assistant), Jobs is /#jobs, and Sessions is
+  // /sessions, one session being /sessions/<session id> (the server serves the page at those paths, so a reload or a direct
+  // link works). The root (no hash, or a hash that names no page) opens the Assistant. Assistant and Jobs are owner only:
+  // when the server refuses them their links hide and those addresses fall back to Sessions (Jobs while it is not known
+  // yet: the Assistant, until the owner check answers). Sessions used to be called Chat and lived at /#chat and
+  // /#chat/<id>; those addresses still open the same session and are replaced with its /sessions address (docs/threads.md).
+  // Links within the page (the page links, a gallery's "Open conversation") switch views without reloading it (see route),
+  // so a draft, the photo tray and a reply in flight stay put.
   const assistantTab = document.getElementById("assistanttab");
   // <routing>
-  function pageFor(hash, jobsAvailable, assistantAvailable) {
-    if (hash === "#chat" || hash.startsWith("#chat/")) return "chat";
+  const isLegacyChat = (hash) => hash === "#chat" || hash.startsWith("#chat/");
+  const isSessionsPath = (path) => path === "/sessions" || path.startsWith("/sessions/");
+  function pageFor(path, hash, jobsAvailable, assistantAvailable) {
+    if (isLegacyChat(hash)) return "chat";
     if (hash === "#jobs" && jobsAvailable) return "jobs";
+    if (hash !== "#assistant" && hash !== "#jobs" && isSessionsPath(path)) return "chat";
     return assistantAvailable ? "assistant" : "chat";
   }
-  // Chat addresses one thread as #chat/<thread id> (the canonical form: lowercase, unencoded). Plain #chat (or "#chat/")
-  // names none. Anything else after "#chat/" is invalid: it is reported, never fetched, opened or sent to. The id is
-  // percent-decoded and lowercased first, so an encoded or uppercase copy of a real id still works (and is canonicalized).
+  // One session is addressed as /sessions/<session id> (the canonical form: lowercase, unencoded). Plain /sessions (or
+  // "/sessions/") names none. Anything else after "/sessions/" is invalid: it is reported, never fetched, opened or sent to.
+  // The id is percent-decoded and lowercased first, so an encoded or uppercase copy of a real id still works (and is
+  // canonicalized). The legacy fragment form, #chat/<id>, is read by the same rules.
   const CHAT_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-  function chatTarget(hash) {
-    if (!hash.startsWith("#chat/") || hash === "#chat/") return { kind: "none" };
-    const raw = hash.slice("#chat/".length);
+  function idTarget(raw) {
+    if (!raw) return { kind: "none" };
     let id;
     try { id = decodeURIComponent(raw).toLowerCase(); } catch { return { kind: "invalid", raw }; }
     return CHAT_THREAD_ID.test(id) ? { kind: "thread", id } : { kind: "invalid", raw };
   }
-  const chatHash = (id) => (id ? `#chat/${encodeURIComponent(id)}` : "#chat");
+  // The legacy Chat fragment: #chat/<id>.
+  function chatTarget(hash) {
+    if (!hash.startsWith("#chat/")) return { kind: "none" };
+    return idTarget(hash.slice("#chat/".length));
+  }
+  // What a Sessions address names: the legacy fragment wins (it is replaced at once when it is valid), else the path.
+  function sessionTarget(path, hash) {
+    if (isLegacyChat(hash)) return chatTarget(hash);
+    if (!path.startsWith("/sessions/")) return { kind: "none" };
+    return idTarget(path.slice("/sessions/".length));
+  }
+  const sessionPath = (id) => (id ? `/sessions/${encodeURIComponent(id)}` : "/sessions");
+  // The address that replaces a legacy or non-canonical one, keeping the query (the fragment of a legacy address is the
+  // address itself, so it is dropped), or null when the address is already canonical. An invalid id is left as it is, so
+  // the page can say what was wrong with it; nothing is fetched or sent from it. #assistant and #jobs under /sessions
+  // (a fragment link followed from a Sessions page) move to /, where those pages live.
+  function canonicalAddress(path, search, hash) {
+    if (isLegacyChat(hash)) {
+      const t = chatTarget(hash);
+      return t.kind === "invalid" ? null : sessionPath(t.kind === "thread" ? t.id : null) + search;
+    }
+    if ((hash === "#assistant" || hash === "#jobs") && path !== "/") return `/${search}${hash}`;
+    if (path === "/sessions/") return `/sessions${search}${hash}`;
+    if (!isSessionsPath(path)) return null;
+    const t = sessionTarget(path, hash);
+    return t.kind === "thread" && path !== sessionPath(t.id) ? sessionPath(t.id) + search + hash : null;
+  }
+  // The address a stored link (a photo gallery's "Open conversation": "#assistant" or "#chat/<id>") opens.
+  const pageLink = (link) => (link === "#assistant" ? "/#assistant" : isLegacyChat(link) ? (canonicalAddress("/", "", link) ?? `/${link}`) : link);
   // </routing>
-  const tabFromHash = () => pageFor(location.hash, !jobsTab.hidden, !assistantTab.hidden);
-  // A changed address (a link, typing it, Back or Forward) is applied to Chat; the page's own address updates use
-  // pushState/replaceState, which fire no hashchange, so they cannot loop.
-  window.addEventListener("hashchange", () => setTab(tabFromHash()));
-  window.addEventListener("hashchange", () => { if (tab === "chat") applyChatAddress(); });
+  const tabFromHash = () => pageFor(location.pathname, location.hash, !jobsTab.hidden, !assistantTab.hidden);
+  const chatAddress = () => sessionTarget(location.pathname, location.hash);
+  // Puts a legacy or non-canonical address into its canonical form, in place (no new history entry).
+  function canonicalize() {
+    const want = canonicalAddress(location.pathname, location.search, location.hash);
+    if (want === null) return;
+    try { window.history.replaceState(window.history.state, "", want); } catch { /* the address just stays as it is */ }
+  }
+  // Applies the address: on load, after a link within the page, and on Back/Forward or an edited fragment. The page's own
+  // address updates (replaceState/pushState) fire neither popstate nor hashchange, so they cannot loop. A traversal can fire
+  // both events; the second finds nothing changed.
+  let routed = "";
+  function route() {
+    canonicalize();
+    if (routed === location.href) return;
+    routed = location.href;
+    setTab(tabFromHash());
+    if (tab === "chat" && threadMode !== null) applyChatAddress();
+  }
+  window.addEventListener("popstate", route);
+  window.addEventListener("hashchange", route);
+  // A plain click on a link to one of the page's own addresses switches views here instead of loading the page again.
+  // Modified clicks (new tab or window), downloads and other targets are left to the browser.
+  document.addEventListener("click", (e) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const a = e.target instanceof Element ? e.target.closest("a[href]") : null;
+    if (!a || (a.target && a.target !== "_self") || a.hasAttribute("download")) return;
+    let u;
+    try { u = new URL(a.href, location.href); } catch { return; }
+    if (u.origin !== location.origin || !(u.pathname === "/" || isSessionsPath(u.pathname))) return;
+    // The Sessions link while Sessions shows: nothing to switch (the address already names the open session).
+    if (tab === "chat" && u.pathname === "/sessions" && !u.search && !u.hash && isSessionsPath(location.pathname)) { e.preventDefault(); applyChatAddress(); return; }
+    // If the address cannot be changed here, the browser follows the link itself.
+    if (u.href !== location.href) { try { window.history.pushState(null, "", u.href); } catch { return; } }
+    e.preventDefault();
+    routed = "";
+    route();
+  });
 
   // The orbit-job source commit the runner reported. Unknown is shown as unknown; only a known commit that differs
   // from the commit ORBIT is running is flagged. All text goes in through textContent.
@@ -1578,7 +1757,7 @@
           const label = galleryLabel(it, items.length);
           const cap = mk("figcaption", {}, label);
           if (it.caption) cap.append(mk("div", { textContent: `Caption: ${String(it.caption).slice(0, 140)}` }));
-          if (typeof it.link === "string" && GALLERY_LINK.test(it.link)) cap.append(" · ", mk("a", { href: it.link, textContent: it.link === "#assistant" ? "Open the Assistant" : "Open conversation" }));
+          if (typeof it.link === "string" && GALLERY_LINK.test(it.link)) cap.append(" · ", mk("a", { href: pageLink(it.link), textContent: it.link === "#assistant" ? "Open the Assistant" : "Open conversation" }));
           if (it.status !== "ok") {
             const miss = mk("figure", { className: "gitem" }, mk("div", { className: "gmissing", role: "img", ariaLabel: `Photo ${it.position} unavailable`, textContent: String(it.note || "This photo is not available.").slice(0, 200) }), cap);
             miss.dataset.ref = it.ref;
@@ -1911,7 +2090,7 @@
   // progress, card states). Never two at once, and never while this page's own send is waiting.
   assistantPoller = makePoller(() => aload(true), () => tab === "assistant" && !asending && document.visibilityState === "visible", setInterval, 10000);
   assistantPoller.start();
-  setTab(tabFromHash());
+  route();
   // Asked once on load whatever page is showing, so a viewer who is not the owner loses the Assistant link at once.
   if (tab !== "assistant") aload();
   refreshStatus();

@@ -303,7 +303,7 @@ test("every navigation link on the page leads to a real GET route that answers, 
     const html = await page.text();
     const nav = html.match(/<nav id="tabs"[^>]*>[\s\S]*?<\/nav>/)?.[0] ?? "";
     const navHrefs = [...nav.matchAll(/<a [^>]*href="([^"]+)"/g)].map((m) => m[1]!);
-    assert.deepEqual(navHrefs, ["/#assistant", "/#chat", "/#jobs"]);
+    assert.deepEqual(navHrefs, ["/#assistant", "/sessions", "/#jobs"]);
     // The status page is linked from the status line under the header, not from the page links.
     const statusLink = html.match(/<a id="statusopen" href="([^"]+)"/)?.[1];
     assert.equal(statusLink, "/status");
@@ -312,10 +312,66 @@ test("every navigation link on the page leads to a real GET route that answers, 
       const res = await fetch(url);
       assert.equal(res.status, 200, href);
       const type = res.headers.get("content-type") ?? "";
-      if (url.pathname === "/") assert.match(type, /text\/html/, "Assistant, Chat and Jobs are views of the page itself");
+      if (url.pathname === "/" || url.pathname === "/sessions") assert.match(type, /text\/html/, "Assistant, Sessions and Jobs are views of the page itself");
       else assert.match(type, /application\/json/, "the status link is the JSON endpoint, and the page says so");
       await res.arrayBuffer();
     }
+  } finally {
+    caller = saved;
+  }
+});
+
+// Sessions addresses (docs/threads.md, "Addresses"): the page is served at /sessions and /sessions/<one segment>, for anyone
+// (what a viewer may do is decided by the API routes, unchanged). The old Chat paths redirect to the same session, same
+// origin, keeping the query; the /chat API routes are untouched.
+test("the page is served at /sessions and /sessions/<id>; /chat and /chat/<id> redirect there; the /chat API routes are unchanged", async () => {
+  const saved = caller;
+  const id = "8aa11645-4a91-4874-8ace-ea248bd893fe";
+  try {
+    for (const who of [undefined, "rai@example.com"]) {
+      caller = who;
+      const root = await (await fetch(`${base}/`)).text();
+      for (const path of ["/sessions", "/sessions/", `/sessions/${id}`, `/sessions/${id.toUpperCase()}`, "/sessions/not-a-session", "/sessions/%3Cimg%3E"]) {
+        const res = await fetch(`${base}${path}`, { redirect: "manual" });
+        assert.equal(res.status, 200, path);
+        assert.match(res.headers.get("content-type") ?? "", /text\/html/, path);
+        assert.equal(await res.text(), root, `${path} is the same page as /`);
+      }
+      // Deeper paths are not page addresses.
+      for (const path of [`/sessions/${id}/x`, "/sessions/a/b/c"]) {
+        const res = await fetch(`${base}${path}`, { redirect: "manual" });
+        assert.equal(res.status, 404, path);
+        await res.arrayBuffer();
+      }
+      for (const [path, location] of [["/chat", "/sessions"], ["/chat/", "/sessions"], ["/chat?x=1&y=2", "/sessions?x=1&y=2"], [`/chat/${id}`, `/sessions/${id}`], [`/chat/${id.toUpperCase()}?q=a`, `/sessions/${id}?q=a`]] as const) {
+        const res = await fetch(`${base}${path}`, { redirect: "manual" });
+        assert.equal(res.status, 302, path);
+        assert.equal(res.headers.get("location"), location, path);
+        assert.equal(new URL(res.headers.get("location")!, base).origin, new URL(base).origin, "same origin");
+        await res.arrayBuffer();
+      }
+      // Anything else under /chat is not redirected: not a session id, a protocol-relative trick, or an API route.
+      for (const path of ["/chat/not-a-session", "/chat//evil.example", "/chat/%2F%2Fevil.example", `/chat/${id}/x`]) {
+        const res = await fetch(`${base}${path}`, { redirect: "manual" });
+        assert.notEqual(res.status, 302, path);
+        assert.equal(res.headers.get("location"), null, path);
+        await res.arrayBuffer();
+      }
+    }
+    // The /chat API routes answer as before: proposals for the owner, refused for anyone else; POST /chat is not redirected.
+    caller = "rai@example.com";
+    const proposals = await fetch(`${base}/chat/proposals`, { redirect: "manual" });
+    assert.equal(proposals.status, 200);
+    assert.ok(Array.isArray((await proposals.json()).proposals));
+    caller = "someone@example.com";
+    const refused = await fetch(`${base}/chat/proposals`, { redirect: "manual" });
+    assert.equal(refused.status, 403);
+    await refused.arrayBuffer();
+    caller = "rai@example.com";
+    const post = await fetch(`${base}/chat`, { method: "POST", redirect: "manual", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+    assert.notEqual(post.status, 302, "POST /chat is the API, never a redirect");
+    assert.equal(post.headers.get("location"), null);
+    await post.arrayBuffer();
   } finally {
     caller = saved;
   }

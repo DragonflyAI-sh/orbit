@@ -263,7 +263,7 @@ test("browser: Chat composer sends multi-line text with the icon button and rese
   const { r, model } = setup();
   const t = await r.create("Alpha");
   const { page, ctx } = await openPage(`${await base(r)}/#chat/${t.id}`, { width: 900, height: 700 });
-  await page.waitForFunction((id: string) => (document.getElementById("threadsel") as HTMLSelectElement)?.value === id && !(document.getElementById("send") as HTMLButtonElement).disabled, t.id);
+  await page.waitForFunction((id: string) => document.getElementById("sessbtn")?.dataset.session === id && !(document.getElementById("send") as HTMLButtonElement).disabled, t.id);
   assert.equal(await page.getByRole("button", { name: "Send", exact: true }).count(), 1);
   assert.equal(await page.getByRole("button", { name: "Add image", exact: true }).count(), 1);
   await page.fill("#input", "one\ntwo\nthree");
@@ -297,9 +297,22 @@ test("browser: compact header and composer fit desktop and narrow phones with no
     assert.equal(g.lines, 8, `${w}px: capped at eight lines`);
     assert.equal(g.pageOverflow, false, `${w}px: no horizontal scroll`);
     for (const [name, b] of [["+", g.plus], ["Send", g.send]] as const) {
-      assert.ok(b.w >= 40 && b.h >= 40, `${w}px: ${name} is at least 40×40 (${b.w}×${b.h})`);
+      // Compact to look at (no larger than the one-line box), but the tap area is at least 40×40 (44 tall on touch screens).
+      assert.ok(b.w >= 32 && b.h >= 32 && b.w <= 36 && b.h <= 36, `${w}px: ${name} looks compact, 32 to 36px (${b.w}×${b.h})`);
       assert.ok(b.left >= 0 && b.right <= w, `${w}px: ${name} is on screen`);
     }
+    const hit = await page.evaluate(() => ["apickbtn", "asend"].map((id) => {
+      const btn = document.getElementById(id)!, r = btn.getBoundingClientRect(), cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+      // How far from the centre a tap still lands on the button, in each direction, in quarter pixels.
+      const reach = (dx: number, dy: number) => { let n = 0; while (n < 160 && document.elementFromPoint(cx + dx * (n + 1) / 4, cy + dy * (n + 1) / 4)?.closest("button") === btn) n++; return n / 4; };
+      return { w: reach(-1, 0) + reach(1, 0) + 0.5, h: reach(0, -1) + reach(0, 1) + 0.5 };
+    }));
+    for (const [i, name] of ["+", "Send"].entries()) {
+      assert.ok(hit[i]!.w >= 40 && hit[i]!.h >= (phone ? 44 : 40), `${w}px: ${name}'s tap area is at least 40×${phone ? 44 : 40} (${hit[i]!.w}×${hit[i]!.h})`);
+    }
+    // The textarea's own padding is compact too, and the one-line box is as tall as the buttons.
+    const pad = await page.evaluate(() => { const cs = getComputedStyle(document.getElementById("ainput")!); return { v: parseFloat(cs.paddingTop), h: parseFloat(cs.paddingLeft) }; });
+    assert.ok(pad.v <= 6 && pad.h <= 8, `${w}px: compact box padding (${JSON.stringify(pad)})`);
     near(g.formBottom, g.vh, `${w}px: the composer is on the bottom edge`);
     near(g.plusBottom, g.boxBottom, `${w}px: + bottom-aligned`);
     near(g.sendBottom, g.boxBottom, `${w}px: Send bottom-aligned`);

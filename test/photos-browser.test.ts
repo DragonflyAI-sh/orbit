@@ -12,6 +12,7 @@ import { metadataSegments } from "../src/jpeg.ts";
 import type { Message } from "../src/model.ts";
 import { encodeJpeg, pattern, withMetadata } from "./jpeg-fixture.ts";
 import { rig, say, scripted } from "./threads-fixture.ts";
+import { pickSession } from "./helpers/sessions-ui.ts";
 
 // Photo attachments in a real browser (Playwright's Chromium, emulating a phone-sized touch screen) against the REAL ORBIT server and
 // the real page (src/web/index.html, src/web/photos.js). Only the model is scripted. Every image is synthetic. This is Chromium on
@@ -210,7 +211,7 @@ test("phone flow in Chat: photos go to the open thread only; switching threads d
   const a = await r.create("Alpha");
   const b = await r.create("Beta");
   const { page, ctx } = await phonePage(`${await base(r)}/#chat/${a.id}`);
-  await page.waitForFunction((id: string) => (document.getElementById("threadsel") as HTMLSelectElement)?.value === id && !(document.getElementById("pickbtn") as HTMLButtonElement).disabled, a.id);
+  await page.waitForFunction((id: string) => document.getElementById("sessbtn")?.dataset.session === id && !(document.getElementById("pickbtn") as HTMLButtonElement).disabled, a.id);
   await page.fill("#input", "text only first");
   await page.press("#input", "Enter");
   await page.waitForFunction(() => document.body.textContent!.includes("saw 0 photo(s)"));
@@ -226,8 +227,8 @@ test("phone flow in Chat: photos go to the open thread only; switching threads d
   // A photo picked in Alpha is dropped when Beta is opened, so it can never be sent there.
   await page.setInputFiles("#pick", [file("c.jpg", "image/jpeg", encodeJpeg(40, 40, pattern(3)))]);
   await page.waitForFunction(() => document.querySelectorAll('#tray .ph[data-status="ready"]').length === 1);
-  await page.selectOption("#threadsel", b.id);
-  await page.waitForFunction((id: string) => location.hash === `#chat/${id}`, b.id);
+  await pickSession(page, b.id);
+  await page.waitForFunction((id: string) => location.pathname === `/sessions/${id}`, b.id);
   await page.waitForFunction(() => document.querySelectorAll("#tray .ph").length === 0);
   assert.equal(await page.isHidden("#tray"), true);
   await ctx.close();

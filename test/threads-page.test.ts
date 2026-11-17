@@ -137,11 +137,12 @@ test("the one-time migration notice is shown from the server's notice and acknow
   assert.match(html, /el\("div", \{ className: "banner", role: "note" \}, n\.text/, "the notice text goes in as a text node");
 });
 
-test("phone width and both colour schemes are handled by the new bar and banners", () => {
-  assert.match(html, /#threadbar \{ display: flex; flex-wrap: wrap;/);
-  assert.match(html, /#threadbar select \{ flex: 1 1 160px; min-width: 0;/);
+test("phone width and both colour schemes are handled by the session control, its picker and the banners", () => {
+  // The session title shares the header bar and is cut with an ellipsis rather than widening the page.
+  assert.match(html, /#sesswrap \{ flex: 1 1 0; min-width: 5em;/);
+  assert.match(html, /#sesstitle \{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; \}/);
   const css = html.slice(html.indexOf("<style>"), html.indexOf("</style>"));
-  for (const sel of [".banner", ".compact", ".cardstate", "#threadbar"]) {
+  for (const sel of [".banner", ".compact", ".cardstate", "#sessbtn", "#sesspicker"]) {
     const rule = css.slice(css.indexOf(sel), css.indexOf("}", css.indexOf(sel)));
     assert.doesNotMatch(rule, /#[0-9a-fA-F]{3,6}\b/, `${sel} uses theme variables, not fixed colours`);
   }
