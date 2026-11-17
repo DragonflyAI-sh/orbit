@@ -302,9 +302,12 @@ test("every navigation link on the page leads to a real GET route that answers, 
     assert.equal(page.status, 200);
     const html = await page.text();
     const nav = html.match(/<nav id="tabs"[^>]*>[\s\S]*?<\/nav>/)?.[0] ?? "";
-    const hrefs = [...nav.matchAll(/<a [^>]*href="([^"]+)"/g)].map((m) => m[1]!);
-    assert.deepEqual(hrefs, ["/#assistant", "/#chat", "/#jobs", "/status"]);
-    for (const href of hrefs) {
+    const navHrefs = [...nav.matchAll(/<a [^>]*href="([^"]+)"/g)].map((m) => m[1]!);
+    assert.deepEqual(navHrefs, ["/#assistant", "/#chat", "/#jobs"]);
+    // The status page is linked from the status line under the header, not from the page links.
+    const statusLink = html.match(/<a id="statusopen" href="([^"]+)"/)?.[1];
+    assert.equal(statusLink, "/status");
+    for (const href of [...navHrefs, statusLink]) {
       const url = new URL(href, base);
       const res = await fetch(url);
       assert.equal(res.status, 200, href);
