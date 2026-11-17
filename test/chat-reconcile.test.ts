@@ -49,6 +49,9 @@ class Text {
   get nextSibling(): Node | Text | null { return sib(this); }
 }
 const sib = (n: Node | Text) => { const p = n.parentNode; if (!p) return null; return p.childNodes[p.childNodes.indexOf(n) + 1] ?? null; };
+// A message row's content parts: everything after its icon and its name-and-time line.
+const content = (n: Node) => n.childNodes.filter((k) => !(k instanceof Node && /^(mavatar|mhead)$/.test(k.className)));
+const contentText = (n: Node) => content(n).map((k) => (k instanceof Text ? k.data : k.text())).join("");
 const label = (n: Node | Text) => (n instanceof Text ? `"${n.data}"` : `${n.tag}.${n.className}`);
 const mk = (tag: string, props?: Record<string, unknown>, ...kids: (Node | Text | string)[]) => { const n = new Node(tag, props); n.append(...kids); return n; };
 
@@ -97,7 +100,7 @@ test("a new message is appended; earlier messages are not moved, rebuilt or re-i
   assert.deepEqual(mutations.filter((x) => x.startsWith("main>")), ["main>insert div.msg user", "main>insert div.msg orbit"]);
   assert.equal(log.childNodes[0], a);
   assert.equal(log.childNodes[1], b);
-  assert.equal((log.childNodes[3] as Node).text(), "Working…");
+  assert.equal(contentText(log.childNodes[3] as Node), "Working…");
 });
 
 test("a reply in progress updates only its own changed parts; completed messages are untouched", () => {
@@ -106,12 +109,12 @@ test("a reply in progress updates only its own changed parts; completed messages
   draw(log, meta, [...msgs(), pending]);
   const done = log.all().filter((n) => n.parentNode && n.parentNode !== log && log.childNodes.indexOf(n.parentNode) < 2);
   const active = log.childNodes[2] as Node;
-  const body = active.childNodes[0];
+  const body = content(active)[0];
   mutations = [];
   const call = { name: "jobs_list", arguments: "{}", ok: true, provenance: "live", source: "jobs", summary: "3 jobs" };
   draw(log, meta, [...msgs(), { ...pending, calls: [call] }]);
   assert.deepEqual(mutations, ["div>insert span.calls"], "a new tool call adds one part; the Working… body stays");
-  assert.equal(active.childNodes[0], body);
+  assert.equal(content(active)[0], body);
   mutations = [];
   draw(log, meta, [...msgs(), { ...pending, status: "done", text: "Finished.", provenance: "live", source: "model/x", calls: [call] }]);
   assert.deepEqual(mutations, ["div>replace span.body", "div>insert span.tag live"], "finishing swaps the body and adds the tag, nothing else");
@@ -124,13 +127,13 @@ test("cards reconcile by id and state: an unchanged card is kept, a changed one 
   const m = [...msgs(), { id: "p", role: "assistant", at: "t", text: "Proposal below.", status: "done", provenance: "live", source: "s", cards: ["c1", "c2"] }];
   const open = [{ id: "c1", state: "open" }, { id: "c2", state: "open" }];
   draw(log, meta, m, open);
-  const [, , card1, card2] = (log.childNodes[2] as Node).childNodes as Node[];
+  const [, , card1, card2] = content(log.childNodes[2] as Node) as Node[];
   mutations = [];
   draw(log, meta, m, open);
   assert.deepEqual(mutations, []);
   draw(log, meta, m, [{ id: "c1", state: "confirmed", live: { state: "running" } }, { id: "c2", state: "open" }]);
   assert.deepEqual(mutations, ["div>replace div.cardwrap open"]);
-  const kids = (log.childNodes[2] as Node).childNodes as Node[];
+  const kids = content(log.childNodes[2] as Node) as Node[];
   assert.notEqual(kids[2], card1);
   assert.equal(kids[2]!.className, "cardwrap confirmed");
   assert.equal(kids[3], card2, "the other, unchanged card keeps its node (and its focus and handlers)");
@@ -143,7 +146,7 @@ test("unknown children (optimistic bubbles, another thread's nodes) are removed 
   log.append(mk("div", { className: "msg user", textContent: "optimistic" }), mk("div", { className: "msg orbit", textContent: "Working…" }));
   draw(log, meta, [...msgs(), { id: "c", role: "user", at: "t", text: "optimistic" }, { id: "c", role: "user", at: "t", text: "optimistic" }]);
   assert.equal(log.childNodes.length, 3);
-  assert.deepEqual(log.childNodes.map((n) => (n as Node).text()), ["first question", "An older answer with code.live · model/x", "optimistic"]);
+  assert.deepEqual(log.childNodes.map((n) => contentText(n as Node)), ["first question", "An older answer with code.live · model/x", "optimistic"]);
 });
 
 test("a real edit to an older message is reflected, in that message only", () => {

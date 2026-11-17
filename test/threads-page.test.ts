@@ -48,7 +48,8 @@ test("stored text is rendered as text: markup stays literal, only https links be
   const hostile = `<img src=x onerror=alert(1)> <script>boom()</script> see https://claude.ai/code/x and javascript:alert(1) and http://plain.example`;
   const node = lib.renderStoredMessage({ id: "1", role: "assistant", at: "t", text: hostile, status: "done", provenance: "live", source: "model/x", memory: ["<b>note</b>.md"] }, mk);
   assert.equal(node.text().includes("<img src=x onerror=alert(1)>"), true, "markup is shown literally");
-  assert.equal(node.all().filter((n) => ["img", "script", "b"].includes(n.tag)).length, 0, "no element is ever created from stored text");
+  assert.equal(node.all().filter((n) => ["img", "script", "b"].includes(n.tag) && n.props.className !== "mavatar").length, 0, "no element is ever created from stored text");
+  assert.deepEqual(node.all().filter((n) => n.tag === "img").map((n) => [n.props.src, n.props.alt]), [["/avatar.png", ""]], "the only image is ORBIT's own fixed icon");
   const anchors = node.all().filter((n) => n.tag === "a");
   assert.deepEqual(anchors.map((a) => a.props.href), ["https://claude.ai/code/x"]);
   assert.equal(anchors[0]!.props.rel, "noopener noreferrer");
