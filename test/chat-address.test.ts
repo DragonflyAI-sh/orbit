@@ -147,7 +147,7 @@ const settled = async (p: any, ms = 30) => {
 const view = (p: any = page) => p.evaluate(() => ({
   hash: location.hash,
   menu: (document.getElementById("threadsel") as HTMLSelectElement).value,
-  log: [...document.querySelectorAll("#log .msg")].map((n) => n.textContent!.slice(0, 24)),
+  log: [...document.querySelectorAll("#log .msg")].map((n) => [...n.children].filter((c) => !c.matches(".mavatar, .mhead")).map((c) => c.textContent).join("").slice(0, 24)),
   canSend: !(document.getElementById("input") as HTMLTextAreaElement).disabled && !(document.getElementById("send") as HTMLButtonElement).disabled,
 }));
 const status = (p: any = page) => p.evaluate(() => document.getElementById("tstatus")!.textContent);

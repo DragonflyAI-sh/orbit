@@ -59,7 +59,7 @@ async function openPage(base: string, threadId: string) {
   return page;
 }
 
-const shown = (page: any) => page.evaluate(() => [...document.querySelectorAll("#log .msg")].map((m) => (m.textContent ?? "").slice(0, 60)));
+const shown = (page: any) => page.evaluate(() => [...document.querySelectorAll("#log .msg")].map((m) => [...m.children].filter((c) => !c.matches(".mavatar, .mhead")).map((c) => c.textContent).join("").slice(0, 60)));
 const stored = async (r: ReturnType<typeof rig>, id: string) => ((await r.api(`/threads/${id}`)).data.thread.messages as { role: string; text: string; status?: string }[]).map((m) => `${m.role}:${m.text}`);
 const baseOf = (r: ReturnType<typeof rig>) => r.api("/status").then(() => `http://127.0.0.1:${(r.server.address() as { port: number }).port}/`);
 
@@ -70,7 +70,7 @@ test("real server: a send in flight in Alpha, a switch to Beta, a blocked Enter 
     await page.fill("#input", "alpha HOLD question");
     await page.press("#input", "Enter");
     // The request is in flight on the server (the model is held) and the page shows it as working.
-    await page.waitForFunction(() => [...document.querySelectorAll("#log .msg")].some((m) => m.textContent === "Working…"));
+    await page.waitForFunction(() => [...document.querySelectorAll("#log .msg")].some((m) => [...m.children].filter((c) => !c.matches(".mavatar, .mhead")).map((c) => c.textContent).join("") === "Working…"));
     for (let i = 0; i < 50 && !(await r.api(`/threads/${alpha.id}`)).data.thread.busy; i++) await page.waitForTimeout(20);
     assert.equal((await r.api(`/threads/${alpha.id}`)).data.thread.busy, true, "Alpha is busy on the server while the model is held");
 

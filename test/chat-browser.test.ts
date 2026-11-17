@@ -185,7 +185,7 @@ test("browser: a selection in an older message survives unchanged polls, an appe
   bump(T1, (t) => { t.busy = true; t.messages.push({ id: "a5", role: "user", at: "t", text: "third question" }, { id: "a6", role: "assistant", at: "t", text: "", status: "pending", calls: [] }); });
   await poll();
   const pendingNode = await page.evaluateHandle(() => [...document.querySelectorAll("#log .msg")].at(-1));
-  assert.equal(await pendingNode.evaluate((n: Element) => n.textContent), "Working…");
+  assert.equal(await pendingNode.evaluate((n: Element) => [...n.children].filter((c) => !c.matches(".mavatar, .mhead")).map((c) => c.textContent).join("")), "Working…");
   bump(T1, (t) => { (t.messages[5]!.calls as unknown[]).push({ name: "jobs_list", arguments: "{}", ok: true, provenance: "live", source: "jobs", summary: "1 job" }); });
   await poll();
   bump(T1, (t) => { t.busy = false; Object.assign(t.messages[5]!, { status: "done", text: "Done **now**.", provenance: "live", source: "model/x" }); });
@@ -251,7 +251,7 @@ test("browser: an open card keeps its inner scroll and keyboard focus across pol
 
 test("browser: thread switches, late answers and old revisions never mix threads; reloading restores the history", { skip }, async () => {
   await open();
-  const texts = () => page.evaluate(() => [...document.querySelectorAll("#log .msg")].map((n) => n.textContent!.slice(0, 20)));
+  const texts = () => page.evaluate(() => [...document.querySelectorAll("#log .msg")].map((n) => [...n.children].filter((c) => !c.matches(".mavatar, .mhead")).map((c) => c.textContent).join("").slice(0, 20)));
   // A slow poll answer for Alpha arrives after the reader switched to Beta: it is dropped.
   delayFor[T1] = 400;
   bump(T1, (t) => t.messages.push({ id: "late", role: "user", at: "t", text: "late alpha message" }));
@@ -282,7 +282,7 @@ test("browser: thread switches, late answers and old revisions never mix threads
 // thread a message is actually sent to must agree once a navigation settles, and nothing is sent while one is pending.
 const bar = () => page.evaluate(() => ({
   menu: (document.getElementById("threadsel") as HTMLSelectElement).value,
-  log: [...document.querySelectorAll("#log .msg")].map((n) => n.textContent!.slice(0, 20)),
+  log: [...document.querySelectorAll("#log .msg")].map((n) => [...n.children].filter((c) => !c.matches(".mavatar, .mhead")).map((c) => c.textContent).join("").slice(0, 20)),
   stored: localStorage.getItem("orbit.thread"),
   status: document.getElementById("tstatus")?.textContent ?? "",
 }));

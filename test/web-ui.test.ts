@@ -37,6 +37,8 @@ class Fake {
     return this.all().filter((n) => n.tag === tag);
   }
 }
+// A message row's content: everything after its icon and its name-and-time line.
+const body = (n: Fake) => n.kids.filter((k) => typeof k === "string" || !/^(mavatar|mhead)$/.test(String(k.props.className))).map((k) => (typeof k === "string" ? k : k.text())).join("");
 type Mk = (tag: string, props?: Record<string, unknown>, ...kids: (Fake | string)[]) => Fake;
 const mk: Mk = (tag, props, ...kids) => {
   const f = new Fake(tag, props);
@@ -225,9 +227,9 @@ test("a stored reply renders as Markdown; the user's own text, pending and error
   assert.equal(reply.find("span").at(-1)!.text(), "live · model/x", "the provenance tag is still shown");
   const user = lib.renderStoredMessage({ id: "2", role: "user", at: "t", text: "**not bold** <i>x</i>", status: "done" }, mk);
   assert.equal(user.find("strong").length, 0);
-  assert.equal(user.text(), "**not bold** <i>x</i>");
+  assert.equal(body(user), "**not bold** <i>x</i>");
   const pending = lib.renderStoredMessage({ id: "3", role: "assistant", at: "t", text: "# partial", status: "pending" }, mk);
-  assert.equal(pending.text(), "Working…");
+  assert.equal(body(pending), "Working…");
   assert.equal(pending.find("h3").length, 0);
   const failed = lib.renderStoredMessage({ id: "4", role: "assistant", at: "t", text: "", status: "error", error: "provider **down**" }, mk);
   assert.equal(failed.find("strong").length, 0);
@@ -236,7 +238,8 @@ test("a stored reply renders as Markdown; the user's own text, pending and error
 
 test("the legacy chat renders a model reply as Markdown and errors as text", () => {
   const add = html.slice(html.indexOf("function add(role"), html.indexOf("// ---- Threads"));
-  assert.match(add, /if \(extra\?\.reply\) node\.append\(renderMarkdown\(text, el\)\); else node\.textContent = text;/);
+  assert.match(add, /if \(extra\?\.reply\) node\.append\(renderMarkdown\(text, el\)\); else node\.append\(el\("span", \{ className: "body", textContent: text \}\)\);/);
+  assert.match(add, /msgHead\(r, owner, "unsaved", "", el\)/, "a row ORBIT did not store is marked as not saved, never given a time");
 });
 
 // ---- Overflow containment (CSS) -----------------------------------------------------------------------------------------
@@ -248,7 +251,7 @@ const rule = (selector: string) => {
 
 test("message cards wrap long prose and URLs and never widen the page", () => {
   const msg = rule(".msg");
-  assert.match(msg, /max-width:\s*min\(720px,\s*100%\)/);
+  assert.match(msg, /max-width:\s*min\(780px,\s*100%\)/);
   assert.match(msg, /min-width:\s*0/);
   assert.match(msg, /overflow-wrap:\s*anywhere/);
   assert.match(rule(".card"), /min-width:\s*0/);
