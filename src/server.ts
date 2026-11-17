@@ -65,7 +65,10 @@ export const STALE_AFTER_MS = 5 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_MESSAGES = 40;
 const MAX_NOTE_CHARS = 2000;
-const page = readFileSync(new URL("./web/index.html", import.meta.url), "utf8");
+// The page shows message times in ORBIT's configured zone (src/time.ts), the one schedules, quiet hours and photo days use.
+const ZONE_META = /<meta name="orbit-time-zone" content="[^"]*">/;
+export const pageHtml = (html: string, zone: string): string => html.replace(ZONE_META, `<meta name="orbit-time-zone" content="${zone.replace(/[^A-Za-z0-9_+\-/]/g, "")}">`);
+const page = pageHtml(readFileSync(new URL("./web/index.html", import.meta.url), "utf8"), ZONE);
 const avatar = readFileSync(new URL("./web/avatar.png", import.meta.url));
 const photosJs = readFileSync(new URL("./web/photos.js", import.meta.url), "utf8");
 

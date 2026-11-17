@@ -62,10 +62,15 @@ test("a slow request is not overlapped by the next tick", async () => {
 
 test("the page has one place that fetches the job rows, no extra timers or visibility refreshes", () => {
   assert.equal(html.split("/jobs?view=rows").length - 1, 1);
-  assert.equal(html.match(/setInterval\(/g)?.length, 2, "only the status and inbox timers; the jobs timer is the poller");
-  // The page's only visibility listener is the notifications receipt (docs/assistant.md, "Notifications"): it acks notes the
-  // page already holds when they become visible on screen, and refreshes nothing (no rows, no lists).
-  assert.deepEqual(html.match(/[^\n]*visibilitychange[^\n]*/g)?.map((l) => l.trim()), ['document.addEventListener("visibilitychange", () => ackListedNotes());']);
+  assert.equal(html.match(/setInterval\(/g)?.length, 3, "only the status, inbox and message-time timers; the jobs timer is the poller");
+  // The page's visibility listeners are the notifications receipt (docs/assistant.md, "Notifications"): it acks notes the
+  // page already holds when they become visible on screen, and the message-time relabel (docs/threads.md, "Message rows and
+  // times"). Neither refreshes anything (no rows, no lists).
+  assert.deepEqual(html.match(/[^\n]*visibilitychange[^\n]*/g)?.map((l) => l.trim()), ['document.addEventListener("visibilitychange", () => ackListedNotes());', 'document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") tickTimes(); });']);
+  // The message-time tick only relabels what is drawn: it makes no request.
+  const tick = html.match(/const tickTimes = [^\n]*/)![0] + (html.match(/\/\/ <msgtime>[\s\S]*?\/\/ <\/msgtime>/)?.[0] ?? "");
+  assert.ok(tick.includes("refreshMsgTimes(alog") && tick.includes("function refreshMsgTimes("));
+  assert.doesNotMatch(tick, /fetch\(|tapi\(|XMLHttpRequest/);
   const ackFn = html.match(/function ackListedNotes\(\) \{[\s\S]*?\n  \}/)![0];
   assert.deepEqual(ackFn.match(/fetch\(`[^`]*`/g), ["fetch(`/notifications/${encodeURIComponent(n.id)}/ack`"]);
   assert.match(html, /makePoller\(refreshJobs, \(\) => tab === "jobs" && document\.visibilityState === "visible", setInterval, 15000\)/);

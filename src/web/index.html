@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#080a1a" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f4f2fb" media="(prefers-color-scheme: light)">
+<!-- The owner's time zone for message times. The server writes ORBIT's configured zone (src/time.ts ZONE) here. -->
+<meta name="orbit-time-zone" content="America/Los_Angeles">
 <title>ORBIT</title>
 <link rel="icon" href="/avatar.png">
 <link rel="apple-touch-icon" href="/avatar.png">
@@ -112,12 +114,39 @@
   #signin code { font-size: 16px; letter-spacing: .12em; color: var(--gold); }
   #signin a { color: var(--accent-2); }
   #log { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-  /* A message never grows past the log's width: long words and URLs wrap, wide code and tables scroll inside it. */
-  .msg { max-width: min(720px, 100%); min-width: 0; padding: 8px 12px; border-radius: 12px; background: var(--card);
-         border: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
-  .user { align-self: flex-end; background: var(--accent); color: var(--on-accent); border-color: transparent; }
+  /* Messages, in Chat and the Assistant alike: one left-aligned list, no bubbles. Every row is the sender's icon in a
+     narrow first column and everything else (name and time, then the content parts) in one content column. The sender
+     shows as an icon (ORBIT's avatar, or Rai's initial), the name in the sender's color, and a thin line in that color
+     down the content's left edge; never a background. A message never grows past the log's width: long words and URLs
+     wrap, wide code and tables scroll inside it. */
+  .msg { --who: var(--accent-2); position: relative; display: grid; grid-template-columns: 32px minmax(0, 1fr); column-gap: 10px;
+         align-self: stretch; width: 100%; max-width: min(780px, 100%); min-width: 0; padding: 4px 8px 4px 4px;
+         white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.user { --who: var(--accent); }
+  .msg > * { grid-column: 2; min-width: 0; }
+  .msg > .mavatar { grid-column: 1; grid-row: 1 / span 60; align-self: start; }
+  .msg::before { content: ""; position: absolute; left: 41px; top: 28px; bottom: 6px; width: 2px; border-radius: 1px; background: color-mix(in srgb, var(--who) 40%, transparent); }
+  .msg:hover { background: color-mix(in srgb, var(--fg) 4%, transparent); }
+  .mavatar { width: 32px; height: 32px; margin-top: 2px; border-radius: 50%; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 0 1px var(--line); }
+  img.mavatar { object-fit: cover; }
+  span.mavatar { background: var(--accent); color: var(--on-accent); font-weight: 700; font-size: 15px; line-height: 1; white-space: nowrap; }
+  .mhead { position: relative; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; min-height: 24px; white-space: normal; line-height: 1.35; }
+  .mname { font-weight: 600; color: var(--who); overflow-wrap: anywhere; }
+  /* The time beside the name: small and muted. It is a button, so the full date, time and time zone show on hover, on
+     keyboard focus and on a tap (aria-expanded), and screen readers get them in its name. The tip is anchored to the name
+     line, so it is never wider than the content column and never widens the page. */
+  .mtime { font: inherit; font-size: 12px; color: var(--muted); background: none; border: 0; border-radius: 4px; padding: 0 2px; min-height: 24px; cursor: help; }
+  .mtime:not(:disabled):hover, .mtime:not(:disabled):active { filter: none; box-shadow: none; transform: none; text-decoration: underline; }
+  .mtime.provisional { font-style: italic; }
+  .mtip { display: none; position: absolute; left: 0; top: 100%; z-index: 5; width: max-content; max-width: 100%; padding: 6px 8px; border-radius: 6px;
+          background: var(--fg); color: var(--bg); font-size: 12px; line-height: 1.4; text-align: left; white-space: normal; overflow-wrap: anywhere; box-shadow: 0 2px 8px rgba(0, 0, 0, .3); }
+  .mtime:hover .mtip, .mtime:focus-visible .mtip, .mtime[aria-expanded="true"] .mtip { display: block; }
+  @media (max-width: 480px) {
+    .msg { grid-template-columns: 28px minmax(0, 1fr); column-gap: 8px; padding: 4px 2px; }
+    .msg::before { left: 33px; top: 26px; }
+    .mavatar { width: 28px; height: 28px; } span.mavatar { font-size: 13px; }
+  }
   .msg a { color: var(--accent-2); overflow-wrap: anywhere; }
-  .msg.user a { color: inherit; text-decoration: underline; }
   .tag { display: block; font-size: 11px; margin-top: 4px; }
   .calls { display: block; margin-top: 6px; font-size: 12px; color: var(--muted); }
   .calls div { margin-top: 2px; }
@@ -403,11 +432,13 @@
     el.append(box);
   }
 
+  // A row ORBIT did not store (an error note, or a reply in the no-history chat): the same layout, marked "Not saved", never a time.
   function add(role, text, tag, tagClass, extra) {
-    const node = document.createElement("div");
-    node.className = `msg ${role}`;
+    const r = role === "user" ? "user" : "assistant";
+    const owner = threadMode === "server";
+    const node = el("div", { className: `msg ${role}` }, msgAvatar(r, owner, el), msgHead(r, owner, "unsaved", "", el));
     // A model reply (it has a reply record) is Markdown, built without HTML parsing; everything else is plain text.
-    if (extra?.reply) node.append(renderMarkdown(text, el)); else node.textContent = text;
+    if (extra?.reply) node.append(renderMarkdown(text, el)); else node.append(el("span", { className: "body", textContent: text }));
     if (tag) {
       const t = document.createElement("span");
       t.className = `tag ${tagClass}`;
@@ -849,7 +880,7 @@
         writeSel(current.id);
         setChatAddress(current.id, false);
       }
-      log.append(el("div", { className: "msg user", textContent: photoIds.length ? `${content}${content ? "\n" : ""}📷 ${photoIds.length} photo${photoIds.length === 1 ? "" : "s"}` : content }), el("div", { className: "msg orbit", textContent: "Working…" }));
+      log.append(localMessage(el, "user", true, "sending", photoIds.length ? `${content}${content ? "\n" : ""}📷 ${photoIds.length} photo${photoIds.length === 1 ? "" : "s"}` : content), localMessage(el, "assistant", true, "waiting", "Working…"));
       log.scrollTop = log.scrollHeight;
       const sentTo = current.id;
       sentToId = sentTo;
@@ -1703,6 +1734,111 @@
     node.append(det);
     return node;
   }
+  // <msgtime>
+  // Message times. A stored message's time is the `at` ORBIT wrote when it stored the message (a user message: when it was
+  // received; a reply: when the reply started), never the time the page drew it. Times are shown in the owner's configured
+  // zone (the orbit-time-zone meta tag, which the server fills from src/time.ts ZONE), on that zone's calendar days, so
+  // midnight and daylight-saving changes fall where the owner's clock puts them. A missing or malformed time says so; a
+  // message ORBIT has not stored yet (the page's own optimistic rows) shows its state, never a time. Tests load this block
+  // with the threads block, and call msgTime with a fixed clock and zone.
+  const MSG_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+  const msgFormats = new Map();
+  function msgZoneOk(zone) {
+    if (typeof zone !== "string" || !zone) return false;
+    try { new Intl.DateTimeFormat("en-US", { timeZone: zone }); return true; } catch { return false; }
+  }
+  function msgParts(ms, zone) {
+    let f = msgFormats.get(zone);
+    if (!f) {
+      f = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
+      msgFormats.set(zone, f);
+    }
+    const p = {};
+    for (const x of f.formatToParts(new Date(ms))) if (x.type !== "literal") p[x.type] = x.value.replace(/[  ]/g, " ");
+    return p;
+  }
+  // The zone's calendar day as a day number, so "yesterday" is a calendar day, not 24 hours.
+  const msgDay = (p) => Date.UTC(Number(p.year), ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].indexOf(p.month), Number(p.day)) / 86400000;
+  // { iso, label, full } for a valid stored time, or null. `label` is what shows beside the name: the time today, "Yesterday
+  // at" the time, otherwise the month and day (and the year when it is not this year) at the time. `full` is the weekday,
+  // date, time to the second, the zone's abbreviation and the zone's name.
+  function msgTime(at, nowMs, zone) {
+    if (typeof at !== "string" || !MSG_ISO.test(at)) return null;
+    const ms = Date.parse(at);
+    if (!Number.isFinite(ms) || !msgZoneOk(zone) || !Number.isFinite(nowMs)) return null;
+    const p = msgParts(ms, zone), n = msgParts(nowMs, zone);
+    const time = `${p.hour}:${p.minute} ${p.dayPeriod}`;
+    const days = msgDay(n) - msgDay(p);
+    const label = days === 0 ? time : days === 1 ? `Yesterday at ${time}` : `${p.month.slice(0, 3)} ${p.day}${p.year !== n.year ? `, ${p.year}` : ""} at ${time}`;
+    return { iso: new Date(ms).toISOString(), label, full: `${p.weekday}, ${p.month} ${p.day}, ${p.year} at ${p.hour}:${p.minute}:${p.second} ${p.dayPeriod} ${p.timeZoneName} (${zone})` };
+  }
+  // The zone the page shows times in: the configured one; if the page carries none it can use, the browser's own (the full
+  // text always names the zone used, so it is never passed off as the configured one).
+  let msgZoneCached = null;
+  function msgZone() {
+    if (msgZoneCached) return msgZoneCached;
+    let z = null;
+    try { z = document.querySelector('meta[name="orbit-time-zone"]').getAttribute("content"); } catch { z = null; }
+    if (!msgZoneOk(z)) { try { z = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { z = null; } }
+    msgZoneCached = msgZoneOk(z) ? z : "UTC";
+    return msgZoneCached;
+  }
+  // What a message's time control says. `state` is "stored" (a message ORBIT stored; `at` is its time), or a state of a row
+  // the page drew itself: "sending" (the reader's message, not stored yet), "waiting" (ORBIT's reply, not stored yet) or
+  // "unsaved" (never stored: an error note, or a reply in the no-history chat).
+  function msgStamp(state, at, role, nowMs, zone) {
+    if (state === "sending") return { label: "Sending…", full: "Not saved yet: ORBIT records this message's time when it stores it.", provisional: true };
+    if (state === "waiting") return { label: "Waiting…", full: "ORBIT has not stored a reply yet: its time shows once it has.", provisional: true };
+    if (state === "unsaved") return { label: "Not saved", full: "This message is not stored on ORBIT's server, so it has no recorded time.", provisional: true };
+    const t = msgTime(at, nowMs, zone);
+    if (!t) return { label: "Time unknown", full: "No valid time was recorded for this message.", provisional: true };
+    // A reply keeps the time it started at, in progress or finished (its "Working…" body says which), so this never changes.
+    return { iso: t.iso, label: t.label, full: `${role === "user" ? "Sent" : "Reply started"} ${t.full}` };
+  }
+  function msgSender(role, owner) {
+    return role === "user" ? { name: owner ? "Rai" : "You", initial: owner ? "R" : "Y" } : { name: "ORBIT", initial: "" };
+  }
+  // The icon: ORBIT's own avatar image, or the reader's initial. Decorative: the name beside it says who it is.
+  function msgAvatar(role, owner, mk) {
+    const s = msgSender(role, owner);
+    return s.initial ? mk("span", { className: "mavatar", ariaHidden: "true", textContent: s.initial }) : mk("img", { className: "mavatar", src: "/avatar.png", alt: "", ariaHidden: "true" });
+  }
+  // Fills a time control from a stamp: the visible label (a <time> element for a stored time), the tip, and the button's name.
+  function fillStamp(b, s, mk) {
+    const label = s.iso ? mk("time", { dateTime: s.iso, textContent: s.label }) : mk("span", { textContent: s.label });
+    if (b.replaceChildren) b.replaceChildren();
+    b.append(label, mk("span", { className: "mtip", ariaHidden: "true", textContent: s.full }));
+    b.className = `mtime${s.provisional ? " provisional" : ""}`;
+    b.ariaLabel = `${s.label}. ${s.full}`;
+  }
+  function msgHead(role, owner, state, at, mk) {
+    const b = mk("button", { type: "button", ariaExpanded: "false", onclick: () => { b.ariaExpanded = b.ariaExpanded === "true" ? "false" : "true"; }, onblur: () => { b.ariaExpanded = "false"; } });
+    if (b.dataset) Object.assign(b.dataset, { state, at: typeof at === "string" ? at : "", role });
+    fillStamp(b, msgStamp(state, at, role, Date.now(), msgZone()), mk);
+    return mk("div", { className: "mhead" }, mk("span", { className: "mname", textContent: msgSender(role, owner).name }), b);
+  }
+  // The icon and the name line of a stored message, as keyed parts (see messageParts). Neither depends on anything that
+  // changes while a reply runs, so a reply in progress never rebuilds them (the label itself follows the clock: refreshMsgTimes).
+  function headParts(m, mk) {
+    const role = m.role === "user" ? "user" : "assistant";
+    return [
+      { key: "avatar", sig: role, build: () => msgAvatar(role, true, mk) },
+      { key: "head", sig: JSON.stringify([role, m.at ?? null]), build: () => msgHead(role, true, "stored", m.at, mk) },
+    ];
+  }
+  // A row the page draws before (or without) ORBIT storing it: same layout, its state where the time goes.
+  function localMessage(mk, role, owner, state, text) {
+    const r = role === "user" ? "user" : "assistant";
+    return mk("div", { className: `msg ${r === "user" ? "user" : "orbit"}` }, msgAvatar(r, owner, mk), msgHead(r, owner, state, "", mk), mk("span", { className: "body", textContent: text }));
+  }
+  // Keeps every shown time label current (a day rollover turns a time into "Yesterday at …"). Only labels that changed are written.
+  function refreshMsgTimes(root, nowMs, mk) {
+    for (const b of root.querySelectorAll(".mtime[data-state]")) {
+      const s = msgStamp(b.dataset.state, b.dataset.at, b.dataset.role, nowMs, msgZone());
+      if (b.ariaLabel !== `${s.label}. ${s.full}`) fillStamp(b, s, mk);
+    }
+  }
+  // </msgtime>
   const messageClass = (m) => `msg ${m.role === "user" ? "user" : "orbit"}`;
   // A stored message as separately keyed parts (body, tag, warnings, tool calls, one per card). Each part carries a
   // signature of exactly the data it shows, so the page can keep every part whose data did not change (and the text the
@@ -1780,7 +1916,7 @@
     });
   }
   function messageParts(m, mk, cardSpec, photoUrl, galleryBase) {
-    const parts = [];
+    const parts = headParts(m, mk);
     const pending = m.status === "pending";
     const text = pending ? "Working…" : m.text || (m.error ? "" : m.role === "assistant" ? "(no text)" : "");
     // A finished reply is Markdown (rendered without any HTML parsing, see the markdown block); the user's own text, a
@@ -2043,7 +2179,7 @@
     asending = true;
     aerror = "";
     aBar();
-    alog.append(el("div", { className: "msg user", textContent: photoIds.length ? `${text}${text ? "\n" : ""}📷 ${photoIds.length} photo${photoIds.length === 1 ? "" : "s"}` : text }), el("div", { className: "msg orbit", textContent: "Working…" }));
+    alog.append(localMessage(el, "user", true, "sending", photoIds.length ? `${text}${text ? "\n" : ""}📷 ${photoIds.length} photo${photoIds.length === 1 ? "" : "s"}` : text), localMessage(el, "assistant", true, "waiting", "Working…"));
     alog.scrollTop = alog.scrollHeight;
     // One id per send: if the browser repeats the request after a dropped connection, ORBIT refuses the repeat instead of running it.
     const bytes = new Uint8Array(16);
@@ -2102,6 +2238,14 @@
   refreshSignin();
   setInterval(refreshStatus, 30000);
   setInterval(refreshInbox, 30000);
+  // Message times: labels follow the clock (a day rollover turns "9:40 PM" into "Yesterday at 9:40 PM"), checked every 30
+  // seconds and whenever the page becomes visible again. A tapped time's details close on a tap elsewhere or on Escape.
+  const tickTimes = () => { refreshMsgTimes(alog, Date.now(), el); refreshMsgTimes(log, Date.now(), el); };
+  setInterval(tickTimes, 30000);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") tickTimes(); });
+  const closeStamps = (keep) => { for (const b of document.querySelectorAll('.mtime[aria-expanded="true"]')) if (b !== keep) b.setAttribute("aria-expanded", "false"); };
+  document.addEventListener("click", (e) => closeStamps(e.target instanceof Element ? e.target.closest(".mtime") : null));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeStamps(null); });
 </script>
 </body>
 </html>
