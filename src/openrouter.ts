@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ProviderError } from "./chatgpt.ts";
 import { instructions } from "./model.ts";
-import type { Item, Step, ToolCall, ToolDef } from "./model.ts";
+import type { Item, Step, ToolCall, ToolDef, ToolRounds } from "./model.ts";
 import { SpendError, toMicro } from "./spend-ledger.ts";
 import type { SpendCaps, SpendLedger } from "./spend-ledger.ts";
 
@@ -250,7 +250,8 @@ export type PaidStep = Step & { costUsd: number | undefined; model: string };
 
 export type OpenRouterClient = {
   readonly model: string;
-  step(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[]): Promise<PaidStep>;
+  // `rounds`: the reply's tool-round position (src/model.ts ToolRounds), only for the instructions.
+  step(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], rounds?: ToolRounds): Promise<PaidStep>;
   // The key's own limits and use as OpenRouter reports them. This is the account/key view, NOT the local allowance.
   balance(): Promise<{ limitUsd: number | null; remainingUsd: number | null; usedUsd: number | null }>;
 };
@@ -281,8 +282,8 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
   return {
     model: cfg.model,
 
-    async step(input, limits, notes, tools) {
-      const system = instructions(limits, notes, tools.map((t) => `${t.name}: ${t.description}`));
+    async step(input, limits, notes, tools, rounds) {
+      const system = instructions(limits, notes, tools.map((t) => t.name), rounds);
       const body = JSON.stringify({
         model: cfg.model,
         messages: toMessages(system, input),

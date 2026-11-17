@@ -63,6 +63,9 @@ export type ChatTool = {
   readOnly?: boolean;
   // This tool's own execution deadline, when it legitimately takes longer than TOOL_DEADLINE_MS (see docs/tool-deadlines.md).
   deadlineMs?: number;
+  // This tool's own output bound, when its result must reach the model whole and is larger than MAX_OUTPUT_CHARS (vault_policy: the
+  // vault's authoritative rules). Anything over the bound is cut with a note that says so.
+  maxOutputChars?: number;
   // What the conversation stores of a call (src/thread-service.ts). The model sees the real arguments and output in its own reply;
   // a tool whose arguments or results must not live on in the transcript (photo observations, docs/photo-recall.md) returns a stub.
   transcript?: (call: { arguments: string; output: string; summary: string; ok: boolean }) => { arguments: string; output: string; summary: string };
@@ -115,7 +118,12 @@ export type CallRecord = {
 // `fallback` is set when any round was answered by the OpenRouter fallback; `mixed` when other rounds of the same reply came from the primary.
 // `accounting`: spend-accounting diagnostics from every round, for the owner. `incomplete`: notes that a reply was cut off or partly dropped.
 // Neither is ever put into `input`, so no later model turn sees them as prose.
+// `capped`: the tool-round budget ran out, so the final step was sent with no tools (whatever it then answered).
 export type ChatOutcome = { text: string; calls: CallRecord[]; rounds: number; capped: boolean; fallback?: FallbackInfo; mixed?: boolean; accounting?: string[]; incomplete?: string[] };
+
+// The owner-visible note on a reply whose tool-round budget ran out. Never part of `text`, so no later model turn reads it as prose.
+export const BUDGET_NOTE = (max: number) =>
+  `The tool-round budget for this reply (${max} steps that may call tools) ran out, so its last step was answered without tools. The tools were withheld for that step only, not missing. Anything not shown as a completed tool call below was not done; ask again (for example "continue") for a fresh budget.`;
 
 const def = (t: ChatTool): ToolDef => ({ name: t.name, description: t.description, parameters: t.parameters, ...(t.strict ? { strict: true } : {}) });
 
@@ -139,6 +147,9 @@ export function withEarlierAccounting(err: unknown, earlier: readonly string[]):
   return wrapped;
 }
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}… (truncated)` : s);
+// A tool output over its bound: the head, then a note that says how much was cut and that repeating the call does not help.
+export const clipOutput = (s: string, n: number) =>
+  s.length > n ? `${s.slice(0, n)}… [ORBIT: this output was cut from ${s.length} to ${n} characters; the rest did not reach you. Calling the same tool again with the same arguments returns the same cut: do not repeat it. Say what is missing if it matters.]` : s;
 
 export async function runChat(options: {
   model: ModelPort;
@@ -249,7 +260,8 @@ export async function runChat(options: {
     let step;
     try {
       if (options.signal?.aborted) throw new TurnInterrupted("cancelled", undefined, 0, "The turn was cancelled before the next model request. Nothing further was run.");
-      step = await model.step(input, limits, notes, capped ? [] : tools.map(def), { fallback: options.fallback === true, ...(options.signal ? { signal: options.signal } : {}) });
+      // `rounds` lets the instructions say how many tool steps are left and, at the cap, that the tools are withheld, not missing.
+      step = await model.step(input, limits, notes, capped ? [] : tools.map(def), { fallback: options.fallback === true, ...(options.signal ? { signal: options.signal } : {}), rounds: { round, max: maxRounds, offered: tools.map((t) => t.name) } });
     } catch (err) {
       // Diagnostics from earlier rounds are not lost because a later round failed.
       throw withEarlierAccounting(err, accounting);
@@ -261,8 +273,10 @@ export async function runChat(options: {
     if (!step.calls.length || capped) {
       const text =
         step.text ||
-        (capped ? `I stopped after ${maxRounds} rounds of tool calls without reaching an answer. Calls made are listed below.` : "");
-      return { text, calls, rounds: round, capped: capped && step.calls.length > 0, ...provenance() };
+        (capped ? `I stopped after ${maxRounds} rounds of tool calls without reaching an answer: this reply's tool-round budget ran out. Calls made are listed below; anything not listed was not done.` : "");
+      // A round-capped reply says so to Rai beside the text (never inside it), whatever the final step answered.
+      if (capped) merge(incomplete, [BUDGET_NOTE(maxRounds)]);
+      return { text, calls, rounds: round, capped, ...provenance() };
     }
     const stepFacts = { index: round, fallback: Boolean(step.fallback), incomplete: Boolean(step.incomplete?.length) };
     const evidenceFor = (callId: string): Evidence | undefined =>
@@ -366,7 +380,7 @@ async function execute(
   const success = (result: Result<unknown>, extra: Partial<CallRecord> = {}, note?: Record<string, unknown>) => {
     const body = JSON.stringify({ ok: true, provenance: result.provenance, source: result.source, ...note, result: result.value });
     return {
-      output: clip(body, MAX_OUTPUT_CHARS),
+      output: clipOutput(body, tool.maxOutputChars ?? MAX_OUTPUT_CHARS),
       record: { name, args, ok: true, provenance: result.provenance, source: result.source, summary: clip(JSON.stringify(result.value) ?? "", 300), ...extra },
     };
   };

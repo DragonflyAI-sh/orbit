@@ -88,7 +88,8 @@ test("memory: a failing fetch keeps answering from the last good clone and says 
   const st = memory.status();
   assert.equal(st.state, "degraded");
   assert.match(st.detail, /FALLBACK/);
-  assert.match(st.detail, /write tools are unavailable/);
+  // Without the credential every write fails, and the detail says so from the clone's state (not a fixed claim).
+  assert.match(st.detail, /Vault writes fail until that credential is installed/);
 });
 
 test("memory: selectMemory without a clone is exactly the old read-only behaviour, and symlinked notes are never followed", () => {

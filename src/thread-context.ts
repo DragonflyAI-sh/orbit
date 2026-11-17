@@ -36,6 +36,32 @@ export const dataBlock = (name: string, body: string): string => `<orbit-data na
 // How a stored call ended, in words: a call cut off by a deadline or a cancellation is never called "failed" (docs/tool-deadlines.md).
 export const callState = (c: Pick<StoredCall, "ok" | "interrupted" | "outcomeUnknown">): string =>
   c.outcomeUnknown ? "outcome unknown (not retried)" : c.interrupted && !c.ok ? (c.interrupted === "timeout" ? "timed out, no result" : "cancelled, no result") : c.ok ? "ok" : "failed";
+// The outcome facts of a stored call that must survive any shortening of history (docs/assistant.md, "Tool rounds and capability
+// claims"): whether a write was committed or only proposed, and the ids that point at the authoritative record (proposal, commit,
+// job, operation). Read from the call's own JSON output; only short id-shaped values, so no untrusted prose is lifted out of it.
+const FACT_KEYS = ["status", "saved", "launched", "executed", "proposalId", "commit", "jobId", "opId"] as const;
+export function callFacts(c: Pick<StoredCall, "output">): string {
+  let r: unknown;
+  try {
+    r = (JSON.parse(c.output) as { result?: unknown } | null)?.result;
+  } catch {
+    return "";
+  }
+  if (!r || typeof r !== "object" || Array.isArray(r)) return "";
+  const out: string[] = [];
+  for (const k of FACT_KEYS) {
+    const v = (r as Record<string, unknown>)[k];
+    if (typeof v === "boolean") out.push(`${k} ${v}`);
+    else if (typeof v === "string" && /^[A-Za-z0-9._:/-]{1,80}$/.test(v)) out.push(`${k} ${v}`);
+  }
+  return out.join(", ");
+}
+// callState plus those facts, for every place a call is shown in shortened form.
+export const callOutcome = (c: Pick<StoredCall, "ok" | "interrupted" | "outcomeUnknown" | "output">): string => {
+  const f = c.ok ? callFacts(c) : "";
+  return f ? `${callState(c)}: ${f}` : callState(c);
+};
+
 export function buildItems(t: Thread): Item[] {
   const items: Item[] = [];
   const used = new Set<string>();
@@ -84,7 +110,7 @@ export function summaryNote(t: Thread): string | undefined {
 
 function renderForSummary(m: ThreadMessage): string {
   const lines = [`[${m.role}] ${m.text.slice(0, 1500)}${m.attachments?.length ? ` [${m.attachments.length} photo(s) attached; not part of this summary]` : ""}`];
-  for (const c of m.calls ?? []) lines.push(`  tool ${c.name}(${c.arguments.slice(0, 200)}) -> ${callState(c)}${c.source ? ` [${c.provenance} ${c.source}]` : ""}: ${c.summary.slice(0, 300)}`);
+  for (const c of m.calls ?? []) lines.push(`  tool ${c.name}(${c.arguments.slice(0, 200)}) -> ${callOutcome(c)}${c.source ? ` [${c.provenance} ${c.source}]` : ""}: ${c.summary.slice(0, 300)}`);
   return lines.join("\n");
 }
 
@@ -93,7 +119,7 @@ function renderForSummary(m: ThreadMessage): string {
 // that bound drops is named in the text itself and returned as `lossy`, so a digest never passes for a complete one.
 export function extractiveDigest(prior: string | undefined, older: ThreadMessage[]): { text: string; lossy?: string } {
   const lines = older.map((m) => {
-    const tools = (m.calls ?? []).map((c) => `${c.name}:${callState(c)}`).join(", ");
+    const tools = (m.calls ?? []).map((c) => `${c.name}:${callOutcome(c)}`).join(", ");
     return `- ${m.role}: ${m.text.replace(/\s+/g, " ").slice(0, 200)}${m.attachments?.length ? ` [${m.attachments.length} photo(s)]` : ""}${tools ? ` [tools: ${tools}]` : ""}`;
   });
   const notes: string[] = [];

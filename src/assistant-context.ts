@@ -1,5 +1,5 @@
 import type { Item, Message } from "./model.ts";
-import { buildItems, buildMessages, callState, messageChars } from "./thread-context.ts";
+import { buildItems, buildMessages, callFacts, callOutcome, messageChars } from "./thread-context.ts";
 import type { Thread, ThreadMessage } from "./threads.ts";
 import { MAX_MESSAGE_CHARS } from "./threads.ts";
 
@@ -55,10 +55,17 @@ const pageCursor = (name: string, output: string): string | undefined => {
     return undefined;
   }
 };
+// Likewise a write or proposal's outcome facts (status, proposal id, commit; thread-context callFacts) are kept whole at the end of a
+// cut output, so a shortened history still says whether something was committed or only proposed, and under which id.
 const cutOutput = (name: string, output: string, seq: number): string => {
-  const cursor = output.length > BOUNDED_OUTPUT_CHARS ? pageCursor(name, output) : undefined;
-  if (!cursor) return cut(output, BOUNDED_OUTPUT_CHARS, `the output of ${name}`, seq);
-  const tail = `\n${marker(`the output of ${name}`, output.length, BOUNDED_OUTPUT_CHARS, seq)}\n[ORBIT: this page's nextCursor, kept whole so reading can continue from where it stopped] nextCursor: "${cursor}"`;
+  if (output.length <= BOUNDED_OUTPUT_CHARS) return output;
+  const cursor = pageCursor(name, output);
+  const facts = cursor ? "" : callFacts({ output });
+  if (!cursor && !facts) return cut(output, BOUNDED_OUTPUT_CHARS, `the output of ${name}`, seq);
+  const keep = cursor
+    ? `[ORBIT: this page's nextCursor, kept whole so reading can continue from where it stopped] nextCursor: "${cursor}"`
+    : `[ORBIT: this call's outcome, kept whole from its full result] ${facts}`;
+  const tail = `\n${marker(`the output of ${name}`, output.length, BOUNDED_OUTPUT_CHARS, seq)}\n${keep}`;
   return `${output.slice(0, Math.max(0, BOUNDED_OUTPUT_CHARS - tail.length))}${tail}`;
 };
 
@@ -77,9 +84,11 @@ export function boundChunk(chunk: ChunkLike, cap: number = ASSISTANT_CHUNK_MAX_C
   if (clippedChars <= cap) return { messages: clipped, chars: clippedChars, form: "clipped" };
 
   // Tool calls are dropped as whole pairs (the call and its result together), so no call is ever sent without its output.
-  const noCalls = clipped.map((m) => {
+  const noCalls = clipped.map((m, mi) => {
     if (!m.calls?.length) return m;
-    const list = m.calls.map((c) => `${c.name} (${callState(c)})`).join(", ").slice(0, 400);
+    // Each call's outcome facts (committed or only proposed, and the ids) come with it, so dropping the pair never drops the evidence.
+    // Read from the stored (full) call: a clipped output is no longer JSON.
+    const list = (full[mi]!.calls ?? m.calls).map((c) => `${c.name} (${callOutcome(c)})`).join(", ").slice(0, 1200);
     // A gallery shown in this turn stays addressable ("the second one") even when its photos_show call is omitted: its ordered refs.
     const shown = (m.gallery ?? []).map((g, i) => `gallery ${i + 1}: ${g.refs.map((r, j) => `${j + 1}=${r}`).join(", ")}`).join("; ");
     const note = `[ORBIT: ${m.calls.length} tool call(s) of this turn are omitted from the model's context to stay within budget: ${list}. They are stored in full in assistant chunk ${chunk.seq}.${shown ? ` Photos displayed to Rai in this turn (display only, never seen by the model), by position: ${shown}.` : ""}]`;
