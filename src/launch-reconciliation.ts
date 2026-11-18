@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { redactText } from "./job-inputs.ts";
-import { JOB_ID, type Job } from "./jobs.ts";
-import { type DispatchState, type EvidenceContext, type LaunchOutcome, launchOutcome } from "./launch-evidence.ts";
+import { JOB_ID, KEEP_EVENTS, type Job, type JobEvent, type Launch } from "./jobs.ts";
+import { type DispatchState, type EvidenceContext, type LaunchOutcome, launchOutcome, legacyFailure } from "./launch-evidence.ts";
 import type { Notifier } from "./notify.ts";
 
 // Owner reconciliation of a launch whose outcome ORBIT's own record cannot settle (docs/reviews/launch-reconciliation.md, section 9).
@@ -23,8 +23,13 @@ import type { Notifier } from "./notify.ts";
 //     `runner-evidence-after-reconciliation`, and ORBIT appends its own entry and tells Rai once.
 //   - Nothing here launches, retries, cancels, steers or calls the provider.
 //
+//   - `provider-no-run` is only as good as the window it covers. It is checked against the dispatch ORBIT recorded (fireStartedAt to the
+//     fire's recorded end), not the launch record time, at preview, at confirmation and again at every reading, so an entry an older
+//     build admitted is held to the same rule. A record that cannot bound the dispatch (legacy, interrupted, inconsistent) fails closed.
+//
 // Persistence: one JSON file, `<state>/launch-reconciliations.json`, written atomically (write `.new`, rename) before memory changes. A
-// file that exists but cannot be read, or has a newer schema version, makes the log unavailable: it is never overwritten.
+// file that exists but cannot be read, has a newer schema version, or holds any entry that fails the integrity check (integrityProblems)
+// makes the whole log unavailable: it is never overwritten, repaired or partly used, and nothing in it authorizes a retry.
 
 export const RECON_FILE_VERSION = 1;
 // Bounds: the log only grows, so it refuses new owner entries rather than dropping old ones.
@@ -32,8 +37,13 @@ export const MAX_ENTRIES_PER_JOB = 20;
 export const MAX_ENTRIES = 2000;
 export const REASON_MIN = 10;
 export const REASON_MAX = 500;
-// How far the checked window must reach past the launch time: a fire's session is created within seconds of the request.
-export const WINDOW_AFTER_LAUNCH_MS = 60_000;
+// How far a provider-no-run window must reach around the dispatch ORBIT recorded (dispatchBounds). Before fireStartedAt: the clocks of
+// ORBIT's host and the provider may disagree (CLOCK_SKEW_MS is the tolerance used everywhere here), and run lists show times to the
+// minute. After the fire's recorded end (failedAt): the same skew, plus time for the provider to create a session from a request whose
+// answer was lost (a transport failure or 5xx can be recorded before the provider finishes handling the request). These are judgment
+// margins, not provider guarantees; a window that does not reach them is refused, never widened.
+export const WINDOW_BEFORE_DISPATCH_MS = 5 * 60_000;
+export const WINDOW_AFTER_DISPATCH_MS = 15 * 60_000;
 export const WINDOW_MAX_MS = 24 * 60 * 60_000;
 export const CLOCK_SKEW_MS = 5 * 60_000;
 
@@ -48,12 +58,18 @@ export type EvidenceSource = "routine-run-history" | "session-page";
 export type SessionOutput = "none" | "pushed" | "unknown";
 
 export type ProviderEvidence = { source: EvidenceSource; checkedAt: string; window?: { from: string; to: string }; sessionId?: string; output?: SessionOutput };
-// What ORBIT's own record held when the entry was confirmed. Copied, never re-derived later.
-export type BasedOn = { launchAt: string; routine: string; briefCommit?: string; sessionId?: string; dispatch: DispatchState; outcome: LaunchOutcome; events: number };
+// What ORBIT's own record held when the entry was confirmed. Copied, never re-derived later. `fire` holds the launch record's dispatch
+// times as they were (each only when the record had it); it is present on every entry written since it was added, and absent on entries
+// from before, which is how a reading tells the two apart.
+export type FireTimes = { fireStartedAt?: string; firedAt?: string; failedAt?: string; fireFailure?: NonNullable<Launch["fireFailure"]> };
+export type BasedOn = { launchAt: string; routine: string; briefCommit?: string; sessionId?: string; dispatch: DispatchState; outcome: LaunchOutcome; events: number; fire?: FireTimes };
 
 export type OwnerEntry = { seq: number; job: string; at: string; actor: "owner"; kind: OwnerKind; evidence?: ProviderEvidence; reason: string; digest: string; basedOn: BasedOn };
-// ORBIT's own entry: the runner reported after an owner entry. One per owner entry at most.
-export type LateEntry = { seq: number; job: string; at: string; actor: "orbit"; kind: "late-runner-evidence"; after: number; events: number; firstLateAt: string; firstLateType: string; contradicts: boolean };
+// ORBIT's own entry: the runner reported after an owner entry. One per owner entry at most. `events` counts late events (with any the job
+// record dropped past its cap, when that count is known). `firstLate*` is the first late event by position in the job record;
+// `firstLateExact` is false when the record no longer holds the true first one (dropped past the cap, or an uncounted legacy drop), so
+// the event named is the first retained one. Entries written before the field was added lack it.
+export type LateEntry = { seq: number; job: string; at: string; actor: "orbit"; kind: "late-runner-evidence"; after: number; events: number; firstLateAt: string; firstLateType: string; firstLateExact?: boolean; contradicts: boolean };
 export type Entry = OwnerEntry | LateEntry;
 
 export type ReconciledState =
@@ -62,7 +78,10 @@ export type ReconciledState =
   | "provider-confirmed-ended"
   | "provider-confirmed-running"
   | "tracking-abandoned"
-  | "runner-evidence-after-reconciliation";
+  | "runner-evidence-after-reconciliation"
+  // An owner entry that would allow a retry does not hold against ORBIT's current record: a provider-no-run window that does not cover
+  // the recorded dispatch (or a record that cannot bound it), or a launch record that changed since the entry. Kept as history; no retry.
+  | "provider-evidence-insufficient";
 
 export type ReconciliationView = {
   state: ReconciledState;
@@ -109,10 +128,114 @@ export function reconFile(dir: string | undefined): ReconBackend {
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-const validEntry = (e: unknown): e is Entry =>
-  isObj(e) && Number.isInteger(e.seq) && typeof e.job === "string" && JOB_ID.test(e.job) && typeof e.at === "string" &&
-  ((e.actor === "owner" && OWNER_KINDS.includes(e.kind as OwnerKind) && typeof e.reason === "string" && typeof e.digest === "string" && isObj(e.basedOn)) ||
-    (e.actor === "orbit" && e.kind === "late-runner-evidence" && Number.isInteger(e.after)));
+
+// ---- integrity of the persisted log ------------------------------------------------------------------------------------------------
+//
+// Every entry is checked in full when the file is loaded: its discriminated shape (owner kinds and their evidence, exactly as
+// parseRequest would produce it; ORBIT's late entries), its times, its basedOn copy, and the order of the file (seq increases; a late
+// entry names an earlier owner entry of the same job, at most once). One failing entry makes the whole log unavailable (503): skipping
+// it could expose an older entry as the latest decision (a corrupt abandon-tracking hiding behind an earlier provider-no-run), and a
+// missing count could read as "no late events". The file is never rewritten or repaired by ORBIT; the problem is reported, bounded,
+// naming entries by position and seq only, never echoing stored text.
+const EVENT_TYPES = new Set<string>(["started", "checkin", "reply", "summary"] satisfies JobEvent["type"][]);
+// The only dispatch states an entry can be admitted in (admit): unresolved, not in flight, with a launch record.
+const ADMITTED_DISPATCH = new Set<string>(["dispatch-unknown", "provider-accepted"] satisfies DispatchState[]);
+const OWNER_KEYS = new Set(["seq", "job", "at", "actor", "kind", "evidence", "reason", "digest", "basedOn"]);
+const LATE_KEYS = new Set(["seq", "job", "at", "actor", "kind", "after", "events", "firstLateAt", "firstLateType", "firstLateExact", "contradicts"]);
+const BASED_KEYS = new Set(["launchAt", "routine", "briefCommit", "sessionId", "dispatch", "outcome", "events", "fire"]);
+const FIRE_KEYS = new Set(["fireStartedAt", "firedAt", "failedAt", "fireFailure"]);
+const MAX_PROBLEM_CHARS = 560;
+const isTime = (v: unknown): v is string => typeof v === "string" && ISO.test(v) && !Number.isNaN(Date.parse(v));
+const isCount = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0;
+// Copied launch fields are bound as they were read, valid or not (a record with an unparseable time can still be abandoned), so their
+// check is only that they are short strings.
+const isCopied = (v: unknown) => v === undefined || (typeof v === "string" && v.length <= 128);
+const canon = (v: unknown): string => (isObj(v) ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(",")}}` : JSON.stringify(v ?? null));
+
+function ownerProblem(e: Record<string, unknown>): string | undefined {
+  if (Object.keys(e).some((k) => !OWNER_KEYS.has(k))) return "has an unknown field";
+  if (!OWNER_KINDS.includes(e.kind as OwnerKind)) return "kind is not a known owner kind";
+  const kind = e.kind as OwnerKind;
+  if (typeof e.digest !== "string" || !/^[0-9a-f]{64}$/.test(e.digest)) return "digest must be 64 lowercase hex characters";
+  if (typeof e.reason !== "string" || e.reason.trim() !== e.reason || e.reason.length < REASON_MIN || e.reason.length > REASON_MAX || CONTROL.test(e.reason))
+    return `reason must be ${REASON_MIN} to ${REASON_MAX} characters, trimmed, without control characters`;
+  const ev = e.evidence;
+  if (kind === "abandon-tracking") {
+    if (ev !== undefined) return "evidence is not allowed on abandon-tracking";
+  } else {
+    if (!isObj(ev)) return `evidence is missing or not an object (${kind} needs it)`;
+    const w = ev.window;
+    if (w !== undefined && !isObj(w)) return "evidence.window is not an object";
+    let parsed: OwnerRequest;
+    try {
+      parsed = parseRequest({ kind, reason: e.reason, source: ev.source, checkedAt: ev.checkedAt, windowFrom: w?.from, windowTo: w?.to, sessionId: ev.sessionId, output: ev.output });
+    } catch {
+      return `evidence does not have the shape a ${kind} entry needs`;
+    }
+    if (canon(parsed.evidence) !== canon(ev)) return `evidence does not have the shape a ${kind} entry needs`;
+    if (parsed.evidence?.window) {
+      const from = Date.parse(parsed.evidence.window.from), to = Date.parse(parsed.evidence.window.to);
+      if (to < from || to - from > WINDOW_MAX_MS) return "evidence.window must run forward and span at most 24 hours";
+    }
+  }
+  const b = e.basedOn;
+  if (!isObj(b)) return "basedOn is missing or not an object";
+  if (Object.keys(b).some((k) => !BASED_KEYS.has(k))) return "basedOn has an unknown field";
+  if (!isTime(b.launchAt)) return "basedOn.launchAt must be a UTC ISO time";
+  if (typeof b.routine !== "string" || !b.routine || b.routine.length > 128) return "basedOn.routine must be a short non-empty string";
+  if (!isCopied(b.briefCommit) || !isCopied(b.sessionId)) return "basedOn.briefCommit and basedOn.sessionId must be short strings when present";
+  if (!ADMITTED_DISPATCH.has(b.dispatch as string)) return "basedOn.dispatch must be dispatch-unknown or provider-accepted, the only states an entry is admitted in";
+  if (b.outcome !== "unresolved") return "basedOn.outcome must be unresolved";
+  if (!isCount(b.events)) return "basedOn.events must be a nonnegative integer";
+  if (b.fire !== undefined) {
+    if (!isObj(b.fire) || Object.keys(b.fire).some((k) => !FIRE_KEYS.has(k))) return "basedOn.fire must be an object of the launch record's fire times";
+    if (![...FIRE_KEYS].every((k) => isCopied((b.fire as Record<string, unknown>)[k]))) return "basedOn.fire values must be short strings when present";
+  }
+  return undefined;
+}
+
+function lateProblem(e: Record<string, unknown>): string | undefined {
+  if (Object.keys(e).some((k) => !LATE_KEYS.has(k))) return "has an unknown field";
+  if (e.kind !== "late-runner-evidence") return "kind must be late-runner-evidence on an ORBIT entry";
+  if (!Number.isInteger(e.after) || (e.after as number) < 1) return "after must be the seq of an owner entry";
+  if (!Number.isInteger(e.events) || (e.events as number) < 1) return "events must be a positive integer";
+  if (!isTime(e.firstLateAt)) return "firstLateAt must be a UTC ISO time";
+  if (typeof e.firstLateType !== "string" || !EVENT_TYPES.has(e.firstLateType)) return "firstLateType must be a runner event type";
+  if (e.firstLateExact !== undefined && typeof e.firstLateExact !== "boolean") return "firstLateExact must be true or false when present";
+  if (typeof e.contradicts !== "boolean") return "contradicts must be true or false";
+  return undefined;
+}
+
+function entryProblem(e: unknown): string | undefined {
+  if (!isObj(e)) return "is not an object";
+  if (!Number.isInteger(e.seq) || (e.seq as number) < 1) return "seq must be a positive integer";
+  if (typeof e.job !== "string" || !JOB_ID.test(e.job)) return "job is not a valid job id";
+  if (!isTime(e.at)) return "at must be a UTC ISO time";
+  if (e.actor === "owner") return ownerProblem(e);
+  if (e.actor === "orbit") return lateProblem(e);
+  return "actor must be owner or orbit";
+}
+
+// Every problem in a log's entries, in file order. Empty when the whole log can be used.
+export function integrityProblems(entries: unknown[]): string[] {
+  const out: string[] = [];
+  let lastSeq = 0;
+  const owners = new Map<number, string>();
+  const reported = new Set<number>();
+  entries.forEach((e, i) => {
+    const where = `entry ${i + 1}${isObj(e) && Number.isInteger(e.seq) ? ` (seq ${e.seq})` : ""}`;
+    const problem = entryProblem(e);
+    if (problem) return void out.push(`${where}: ${problem}`);
+    const x = e as Entry;
+    if (x.seq <= lastSeq) out.push(`${where}: seq must increase through the file (the log is append-only)`);
+    lastSeq = Math.max(lastSeq, x.seq);
+    if (x.actor === "owner") owners.set(x.seq, x.job);
+    else if (owners.get(x.after) !== x.job) out.push(`${where}: after does not name an earlier owner entry of the same job`);
+    else if (reported.has(x.after)) out.push(`${where}: a second late-runner-evidence entry for owner entry ${x.after}`);
+    else reported.add(x.after);
+  });
+  return out;
+}
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?Z$/;
 const SESSION_ID = /^[A-Za-z0-9_-]{6,128}$/;
@@ -165,6 +288,78 @@ export function parseRequest(input: unknown): OwnerRequest {
   return { kind, reason, evidence: { source, checkedAt, sessionId } };
 }
 
+// ---- the dispatch a provider-no-run window must cover --------------------------------------------------------------------------
+//
+// launch.at is written before the brief (src/job-launch.ts), so the fire can come minutes later (the brief write and the fire request
+// have no timeout). The dispatch is bounded only by fireStartedAt, persisted immediately before the fire request, and the fire's recorded
+// end (failedAt; a recorded firedAt comes with a session, which provider-no-run is refused for anyway). A record without both bounds, or
+// with bounds that contradict each other, cannot show that any window covered the dispatch, so provider-no-run is refused: a wider
+// window around launch.at is not proof of anything.
+export type DispatchBounds = { ok: true; start: number; end: number } | { ok: false; why: string };
+export function dispatchBounds(l: Pick<Launch, "at" | "fireStartedAt" | "firedAt" | "failedAt">): DispatchBounds {
+  const inconsistent = (what: string) => ({ ok: false as const, why: `ORBIT's launch record has inconsistent dispatch times (${what})` });
+  if (l.fireStartedAt === undefined)
+    return { ok: false, why: "ORBIT's launch record is an older one with no fire-start time, so when the fire was sent is unknown (the launch time is written before the brief, not at the fire)" };
+  if (!isTime(l.at) || !isTime(l.fireStartedAt)) return inconsistent("a launch or fire-start time is not a valid UTC time");
+  const at = Date.parse(l.at), start = Date.parse(l.fireStartedAt);
+  if (start < at) return inconsistent("the fire started before the launch was recorded");
+  if (l.failedAt !== undefined && l.firedAt !== undefined) return inconsistent("both a fire answer and a fire failure are recorded");
+  const endAt = l.failedAt ?? l.firedAt;
+  if (endAt === undefined) return { ok: false, why: "ORBIT's launch record has no time for the end of the fire (ORBIT stopped before the fire returned), so the request may have reached the provider at any time until ORBIT stopped" };
+  if (!isTime(endAt)) return inconsistent("the fire's end is not a valid UTC time");
+  const end = Date.parse(endAt);
+  if (end < start) return inconsistent("the fire ended before it started");
+  return { ok: true, start, end };
+}
+
+// Whether a provider-no-run window can stand for this launch record as it is now: undefined when it can, otherwise why not. Checked at
+// preview and confirmation (admit) and again at every reading (reconciliationOf), so entries an older build admitted are held to it too.
+// It speaks only to the window: the run history shows only the runs it lists for the period checked.
+export function noRunProblem(l: Launch | undefined, window: { from: string; to: string } | undefined): { code: number; why: string } | undefined {
+  if (!l) return { code: 409, why: "the job has no launch record" };
+  if (!window || !isTime(window.from) || !isTime(window.to)) return { code: 400, why: "the entry has no valid checked window" };
+  if (l.sessionId || l.firedAt || (l.failedAt && (l.fireFailure ?? legacyFailure(l.error)) === "no-session"))
+    return { code: 409, why: "ORBIT's record shows the provider accepted this fire, so \"no run\" contradicts it" };
+  const b = dispatchBounds(l);
+  if (!b.ok) return { code: 409, why: `${b.why}; no checked window can be shown to cover the dispatch, so provider-no-run cannot stand for it` };
+  const needFrom = b.start - WINDOW_BEFORE_DISPATCH_MS, needTo = b.end + WINDOW_AFTER_DISPATCH_MS;
+  if (Date.parse(window.from) > needFrom || Date.parse(window.to) < needTo)
+    return {
+      code: 400,
+      why: `the window you checked must cover the dispatch ORBIT recorded: from at or before ${new Date(needFrom).toISOString()} (fire started ${l.fireStartedAt}, less ${WINDOW_BEFORE_DISPATCH_MS / 60_000} minutes) to at least ${new Date(needTo).toISOString()} (fire ended ${l.failedAt ?? l.firedAt}, plus ${WINDOW_AFTER_DISPATCH_MS / 60_000} minutes)`,
+    };
+  return undefined;
+}
+
+// Whether the launch record an entry was based on still holds the facts it copied: undefined when it does, otherwise what changed.
+// The fire times are compared when the entry recorded them (`fire`); an older entry has none, and its no-run window is checked against
+// the record as it is now (noRunProblem).
+export function basisChange(b: BasedOn, l: Launch | undefined): string | undefined {
+  if (!l) return "ORBIT's launch record changed since your entry (the job no longer has one)";
+  const pairs: [string, unknown, unknown][] = [
+    ["launch time", b.launchAt, l.at],
+    ["routine", b.routine, l.routine],
+    ["brief commit", b.briefCommit, l.briefCommit || undefined],
+    ["session id", b.sessionId, l.sessionId || undefined],
+  ];
+  if (b.fire)
+    pairs.push(["fire start time", b.fire.fireStartedAt, l.fireStartedAt], ["fire answer time", b.fire.firedAt, l.firedAt], ["fire failure time", b.fire.failedAt, l.failedAt], ["fire failure kind", b.fire.fireFailure, l.fireFailure]);
+  const changed = pairs.filter(([, was, now]) => was !== now).map(([name]) => name);
+  return changed.length ? `ORBIT's launch record changed since your entry (${changed.join(", ")})` : undefined;
+}
+
+// How many runner events arrived after an owner entry, and the first of them, by position in the job record (never by timestamp: an
+// event's time can be skewed relative to the entry's). The record keeps the last KEEP_EVENTS events and counts those it dropped
+// (eventsDropped; absent on legacy records, where drops past the cap are unknown). `count` is exact when drops are known, otherwise a
+// lower bound. `firstExact` is false when the true first late event is no longer in the record: `first` is then the first retained one.
+export function lateEventsOf(job: Pick<Job, "events" | "eventsDropped">, basedOnEvents: number): { count: number; exactCount: boolean; first?: JobEvent; firstExact: boolean } {
+  const dropped = job.eventsDropped ?? (job.events.length < KEEP_EVENTS ? 0 : undefined);
+  const count = Math.max(0, job.events.length + (dropped ?? 0) - basedOnEvents);
+  if (!count) return { count, exactCount: dropped !== undefined, firstExact: false };
+  const at = basedOnEvents - (dropped ?? 0);
+  return { count, exactCount: dropped !== undefined, first: job.events[Math.max(0, at)], firstExact: dropped !== undefined && at >= 0 };
+}
+
 // The checks an entry must pass against ORBIT's own record, before a preview is even offered.
 function admit(job: Job, req: OwnerRequest, now: Date, ctx: EvidenceContext): BasedOn {
   const l = job.launch;
@@ -173,7 +368,13 @@ function admit(job: Job, req: OwnerRequest, now: Date, ctx: EvidenceContext): Ba
   if (dispatch.state === "in-flight") throw new ReconcileError(409, "This ORBIT process is still running this launch. Wait for its result. Nothing was recorded.");
   if (outcome !== "unresolved")
     throw new ReconcileError(409, `ORBIT's record already settles this launch (${outcome}: ${dispatch.basis}). Reconciliation is only for unresolved launches. Nothing was recorded.`);
-  const based: BasedOn = { launchAt: l.at, routine: l.routine, ...(l.briefCommit ? { briefCommit: l.briefCommit } : {}), ...(l.sessionId ? { sessionId: l.sessionId } : {}), dispatch: dispatch.state, outcome, events: job.events.length };
+  const fire: FireTimes = {
+    ...(l.fireStartedAt !== undefined ? { fireStartedAt: l.fireStartedAt } : {}),
+    ...(l.firedAt !== undefined ? { firedAt: l.firedAt } : {}),
+    ...(l.failedAt !== undefined ? { failedAt: l.failedAt } : {}),
+    ...(l.fireFailure !== undefined ? { fireFailure: l.fireFailure } : {}),
+  };
+  const based: BasedOn = { launchAt: l.at, routine: l.routine, ...(l.briefCommit ? { briefCommit: l.briefCommit } : {}), ...(l.sessionId ? { sessionId: l.sessionId } : {}), dispatch: dispatch.state, outcome, events: job.events.length, fire };
   const e = req.evidence;
   if (!e) return based;
   const launched = Date.parse(l.at);
@@ -184,9 +385,10 @@ function admit(job: Job, req: OwnerRequest, now: Date, ctx: EvidenceContext): Ba
     // ORBIT's record already shows the provider accepted the fire: "no run" contradicts it.
     if (dispatch.state === "provider-accepted" || l.sessionId)
       throw new ReconcileError(409, `ORBIT's record shows the provider accepted this fire (${dispatch.basis}), so "no run" contradicts it. Record provider-session-ended or provider-session-running for that session instead. Nothing was recorded.`);
+    if (dispatch.state !== "dispatch-unknown") throw new ReconcileError(409, `provider-no-run is only for a launch whose dispatch is unknown; this one reads ${dispatch.state}. Nothing was recorded.`);
+    const gap = noRunProblem(l, e.window!);
+    if (gap) throw new ReconcileError(gap.code, `${gap.why[0].toUpperCase()}${gap.why.slice(1)}. Nothing was recorded.`);
     const from = Date.parse(e.window!.from), to = Date.parse(e.window!.to);
-    if (from > launched || to < launched + WINDOW_AFTER_LAUNCH_MS)
-      throw new ReconcileError(400, `The window you checked must cover the launch: from at or before ${l.at} to at least ${new Date(launched + WINDOW_AFTER_LAUNCH_MS).toISOString()}. Nothing was recorded.`);
     if (to - from > WINDOW_MAX_MS) throw new ReconcileError(400, "The window is longer than 24 hours; give the period you actually checked. Nothing was recorded.");
     if (to > checked + CLOCK_SKEW_MS) throw new ReconcileError(400, "The window ends after checkedAt: you cannot have checked a period that had not happened yet. Nothing was recorded.");
   } else if (l.sessionId && e.sessionId !== l.sessionId) {
@@ -202,9 +404,14 @@ export function meaningOf(req: OwnerRequest): { meaning: string; doesNotMean: st
   switch (req.kind) {
     case "provider-no-run":
       return {
-        meaning: `You checked the Routine's run history from ${req.evidence!.window!.from} to ${req.evidence!.window!.to} (at ${req.evidence!.checkedAt}) and found no run for this job: no session was created.`,
-        doesNotMean: [unverified, kept, "Nothing is relaunched or retried by this entry."],
-        effect: "The launch reads provider-confirmed-no-run. A retry of it through its work session becomes possible, with its own confirmation. If the runner ever reports, that outranks this entry and you are told.",
+        meaning: `You checked the Routine's run history from ${req.evidence!.window!.from} to ${req.evidence!.window!.to} (at ${req.evidence!.checkedAt}), a window that covers the dispatch ORBIT recorded, and found no run for this job: no session was created by this fire.`,
+        doesNotMean: [
+          unverified,
+          kept,
+          "It covers only the window you checked: a run outside it, or one the run history does not list, is not ruled out.",
+          "Nothing is relaunched or retried by this entry.",
+        ],
+        effect: "The launch reads provider-confirmed-no-run while ORBIT's launch record still matches this entry. A retry of it through its work session becomes possible, with its own confirmation. If the runner ever reports, that outranks this entry and you are told; if the launch record changes, the retry is refused.",
       };
     case "provider-session-ended":
       return {
@@ -234,17 +441,24 @@ export function meaningOf(req: OwnerRequest): { meaning: string; doesNotMean: st
   }
 }
 
+// The confirmation digest binds: the job id; the normalized request (kind, evidence, reason); the whole basedOn copy of the launch record
+// (launch time, routine, brief commit, session id, dispatch state, outcome, event count, and the fire times fireStartedAt, firedAt,
+// failedAt and fireFailure); and the number of earlier entries for the job. Nothing else of the job record is bound. `v: 2` since the
+// fire times were added.
 export const digestOf = (job: string, req: OwnerRequest, based: BasedOn, prior: number) =>
-  createHash("sha256").update(JSON.stringify({ v: 1, job, kind: req.kind, evidence: req.evidence ?? null, reason: req.reason, basedOn: based, prior })).digest("hex");
+  createHash("sha256").update(JSON.stringify({ v: 2, job, kind: req.kind, evidence: req.evidence ?? null, reason: req.reason, basedOn: based, prior })).digest("hex");
 
 const ownerEntries = (entries: Entry[]) => entries.filter((e): e is OwnerEntry => e.actor === "owner");
 
 // The reading of a job's reconciliation: the latest owner entry, unless the runner has reported since. Pure: reads the job and the entries.
-export function reconciliationOf(job: Pick<Job, "events">, entries: Entry[]): ReconciliationView {
+// An entry that would allow a retry (provider-no-run, or provider-session-ended with output none) is re-read against the job's launch
+// record every time: the record must still hold what the entry copied, and a no-run window must still cover the recorded dispatch.
+// Otherwise the reading is provider-evidence-insufficient and the retry is refused.
+export function reconciliationOf(job: Pick<Job, "events" | "eventsDropped" | "launch">, entries: Entry[]): ReconciliationView {
   const latest = ownerEntries(entries).at(-1);
   const refused = (basis: string) => ({ allowed: false, basis });
   if (!latest) return { state: "none", basis: "no owner reconciliation is recorded for this launch", retry: refused("no owner reconciliation is recorded; the launch reading alone decides"), entries, lateEvents: 0, contradicted: false };
-  const lateEvents = Math.max(0, job.events.length - latest.basedOn.events);
+  const lateEvents = lateEventsOf(job, latest.basedOn.events).count;
   const claimedOver = latest.kind === "provider-no-run" || latest.kind === "provider-session-ended";
   if (lateEvents)
     return {
@@ -258,11 +472,26 @@ export function reconciliationOf(job: Pick<Job, "events">, entries: Entry[]): Re
       contradicted: claimedOver,
     };
   const owner = `Owner-reported (${latest.at}): ORBIT did not verify it. The job record is unchanged and still reads ${latest.basedOn.dispatch}.`;
+  const insufficient = (why: string): ReconciliationView => ({
+    state: "provider-evidence-insufficient",
+    basis: `your ${latest.kind} entry of ${latest.at} does not hold against ORBIT's launch record now: ${why}`,
+    caveat: `${owner} The entry is kept as history and allows nothing.`,
+    retry: refused(`${why}; a session may exist, so record provider evidence that holds for the record as it is, or leave the launch unresolved`),
+    latest,
+    entries,
+    lateEvents,
+    contradicted: false,
+  });
   switch (latest.kind) {
-    case "provider-no-run":
-      return { state: "provider-confirmed-no-run", basis: `you reported that the Routine run history (${latest.evidence?.window?.from} to ${latest.evidence?.window?.to}) holds no run for this job`, caveat: owner, retry: { allowed: true, basis: "provider evidence reported by the owner: no session was created" }, latest, entries, lateEvents, contradicted: false };
+    case "provider-no-run": {
+      const why = basisChange(latest.basedOn, job.launch) ?? noRunProblem(job.launch, latest.evidence?.window)?.why;
+      if (why) return insufficient(why);
+      return { state: "provider-confirmed-no-run", basis: `you reported that the Routine run history (${latest.evidence?.window?.from} to ${latest.evidence?.window?.to}) holds no run for this job`, caveat: owner, retry: { allowed: true, basis: "provider evidence reported by the owner: the Routine run history for a window covering the recorded dispatch lists no run for this job" }, latest, entries, lateEvents, contradicted: false };
+    }
     case "provider-session-ended": {
       const none = latest.evidence?.output === "none";
+      const why = none ? basisChange(latest.basedOn, job.launch) : undefined;
+      if (why) return insufficient(why);
       return {
         state: "provider-confirmed-ended",
         basis: `you reported that session ${latest.evidence?.sessionId} has ended (output: ${latest.evidence?.output})`,
@@ -317,18 +546,30 @@ export function launchReconciliations(backend: ReconBackend, now: () => Date = (
       problem = `the reconciliation log has schema version ${raw.v}, newer than this build understands (${RECON_FILE_VERSION}); it is left as it is`;
       throw new ReconcileError(503, `Launch reconciliation is unavailable: ${problem}.`);
     }
+    // Any entry that fails the integrity check makes the whole log unavailable, and it is not cached: every use re-reads the file, so a
+    // copy the owner repaired by hand is picked up without a restart. Nothing is written while it fails, so nothing is lost or masked.
+    const problems = integrityProblems(raw.entries);
+    if (problems.length) {
+      const shown = problems.slice(0, 3).join("; ") + (problems.length > 3 ? "; …" : "");
+      problem = `the reconciliation log failed its integrity check (${problems.length} problem(s): ${shown.slice(0, MAX_PROBLEM_CHARS)}); it is left as it is, no entry in it is used and no retry is allowed from it until it is repaired by hand`;
+      throw new ReconcileError(503, `Launch reconciliation is unavailable: ${problem}.`);
+    }
     problem = undefined;
     file = raw;
     return file;
   };
-  // Persist first, then change memory: a failed write leaves both as they were.
+  // Persist first, then change memory: a failed write leaves both as they were. ORBIT never writes an entry its own loader would refuse
+  // (for example a launch record whose time is not a UTC ISO time, copied into basedOn): that would make the whole log unavailable.
   const append = (entry: Entry) => {
     const f = load();
     const next = { v: Math.max(f.v, RECON_FILE_VERSION), entries: [...f.entries, entry] };
+    const problems = integrityProblems(next.entries);
+    if (problems.length) throw new ReconcileError(409, `This entry would not pass the log's integrity check (${problems[0].slice(0, 200)}), so it was not written. Nothing was recorded.`);
     backend.save(next);
     file = next;
   };
-  const all = () => load().entries.filter(validEntry);
+  // Every entry passed the integrity check in load(), or load() threw: nothing is filtered out here.
+  const all = () => load().entries as Entry[];
   const of = (job: string) => all().filter((e) => e.job === job);
   const nextSeq = () => all().reduce((m, e) => Math.max(m, e.seq), 0) + 1;
 
@@ -354,9 +595,10 @@ export function launchReconciliations(backend: ReconBackend, now: () => Date = (
       return { job: job.id, kind: req.kind, ...(req.evidence ? { evidence: req.evidence } : {}), reason: req.reason, basedOn: based, ...meaningOf(req), digest };
     },
 
-    // Step two: the same request plus the digest the preview returned. The digest binds the exact entry, ORBIT's record as it was read
-    // (dispatch state, outcome, event count, session id) and the number of earlier entries, so a confirmation is single use and goes stale
-    // when anything it was based on changes. A repeat of the confirmation that was just recorded returns that entry and records nothing.
+    // Step two: the same request plus the digest the preview returned. The digest (digestOf) binds the exact entry, the basedOn copy of
+    // ORBIT's launch record as it was read (launch time, routine, brief commit, session id, dispatch state, outcome, event count and the
+    // fire times) and the number of earlier entries, so a confirmation is single use and goes stale when any of those changes. admit()
+    // runs again here, so the window is checked against the record as it is at confirmation. A repeat of the confirmation that was just recorded returns that entry and records nothing.
     confirm(job: Job, input: unknown, digest: unknown): { entry: OwnerEntry; repeated: boolean } {
       if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) throw new ReconcileError(400, "confirm must be the digest the preview returned.");
       // A repeat is the same request with the digest already recorded; anything else with that digest is stale and refused below.
@@ -383,14 +625,20 @@ export function launchReconciliations(backend: ReconBackend, now: () => Date = (
           const latest = ownerEntries(entries).at(-1);
           if (!latest || entries.some((e) => e.actor === "orbit" && e.after === latest.seq)) continue;
           const job = jobs.get(id);
-          if (!job || job.events.length <= latest.basedOn.events) continue;
+          if (!job) continue;
+          // By position, not timestamp (lateEventsOf): the first late event is the one after the basedOn count, when the record still
+          // holds it; otherwise the first retained one, and the entry and the message say so.
+          const lateness = lateEventsOf(job, latest.basedOn.events);
+          if (!lateness.count || !lateness.first) continue;
           const view = reconciliationOf(job, entries);
-          const first = job.events.find((e) => e.at >= latest.at) ?? job.events.at(-1)!;
-          const late: LateEntry = { seq: nextSeq(), job: id, at: now().toISOString(), actor: "orbit", kind: "late-runner-evidence", after: latest.seq, events: view.lateEvents, firstLateAt: first.at, firstLateType: first.type, contradicts: view.contradicted };
+          const first = lateness.first;
+          const late: LateEntry = { seq: nextSeq(), job: id, at: now().toISOString(), actor: "orbit", kind: "late-runner-evidence", after: latest.seq, events: lateness.count, firstLateAt: first.at, firstLateType: first.type, firstLateExact: lateness.firstExact, contradicts: view.contradicted };
           append(late);
           added.push(late);
+          const count = `${lateness.exactCount ? "" : "at least "}${lateness.count} runner event(s)`;
+          const firstText = lateness.firstExact ? `first ${first.type} at ${first.at}` : `first retained ${first.type} at ${first.at} (earlier events were dropped from the job record, so the true first is not known)`;
           opts.notify?.send(
-            `Job ${id} reported after you reconciled its launch (${latest.kind}, ${latest.at}): ${view.lateEvents} runner event(s), first ${first.type} at ${first.at}.${view.contradicted ? " This contradicts your entry: a session did run. Check its work before relaunching anything." : ""} Your entry is kept; the runner's events now decide.`,
+            `Job ${id} reported after you reconciled its launch (${latest.kind}, ${latest.at}): ${count}, ${firstText}.${view.contradicted ? " This contradicts your entry: a session did run. Check its work before relaunching anything." : ""} Your entry is kept; the runner's events now decide.`,
             view.contradicted,
           );
         }

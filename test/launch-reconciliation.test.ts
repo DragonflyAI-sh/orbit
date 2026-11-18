@@ -27,7 +27,9 @@ const ACCEPTED: Launch = { ...LEGACY, fireStartedAt: at(), sessionId: "cse_accep
 const REJECTED: Launch = { ...LEGACY, fireStartedAt: at(), failedAt: at(1000), error: "routine not fired: Routine orbit fire returned HTTP 401", fireFailure: "rejected" };
 const TRANSPORT: Launch = { ...LEGACY, fireStartedAt: at(), failedAt: at(1000), error: "routine not fired: fetch failed (outcome unknown: the request may have reached the provider)", fireFailure: "transport" };
 
-const NO_RUN = { kind: "provider-no-run", source: "routine-run-history", checkedAt: at(4 * 60 * MIN), windowFrom: at(-MIN), windowTo: at(2 * MIN), reason: "Routine orbit run history shows no run for this job id between 01:17 and 01:20 UTC." };
+// provider-no-run must cover the recorded dispatch (fireStartedAt - 5 min to failedAt + 15 min), so these tests use TRANSPORT, a record
+// that bounds it. A legacy record cannot, and is refused for provider-no-run (test/launch-reconciliation-safety.test.ts).
+const NO_RUN = { kind: "provider-no-run", source: "routine-run-history", checkedAt: at(4 * 60 * MIN), windowFrom: at(-10 * MIN), windowTo: at(30 * MIN), reason: "Routine orbit run history shows no run for this job id between 01:08 and 01:48 UTC." };
 const ENDED = (output: string, sessionId = "cse_found12") => ({ kind: "provider-session-ended", source: "session-page", checkedAt: at(4 * 60 * MIN), sessionId, output, reason: "The session page shows it stopped at the tool-commit check." });
 const RUNNING = { kind: "provider-session-running", source: "session-page", checkedAt: at(4 * 60 * MIN), sessionId: "cse_found12", reason: "The session page still shows the session as active." };
 const ABANDON = { kind: "abandon-tracking", reason: "Run history is no longer available; I stop tracking this launch." };
@@ -40,7 +42,7 @@ function setup(opts: { dir?: string; launch?: Launch; id?: string } = {}) {
   const jobs = jobRegistry(jsonStore<Job[]>(opts.dir, "jobs-cloud", []), Buffer.alloc(32, 7), notes, () => clock);
   const id = opts.id ?? "orbit-202611180118-test";
   jobs.register(id);
-  jobs.setLaunch(id, opts.launch ?? LEGACY);
+  jobs.setLaunch(id, opts.launch ?? TRANSPORT);
   const inFlight = launchTracker();
   const recon = launchReconciliations(reconFile(opts.dir), () => clock, { notify, inFlight });
   const record = (input: Record<string, unknown>) => {
@@ -117,7 +119,8 @@ test("only unresolved launches can be reconciled: definitive failures, runner re
   const ended = setup();
   ended.jobs.record(ended.id, { type: "summary", status: "done", text: "done" });
   refuses(() => ended.recon.preview(ended.job(), ABANDON), 409, /runner-ended/);
-  const fly = setup();
+  // In flight: a fire with no result yet, in this process's tracker.
+  const fly = setup({ launch: { ...LEGACY, fireStartedAt: at() } });
   fly.inFlight.begin(fly.id);
   refuses(() => fly.recon.preview(fly.job(), ABANDON), 409, /still running this launch/);
   const none = setup();
@@ -261,7 +264,7 @@ test("a failed write records nothing, and the log refuses rather than drops when
 
 // ---- bounded, secret-safe input -------------------------------------------------------------------------------------------------
 
-test("input is a fixed set of bounded fields: unknown fields, secrets, bad times and windows that miss the launch are refused", () => {
+test("input is a fixed set of bounded fields: unknown fields, secrets, bad times and windows that miss the dispatch are refused", () => {
   const s = setup();
   const p = (input: Record<string, unknown>) => () => s.recon.preview(s.job(), input);
   refuses(p({ ...ABANDON, logs: "raw provider log" }), 400, /Unknown field/);
@@ -276,8 +279,10 @@ test("input is a fixed set of bounded fields: unknown fields, secrets, bad times
   refuses(p({ ...ENDED("none"), sessionId: "../../etc/passwd" }), 400, /sessionId must be/);
   refuses(p({ ...NO_RUN, checkedAt: "yesterday" }), 400, /UTC ISO time/);
   refuses(p({ ...NO_RUN, source: "session-page" }), 400, /routine-run-history/);
-  refuses(p({ ...NO_RUN, windowFrom: at(MIN) }), 400, /must cover the launch/);
-  refuses(p({ ...NO_RUN, windowTo: at(30_000) }), 400, /must cover the launch/);
+  refuses(p({ ...NO_RUN, windowFrom: at(MIN) }), 400, /must cover the dispatch/);
+  refuses(p({ ...NO_RUN, windowTo: at(30_000) }), 400, /must cover the dispatch/);
+  refuses(p({ ...NO_RUN, windowFrom: at(-4 * MIN) }), 400, /must cover the dispatch/);
+  refuses(p({ ...NO_RUN, windowTo: at(15 * MIN) }), 400, /must cover the dispatch/);
   refuses(p({ ...NO_RUN, windowFrom: at(-25 * 60 * MIN) }), 400, /longer than 24 hours/);
   refuses(p({ ...NO_RUN, checkedAt: at(-MIN) }), 400, /before the launch/);
   refuses(p({ ...NO_RUN, checkedAt: at(10 * 60 * MIN) }), 400, /future/);
@@ -344,6 +349,10 @@ test("retry of an unresolved launch: refused without reconciliation, after aband
 
 test("the pure reading never derives a state from a job alone", () => {
   assert.equal(reconciliationOf({ events: [] }, []).state, "none");
+  // An entry handed in without a launch record never allows a retry.
+  const s = setup();
+  s.record(NO_RUN);
+  assert.equal(reconciliationOf({ events: [] }, s.recon.entries(s.id)).retry.allowed, false);
   assert.equal(reconciliationOf({ events: [] }, []).retry.allowed, false);
 });
 

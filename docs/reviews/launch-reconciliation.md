@@ -287,11 +287,13 @@ launch.** Only the owner's look at the provider's record, recorded through this 
 
 `src/launch-reconciliation.ts`: an append-only log, `<state>/launch-reconciliations.json`, kept beside the job store. It never changes
 the job record: the launch, events and `dispatch` reading stay exactly as they were, and each entry also copies what that record held
-when it was confirmed (`basedOn`: launch time, routine, brief commit, session id, dispatch state, outcome, event count).
+when it was confirmed (`basedOn`: launch time, routine, brief commit, session id, dispatch state, outcome, event count, and under `fire`
+the record's dispatch times `fireStartedAt`, `firedAt`, `failedAt` and `fireFailure` as they were; entries written before the follow-up
+below have no `fire`).
 
 | Kind (owner) | Means | Needs | Reading | Retry through the work session |
 |---|---|---|---|---|
-| `provider-no-run` | The Routine's run history for a window covering the launch shows no run for this job | `source: routine-run-history`, `checkedAt`, `windowFrom` ≤ launch, `windowTo` ≥ launch + 60 s | `provider-confirmed-no-run` | allowed (own confirmation) |
+| `provider-no-run` | The Routine's run history for a window covering the recorded dispatch shows no run for this job | `source: routine-run-history`, `checkedAt`, `windowFrom` ≤ `fireStartedAt` − 5 min, `windowTo` ≥ the fire's recorded end (`failedAt`) + 15 min; a `dispatch-unknown` record that has both times (see the follow-up below) | `provider-confirmed-no-run` | allowed (own confirmation) while the entry still holds against the record |
 | `provider-session-ended` | The session was found and has ended | `source`, `checkedAt`, `sessionId`, `output: none \| pushed \| unknown` | `provider-confirmed-ended` | allowed only with `output: none` |
 | `provider-session-running` | The session was found and is running, or was not seen to end | `source`, `checkedAt`, `sessionId` | `provider-confirmed-running` | refused |
 | `abandon-tracking` | The owner stops tracking the launch without provider evidence | `reason` only; any evidence field is refused | `tracking-abandoned` | refused |
@@ -305,13 +307,15 @@ is stored masked. There are no other fields: no logs, no transcripts, no paths, 
   no tool for this, so no model-only state change is possible.
 * **Two steps.** A POST without `confirm` returns a preview and writes nothing. The preview has the normalized entry, `basedOn`,
   `meaning`, `doesNotMean`, `effect` and a `digest`. A POST of the same body with `confirm: <digest>` appends the entry. The digest binds
-  the entry, ORBIT's record as it was read and the number of earlier entries. So a confirmation is single use, and it goes stale (409) if
-  the request, the job record or the log changes in between. A repeat of the confirmation just recorded returns that entry and writes
-  nothing.
+  the job id, the normalized request (kind, evidence, reason), the `basedOn` copy of the launch record (launch time, routine, brief
+  commit, session id, dispatch state, outcome, event count, and the fire times `fireStartedAt`, `firedAt`, `failedAt`, `fireFailure`)
+  and the number of earlier entries for the job. Nothing else of the job record is bound. So a confirmation is single use, and it goes
+  stale (409) if the request, any of those record fields or the log changes in between; the admission checks also run again at
+  confirmation. A repeat of the confirmation just recorded returns that entry and writes nothing.
 * **Only unresolved launches.** A launch the record already settles (`runner-active`, `runner-ended` or `not-launched`) is refused, as is
   one this process is still running (`in-flight`). `provider-no-run` is refused when the record shows the provider accepted the fire (a
   session id, or a 2xx). A named session must match the recorded `launch.sessionId` when there is one. The checked window must cover
-  the launch, and `checkedAt` must be after the launch and not in the future.
+  the recorded dispatch (follow-up below), and `checkedAt` must be after the launch and not in the future.
 * **Provider evidence is reported, not verified.** The reading's caveat says so, and says the job record is unchanged.
 * **Abandoning is not evidence.** It never claims a cancellation, a non-launch or an ended session. The launch stays unresolved and a
   retry stays refused. The refusal says that a replacement carrying that residual duplicate risk would need its own explicit owner
@@ -321,8 +325,8 @@ is stored masked. There are no other fields: no logs, no transcripts, no paths, 
   appends its own `late-runner-evidence` entry once per owner entry, at start and on every 30-second tick (`observe`), and notifies the
   owner. The notification is urgent when the runner contradicts the entry. Nothing is removed from the log. After that, the job's own
   events decide: further owner entries are refused, and a retry is refused while the runner is active.
-* **Fail closed.** An unreadable or newer-version log is left as it is and makes the route answer 503. If the log cannot be read, the
-  retry gate refuses with 503. A failed write records nothing. A job's history holds at most 20 owner entries, and when it is full new
+* **Fail closed.** An unreadable or newer-version log, or one with any entry that fails the integrity check (follow-up below), is left
+  as it is and makes the route answer 503. If the log cannot be used, the retry gate refuses with 503. A failed write records nothing. A job's history holds at most 20 owner entries, and when it is full new
   entries are refused (409); old ones are never dropped.
 * **Nothing external.** Nothing here launches, retries, cancels, steers or calls the provider. The retry gate
   (`src/work-sessions.ts` `plan()`) only *allows* the owner's separately confirmed retry. Nothing relaunches automatically.
@@ -351,8 +355,12 @@ change is deployed. `$ORBIT` is ORBIT's tailnet address.
    If not, open the `orbit` Routine's run history and look for a run started from 2026-11-18T01:18Z to 01:19Z whose first message begins
    `Job id: orbit-202611180118-hcey`. Do not copy the token line anywhere.
 3. **Write the body for what you found**, as `body.json`. Use your own times and wording; never paste logs or tokens.
-   * No run in the window:
-     `{"kind":"provider-no-run","source":"routine-run-history","checkedAt":"<now, UTC>","windowFrom":"2026-11-18T01:18:00Z","windowTo":"2026-11-18T01:20:00Z","reason":"<what you checked>"}`
+   * No run in the window. This is only accepted when the record from step 1 has `dispatch.fireStartedAt` and a recorded fire end
+     (`launch.failedAt`); an older record without them, or one where ORBIT stopped mid-fire, is refused (409) for `provider-no-run`,
+     and only session evidence or `abandon-tracking` can be recorded. **Whether this job's record has those times was not checked by
+     this change;** step 1 shows it. The window must run from at least 5 minutes before `fireStartedAt` to at least 15 minutes after
+     `failedAt`; a preview that falls short says the exact bounds needed:
+     `{"kind":"provider-no-run","source":"routine-run-history","checkedAt":"<now, UTC>","windowFrom":"<fireStartedAt − 5 min or earlier>","windowTo":"<failedAt + 15 min or later>","reason":"<what you checked>"}`
    * A session that has ended:
      `{"kind":"provider-session-ended","source":"session-page","checkedAt":"<now, UTC>","sessionId":"<id as shown>","output":"none|pushed|unknown","reason":"<where it stopped, what it pushed>"}`
    * A session still running, or not seen to end:
@@ -371,6 +379,64 @@ change is deployed. `$ORBIT` is ORBIT's tailnet address.
    * `tracking-abandoned`: the duplicate-risk gate stays unresolved, and ORBIT has no path for a replacement that carries that risk. Any
      such replacement needs an explicit owner decision made knowing a duplicate is possible, plus a separate design for confirming it.
 
+### Review follow-up: dispatch window, log integrity, first late event
+
+The review of PR #132 (ORBIT job `orbit-202611180530-2ghl`, head `c3fc6f8`) recorded a blocking finding and three smaller ones. Each was
+reproduced on `main` at `2004975` with a test that failed before the change (`test/launch-reconciliation-safety.test.ts`, F1 to F3), and
+fixed in `src/launch-reconciliation.ts` (job `orbit-202611180544-2kr1`).
+
+**F1 (blocking): the `provider-no-run` window was anchored to `launch.at`.** `launch.at` is written before the brief
+(`src/job-launch.ts`), and the fire follows the brief write and the fire request, neither with a timeout. A window
+00:59:00Z–01:01:01Z was accepted for a launch recorded at 01:00:00Z whose fire started at 01:03:00Z and failed in transport at 01:03:05Z,
+and the reading allowed a retry. Now:
+
+* The window is checked against the dispatch the record bounds (`dispatchBounds`): from `fireStartedAt` (persisted immediately before
+  the fire request) to the fire's recorded end (`failedAt`). It must start at least 5 minutes before `fireStartedAt`
+  (`WINDOW_BEFORE_DISPATCH_MS`: host and provider clocks may differ, and run lists show minutes) and end at least 15 minutes after the
+  end (`WINDOW_AFTER_DISPATCH_MS`: the same skew, plus time for the provider to create a session from a request whose answer was lost).
+  These are judgment margins, not provider guarantees.
+* It fails closed when the record cannot bound the dispatch: an older record with no `fireStartedAt` (its `launch.at` is not a fire
+  time, so no window around it is proof), a fire with no recorded end (ORBIT stopped mid-fire; the request could have reached the
+  provider any time until it stopped), or times that contradict each other (unparseable, fire before launch, end before start, both an
+  answer and a failure). The refusal is 409 and names the reason; session evidence and `abandon-tracking` are still accepted.
+  A record that shows the provider accepted the fire is still refused first.
+* The same check (`noRunProblem`) runs at preview, again at confirmation, and at every reading. An entry that would allow a retry
+  (`provider-no-run`, or `provider-session-ended` with output `none`) is also compared with the launch record as it is now
+  (`basisChange`: launch time, routine, brief commit, session id, and the fire times when the entry recorded them). When either fails
+  the reading is **`provider-evidence-insufficient`**, the entry is kept as history, and the retry gate refuses (409). This covers
+  entries the PR #132 build admitted: they have no `fire` copy and are checked against the record as it is.
+* The fire times are copied into `basedOn.fire` and bound by the digest (version 2), so a change to them between preview and
+  confirmation makes the approval stale.
+* What the entry means is stated no wider than its scope: the preview says the run history covers only the window checked, and a run
+  outside it, or one the history does not list, is not ruled out. ORBIT still does not verify the report.
+
+**F2: malformed persisted entries were skipped silently.** `validEntry` checked only that `basedOn` was an object; a missing
+`basedOn.events` made the late-event count `NaN` and left a retry allowed, and a corrupt newer entry was filtered out so an older
+`provider-no-run` became the latest decision. Now every entry is checked in full at load (`integrityProblems`): the discriminated
+owner and ORBIT shapes, no unknown fields, evidence exactly as `parseRequest` would produce it (window forward and at most 24 hours),
+valid UTC times, `basedOn.events` a nonnegative integer, `dispatch` one of the states an entry can be admitted in, `outcome`
+`unresolved`, `seq` increasing through the file, and each late entry naming an earlier owner entry of the same job at most once. One
+failing entry makes the whole log unavailable (503) with a bounded message (problem count, the first three by entry position and seq,
+never stored text). The file is not rewritten, repaired or partly used, and every use re-reads it, so a copy repaired by hand is picked
+up without a restart. Unreadable and newer-version files are refused as before. Valid entries written by the PR #132 build load
+unchanged. ORBIT also refuses (409, nothing written) to append an entry that its own check would refuse, so an odd launch record cannot
+lock the log.
+
+**F3: digest wording and the first late event.** The digest's binding is now documented field by field (above and in `digestOf`).
+`observe()` finds the first late event by position (`lateEventsOf`: the event after the `basedOn` count, using the job record's
+`eventsDropped`), not by comparing timestamps with the entry's time. When the job record has dropped it past its 200-event cap, or its
+drops are unknown, the late entry records `firstLateExact: false` and the notification says "first retained … (earlier events were
+dropped …)". The late count includes counted drops, and says "at least" when drops are unknown. Contradiction notifications and the
+once-per-entry late entry are unchanged.
+
+Tests (`test/launch-reconciliation-safety.test.ts`, synthetic): the review's reproduction; sufficient and insufficient windows on
+either side; legacy, interrupted and inconsistent timing; a timing change between preview and confirmation; persisted entries from the
+older build with a short window, on a legacy record and with a changed session id; a no-run entry whose record later gains a session;
+a missing `basedOn.events`; corrupt newer `abandon-tracking` and `provider-session-running` entries behind an older `provider-no-run`;
+25 malformed shapes and orderings; a repaired log after restart; clock skew and the event cap in `observe()`; restart round trips of the
+new entries, idempotent repeats and late callbacks; the owner route; the write-side integrity guard; and the retry gate for each. `test/launch-reconciliation.test.ts`
+now uses a launch record with dispatch times for `provider-no-run`.
+
 ### Limitations
 
 * The provider evidence is the owner's report. ORBIT cannot check it, because no read-only provider interface is available to it or to a
@@ -380,3 +446,8 @@ change is deployed. `$ORBIT` is ORBIT's tailnet address.
 * The not-started alert, the work-session views and the Jobs page do not show a reconciliation yet. The JSON job routes and the retry gate do (the detail route carries it, but the page does not render it).
 * The shutdown handler still does not wait for launches in flight (F4), so new W3 cases remain possible. This change only gives them an
   honest way to be closed.
+* A launch interrupted mid-fire (no recorded fire end) and any older record without `fireStartedAt` can no longer be closed with
+  `provider-no-run`: ORBIT cannot bound when the fire could have reached the provider. Such a launch can be closed with session evidence,
+  or abandoned (which allows no retry). Bounding them would need new evidence, such as the time the old ORBIT process stopped, which
+  ORBIT does not record.
+* The 5- and 15-minute margins are judgment, not provider guarantees. They are constants in `src/launch-reconciliation.ts`.
