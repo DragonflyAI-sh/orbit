@@ -9,7 +9,9 @@ import { researchStore } from "./research.ts";
 import type { ResearchLane, ResearchStore, ResearchTool } from "./research.ts";
 import { researchTools, watchResearchVault, withLaneGuard } from "./research-tools.ts";
 import { hasLegacyContext, LEGACY_CONTEXT_ERROR, refuseLegacyContext } from "./job-context.ts";
-import { jobRow, toolCommitStatus } from "./job-view.ts";
+import { toolCommitStatus } from "./job-view.ts";
+import { EVENTS_DEFAULT, eventsPage, jobDetail, listRows, parseRowQuery } from "./job-detail.ts";
+import type { OpenSteerProposal } from "./job-detail.ts";
 import type { Job, Jobs } from "./jobs.ts";
 import type { ControlRepo, Routine } from "./launcher.ts";
 import type { MemoryPort } from "./memory.ts";
@@ -923,8 +925,9 @@ export function buildServer({
 
     if (jobs && url.pathname === "/jobs" && req.method === "GET") {
       if (!(await owned("jobs", "list"))) return;
-      if (url.searchParams.get("view") === "rows") return send(res, 200, { jobs: jobs.list().map((j) => jobRow(j, jobs.health(j), commit)) });
-      return send(res, 200, { jobs: jobs.list().map((j) => withHealth({ ...j, ...(j.summary ? { summary: { ...j.summary, text: "" } } : {}) })) });
+      // The Jobs page list: every stored job, searched, filtered and paged with a cursor (src/job-detail.ts).
+      if (url.searchParams.get("view") === "rows") return send(res, 200, listRows(jobs.all(), (j) => jobs.health(j), commit, parseRowQuery(url.searchParams)));
+      return send(res, 200, { jobs: jobs.list().map((j) => withHealth({ ...j, ...(j.summary ? { summary: { ...j.summary, text: "" } } : {}), ...(j.launch?.dispatch ? { launch: { ...j.launch, dispatch: { ...j.launch.dispatch, brief: { ...j.launch.dispatch.brief, text: "" } } } } : {}) })) });
     }
     if (jobs && url.pathname === "/jobs/launch" && req.method === "POST") {
       if (!(await owned("jobs", "launch"))) return;
@@ -1092,7 +1095,7 @@ export function buildServer({
       if (!jobs) return send(res, 503, { error: "Jobs are not enabled." });
       if (!claimed(proposal.id, "confirmed")) return alreadyUsed();
       if (proposal.kind === "job_steer") {
-        const steer = jobs.steer(proposal.job, proposal.text);
+        const steer = jobs.steer(proposal.job, proposal.text, { source: "proposal", proposal: proposal.id });
         const result = steer ? { code: 201, body: { steered: proposal.job, steer } } : { code: 404, body: { error: "That job no longer exists." } };
         cardSvc(proposal.id).settle(proposal.id, result);
         return send(res, result.code, result.body);
@@ -1118,18 +1121,34 @@ export function buildServer({
       if ("error" in result) return send(res, 400, { error: result.error });
       return send(res, 201, { ...result, api: publicJobUrl ?? null });
     }
-    const jobMatch = url.pathname.match(/^\/jobs\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})(\/steer)?$/);
+    const jobMatch = url.pathname.match(/^\/jobs\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})(\/steer|\/events)?$/);
     if (jobs && jobMatch && req.method === "GET" && !jobMatch[2]) {
       if (!(await owned("jobs", "get"))) return;
       const job = jobs.get(jobMatch[1]);
-      return job ? send(res, 200, withHealth(job)) : send(res, 404, { error: "No job with that id." });
+      if (!job) return send(res, 404, { error: "No job with that id." });
+      // The Jobs page's detail: sections, links, inputs and the newest page of events (src/job-detail.ts). Without `view` the raw record.
+      if (url.searchParams.get("view") === "detail") {
+        const openSteers = proposals.list().filter((p): p is typeof p & OpenSteerProposal => p.kind === "job_steer" && p.job === job.id);
+        return send(res, 200, jobDetail(job, jobs.health(job), { all: jobs.all(), routineRepo: job.launch ? research?.routineRepos?.get(job.launch.routine) : undefined, running: commit }, openSteers));
+      }
+      return send(res, 200, withHealth(job));
     }
-    if (jobs && jobMatch && req.method === "POST" && jobMatch[2]) {
+    // Older events of a job, newest first, from before the `before` sequence number; `next` continues further back.
+    if (jobs && jobMatch && req.method === "GET" && jobMatch[2] === "/events") {
+      if (!(await owned("jobs", "get"))) return;
+      const job = jobs.get(jobMatch[1]);
+      if (!job) return send(res, 404, { error: "No job with that id." });
+      const before = url.searchParams.get("before");
+      const limit = Number(url.searchParams.get("limit") ?? EVENTS_DEFAULT);
+      if (before !== null && !/^\d{1,9}$/.test(before)) return send(res, 400, { error: "before is an event sequence number." });
+      return send(res, 200, eventsPage(job, before === null ? undefined : Number(before), Number.isInteger(limit) ? limit : EVENTS_DEFAULT));
+    }
+    if (jobs && jobMatch && req.method === "POST" && jobMatch[2] === "/steer") {
       if (!(await owned("jobs", "steer"))) return;
       const input = await body();
       if (!input) return;
       if (typeof input.text !== "string" || !input.text.trim()) return send(res, 400, { error: "A steer needs text." });
-      const steer = jobs.steer(jobMatch[1], input.text.trim());
+      const steer = jobs.steer(jobMatch[1], input.text.trim(), { source: "owner" });
       return steer ? send(res, 201, steer) : send(res, 404, { error: "No job with that id." });
     }
 

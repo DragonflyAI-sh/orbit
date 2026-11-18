@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { normalizeToolCommit } from "./jobs.ts";
@@ -61,7 +62,12 @@ export function buildIngress(jobs: Jobs, now: () => number = Date.now, opts: { r
     const research = jobs.get(id)?.kind === "research";
     if ((what === "brief" || what === "tool") && req.method === "GET") {
       if (!research) return send(res, 404, { error: "Not found" });
-      if (what === "brief") return send(res, 200, researchBriefPayload(jobs.get(id)!));
+      if (what === "brief") {
+        // Recorded as evidence that the runner received its brief (the Jobs page's input states); the payload has no secrets in it.
+        const payload = researchBriefPayload(jobs.get(id)!);
+        jobs.briefServed(id, createHash("sha256").update(JSON.stringify(payload)).digest("hex"));
+        return send(res, 200, payload);
+      }
       if (!opts.researchTool) return send(res, 503, { error: "The research tool is not available on this ORBIT." });
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-orbit-sha256": opts.researchTool.sha256 });
       return res.end(opts.researchTool.text);

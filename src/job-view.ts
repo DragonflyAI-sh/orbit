@@ -47,7 +47,9 @@ function dispatchView(job: Job) {
 export function detailJob(job: Job, health: Health, running?: string) {
   const events = job.events.slice(-DETAIL_EVENTS);
   const omitted = job.events.length - events.length;
-  const { briefWords: _words, ...launch } = job.launch ?? ({} as NonNullable<Job["launch"]>);
+  const { briefWords: _words, dispatch: snap, ...rest0 } = job.launch ?? ({} as NonNullable<Job["launch"]>);
+  // The dispatch snapshot holds the whole brief; the model gets its shape (the Jobs page shows the text).
+  const launch = { ...rest0, ...(snap ? { dispatch: { v: snap.v, at: snap.at, lane: snap.lane, origin: snap.origin, briefChars: snap.brief.chars, briefSha256: snap.brief.sha256 } } : {}) };
   // The full summary is stored on the job and shown on the Jobs page; the model gets its size and state, not 200,000 characters.
   const { summary, ...rest } = job;
   return { ...rest, ...(summary ? { summary: { chars: summary.chars, state: summary.state, via: summary.via, at: summary.at } } : {}), ...(job.launch ? { launch } : {}), ...toolCommitFields(job, running), health, dispatch: dispatchView(job), events, eventsOmitted: omitted, eventsNote: omitted ? `${omitted} earlier events left out; ${events.length} of ${job.events.length} shown.` : undefined };

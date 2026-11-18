@@ -4,6 +4,7 @@ import type { LaunchTracker } from "./launch-evidence.ts";
 import { fireFailureOf } from "./launcher.ts";
 import type { ControlRepo, Routine } from "./launcher.ts";
 import { briefWords } from "./duplicates.ts";
+import { dispatchSnapshot } from "./job-inputs.ts";
 import type { Notifier } from "./notify.ts";
 import type { JobWorkLink } from "./work-sessions.ts";
 import { RESEARCH_LIMITS } from "./research.ts";
@@ -66,13 +67,13 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
     if ("error" in registered) return { code: 400, body: { error: registered.error } };
     inFlight.begin(id);
     try {
-      return await launchBuild(id, registered.token, routine, briefText, review);
+      return await launchBuild(id, registered.token, routine, briefText, review, work);
     } finally {
       inFlight.end(id);
     }
   };
 
-  async function launchBuild(id: string, token: string, routine: Routine, briefText: string, review?: NonNullable<Job["review"]>): Promise<LaunchResult> {
+  async function launchBuild(id: string, token: string, routine: Routine, briefText: string, review?: NonNullable<Job["review"]>, work?: JobWorkLink): Promise<LaunchResult> {
     if (!jobs || !control) throw new Error("unreachable: checked by the caller");
     if (review) jobs.setReview(id, review);
     const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString(), briefWords: briefWords(briefText) };
@@ -93,8 +94,11 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
     }
     // The token goes to the runner in the fire text, server to server; it is never returned or logged here.
     const text = [`Job id: ${id}`, ...(publicJobUrl ? [`API: ${publicJobUrl}`, `Token: ${token}`] : []), `Tool commit: ${commit}`].join("\n");
-    // Persisted before the request is sent, so a fire cut off by a restart is recorded as started, never as not attempted.
-    Object.assign(launch, { fireStartedAt: new Date().toISOString(), toolCommitSent: commit });
+    // Persisted before the request is sent, so a fire cut off by a restart is recorded as started, never as not attempted. The dispatch
+    // snapshot is made from this very text and brief, with the token replaced by its label (src/job-inputs.ts).
+    const fireStartedAt = new Date().toISOString();
+    const dispatch = dispatchSnapshot({ at: fireStartedAt, lane: "build", origin: review ? "orbit-review" : work ? "chat-proposal" : "owner-route", proposal: work?.proposal, fireText: text, token, brief: briefText.trim() });
+    Object.assign(launch, { fireStartedAt, toolCommitSent: commit, dispatch });
     jobs.setLaunch(id, launch);
     try {
       const fired = await routine.fire(text);
@@ -128,17 +132,19 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
     if ("error" in registered) return { code: 400, body: { error: registered.error } };
     inFlight.begin(id);
     try {
-      return await fireResearch(id, registered.token, routine, brief);
+      return await fireResearch(id, registered.token, routine, brief, work);
     } finally {
       inFlight.end(id);
     }
   }
 
-  async function fireResearch(id: string, token: string, routine: Routine, brief: string): Promise<LaunchResult> {
+  async function fireResearch(id: string, token: string, routine: Routine, brief: string, work?: JobWorkLink): Promise<LaunchResult> {
     if (!deps.research?.tool) throw new Error("unreachable: checked by the caller");
     const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString(), briefWords: briefWords(brief) };
     const text = ["Lane: research", `Job id: ${id}`, `API: ${publicJobUrl}`, `Token: ${token}`, `Tool commit: ${commit}`, `Tool sha256: ${deps.research.tool.sha256}`].join("\n");
-    Object.assign(launch, { fireStartedAt: new Date().toISOString(), toolCommitSent: commit });
+    const fireStartedAt = new Date().toISOString();
+    const dispatch = dispatchSnapshot({ at: fireStartedAt, lane: "research", origin: work ? "chat-proposal" : "owner-route", proposal: work?.proposal, fireText: text, token, brief });
+    Object.assign(launch, { fireStartedAt, toolCommitSent: commit, dispatch });
     jobs!.setLaunch(id, launch);
     try {
       const fired = await routine.fire(text);

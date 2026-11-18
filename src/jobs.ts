@@ -17,13 +17,38 @@ export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "su
 // The final summary as ORBIT holds it. complete: the whole text. partial: only the start arrived (API size limit); the full text is read from git and
 // the PR and review wait for it. oversize: longer than MAX_SUMMARY_CHARS; only the first MAX_TEXT characters are kept here, the full text is in git.
 export type SummaryRecord = { text: string; chars: number; state: "complete" | "partial" | "oversize"; via: "api" | "git"; at: string; sha?: string };
-export type Steer = { n: number; text: string; at: string; deliveredAt?: string };
+// A steer as ORBIT queued it. deliveredAt: the runner acknowledged it (the orbit-job tool acks a steer once it has written it into git).
+// source: "owner" (Rai's own POST /jobs/<id>/steer) or "proposal" (a confirmed chat proposal, whose id is `proposal`); absent on steers
+// queued before this field existed (legacy: source not recorded). textChars: set only when the text was longer than MAX_TEXT and clipped.
+export type Steer = { n: number; text: string; at: string; deliveredAt?: string; source?: "owner" | "proposal"; proposal?: string; textChars?: number };
+// What ORBIT actually sent a runner at dispatch, recorded in the same write as fireStartedAt (src/job-launch.ts), so the Jobs page shows
+// what was truly sent and never a reconstruction from today's templates. Versioned (`v`); absent on every launch before it existed.
+// Redacted before it is stored: the one-job token in the fire text is replaced by its label, and secret-shaped values in the brief are
+// masked (src/job-inputs.ts). Transport headers (the Routine credential, API version headers) are never part of it.
+export type DispatchSnapshot = {
+  v: 1;
+  at: string;
+  lane: "build" | "research";
+  // Which path launched it: Rai's /jobs/launch route, a confirmed chat proposal, or ORBIT's own review launch.
+  origin: "owner-route" | "chat-proposal" | "orbit-review";
+  proposal?: string;
+  // The `text` of the Routine fire request body, exactly as sent, except the token value.
+  fireText: string;
+  // The brief: for build jobs what ORBIT wrote to orbit-work .orbit/brief.md at the brief commit; for research jobs what the job API
+  // serves. sha256 and chars are of the text as sent (before redaction); text is the redacted copy, at most retainedChars characters
+  // (retainedChars < chars only for a brief longer than DISPATCH_BRIEF_CHARS, which is then labelled, and git holds the whole of it).
+  brief: { text: string; chars: number; retainedChars: number; sha256: string; delivery: "orbit-work" | "job-api" };
+  // What was redacted, by field, with a count. Values are never kept.
+  redactions: { field: "fireText" | "brief"; what: string; count: number }[];
+};
 export type Launch = { routine: string; at: string; branch?: string; briefCommit?: string; sessionId?: string; sessionUrl?: string; failedAt?: string; error?: string;
   // Dispatch evidence (docs/reviews/launch-reconciliation.md), written by src/job-launch.ts on launches since this field was added; absent
   // on older records, which are read conservatively (src/launch-evidence.ts). fireStartedAt: persisted immediately before the Routine fire
   // request is sent. firedAt: when the provider answered with a session. toolCommitSent: the `Tool commit:` line of the fire text (a commit
   // id or "unknown", never the token). fireFailure: what a failed fire says about whether the provider received it (src/launcher.ts).
   fireStartedAt?: string; firedAt?: string; toolCommitSent?: string; fireFailure?: "rejected" | "server-error" | "no-session" | "transport";
+  // The redacted record of what was sent (above). Absent on older launches: their brief is only in orbit-work at briefCommit.
+  dispatch?: DispatchSnapshot;
   // Distinct words of the brief, for the duplicate-launch warning (src/duplicates.ts). Not the brief itself.
   briefWords?: string;
   // Legacy, read only: job records from before launch-time vault context export was removed may still hold the paths that were copied,
@@ -52,6 +77,9 @@ export type ResearchRecord = {
   // A pending record is reconciled with the card's live outcome (src/research-tools.ts): committed, failed, cancelled, or expired when
   // the card lapsed (timed out, or dropped by a restart) without being confirmed. Earlier attempts are kept, newest last, as provenance.
   vault?: ResearchVaultAttempt & { previous?: ResearchVaultAttempt[] };
+  // Evidence that the runner fetched its brief from the job API (GET /v1/jobs/<id>/brief): when it was first and last served, how many
+  // times, and the sha256 of the first payload served. Absent: never served, or served before this field existed.
+  briefServed?: { firstAt: string; lastAt: string; count: number; sha256: string };
 };
 export type ResearchVaultAttempt = { at: string; path: string; state: "committed" | "pending-confirmation" | "failed" | "cancelled" | "expired"; commit?: string; proposalId?: string; expiresAt?: string; settledAt?: string; error?: string };
 export type Job = {
@@ -77,6 +105,8 @@ export type Job = {
   state: "registered" | "running" | "done" | "blocked" | "failed";
   lastEventAt?: string;
   events: JobEvent[];
+  // How many of the oldest events were dropped to keep the last KEEP_EVENTS. Absent on records from before it was counted (unknown).
+  eventsDropped?: number;
   steers: Steer[];
 };
 
@@ -92,8 +122,9 @@ export const RESEARCH_TTL_MS = 3 * 60 * 60 * 1000;
 const MAX_TEXT = 4000;
 // The most of a final summary ORBIT keeps whole (about 3 GitHub comments). Longer is reported as oversize, never silently cut.
 export const MAX_SUMMARY_CHARS = 200_000;
-const KEEP_EVENTS = 200;
-const KEEP_JOBS = 200;
+export const KEEP_EVENTS = 200;
+export const KEEP_JOBS = 200;
+export const MAX_STEER_CHARS = MAX_TEXT;
 
 export function jobSecret(dir: string | undefined): Buffer {
   if (!dir) return randomBytes(32);
@@ -162,7 +193,15 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
       if (reported) clean.toolCommit = reported;
       else delete clean.toolCommit;
       // A later summary never replaces a complete one with a partial one.
-      update(id, (j) => ({ ...j, ...(reported ? { toolCommit: reported } : {}), ...(summary && !(j.summary?.state === "complete" && summary.state !== "complete") ? { summary } : {}), state, lastEventAt: at, events: [...j.events, clean].slice(-KEEP_EVENTS) }));
+      update(id, (j) => {
+        const all = [...j.events, clean];
+        const dropped = Math.max(0, all.length - KEEP_EVENTS);
+        // Counted from the moment the timeline reaches KEEP_EVENTS on a record whose drops are known (it never had KEEP_EVENTS before, or
+        // it already counts). A legacy record already at KEEP_EVENTS stays uncounted: how many it lost before is unknown.
+        const known = j.eventsDropped !== undefined || j.events.length < KEEP_EVENTS;
+        const count = known && (j.eventsDropped !== undefined || all.length >= KEEP_EVENTS);
+        return { ...j, ...(reported ? { toolCommit: reported } : {}), ...(summary && !(j.summary?.state === "complete" && summary.state !== "complete") ? { summary } : {}), state, lastEventAt: at, events: all.slice(-KEEP_EVENTS), ...(count ? { eventsDropped: (j.eventsDropped ?? 0) + dropped } : {}) };
+      });
       lastEventAt = at;
       if (event.type === "reply") notify.send(`Job ${id} replied to steer ${event.n}:\n\n${clean.text ?? "(see git)"}`, false);
       if (event.type === "summary") {
@@ -202,10 +241,11 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
       return true;
     },
 
-    steer(id: string, text: string): Steer | undefined {
+    // `from`: who queued it (the owner's own route, or a confirmed chat proposal and its id). Shown on the Jobs page as provenance.
+    steer(id: string, text: string, from?: { source: "owner" } | { source: "proposal"; proposal: string }): Steer | undefined {
       const job = find(id);
       if (!job) return undefined;
-      const steer: Steer = { n: job.steers.length + 1, text: text.slice(0, MAX_TEXT), at: now().toISOString() };
+      const steer: Steer = { n: job.steers.length + 1, text: text.slice(0, MAX_TEXT), at: now().toISOString(), ...(from ?? {}), ...(text.length > MAX_TEXT ? { textChars: text.length } : {}) };
       update(id, (j) => ({ ...j, steers: [...j.steers, steer] }));
       return steer;
     },
@@ -241,6 +281,12 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
 
     setResearch(id: string, research: ResearchRecord): void {
       update(id, (j) => (j.kind === "research" ? { ...j, research } : j));
+    },
+
+    // The runner fetched its research brief from the job API: evidence that it received it.
+    briefServed(id: string, sha256: string): void {
+      const at = now().toISOString();
+      update(id, (j) => (j.kind === "research" && j.research ? { ...j, research: { ...j.research, briefServed: j.research.briefServed ? { ...j.research.briefServed, lastAt: at, count: j.research.briefServed.count + 1 } : { firstAt: at, lastAt: at, count: 1, sha256 } } } : j));
     },
 
     setToolCommit(id: string, toolCommit: string): void {
