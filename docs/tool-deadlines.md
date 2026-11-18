@@ -117,6 +117,9 @@ repository. Nothing touches a provider, the real vault or a credential. The case
 - A vault write that is cut off while it waits in the clone's queue has not started yet when the turn ends. It will still run when its
   turn in the queue comes. Its outcome is reported as unknown. ORBIT does not withdraw queued writes.
 - The page still tags the whole reply `error:`. The message text and the per-call labels say "outcome unknown".
-- There is no whole-turn deadline beyond model and tool bounds. A turn is bounded by at most six model steps, each bounded by the model
-  request deadlines, and at most five rounds of tool calls, each call bounded as above.
+- There is no whole-turn deadline beyond model and tool bounds. A turn is bounded by at most 21 model steps (`MAX_ROUNDS` + 1), each
+  bounded by the model request deadlines, and at most 20 rounds of tool calls, each call bounded as above (before the ceiling was
+  raised: six steps and five rounds). The worst case is long; in practice the model answering or the no-progress guard
+  (docs/assistant.md, "The per-reply tool-round budget") ends a turn earlier. No route passes a cancellation signal yet, so a long
+  turn cannot be stopped from the page.
 - None of this was exercised against production.

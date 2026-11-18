@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { ProviderError } from "./chatgpt.ts";
+import { REPEAT_FAILURES_MAX } from "./model.ts";
 import type { FallbackInfo, ImageSupport, Item, Message, ModelPort, ToolDef } from "./model.ts";
 import type { MutatingAction } from "./ops/admin-protocol.ts";
 import type { SysMutatingAction } from "./ops/sys-protocol.ts";
@@ -8,7 +9,16 @@ import type { Result } from "./ports.ts";
 // Tool use inside a chat reply. The model may call ChatTools; every call is checked by `allow` (ORBIT's policy)
 // before it runs, and the reply lists every call with where its result came from.
 
-export const MAX_ROUNDS = 5;
+// The per-reply tool-round ceiling: how many model steps of ONE reply may call tools (docs/assistant.md, "Tool rounds and capability
+// claims"). A round is one model step that asked for tool calls, however many calls it made in parallel; user messages are not
+// counted. Steps 0..MAX_ROUNDS-1 are offered the tools; if the model still wants tools after that, one more step (index MAX_ROUNDS)
+// is sent with no tools so it can answer with what it has. So a reply makes at most MAX_ROUNDS tool rounds and MAX_ROUNDS + 1 model
+// requests. It is a ceiling, not a target: a reply ends at the first step that answers without calling a tool.
+// This is the only place the number lives; enforcement (runChat) and the model-facing round lines (src/model.ts roundGuidance) both
+// derive from it, so they cannot disagree.
+export const MAX_ROUNDS = 20;
+// The no-progress guard's threshold (defined beside ToolRounds in src/model.ts, which the instructions also read; re-exported here).
+export { REPEAT_FAILURES_MAX };
 export const MAX_OUTPUT_CHARS = 8000;
 
 // What a tool is given besides its arguments. `signal` is aborted when ORBIT stops waiting for the call (its deadline passed or the
@@ -119,11 +129,41 @@ export type CallRecord = {
 // `accounting`: spend-accounting diagnostics from every round, for the owner. `incomplete`: notes that a reply was cut off or partly dropped.
 // Neither is ever put into `input`, so no later model turn sees them as prose.
 // `capped`: the tool-round budget ran out, so the final step was sent with no tools (whatever it then answered).
-export type ChatOutcome = { text: string; calls: CallRecord[]; rounds: number; capped: boolean; fallback?: FallbackInfo; mixed?: boolean; accounting?: string[]; incomplete?: string[] };
+// `stalled`: the no-progress guard withheld the tools before the budget ran out (every call of a round was a blocked repeat of a call
+// that kept failing the same way), so the final step was sent with no tools. Never set together with `capped`.
+export type ChatOutcome = { text: string; calls: CallRecord[]; rounds: number; capped: boolean; stalled?: boolean; fallback?: FallbackInfo; mixed?: boolean; accounting?: string[]; incomplete?: string[] };
 
 // The owner-visible note on a reply whose tool-round budget ran out. Never part of `text`, so no later model turn reads it as prose.
 export const BUDGET_NOTE = (max: number) =>
   `The tool-round budget for this reply (${max} steps that may call tools) ran out, so its last step was answered without tools. The tools were withheld for that step only, not missing. Anything not shown as a completed tool call below was not done; ask again (for example "continue") for a fresh budget.`;
+
+// The owner-visible note on a reply whose tools were withheld by the no-progress guard. Like BUDGET_NOTE, never part of `text`.
+export const NO_PROGRESS_NOTE = (used: number, max: number) =>
+  `ORBIT stopped offering tools in this reply after ${used} of its ${max} tool rounds because the model kept repeating calls that had already failed with the same result; the repeats were not run. This is not the round budget running out, and no tool is missing. Anything not shown as a completed tool call below was not done.`;
+
+// The output a blocked repeat gets instead of running. It says nothing ran, so the model cannot read it as an outcome.
+export const repeatRefusal = (name: string, times: number) =>
+  `ORBIT did not run this ${name} call: the same call (same tool, same arguments) already failed ${times} times in this reply with the same result, so repeating it cannot make progress. Nothing was run or changed by this call. Change the arguments, try a different approach, or tell Rai what failed and what is still not done.`;
+
+// One key per distinct call: the tool name and its arguments with object keys sorted, so whitespace or key order does not make a
+// repeat look new. Arguments that are not valid JSON are keyed as sent.
+const canonical = (v: unknown): unknown =>
+  Array.isArray(v) ? v.map(canonical) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical((v as Record<string, unknown>)[k])])) : v;
+export function callKey(name: string, rawArgs: string): string {
+  try {
+    return `${name}\u0000${JSON.stringify(canonical(rawArgs.trim() ? JSON.parse(rawArgs) : {}))}`;
+  } catch {
+    return `${name}\u0000${rawArgs}`;
+  }
+}
+const argsOf = (rawArgs: string): Record<string, unknown> => {
+  try {
+    const v = rawArgs.trim() ? JSON.parse(rawArgs) : {};
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+};
 
 const def = (t: ChatTool): ToolDef => ({ name: t.name, description: t.description, parameters: t.parameters, ...(t.strict ? { strict: true } : {}) });
 
@@ -254,14 +294,22 @@ export async function runChat(options: {
     return undefined;
   };
 
+  // The no-progress guard's ledger: for each distinct call (callKey) that last failed, its output and how many times in a row that
+  // identical call failed with that identical output. A success or a different output resets it.
+  const failures = new Map<string, { output: string; times: number }>();
+  // Set when every call of a round was a blocked repeat: the next step is the final one, without tools (unless the budget is out anyway).
+  let stalled = false;
+
   for (let round = 0; ; round++) {
     const capped = round >= maxRounds;
-    // At the cap the model gets no tools, so it has to answer with what it has.
+    const stop = capped || stalled;
+    // At the cap (or once the guard stopped the loop) the model gets no tools, so it has to answer with what it has.
     let step;
     try {
       if (options.signal?.aborted) throw new TurnInterrupted("cancelled", undefined, 0, "The turn was cancelled before the next model request. Nothing further was run.");
       // `rounds` lets the instructions say how many tool steps are left and, at the cap, that the tools are withheld, not missing.
-      step = await model.step(input, limits, notes, capped ? [] : tools.map(def), { fallback: options.fallback === true, ...(options.signal ? { signal: options.signal } : {}), rounds: { round, max: maxRounds, offered: tools.map((t) => t.name) } });
+      const rounds = { round, max: maxRounds, offered: tools.map((t) => t.name), ...(stalled && !capped ? { stalled: true } : {}) };
+      step = await model.step(input, limits, notes, stop ? [] : tools.map(def), { fallback: options.fallback === true, ...(options.signal ? { signal: options.signal } : {}), rounds });
     } catch (err) {
       // Diagnostics from earlier rounds are not lost because a later round failed.
       throw withEarlierAccounting(err, accounting);
@@ -270,13 +318,19 @@ export async function runChat(options: {
     merge(incomplete, step.incomplete);
     if (step.fallback) fallback = step.fallback;
     else primaryRounds += 1;
-    if (!step.calls.length || capped) {
+    // Calls a step asks for when it was offered no tools are never run.
+    if (!step.calls.length || stop) {
       const text =
         step.text ||
-        (capped ? `I stopped after ${maxRounds} rounds of tool calls without reaching an answer: this reply's tool-round budget ran out. Calls made are listed below; anything not listed was not done.` : "");
-      // A round-capped reply says so to Rai beside the text (never inside it), whatever the final step answered.
+        (capped
+          ? `I stopped after ${maxRounds} rounds of tool calls without reaching an answer: this reply's tool-round budget ran out. Calls made are listed below; anything not listed was not done.`
+          : stalled
+            ? `I stopped calling tools after ${round} rounds because the same calls kept failing with the same result. Calls made are listed below; anything not listed as completed was not done.`
+            : "");
+      // A round-capped (or guard-stopped) reply says so to Rai beside the text (never inside it), whatever the final step answered.
       if (capped) merge(incomplete, [BUDGET_NOTE(maxRounds)]);
-      return { text, calls, rounds: round, capped, ...provenance() };
+      else if (stalled) merge(incomplete, [NO_PROGRESS_NOTE(round, maxRounds)]);
+      return { text, calls, rounds: round, capped, ...(stalled && !capped ? { stalled: true } : {}), ...provenance() };
     }
     const stepFacts = { index: round, fallback: Boolean(step.fallback), incomplete: Boolean(step.incomplete?.length) };
     const evidenceFor = (callId: string): Evidence | undefined =>
@@ -291,12 +345,21 @@ export async function runChat(options: {
     // Images tools supplied in this round, sent once after all of the round's tool results (a user message is the role that may carry
     // image input; function outputs stay text).
     const roundImages: ToolImage[] = [];
+    let blocked = 0;
     for (const [i, call] of step.calls.entries()) {
       const left = step.calls.length - i;
       // A cancelled turn starts no new tool call.
       if (options.signal?.aborted) throw new TurnInterrupted("cancelled", undefined, left, `The turn was cancelled. ${notStartedText(left)}`);
       input.push({ type: "function_call", call_id: call.call_id, name: call.name, arguments: call.arguments });
-      const ran = await execute(call.name, call.arguments, byName, allow, { ...bound, evidence: evidenceFor(call.call_id) });
+      // No-progress guard: a call that already failed identically REPEAT_FAILURES_MAX times in a row is answered without running it.
+      // It never reaches `allow` or the tool, so it cannot have an effect; it is still recorded, like any refused call.
+      const key = callKey(call.name, call.arguments);
+      const before = failures.get(key);
+      const repeat = before && before.times >= REPEAT_FAILURES_MAX ? repeatRefusal(call.name, before.times) : undefined;
+      if (repeat) blocked++;
+      const ran: Awaited<ReturnType<typeof execute>> = repeat
+        ? { output: JSON.stringify({ ok: false, notRun: true, error: repeat }), record: { name: call.name, args: argsOf(call.arguments), ok: false, summary: repeat } }
+        : await execute(call.name, call.arguments, byName, allow, { ...bound, evidence: evidenceFor(call.call_id) });
       let { output, record } = ran;
       let display: ToolDisplay | undefined;
       if (ran.display && !record.interrupted) {
@@ -317,6 +380,10 @@ export async function runChat(options: {
           for (const img of ran.media.images) if (!delivered.has(img.ref)) delivered.set(img.ref, { ref: img.ref, sha256: createHash("sha256").update(img.bytes).digest("hex"), via: "photos_inspect", callId: call.call_id, step: round + 1 });
         }
       }
+      if (!repeat) {
+        if (record.ok) failures.delete(key);
+        else failures.set(key, { output, times: before?.output === output ? before.times + 1 : 1 });
+      }
       calls.push(record);
       input.push({ type: "function_call_output", call_id: call.call_id, output });
       await options.onCall?.({ call_id: call.call_id, name: call.name, arguments: call.arguments, output, record, ...(display ? { display } : {}) });
@@ -325,6 +392,8 @@ export async function runChat(options: {
       if (record.interrupted) throw new TurnInterrupted(record.interrupted, record, left - 1, interruptedText(record, bound, left - 1));
     }
     if (roundImages.length) input.push(toolImageMessage(roundImages));
+    // Every call this round was a blocked repeat: the model is not making progress, so the next step gets no tools.
+    if (blocked === step.calls.length) stalled = true;
   }
 }
 

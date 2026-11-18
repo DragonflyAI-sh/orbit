@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { MAX_OUTPUT_CHARS } from "../src/agent.ts";
+import { MAX_OUTPUT_CHARS, MAX_ROUNDS } from "../src/agent.ts";
 import { BOUNDED_OUTPUT_CHARS, boundChunk } from "../src/assistant-context.ts";
 import { SESSION_TOOL_NAMES, TRANSCRIPT_NOTICE } from "../src/sessions.ts";
 import { threadStore } from "../src/threads.ts";
@@ -161,10 +161,10 @@ test("continuation across Assistant turns: a turn capped mid-read leaves a usabl
     const outs = outputsOf(seen);
     const u = lastUser(seen);
     if (u === "read the Slate Heron chat from the start") {
-      // Small pages (limit 4); follow nextCursor until the turn's round cap stops it.
-      if (!outs.length) return { text: "", calls: [call("session_read", { id: `chat:${chatId}`, from: "start", limit: 4 }, "a0")] };
+      // One message per page (limit 1); follow nextCursor until the turn's round cap stops it.
+      if (!outs.length) return { text: "", calls: [call("session_read", { id: `chat:${chatId}`, from: "start", limit: 1 }, "a0")] };
       const last = outs.at(-1)!;
-      return last.ok && last.result.nextCursor ? { text: "", calls: [call("session_read", { id: `chat:${chatId}`, cursor: last.result.nextCursor, limit: 4 }, `a${outs.length}`)] } : say("done");
+      return last.ok && last.result.nextCursor ? { text: "", calls: [call("session_read", { id: `chat:${chatId}`, cursor: last.result.nextCursor, limit: 1 }, `a${outs.length}`)] } : say("done");
     }
     if (u === "continue reading it") {
       // This turn's own pages first; with none yet, the newest cursor in the history before this turn's message.
@@ -181,19 +181,21 @@ test("continuation across Assistant turns: a turn capped mid-read leaves a usabl
   const r1 = await s.x.api("/assistant/messages", "POST", { text: "read the Slate Heron chat from the start" });
   assert.equal(r1.status, 200, JSON.stringify(r1.data.error));
   const first = outputsOf(s.model.seen.at(-1)!);
-  // The turn is capped (MAX_ROUNDS) before the chat ends: the chat needs more default pages than one turn may read.
-  assert.equal(first.length, 5);
+  // The turn is capped (MAX_ROUNDS) before the chat ends: the chat needs more one-message pages than one turn may read.
+  assert.equal(first.length, MAX_ROUNDS);
   first.forEach(assertBoundedPage);
   assert.equal(typeof first.at(-1)!.result.nextCursor, "string");
 
   const r2 = await s.x.api("/assistant/messages", "POST", { text: "continue reading it" });
   assert.equal(r2.status, 200);
   const seen2 = s.model.seen.at(-1)!;
-  // Reproduction condition: the first turn is in the second turn's context in shortened form (its tool outputs are cut).
+  // Reproduction condition: the first turn is in the second turn's context in shortened form. A turn of MAX_ROUNDS pages is too large
+  // even with its outputs cut, so its calls are omitted; the omitted-calls note still carries the newest page cursor.
   const view = (await s.x.api("/assistant")).data.assistant;
   const turn2 = view.chunks.at(-1);
   const firstSeq = view.chunks.at(-2).seq;
-  assert.equal(turn2.context.included.find((c: any) => c.seq === firstSeq)?.form, "clipped");
+  assert.equal(turn2.context.included.find((c: any) => c.seq === firstSeq)?.form, "calls-omitted");
+  assert.ok(JSON.stringify(seen2.input).includes(`nextCursor: \\"${first.at(-1)!.result.nextCursor}\\"`), "the omitted-calls note keeps the newest cursor whole");
   const second = outputsOf(seen2);
   assert.ok(second.length >= 1, "the second turn found the cursor in its history and continued");
   second.forEach(assertBoundedPage);

@@ -55,6 +55,25 @@ const pageCursor = (name: string, output: string): string | undefined => {
     return undefined;
   }
 };
+// When a turn's calls are omitted (form "calls-omitted"), the newest page cursor of each paged tool is still named in the note, with
+// the session id it was reading, so a turn that read many pages (up to MAX_ROUNDS) can still be continued by the next one.
+const lastCursors = (calls: readonly { name: string; arguments: string; output: string }[]): string => {
+  const seen = new Map<string, string>();
+  for (const c of [...calls].reverse()) {
+    if (seen.has(c.name)) continue;
+    const cursor = pageCursor(c.name, c.output);
+    if (!cursor) continue;
+    let id: unknown;
+    try {
+      id = (JSON.parse(c.arguments) as { id?: unknown } | null)?.id;
+    } catch {
+      id = undefined;
+    }
+    const of = typeof id === "string" && /^[A-Za-z0-9:_.-]{1,200}$/.test(id) ? ` (id ${id})` : "";
+    seen.set(c.name, `${c.name}${of} nextCursor: "${cursor}"`);
+  }
+  return [...seen.values()].reverse().join("; ");
+};
 // Likewise a write or proposal's outcome facts (status, proposal id, commit; thread-context callFacts) are kept whole at the end of a
 // cut output, so a shortened history still says whether something was committed or only proposed, and under which id.
 const cutOutput = (name: string, output: string, seq: number): string => {
@@ -91,7 +110,8 @@ export function boundChunk(chunk: ChunkLike, cap: number = ASSISTANT_CHUNK_MAX_C
     const list = (full[mi]!.calls ?? m.calls).map((c) => `${c.name} (${callOutcome(c)})`).join(", ").slice(0, 1200);
     // A gallery shown in this turn stays addressable ("the second one") even when its photos_show call is omitted: its ordered refs.
     const shown = (m.gallery ?? []).map((g, i) => `gallery ${i + 1}: ${g.refs.map((r, j) => `${j + 1}=${r}`).join(", ")}`).join("; ");
-    const note = `[ORBIT: ${m.calls.length} tool call(s) of this turn are omitted from the model's context to stay within budget: ${list}. They are stored in full in assistant chunk ${chunk.seq}.${shown ? ` Photos displayed to Rai in this turn (display only, never seen by the model), by position: ${shown}.` : ""}]`;
+    const cursors = lastCursors(full[mi]!.calls ?? []);
+    const note = `[ORBIT: ${m.calls.length} tool call(s) of this turn are omitted from the model's context to stay within budget: ${list}. They are stored in full in assistant chunk ${chunk.seq}.${cursors ? ` Last page cursor, kept whole so reading can continue from where it stopped: ${cursors}.` : ""}${shown ? ` Photos displayed to Rai in this turn (display only, never seen by the model), by position: ${shown}.` : ""}]`;
     // An errored reply's own text is not sent (as in chat threads); the note is, so the model knows calls happened.
     const text = m.status === "error" || m.status === "interrupted" ? note : `${note}\n${m.text}`;
     return { ...m, calls: [], text, status: "done" as const };

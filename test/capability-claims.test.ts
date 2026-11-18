@@ -196,7 +196,7 @@ test("budget exhausted: the forced final step says the tools are withheld (not m
   const { model, sent } = provider((s, n) => (n < MAX_ROUNDS ? { text: "", calls: [call("session_read", {}, `r${n}`)] } : say("The tool-round budget ran out before I saved it; nothing was written.")));
   const out = await runChat({ model, messages: user, limits: [], tools: [reader, w.tool, { ...reader, name: "jobs_list" }] });
   assert.equal(sent.length, MAX_ROUNDS + 1);
-  assert.match(sent[0]!.instructions, /\(5 left, this one included\)/);
+  assert.match(sent[0]!.instructions, new RegExp(`\\(${MAX_ROUNDS} left, this one included\\)`));
   assert.match(sent[MAX_ROUNDS - 1]!.instructions, /\(1 left, this one included\)/);
   const last = sent.at(-1)!;
   assert.deepEqual(last.tools, []);
@@ -253,7 +253,7 @@ test("an earlier false 'no vault-write tool' claim stays in history, but the nex
   const { model, sent } = provider((s) => {
     if (!s.tools.length) return say("note");
     const lastUser = [...s.input].reverse().find((i) => i.role === "user")?.content;
-    if (lastUser === "plan shell access and save it") return outputsOf(s).length >= 3 ? say(`${FALSE_CLAIM}\n${"Draft line.\n".repeat(1300)}`) : { text: "", calls: [call("session_read", {}, `r${outputsOf(s).length}`)] };
+    if (lastUser === "plan shell access and save it") return outputsOf(s).length >= 3 ? say(`${FALSE_CLAIM}\n${"Draft line.\n".repeat(1300)}`) : { text: "", calls: [call("session_read", { id: `chat:missing-${outputsOf(s).length}` }, `r${outputsOf(s).length}`)] };
     const outs = outputsOf(s).slice(-1);
     return outs[0]?.result?.status ? say("Saved.") : { text: "", calls: [call("vault_create_note", { path: "Projects/shell-plan.md", content: "# Shell plan\n" }, "w")] };
   });

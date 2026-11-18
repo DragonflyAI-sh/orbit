@@ -76,7 +76,7 @@ Characters are counted as chat threads count them (`messageChars`: message text 
 
 The chat thread budget is 48,000 characters of live messages; the Assistant's 52,000 conversation cap is of the same order, chosen so the existing model/context settings (the same models, the same 8,000-character tool output clip, the same 20,000-character message cap) need no change.
 
-Within one turn, the model's input also grows with that turn's own tool calls, exactly as in chat (`runChat`: at most 5 rounds, each tool output clipped to 8,000 characters unless the tool sets its own bound: `vault_policy` does, see "Tool rounds and capability claims"). That growth is the existing behaviour and is not counted in the 52,000.
+Within one turn, the model's input also grows with that turn's own tool calls, exactly as in chat (`runChat`: at most 20 tool rounds, see "The per-reply tool-round budget", each tool output clipped to 8,000 characters unless the tool sets its own bound: `vault_policy` does, see "Tool rounds and capability claims"). That growth is the existing behaviour and is not counted in the 52,000.
 
 ## The context bound
 
@@ -89,8 +89,8 @@ Within one turn, the model's input also grows with that turn's own tool calls, e
 The bounded representation of a chunk (`boundChunk`), tried in order, never changing the stored chunk:
 
 - `full`: as stored, when it is at most 12,000 characters.
-- `clipped`: each tool output cut to 1,500 and each text to 4,000 characters; each cut ends with `[ORBIT: … cut from N to M characters for the model's context; the full text is stored in assistant chunk <seq>]`. A cut page of `session_read` or `sessions_list` keeps its `nextCursor` whole at the end, inside the same 1,500 characters, so a later turn can continue where a turn capped at 5 tool rounds stopped (`test/session-durability.test.ts`). Likewise a cut write or proposal result keeps its outcome facts (status, saved, proposal id, commit) whole at the end, and `calls-omitted` lists each omitted call with those facts (`test/capability-claims.test.ts`).
-- `calls-omitted`: the turn's tool calls are removed as whole pairs (a call is never sent without its result, or a result without its call) and replaced by a one-line note listing them and their outcomes. Tool arguments are never cut, because a cut argument would no longer be valid JSON.
+- `clipped`: each tool output cut to 1,500 and each text to 4,000 characters; each cut ends with `[ORBIT: … cut from N to M characters for the model's context; the full text is stored in assistant chunk <seq>]`. A cut page of `session_read` or `sessions_list` keeps its `nextCursor` whole at the end, inside the same 1,500 characters, so a later turn can continue where a turn capped by its tool-round budget stopped (`test/session-durability.test.ts`). Likewise a cut write or proposal result keeps its outcome facts (status, saved, proposal id, commit) whole at the end, and `calls-omitted` lists each omitted call with those facts (`test/capability-claims.test.ts`).
+- `calls-omitted`: the turn's tool calls are removed as whole pairs (a call is never sent without its result, or a result without its call) and replaced by a one-line note listing them and their outcomes. The note also keeps the newest `nextCursor` of each paged tool (`session_read`, `sessions_list`) whole, with the session id it was reading, so a turn that read more pages than fit even in clipped form (about 7 pages of 1,500 characters fit in 12,000) can still be continued. Tool arguments are never cut, because a cut argument would no longer be valid JSON.
 - `placeholder`: one short note stands for the whole turn.
 
 So no message, tool result or argument size can push the conversation past 52,000 characters. The form used is recorded per chunk (`context.included`) and shown on the page ("In the model's context this turn is shortened…").
@@ -200,7 +200,7 @@ then said no vault-write tool was available "in this reply"; challenged, it then
 
 ### What the code shows (supported causes)
 
-1. **The round cap looked like a missing tool.** `runChat` allows `MAX_ROUNDS` (5) steps that may call tools; the next step is sent
+1. **The round cap looked like a missing tool.** `runChat` allowed `MAX_ROUNDS` (then 5; now 20, see below) steps that may call tools; the next step is sent
    with no tools at all. Its instructions then listed no tools and said "None of the tools that read ORBIT's job and operation
    records are available in this reply", and nothing said the tools were withheld because the budget ran out. A model answering that
    step truthfully sees no write tool. Policy + several `session_read` pages exhaust 5 steps, which matches the second turn. And
@@ -246,6 +246,51 @@ then said no vault-write tool was available "in this reply"; challenged, it then
 Unchanged: every approval, the owner checks, policy refusals, proposal confirmation, secret refusal, round and context budgets, and
 the absence of any automatic retry. No reply text is checked or rewritten; no tool is ever called to test whether it exists.
 
+### The per-reply tool-round budget (20) and the no-progress guard
+
+`MAX_ROUNDS` in `src/agent.ts` is the one place the number lives; it was raised from 5 to 20 with Rai's approval after weighing
+latency, cost and loop risk. What it counts: **tool rounds within one reply**, that is model steps that asked for at least one tool
+call. A step with several parallel calls is one round. User messages, earlier replies and individual calls are not counted, and every
+new reply (for example after "continue") starts with a fresh budget.
+
+- Steps 1..20 are offered the tools. If the model still asks for tools after the 20th round, one more step is sent with **no tools**
+  and the instructions say the budget ran out (`TOOL-ROUND BUDGET EXHAUSTED`); any calls that step asks for are never run. So a reply
+  makes at most 20 tool rounds and 21 model requests, and always ends with an answer the model wrote without tools. The reply is
+  marked `capped` with `BUDGET_NOTE` beside it.
+- It is a ceiling, not a target: the loop ends at the first step that answers without calling a tool, and every tool step's
+  instructions say "This is a ceiling, not a target: answer as soon as you can". Most replies use 0-3 rounds as before.
+- The instructions on every tool step say "this is step N; at most 20 steps … (K left, this one included)", built from the same
+  counter and constant the loop enforces (`roundGuidance` in `src/model.ts`, used by the ChatGPT, OpenAI and OpenRouter adapters),
+  so the number the model is told cannot drift from the number enforced.
+- The final no-tool step asks for an honest summary: what was completed and what is still pending, only what tool results show, a
+  failed, refused or uncalled tool did nothing, a proposal is not a completed action.
+
+**No-progress guard.** With 20 rounds a model that keeps repeating a failing call could waste many steps. `runChat` keeps, per
+reply, the last failure of each distinct call (tool name + arguments, keys sorted). When the identical call has failed with the
+identical result `REPEAT_FAILURES_MAX` (2) times in a row, a further identical request is **not run**: it never reaches the policy
+check or the tool, is recorded as a failed call, and the model gets `{ok: false, notRun: true, error: …}` saying nothing ran. If every
+call of a round was such a blocked repeat, the next step is the final one, without tools, and its instructions say
+`TOOL CALLS STOPPED FOR LACK OF PROGRESS`, explicitly that this is not the round budget, and that the tools still exist; the reply
+gets `stalled: true` and the owner-visible `NO_PROGRESS_NOTE` (not `capped`). What it does not touch: a call that succeeded (polling
+the same job), changed arguments (pagination with a new cursor), or a retry whose error changed or that succeeded in between: each
+resets or avoids the count. It only stops an exact repeat after two identical failures; it does not detect loops that vary their
+arguments, which the 20-round ceiling still bounds.
+
+**Tradeoffs and bounds that did not change.** Latency and cost grow only for replies that actually need the rounds: each round is one
+more model request (and re-sends the growing input). There is still **no whole-turn deadline**: a reply is bounded by at most 21 model
+requests, each under the model request deadlines (`docs/model-request-deadlines.md`: ChatGPT 120 s to headers, 300 s idle, 600 s
+total), and 20 rounds of tool calls, each call under its own deadline (180 s by default, `docs/tool-deadlines.md`). The theoretical
+worst case is therefore much longer than before (it was 6 requests and 5 rounds); in practice a turn is ended earlier by the model
+answering or by the guard. `runChat` supports cancellation (`signal`: the request in flight is aborted and nothing new starts), but
+**no route passes a signal yet** (`src/thread-service.ts`), so Rai cannot stop a long turn from the page; the thread or Assistant
+stays busy for the whole turn and a second send gets 409. A cancel control is a separate change. Within a turn the model's input grows with every tool result (each output bounded to 8,000
+characters unless the tool sets its own bound); that growth is not part of the 52,000-character conversation cap, so a 20-round reply
+sends larger requests in its late steps. In later turns a long reply's calls are shown in `calls-omitted` form more often (the chunk
+cap is 12,000 characters); outcome facts and the newest page cursor are kept. The image budget (`MEDIA_CALLS_MAX`, per-reply image
+and byte caps), gallery caps, OpenRouter spend caps and output bound, and every owner, policy and confirmation gate apply per call or
+per reply exactly as before. `tools/capability-eval/eval.ts` derives its hard request bound from `MAX_ROUNDS`, so that owner-run
+(possibly paid) evaluation's upper bound grew from 6 to 21 requests per scenario without its own `maxRounds`.
+
 ### Skills and the comparison with Rai's OpenClaw workspace
 
 No skills framework was added. Every supported cause above is in tool plumbing or in instructions generated from the live tool list;
@@ -260,6 +305,12 @@ budget or a refused tool. No credentials, hostnames or private notes are needed.
 
 ### Tests and evaluation
 
+- `test/tool-rounds.test.ts` (deterministic, offline, mocked loop): a task needing more than 5 rounds completes uncapped; exactly 20
+  tool rounds run and no 21st; the final no-tool step's answer is the reply; early completion; parallel calls count as one round;
+  policy refusal, cancellation and the tool deadline in late rounds; the no-progress guard (identical failures stop, pagination,
+  polling and progressing retries do not, mixed rounds carry on, refused repeats never reach the policy check); the instructions sent
+  through the OpenAI, ChatGPT and OpenRouter-fallback adapters; `/chat`, a chat thread and the Assistant completing a 7-round reply
+  whose late `job_launch` still waits for Confirm.
 - `test/capability-claims.test.ts` (deterministic, offline): exposed vault write with an explicit save (chat and Assistant, real
   OpenAI adapter request bodies over a fake fetch, real vault fixture); absent tool; exposed but refused; exposed but unconfigured;
   pending confirmation vs committed; tool errors; budget exhausted (loop, Assistant record, paid fallback); a history carrying the
