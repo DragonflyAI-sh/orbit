@@ -302,8 +302,10 @@ test("the documented routine prompt keeps the token out of curl's arguments and 
   const doc = readFileSync(new URL("../deploy/routines/orbit-research.md", import.meta.url), "utf8");
   const prompt = doc.slice(doc.indexOf("## Prompt"), doc.indexOf("## If the form requires a repository"));
   assert.doesNotMatch(prompt, /-H "Authorization: Bearer/);
-  assert.match(prompt, /-H @"\$HOME\/\.orbit-research-auth"/);
-  assert.match(prompt, /rm -f ~\/\.orbit-research-auth/);
+  // The bootstrap (test/research-bootstrap.test.ts runs it) writes the header to a private temporary file that its EXIT trap removes.
+  assert.match(prompt, /\(umask 077 && printf 'Authorization: Bearer %s\\n' "\$token" > "\$w\/auth"\)/);
+  assert.match(prompt, /-H @"\$w\/auth"/);
+  assert.match(prompt, /trap 'rm -rf "\$w"' EXIT/);
   assert.match(prompt, /ORBIT_RESEARCH_TOKEN='<token>' ~\/\.local\/bin\/orbit-research start/);
   assert.doesNotMatch(prompt, /--token <token>/);
   const lane = readFileSync(new URL("../docs/research-lane.md", import.meta.url), "utf8");

@@ -19,7 +19,9 @@ import type { Job, Launch } from "./jobs.ts";
 //   provider-rejected  the provider answered the fire with a 4xx: it refused the request.
 //   provider-accepted  the provider answered 2xx (with a session id, or without a usable one) and no runner event has arrived. A session
 //                      was accepted; whether it ran, refused or failed before reporting is not in ORBIT's record.
-//   runner-reported    the runner reported (over the API, or ORBIT found its start or summary in git).
+//   runner-reported    the runner reported (over the API, or ORBIT found its start or summary in git). For a research job this includes
+//                      a bootstrap failure report (src/research-bootstrap.ts): the runner's own, unverified word that it stopped before
+//                      its tool ran.
 export type DispatchState = "no-launch-record" | "in-flight" | "never-dispatched" | "dispatch-unknown" | "provider-rejected" | "provider-accepted" | "runner-reported";
 export type DispatchEvidence = {
   state: DispatchState;
@@ -73,6 +75,8 @@ export function dispatchEvidence(job: Job, ctx: EvidenceContext = {}): DispatchE
   const toolCaveat = l.toolCommitSent !== undefined && !/^[0-9a-f]{40}$/.test(l.toolCommitSent) ? ` The fire text carried tool commit "${l.toolCommitSent.slice(0, 64)}", which the Routine prompt refuses (it requires 40 lowercase hex characters on main), so a session would stop before reporting.` : "";
 
   if (job.events.length) {
+    const boot = job.events.find((e) => e.type === "bootstrap");
+    if (boot && !job.events.some((e) => e.type === "started")) return { state: "runner-reported", basis: `the runner reported a bootstrap failure (${boot.bootstrap?.category ?? boot.status ?? "unknown"}) at ${boot.at}, before its tool started: a session ran and stopped (runner-reported, unverified)`, ...facts };
     const via = job.events.some((e) => e.via !== "git") ? "the API" : "git";
     return { state: "runner-reported", basis: `the runner reported ${job.events.length} event(s) (first via ${job.events[0].via === "git" ? "git" : "the API"}; seen via ${via})`, ...facts };
   }

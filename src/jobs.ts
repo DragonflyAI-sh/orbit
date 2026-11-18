@@ -11,9 +11,15 @@ import type { JobWorkLink } from "./work-sessions.ts";
 
 // `text` on an event is for display and is clipped at MAX_TEXT; `textChars` is the length received and `textClipped` says it was
 // clipped. The full final summary is kept on the job (Job.summary), not here.
-export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "summary"; sha?: string; toolCommit?: string; n?: number; status?: string; text?: string; textChars?: number; textClipped?: boolean; via?: "api" | "git";
+export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "summary" | "bootstrap"; sha?: string; toolCommit?: string; n?: number; status?: string; text?: string; textChars?: number; textClipped?: boolean; via?: "api" | "git";
   // False when the sender says `text` is only the start of the real text (the runner's tool sends this when its summary is over the API size limit).
-  textComplete?: boolean };
+  textComplete?: boolean;
+  // Only on a `bootstrap` event: the research runner's own report that it stopped before its tool ran (src/research-bootstrap.ts). Every
+  // field is checked by the listener; `text` is written by ORBIT from them, never taken from the runner.
+  bootstrap?: BootstrapFailure };
+// A research runner's report that its bootstrap (download and digest check of the runner tool) failed and it stopped. Runner-reported and
+// unverified, like every runner event; `category` is one of a fixed set (src/research-bootstrap.ts BOOTSTRAP_CATEGORIES).
+export type BootstrapFailure = { category: string; attempts: number; curlExit: number; http: number };
 // The final summary as ORBIT holds it. complete: the whole text. partial: only the start arrived (API size limit); the full text is read from git and
 // the PR and review wait for it. oversize: longer than MAX_SUMMARY_CHARS; only the first MAX_TEXT characters are kept here, the full text is in git.
 export type SummaryRecord = { text: string; chars: number; state: "complete" | "partial" | "oversize"; via: "api" | "git"; at: string; sha?: string };
@@ -80,6 +86,10 @@ export type ResearchRecord = {
   // Evidence that the runner fetched its brief from the job API (GET /v1/jobs/<id>/brief): when it was first and last served, how many
   // times, and the sha256 of the first payload served. Absent: never served, or served before this field existed.
   briefServed?: { firstAt: string; lastAt: string; count: number; sha256: string };
+  // Evidence that the job API sent the runner tool (GET /v1/jobs/<id>/tool answered 200 with the whole file): when, how often, and the
+  // digest it served. It proves ORBIT sent it, not that the runner received it intact or ran it. Absent: never served (or served before
+  // this field existed), which includes a request that never reached ORBIT (a reset or TLS failure on the way).
+  toolServed?: { firstAt: string; lastAt: string; count: number; sha256: string };
 };
 export type ResearchVaultAttempt = { at: string; path: string; state: "committed" | "pending-confirmation" | "failed" | "cancelled" | "expired"; commit?: string; proposalId?: string; expiresAt?: string; settledAt?: string; error?: string };
 export type Job = {
@@ -125,6 +135,11 @@ export const MAX_SUMMARY_CHARS = 200_000;
 export const KEEP_EVENTS = 200;
 export const KEEP_JOBS = 200;
 export const MAX_STEER_CHARS = MAX_TEXT;
+// The documented callback deadlines (docs/research-lane.md, "Bootstrap and the callback deadline"). A launched job with no runner event
+// after NOT_STARTED_AFTER_MS reads `not-started`: not checked in, which is never proof that it failed or never launched. It is computed
+// from stored times on every read, so it survives a restart, and the first runner event (however late) clears it.
+export const NOT_STARTED_AFTER_MS = 10 * 60_000;
+export const QUIET_AFTER_MS = 15 * 60_000;
 
 export function jobSecret(dir: string | undefined): Buffer {
   if (!dir) return randomBytes(32);
@@ -187,8 +202,9 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
         const state: SummaryRecord["state"] = chars > MAX_SUMMARY_CHARS ? "oversize" : event.textComplete === false ? "partial" : "complete";
         summary = { text: state === "oversize" ? event.text.slice(0, MAX_TEXT) : event.text, chars, state, via: clean.via!, at, ...(event.sha ? { sha: event.sha.slice(0, 64) } : {}) };
       }
+      // A bootstrap failure is the runner saying it stopped before its tool ran: the job is over (failed), and the token stops working.
       const state: Job["state"] =
-        event.type === "summary" && (event.status === "done" || event.status === "blocked" || event.status === "failed") ? event.status : "running";
+        event.type === "bootstrap" ? "failed" : event.type === "summary" && (event.status === "done" || event.status === "blocked" || event.status === "failed") ? event.status : "running";
       const reported = event.type === "started" ? normalizeToolCommit(event.toolCommit) : undefined;
       if (reported) clean.toolCommit = reported;
       else delete clean.toolCommit;
@@ -204,6 +220,7 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
       });
       lastEventAt = at;
       if (event.type === "reply") notify.send(`Job ${id} replied to steer ${event.n}:\n\n${clean.text ?? "(see git)"}`, false);
+      if (event.type === "bootstrap") notify.send(`Research job ${id}: ${clean.text ?? "the runner reported a bootstrap failure"} Runner-reported and unverified; nothing was retried or relaunched. Recovery: deploy/routines/orbit-research.md, "Bootstrap diagnostics and recovery".`, true);
       if (event.type === "summary") {
         const via = clean.via === "git" ? " (found in git; the API did not report it)" : "";
         const note = summary?.state === "partial" ? "\n\n(Only the start of the summary reached ORBIT over the API; ORBIT reads the full text from git before it opens the PR or posts a review.)" : summary?.state === "oversize" ? `\n\n(The summary is ${summary.chars} characters, over ORBIT's ${MAX_SUMMARY_CHARS}-character limit; ORBIT will not open a PR or post a review from it. The full text is in git.)` : clean.textClipped ? "\n\n(Clipped here; the complete summary is stored on the job.)" : "";
@@ -283,6 +300,12 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
       update(id, (j) => (j.kind === "research" ? { ...j, research } : j));
     },
 
+    // The job API sent the runner tool to this research job (evidence that the runner's request reached ORBIT; not that it ran it).
+    toolServed(id: string, sha256: string): void {
+      const at = now().toISOString();
+      update(id, (j) => (j.kind === "research" && j.research ? { ...j, research: { ...j.research, toolServed: j.research.toolServed ? { ...j.research.toolServed, lastAt: at, count: j.research.toolServed.count + 1 } : { firstAt: at, lastAt: at, count: 1, sha256 } } } : j));
+    },
+
     // The runner fetched its research brief from the job API: evidence that it received it.
     briefServed(id: string, sha256: string): void {
       const at = now().toISOString();
@@ -306,8 +329,8 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
       if (job.launch?.failedAt && !job.events.length) return "launch-failed";
       if (job.state === "done" || job.state === "blocked" || job.state === "failed") return "finished";
       const t = now().getTime();
-      if (!job.events.length) return job.launch && t - new Date(job.launch.at).getTime() > 10 * 60_000 ? "not-started" : "ok";
-      return job.lastEventAt && t - new Date(job.lastEventAt).getTime() > 15 * 60_000 ? "quiet" : "ok";
+      if (!job.events.length) return job.launch && t - new Date(job.launch.at).getTime() > NOT_STARTED_AFTER_MS ? "not-started" : "ok";
+      return job.lastEventAt && t - new Date(job.lastEventAt).getTime() > QUIET_AFTER_MS ? "quiet" : "ok";
     },
 
     get: find,

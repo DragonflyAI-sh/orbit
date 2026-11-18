@@ -111,7 +111,7 @@ export function watcher(store: Store<WatchState>, notify: Notifier, now: () => D
         continue;
       }
       const caveat = dispatch.caveat ? ` ${dispatch.caveat}` : "";
-      if (before === undefined) notify.send(`Job ${job.id} is not started (no event 10 minutes after launch). Session: ${link}. no check-in yet Dispatch: ${dispatch.state} (${dispatch.basis}).${caveat}`);
+      if (before === undefined) notify.send(`Job ${job.id} is not started (no runner event 10 minutes after launch: not checked in, which is not proof that it failed or never launched). Session: ${link}. no check-in yet Dispatch: ${dispatch.state} (${dispatch.basis}).${caveat}`);
       else notify.send(`Job ${job.id} is still not started; its dispatch evidence changed from ${before} to ${dispatch.state} (${dispatch.basis}). Session: ${link}.${caveat}`);
       told[job.id] = key;
     }
