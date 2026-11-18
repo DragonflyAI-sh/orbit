@@ -385,6 +385,7 @@ test("the Jobs page labels blocking, missing and ambiguous verdicts as problems,
     assert.ok(!/no blocking issues/.test(l.text));
   }
   // The page only ever puts job text in through textContent (never innerHTML), including the full summary.
-  assert.match(html, /el\("pre", \{ textContent: j\.summary\.text \}\)/);
+  assert.match(html, /longText\(`\$\{id\}:summary`, "Final summary", r\.summary\.text/);
+  assert.match(html, /el\("pre", \{ className: "ltbody", tabIndex: 0 \}, \.\.\.linkify\(src, el\)\)/);
   assert.ok(!/innerHTML\s*=\s*[^;]*summary/.test(html));
 });

@@ -268,7 +268,6 @@
   #jobs button.back, #jobs button.cancel { background: var(--card); color: var(--fg); border: 1px solid var(--line); padding: 4px 12px; align-self: flex-start; }
   #jobs .empty { color: var(--muted); }
   /* Jobs list and detail (docs/jobs-page.md). */
-  #jobs .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #jobs .jlistview, #jobs .jdetail { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
   #jobs .jtools { display: flex; flex-direction: column; gap: 6px; }
   #jobs .jtools input[type=search] { font: inherit; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--fg); width: 100%; box-sizing: border-box; }
@@ -288,7 +287,6 @@
   #jobs .badge.basis-recorded { color: var(--live); }
   #jobs .badge.basis-unavailable, #jobs .badge.steer-queued, #jobs .badge.steer-proposed { color: var(--mock); }
   #jobs .badge.steer-delivered, #jobs .badge.steer-replied { color: var(--live); }
-  #jobs .latest.one { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   #jobs .jrow .meta { margin-top: 4px; }
   #jobs .jpager { justify-content: space-between; }
   #jobs a.back { align-self: flex-start; color: var(--accent-2); }
@@ -1809,6 +1807,7 @@
     const q = jv.query;
     const go = () => { jv.cursor = null; jv.back = []; refreshJobs(); };
     const search = el("input", { type: "search", id: "jobsearch", value: q.q, placeholder: "Search id, title, routine, PR, latest line", autocomplete: "off" });
+    search.setAttribute("aria-label", "Search jobs");
     search.dataset.key = "search";
     let timer = null;
     search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => { q.q = search.value.trim(); go(); }, 250); });
@@ -1842,7 +1841,7 @@
       go();
     });
     const toolbar = el("div", { className: "jtools", role: "search" },
-      el("label", { className: "sr", htmlFor: "jobsearch", textContent: "Search jobs" }), search,
+      search,
       el("div", { className: "row" }, state.s, health.s, lane.s, kind.s, routine.s, el("label", { className: "chk" }, attention, " Needs attention"), clear));
     const proposals = el("div", { className: "jprops" });
     const status = el("div", { className: "meta jstatus", role: "status", ariaLive: "polite" });

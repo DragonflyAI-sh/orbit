@@ -309,7 +309,8 @@ test("wide code and tables scroll inside a bounded region; nothing is clipped wi
   assert.doesNotMatch(rest, /overflow(-x|-y)?:\s*hidden/, "no content is hidden by clipping");
   assert.doesNotMatch(rest, /text-overflow:\s*ellipsis/);
   // Scroll regions are reachable by keyboard: the job summary and card briefs are focusable too.
-  assert.match(html, /mdScroll\(el\("pre", \{ textContent: j\.summary\.text \}\), "Full summary", el\)/);
+  assert.match(html, /el\("pre", \{ className: "ltbody", tabIndex: 0 \}, \.\.\.linkify\(src, el\)\)/);
+  assert.match(rule("#jobs pre.ltbody"), /overflow:\s*auto/);
   assert.match(html, /brief\.tabIndex = 0;/);
   assert.match(html, /mk\("pre", \{ tabIndex: 0, textContent: s\.text \}\)/);
 });
