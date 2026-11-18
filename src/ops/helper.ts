@@ -9,8 +9,12 @@ import { execFile } from "node:child_process";
 import { closeSync, lstatSync, openSync, readSync, readdirSync, readlinkSync, statfsSync } from "node:fs";
 import { request } from "node:http";
 import { freemem, loadavg, totalmem, uptime } from "node:os";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  INVENTORY_DISABLED_MESSAGE,
+  INVENTORY_MARKER,
+  INVENTORY_UNSUPPORTED_MESSAGE,
   LOG_LINES_DEFAULT,
   LOG_LINE_CHARS,
   LOG_TOTAL_CHARS,
@@ -333,6 +337,31 @@ function credentials(env: Env, c: Config) {
   });
 }
 
+// ---- host_inventory: off unless activated on the host (docs/host-inventory.md) ----
+//
+// Two root-controlled conditions, both checked on every request, both absent after any deploy or install.sh run:
+//  1. the activation marker INVENTORY_MARKER exists, is a regular file (not a symlink), is root-owned and not group/world writable,
+//     in a root-owned directory that is not group/world writable. Its contents are never read;
+//  2. the inventory module sits next to this file, root-owned and not group/world writable. install.sh does not copy it.
+// Without (1) the answer is `disabled`; without (2), or if it cannot be loaded, `unsupported`. Never a fallback of any kind.
+export const INVENTORY_MODULE_PATH = fileURLToPath(new URL("./inventory.ts", import.meta.url));
+type InventoryModule = { inventory(env: Env): Promise<unknown> };
+const rootOnly = (s: Stat | undefined, kind: "file" | "dir") =>
+  s !== undefined && !s.isSymbolicLink() && (kind === "file" ? s.isFile() : s.isDirectory()) && s.uid === 0 && (s.mode & 0o022) === 0;
+
+export async function hostInventory(env: Env, load: () => Promise<InventoryModule> = () => import("./inventory.ts"), marker = INVENTORY_MARKER, modulePath = INVENTORY_MODULE_PATH): Promise<unknown> {
+  if (!rootOnly(env.lstat(dirname(marker)), "dir") || !rootOnly(env.lstat(marker), "file")) throw new OpsReject("disabled", INVENTORY_DISABLED_MESSAGE);
+  if (!rootOnly(env.lstat(dirname(modulePath)), "dir") || !rootOnly(env.lstat(modulePath), "file")) throw new OpsReject("unsupported", INVENTORY_UNSUPPORTED_MESSAGE);
+  let mod: InventoryModule;
+  try {
+    mod = await load();
+  } catch {
+    throw new OpsReject("unsupported", INVENTORY_UNSUPPORTED_MESSAGE);
+  }
+  if (typeof mod?.inventory !== "function") throw new OpsReject("unsupported", INVENTORY_UNSUPPORTED_MESSAGE);
+  return mod.inventory(env);
+}
+
 export async function runAction(action: Action, lines: number | undefined, env: Env, c: Config = CONFIG): Promise<unknown> {
   switch (action) {
     case "orbit_status":
@@ -349,6 +378,8 @@ export async function runAction(action: Action, lines: number | undefined, env: 
       return vaultSync(env, c);
     case "credentials":
       return credentials(env, c);
+    case "host_inventory":
+      return hostInventory(env);
   }
 }
 

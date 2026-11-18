@@ -2,6 +2,8 @@
 
 A small root helper lets ORBIT answer questions about its own server without ORBIT itself having any privilege. It is read-only, has seven fixed actions, and is **not** installed by a normal deploy: someone has to run the installer on the host once.
 
+An eighth fixed action, `host_inventory`, is in the code but **off by default**: the helper refuses it until the host is activated separately (a root-owned marker and a module that `install.sh` does not copy), and ORBIT offers its tool, `ops_host_inventory`, only with `ORBIT_HOST_INVENTORY=enabled`. See `docs/host-inventory.md`. The seven actions below are unchanged.
+
 ## What it can do
 
 One chat tool per action, owner only (`decide("agent", tool)`), no per-read confirmation, results shown with the usual provenance (`live`, source `ops/<action>`):
