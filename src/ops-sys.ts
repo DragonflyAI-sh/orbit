@@ -1,5 +1,7 @@
 import type { Proposal, Proposals } from "./agent.ts";
 import type { Jobs } from "./jobs.ts";
+import { launchOutcome } from "./launch-evidence.ts";
+import type { EvidenceContext } from "./launch-evidence.ts";
 import type { Notifier } from "./notify.ts";
 import type { SysClient } from "./ops-sys-client.ts";
 import { randomBytes } from "node:crypto";
@@ -79,15 +81,21 @@ export type JobsSnapshot = {
 };
 export type JobState = () => JobsSnapshot;
 
-export function jobStateOf(jobs: Jobs | undefined, now: () => Date = () => new Date()): JobState {
+export function jobStateOf(jobs: Jobs | undefined, now: () => Date = () => new Date(), opts: EvidenceContext = {}): JobState {
   return () => {
     if (!jobs) return { known: false, active: [], uncertain: [], detail: "ORBIT has no job registry here, so which jobs are running is unknown." };
     if (jobs.status().state !== "live") return { known: false, active: [], uncertain: [], detail: "ORBIT's job state is not persisted, so it may have lost track of running jobs: which jobs are running is unknown." };
     const active: string[] = [];
     const uncertain: string[] = [];
     for (const j of jobs.all()) {
-      if ((j.state !== "registered" && j.state !== "running") || j.launch?.failedAt) continue;
+      if (j.state !== "registered" && j.state !== "running") continue;
+      // The shared reading (src/launch-evidence.ts): only a launch that provably reached no runner is left out. A recorded fire failure does
+      // not hide a runner that reported, and a failure whose outcome is unknown (transport, 5xx, 2xx without a session, a restart mid-fire)
+      // is counted as possibly working, never as ended.
+      const { outcome } = launchOutcome(j, opts);
+      if (outcome === "not-launched") continue;
       if (new Date(j.expiresAt) <= now()) continue; // an expired registration cannot report any more
+      // health is "launch-failed" for an unresolved failure with no runner event, so it lands in uncertain.
       (jobs.health(j) === "ok" ? active : uncertain).push(j.id);
     }
     const parts = [`${active.length} active`, `${uncertain.length} quiet or not started (possibly still working)`];

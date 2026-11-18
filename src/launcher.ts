@@ -120,7 +120,7 @@ export function gitReconciler(jobs: import("./jobs.ts").Jobs, control: ControlRe
       // A launch that provably never reached a runner (brief not written, or the provider refused the fire) has no git record to read.
       // Any other failed launch may have started a session (src/launch-evidence.ts), so its git record is still read: read-only, never a retry.
       if (job.launch?.failedAt && !job.events.length) {
-        const e = dispatchEvidence(job, new Date(now()));
+        const e = dispatchEvidence(job);
         if (e.state === "never-dispatched" || e.state === "provider-rejected") continue;
       }
       const lastApi = job.lastEventAt ? new Date(job.lastEventAt).getTime() : new Date(job.launch?.at ?? job.createdAt).getTime();
