@@ -218,6 +218,20 @@
   .msg details summary { cursor: pointer; min-height: 24px; }
   .msg details .rows div { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .bounded { margin-top: 6px; font-size: 12px; color: var(--mock); }
+  /* A message's Details footer (detailsFooter in the script): closed by default, a small muted "Details" with a chevron that
+     points right when closed and down when open (no motion). It holds the provenance/model/memory tag, tool calls and, in the
+     Assistant, the Tool output and Resource usage panes. Long model ids and note paths wrap. */
+  .msg details.mfoot { margin-top: 4px; }
+  .mfoot > summary { display: inline-flex; align-items: center; gap: 6px; list-style: none; padding: 0 6px 0 2px; border-radius: 6px; color: var(--muted); }
+  .mfoot > summary::-webkit-details-marker { display: none; }
+  .mfoot > summary::before { content: ""; flex: none; width: 5px; height: 5px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); }
+  .mfoot[open] > summary::before { transform: translateY(-2px) rotate(45deg); }
+  .mfoot > summary:hover, .mfoot[open] > summary { color: var(--fg); }
+  .mfoothint { color: var(--mock); font-weight: 600; }
+  .mfoothint:empty { display: none; }
+  .mfootbody { margin: 2px 0 0 4px; padding-left: 10px; border-left: 2px solid var(--line); overflow-wrap: anywhere; }
+  .mfootbody > :first-child { margin-top: 0; }
+  @media (pointer: coarse) { .mfoot > summary { min-height: 32px; } }
   #astatus { padding: 0 16px; font-size: 13px; color: var(--muted); }
   #astatus:empty { display: none; }
   #astatus.bad { color: var(--down); font-weight: 600; }
@@ -2130,7 +2144,12 @@
       } };
     });
   }
+  // Diagnostic metadata parts (`meta: true`: the provenance/model/memory tag, tool calls) go into the message's Details
+  // footer (detailsFooter); the body, photos, galleries, warnings, errors and cards never do.
   function messageParts(m, mk, cardSpec, photoUrl, galleryBase) {
+    return detailsFooter(rawMessageParts(m, mk, cardSpec, photoUrl, galleryBase), m, mk);
+  }
+  function rawMessageParts(m, mk, cardSpec, photoUrl, galleryBase) {
     const parts = headParts(m, mk);
     const pending = m.status === "pending";
     const text = pending ? "Working…" : m.text || (m.error ? "" : m.role === "assistant" ? "(no text)" : "");
@@ -2146,17 +2165,44 @@
     if (tag) {
       const tagText = m.fallback && m.status === "done" ? `⚠ Fallback model, not ChatGPT · ${tag}` : tag;
       const tagClass = `tag ${failed ? "down" : m.provenance || ""}`;
-      parts.push({ key: "tag", sig: JSON.stringify([tagClass, tagText]), build: () => mk("span", { className: tagClass, textContent: tagText }) });
+      // An error or interruption is not diagnostic detail: it stays in view, outside the footer.
+      parts.push({ key: "tag", meta: !failed, sig: JSON.stringify([tagClass, tagText]), build: () => mk("span", { className: tagClass, textContent: tagText }) });
     }
     const warn = (key, t) => parts.push({ key, sig: t, build: () => mk("div", { className: "warn", textContent: t }) });
     if (m.incomplete && m.incomplete.length) warn("incomplete", `Incomplete reply: ${m.incomplete.join("; ")}`);
     if (m.accounting && m.accounting.length) warn("accounting", `Spend accounting: ${m.accounting.join("; ")}`);
     if (m.calls && m.calls.length) {
       const rows = m.calls.map((c) => `${c.ok ? "✓" : c.outcomeUnknown ? "?" : "✗"} ${c.name}(${String(c.arguments).slice(0, 120)}) [${callState(c)}] ${String(c.summary).slice(0, 160)}`);
-      parts.push({ key: "calls", sig: JSON.stringify(rows), build: () => mk("span", { className: "calls" }, `Tool calls (${rows.length}):`, ...rows.map((r) => mk("div", { textContent: r }))) });
+      parts.push({ key: "calls", meta: true, sig: JSON.stringify(rows), build: () => mk("span", { className: "calls" }, `Tool calls (${rows.length}):`, ...rows.map((r) => mk("div", { textContent: r }))) });
     }
     for (const id of m.cards || []) { const c = cardSpec && cardSpec(id); if (c) parts.push({ key: `card:${id}`, sig: c.sig, build: c.build }); }
     return parts;
+  }
+  // The Details footer: one <details> per message that has metadata, closed when it is first drawn, holding that message's
+  // metadata parts in their usual order. It is a keyed part with an `update`, so a poll or a reply in progress reconciles
+  // the parts inside it (reconcileChildren, with footMeta) and never rebuilds the footer itself: the reader's choice to
+  // open it stays as long as the message is on screen, independently for every message, and nothing is stored. A message
+  // with no metadata gets no footer. The summary names a paid fallback model, so that fact is never hidden.
+  const footMeta = new WeakMap();
+  function detailsFooter(parts, m, mk) {
+    const meta = parts.filter((p) => p.meta);
+    if (!meta.length) return parts;
+    const hint = m.fallback && m.status === "done" ? "⚠ Fallback model" : "";
+    const fill = (box) => { for (const p of meta) { const n = p.build(); footMeta.set(n, { key: p.key, sig: p.sig }); box.append(n); } };
+    return [...parts.filter((p) => !p.meta), {
+      key: "details",
+      sig: JSON.stringify([hint, meta.map((p) => [p.key, p.sig])]),
+      build: () => {
+        const body = mk("div", { className: "mfootbody" });
+        fill(body);
+        return mk("details", { className: "mfoot" }, mk("summary", {}, mk("span", { className: "mfootlabel", textContent: "Details" }), mk("span", { className: "mfoothint", textContent: hint })), body);
+      },
+      update: (node) => {
+        const h = node.childNodes[0].childNodes[1];
+        if (h.textContent !== hint) h.textContent = hint;
+        reconcileChildren(node.childNodes[1], meta, footMeta);
+      },
+    }];
   }
   function renderStoredMessage(m, mk, cardFor) {
     const node = mk("div", { className: messageClass(m) });
@@ -2243,8 +2289,19 @@
 
   // <assistant-parts>
   // The Assistant shows a stored message with the chat page's own parts (messageParts), except that tool calls and resource usage
-  // are each in a collapsible pane, closed by default. Warnings (incomplete reply, spend accounting), errors and proposal cards are
-  // never inside a pane, so a required confirmation is never hidden. Tests load this block with the threads block.
+  // are each in a collapsible pane, closed by default, inside the message's Details footer (detailsFooter) with the tag. A pane
+  // whose rows change is updated in place, so an open pane stays open while a reply runs. Warnings (incomplete reply, spend
+  // accounting), errors and proposal cards are never inside a pane or the footer, so a required confirmation is never hidden.
+  // Tests load this block with the threads block.
+  function metaPane(mk, key, cls, label, rows) {
+    const kids = () => [mk("summary", { textContent: label }), mk("div", { className: "rows" }, ...rows.map((r) => mk("div", { textContent: r })))];
+    return { key, meta: true, sig: JSON.stringify([label, rows]), build: () => mk("details", { className: cls }, ...kids()),
+      update: (node) => {
+        const [s, r] = kids();
+        if (node.childNodes[0].textContent !== label) node.replaceChild(s, node.childNodes[0]);
+        node.replaceChild(r, node.childNodes[1]);
+      } };
+  }
   function usageRows(m, chunk) {
     const rows = [];
     if (m.provenance) rows.push(`Answered by: ${m.provenance} · ${m.source || "unknown source"}`);
@@ -2263,25 +2320,24 @@
     return rows;
   }
   function assistantParts(m, mk, cardSpec, chunk, form) {
-    const parts = messageParts(m, mk, cardSpec, (aid) => `/assistant/attachments/${aid}`, "/assistant/photos").filter((p) => p.key !== "calls");
+    const parts = rawMessageParts(m, mk, cardSpec, (aid) => `/assistant/attachments/${aid}`, "/assistant/photos").filter((p) => p.key !== "calls");
     const at = parts.findIndex((p) => p.key.startsWith("card:"));
     const extra = [];
     if (m.calls && m.calls.length) {
       const rows = m.calls.map((c) => `${c.ok ? "✓" : c.outcomeUnknown ? "?" : "✗"} ${c.name}(${String(c.arguments).slice(0, 200)}) [${callState(c)}] ${String(c.summary).slice(0, 300)}${typeof c.outputChars === "number" ? ` · ${c.outputChars} characters of output` : ""}`);
       const unknown = m.calls.filter((c) => c.outcomeUnknown).length;
       const label = `Tool output (${rows.length} call${rows.length === 1 ? "" : "s"}${unknown ? `, ${unknown} with unknown outcome` : ""})`;
-      extra.push({ key: "calls", sig: JSON.stringify(rows), build: () => mk("details", { className: "toolpane" }, mk("summary", { textContent: label }), mk("div", { className: "rows" }, ...rows.map((r) => mk("div", { textContent: r })))) });
+      extra.push(metaPane(mk, "calls", "toolpane", label, rows));
     }
     if (m.role === "assistant" && m.status !== "pending") {
       const rows = usageRows(m, chunk);
-      extra.push({ key: "usage", sig: JSON.stringify(rows), build: () => mk("details", { className: "usagepane" }, mk("summary", { textContent: "Resource usage" }), mk("div", { className: "rows" }, ...rows.map((r) => mk("div", { textContent: r })))) });
+      extra.push(metaPane(mk, "usage", "usagepane", "Resource usage", rows));
     }
     if (m.role === "assistant" && form && form !== "full") {
       const t = form === "clipped" ? "In the model's context this turn is shortened: long tool outputs or text are cut. It is stored in full." : form === "calls-omitted" ? "In the model's context this turn's tool calls are replaced by a one-line note. It is stored in full." : "This turn is too large for the model's context and is sent only as a placeholder. It is stored in full.";
       extra.push({ key: "bounded", sig: t, build: () => mk("div", { className: "bounded", textContent: t }) });
     }
-    if (at < 0) return [...parts, ...extra];
-    return [...parts.slice(0, at), ...extra, ...parts.slice(at)];
+    return detailsFooter(at < 0 ? [...parts, ...extra] : [...parts.slice(0, at), ...extra, ...parts.slice(at)], m, mk);
   }
   // </assistant-parts>
 

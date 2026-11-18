@@ -192,7 +192,7 @@ test("browser: a selection in an older message survives unchanged polls, an appe
   bump(T1, (t) => { t.busy = false; Object.assign(t.messages[5]!, { status: "done", text: "Done **now**.", provenance: "live", source: "model/x" }); });
   await poll();
   assert.equal(await pendingNode.evaluate((n: Element) => n.isConnected && n === [...document.querySelectorAll("#log .msg")].at(-1)), true, "the reply keeps its node from pending to persisted");
-  assert.match(await pendingNode.evaluate((n: Element) => n.textContent), /Done now\.live · model\/x/);
+  assert.match(await pendingNode.evaluate((n: Element) => n.textContent), /Done now\.Details.*live · model\/x/);
   assert.equal(await page.evaluate(() => document.querySelectorAll("#log .msg").length), 6, "no duplicate messages");
   assert.deepEqual(await selectionIntact(), { text: "SELECTME", sameNode: true, connected: true, first: true, notReloaded: true });
   assert.equal((await scroll()).top, top, "the reader, scrolled up, is not pulled to the bottom");
