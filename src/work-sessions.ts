@@ -164,6 +164,8 @@ export function workSessions(backend: WorkBackend, now: () => Date = () => new D
       if (l.launch.job) return { state: l.launch.state, basis: "the job is not in the job store (it keeps the newest 200); the recorded state is shown" };
       return { state: l.launch.state, basis: l.launch.state === "launching" ? "recorded before the launch began; no job is recorded yet (in progress, or ORBIT stopped before it registered one)" : "recorded state" };
     }
+    // The runner's own events outrank a recorded fire failure: a fire whose answer was lost can still start a runner (src/launch-evidence.ts).
+    if (job.events.length) return { state: "launched", basis: "the runner reported to the job record" };
     if (job.launch?.failedAt) return { state: "failed", basis: "the job record has a launch failure" };
     if (job.launch?.sessionId || job.events.length) return { state: "launched", basis: job.events.length ? "the runner reported to the job record" : "the routine accepted the fire (the job record has its cloud session)" };
     if (!settled && l.launch.state === "launching") return { state: "launching", basis: "the job is registered and has no launch result yet (in progress, or ORBIT stopped before recording it; a restart reconciles it)" };

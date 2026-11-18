@@ -19,6 +19,11 @@ export type JobEvent = { at: string; type: "started" | "checkin" | "reply" | "su
 export type SummaryRecord = { text: string; chars: number; state: "complete" | "partial" | "oversize"; via: "api" | "git"; at: string; sha?: string };
 export type Steer = { n: number; text: string; at: string; deliveredAt?: string };
 export type Launch = { routine: string; at: string; branch?: string; briefCommit?: string; sessionId?: string; sessionUrl?: string; failedAt?: string; error?: string;
+  // Dispatch evidence (docs/reviews/launch-reconciliation.md), written by src/job-launch.ts on launches since this field was added; absent
+  // on older records, which are read conservatively (src/launch-evidence.ts). fireStartedAt: persisted immediately before the Routine fire
+  // request is sent. firedAt: when the provider answered with a session. toolCommitSent: the `Tool commit:` line of the fire text (a commit
+  // id or "unknown", never the token). fireFailure: what a failed fire says about whether the provider received it (src/launcher.ts).
+  fireStartedAt?: string; firedAt?: string; toolCommitSent?: string; fireFailure?: "rejected" | "server-error" | "no-session" | "transport";
   // Distinct words of the brief, for the duplicate-launch warning (src/duplicates.ts). Not the brief itself.
   briefWords?: string;
   // Legacy, read only: job records from before launch-time vault context export was removed may still hold the paths that were copied,
@@ -248,8 +253,11 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
     },
 
     // Flags a job that has not started within 10 minutes of launch, or has gone quiet for 15 minutes.
+    // A recorded launch failure is shown only while the runner has said nothing: a fire whose answer was lost (a transport error after the
+    // provider accepted it) can still start a runner, and once it reports, its own events are the evidence, not the lost answer.
+    // "not-started" means no runner event yet. It never says whether a cloud session exists: see src/launch-evidence.ts for that.
     health(job: Job): "ok" | "not-started" | "quiet" | "finished" | "launch-failed" {
-      if (job.launch?.failedAt) return "launch-failed";
+      if (job.launch?.failedAt && !job.events.length) return "launch-failed";
       if (job.state === "done" || job.state === "blocked" || job.state === "failed") return "finished";
       const t = now().getTime();
       if (!job.events.length) return job.launch && t - new Date(job.launch.at).getTime() > 10 * 60_000 ? "not-started" : "ok";
@@ -262,7 +270,7 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
     all: (): Job[] => list(),
 
     status(): PortStatus {
-      const active = list().filter((j) => (j.state === "registered" || j.state === "running") && !j.launch?.failedAt).length;
+      const active = list().filter((j) => (j.state === "registered" || j.state === "running") && !(j.launch?.failedAt && !j.events.length)).length;
       return {
         port: "jobs",
         state: store.persisted ? "live" : "degraded",
