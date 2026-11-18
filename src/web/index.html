@@ -537,18 +537,31 @@
   // </deployinfo>
 
   // <status-dot>
-  // The overall status from /status, in four levels (docs/assistant.md, "Overall status"). Deterministic, from the port entries only:
-  //   down     (red)   a core port (model, policy, channel) is down or mock: ORBIT cannot answer for real. Wins over everything else,
-  //                    so a real core failure is never shown as a working fallback.
-  //   unknown  (grey)  no usable answer (not reachable, an HTTP error, an unreadable body, no entries), or the model port is missing or
-  //                    a core port's state is not one of the four known states: whether ORBIT can answer is not known.
+  // The overall status from /status, in four levels (docs/assistant.md, "Overall status"). Deterministic, from the port entries only.
+  // The model port's `availability` (src/model-availability.ts: can a real reply come from some model now) is read before its
+  // `state`; an answer without it (an older ORBIT) is read from `state` and `fallback.answering` as before.
+  //   down     (red)   a core port (model, policy, channel) is down or mock, or the model is reported not available: no model can
+  //                    reply. Wins over everything else, so a real core failure is never shown as a working fallback.
+  //   unknown  (grey)  no usable answer (not reachable, an HTTP error, an unreadable body, no entries), or the model port is missing,
+  //                    a core port's state is not one of the four known states, or the model's availability is not known (a
+  //                    fallback that has not been tried yet while ChatGPT is limited, or an unreadable availability).
   //   degraded (amber) ORBIT still answers, but some entry is not live: the model on the paid fallback or not yet confirmed, or an
   //                    optional port (memory, notify, jobs, watch, ...) degraded, down, mock or unreadable.
-  //   ok       (green) every entry's state is exactly "live".
-  // `ok` stays true only for green. Never green without an answer. Tests load this block.
+  //   ok       (green) every entry's state is exactly "live" and the model is available.
+  // `ok` stays true only for green. Never green without an answer. ORBIT answering this request at all shows the process is running;
+  // red and grey are about whether a model can reply, and the detail says so. Tests load this block.
   const CORE_PORTS = ["model", "policy", "channel"];
   const PORT_STATES = ["live", "degraded", "down", "mock"];
   const STATUS_WORDS = { ok: "healthy, all live", degraded: "degraded but working", down: "down, core functionality unavailable", unknown: "unknown" };
+  const RUNNING = " ORBIT itself is running: it answered this status request.";
+  // The model's availability as reported: { available: true | false | null, reason } or null when the entry has none (older ORBIT).
+  // A present but malformed value is { available: null }: not known, never available.
+  function availabilityOf(raw) {
+    if (!raw || typeof raw !== "object" || !("availability" in raw)) return null;
+    const a = raw.availability;
+    const ok = a && typeof a === "object" && (a.available === true || a.available === false || a.available === null);
+    return { available: ok ? a.available : null, via: ok && typeof a.via === "string" ? a.via : "unknown", reason: ok && typeof a.reason === "string" ? a.reason : "The model's availability could not be read." };
+  }
   function aggregateStatus(s, failure) {
     const ports = s && typeof s === "object" && Array.isArray(s.ports) ? s.ports : null;
     const unknown = (label, detail) => ({ level: "unknown", ok: false, label, detail });
@@ -565,19 +578,24 @@
     const core = (e) => CORE_PORTS.includes(e.port);
     const named = (list) => list.map((e) => `${e.port}: ${e.state || "unreadable state"}`).join(", ");
     const others = (list) => { const rest = entries.filter((e) => e.state !== "live" && !list.includes(e)); return rest.length ? ` Also not live: ${named(rest)}.` : ""; };
-    const failed = entries.filter((e) => core(e) && (e.state === "down" || e.state === "mock"));
-    if (failed.length) {
-      return { level: "down", ok: false, label: `Down: ${failed.map((e) => e.port).join(", ")}`, detail: `Core functionality is unavailable: ${named(failed)}.${failed.some((e) => e.port === "model") ? " No reply can come from ChatGPT or a fallback model." : ""}${others(failed)}` };
-    }
     const model = entries.find((e) => e.port === "model");
+    const av = model ? availabilityOf(model.raw) : null;
+    const failed = entries.filter((e) => core(e) && (e.state === "down" || e.state === "mock" || (e === model && av && av.available === false)));
+    if (failed.length) {
+      const why = failed.includes(model) ? ` No reply can come from ChatGPT or a fallback model${av && av.available === false ? `: ${av.reason}` : "."}${RUNNING}` : "";
+      return { level: "down", ok: false, label: `Down: ${failed.map((e) => e.port).join(", ")}`, detail: `Core functionality is unavailable: ${named(failed)}.${why}${others(failed)}` };
+    }
     const unclear = entries.filter((e) => core(e) && !e.state);
     if (!model || unclear.length) {
       return unknown("Status unknown", `${model ? `A core entry's state could not be read (${named(unclear)})` : "The model's status is not reported"}, so it is not known whether ORBIT can answer.${others(unclear)}`);
     }
+    if (av && av.available === null) {
+      return unknown("Status unknown: model", `Whether a model can reply is not known: ${av.reason}${RUNNING}${others([model])}`);
+    }
     const bad = entries.filter((e) => e.state !== "live");
     if (!bad.length) return { level: "ok", ok: true, label: "All live", detail: `All ${entries.length} status entries are live.` };
     const fb = model.raw.fallback && typeof model.raw.fallback === "object" ? model.raw.fallback : null;
-    const onFallback = model.state === "degraded" && fb && fb.answering === true;
+    const onFallback = model.state === "degraded" && fb && fb.answering === true && (!av || av.via === "fallback");
     const route = onFallback
       ? `Replies come from the fallback model ${String(fb.provider || "unknown provider")}/${String(fb.model || "unknown model")}, not ChatGPT: ChatGPT ${fb.reason === "rate_limit" ? "rate" : "usage"} limit until ${String(fb.until || "an unknown time")}${fb.estimated ? " (ORBIT's estimate)" : ""}. `
       : "";

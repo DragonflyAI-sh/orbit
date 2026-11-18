@@ -198,7 +198,7 @@ test("model port: fallback answering is degraded with the route named; caps used
   await w.model.reply([{ role: "user", content: "hi" }], []);
   let st = w.model.status();
   assert.equal(st.state, "degraded", "working on the fallback: degraded, not down");
-  assert.deepEqual({ ...st.fallback, until: undefined }, { provider: "openrouter", model: "vendor/cheap-model", answering: true, reason: "usage_limit", until: undefined, estimated: false });
+  assert.deepEqual({ ...st.fallback, until: undefined }, { provider: "openrouter", model: "vendor/cheap-model", answering: true, reason: "usage_limit", until: undefined, estimated: false, lastCall: "succeeded" });
   assert.match(st.detail, /Replies come from OpenRouter vendor\/cheap-model \(fallback, paid; same tools and confirmations as ChatGPT; no photos\)/);
 
   // Both providers unavailable: ChatGPT limited and the fallback's daily cap used up.

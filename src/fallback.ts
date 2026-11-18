@@ -2,11 +2,11 @@ import { MAX_RESET_MS, ProviderError, RATE_PAUSE_MS, USAGE_PAUSE_MS } from "./ch
 import { replySource } from "./model.ts";
 import type { FallbackInfo, ImageSupport, Item, Message, ModelPort, Reply, ReplyOptions, Step, ToolDef, ToolRounds } from "./model.ts";
 import { FALLBACK_NO_PHOTOS, withoutPhotos } from "./photo-context.ts";
-import { BALANCE_EVERY_MS, openrouterClient } from "./openrouter.ts";
+import { BALANCE_EVERY_MS, openrouterClient, reservationUsd } from "./openrouter.ts";
 import type { OpenRouterClient, OpenRouterConfig } from "./openrouter.ts";
-import { SpendError } from "./spend-ledger.ts";
+import { SpendError, toMicro, toUsd } from "./spend-ledger.ts";
 import type { SpendLedger } from "./spend-ledger.ts";
-import type { FallbackRoute, PortStatus } from "./ports.ts";
+import type { FallbackRoute, ModelAvailability, PortStatus } from "./ports.ts";
 
 // The fallback model: ChatGPT token sharing stays primary; OpenRouter answers only while ChatGPT is limited.
 //
@@ -16,11 +16,18 @@ import type { FallbackRoute, PortStatus } from "./ports.ts";
 // then. After it, the next call goes to the primary, and only a successful primary call counts as recovered.
 // What it may do: exactly what the primary may do in the same reply. The fallback is offered the caller's whole tool list, unchanged
 // (docs/openrouter-fallback.md, "Tools"). Every safeguard that matters is model-independent and lives where the tool runs, not here:
-// the owner check and the tool list are decided by the caller (the owner's chat), each tool keeps its own policy checks, confirmation
-// cards (job_launch, every ops_propose_*, vault writes) still wait for Rai, and a call to a tool that was not offered runs nothing
-// (runChat answers "No tool named ..."), whichever model asked. What stays different is only what the route really cannot do or must
-// not spend: no photos are sent to it (it is not given images in this build), background callers never spend it, and every paid call
-// is admitted by the spend ledger and its caps.
+// the owner check and the tool list are decided by the caller (the owner's chat), each tool keeps its own policy checks, and a call to
+// a tool that was not offered runs nothing (runChat answers "No tool named ..."), whichever model asked. Proposal tools (job_launch,
+// job_steer, research_launch, every ops_propose_*) only open a card that waits for Rai. Not everything is a card: the vault write tools
+// and research_save_to_vault commit and push at once where the vault's AGENTS.md section 3 allows a direct write (only section 4
+// protected changes become a card), notify sends at once, ops_sys_cancel_reboot cancels a confirmed reboot at once, and the photo
+// observation tools write ORBIT's own observation store, each under its existing owner, policy and audit checks, exactly as on the
+// primary. What stays different is only what the route really cannot do or must not spend: no photos are sent to it (it is not given
+// images in this build), background callers never spend it, and every paid call is admitted by the spend ledger and its caps.
+//
+// Availability (status()): a configured fallback is not evidence that it answers. While the primary's limit is in force the port is
+// `down` (available false) when no paid call can be admitted OR the latest paid call in this limit window failed, `degraded` with
+// available true only after a paid call in this window succeeded, and `degraded` with available null (not known) before any.
 
 type Limit = { kind: "usage_limit" | "rate_limit"; until: number; estimated: boolean };
 
@@ -53,6 +60,10 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   let recoveredAt: string | undefined;
   let lastUse: { at: string; costUsd?: number } | undefined;
   let lastFallbackError: string | undefined;
+  // The outcome of the latest paid fallback call in the current limit window: the only evidence that the fallback answers. Cleared
+  // when a new limit window starts and when the primary recovers. Not touched by refusals that are not about the route (a background
+  // caller, photos on the newest message) or by an unusable configuration, which status reads directly.
+  let lastCall: { ok: boolean; at: string } | undefined;
   // Fail-closed latch. Set when a paid call showed the ledger cannot be trusted: it refused to admit a call, or it could not record a
   // call's outcome (billed answer, failed call, unreadable body, timeout). While it is set NO paid call is admitted (unavailable()),
   // and status says so. Nothing in this process clears it: not polling status, not a later call (none is made), not time. The way out is
@@ -79,6 +90,8 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     const next: Limit = { kind, until: reliable ? given : t + (kind === "usage_limit" ? USAGE_PAUSE_MS : RATE_PAUSE_MS), estimated: !reliable };
     // A limit in force is never shortened by a later report; a provider reset replaces an estimate.
     if (limit && limit.until > t && next.until <= limit.until && !(limit.estimated && !next.estimated)) return;
+    // A new window (no limit in force before): evidence from an earlier window says nothing about the fallback now.
+    if (!limit || limit.until <= t) lastCall = undefined;
     limit = next;
     recoveredAt = undefined;
   };
@@ -117,6 +130,8 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       paid = await client!.step(input, told, notes, tools, rounds);
     } catch (err) {
       lastFallbackError = err instanceof Error ? err.message : String(err);
+      // Any failed paid attempt (caps or ledger refusal, provider, network, timeout) is evidence the fallback is not answering now.
+      lastCall = { ok: false, at: iso(now()) };
       if (err instanceof SpendError) {
         // "ledger": it could not be read or written. "busy" (another process holds the lock) and the caps refused this one call before
         // anything was charged or sent: nothing is uncertain, so nothing latches.
@@ -129,6 +144,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       throw augment(stand, err instanceof ProviderError ? err.base : lastFallbackError, unrecorded);
     }
     lastFallbackError = undefined;
+    lastCall = { ok: true, at: iso(now()) };
     // A billed answer whose ledger write failed is returned (never discarded), but the ledger is then not trustworthy.
     if (paid.accounting?.length) latch("the ledger could not record a paid call");
     lastUse = { at: iso(now()), ...(paid.costUsd !== undefined ? { costUsd: paid.costUsd } : {}) };
@@ -151,6 +167,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       if (limit) {
         // The pause or reset has passed and the primary answered: only now is it recovered.
         limit = undefined;
+        lastCall = undefined;
         recoveredAt = iso(now());
       }
       return step;
@@ -212,8 +229,19 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     const life = v.caps.totalUsd === null ? `$${v.lifetimeUsd.toFixed(4)} lifetime (no lifetime cap)` : `$${v.lifetimeUsd.toFixed(4)} of $${v.caps.totalUsd} lifetime (never resets)`;
     const allowance = ` Local OpenRouter allowance as last written (UTC ${v.day}): $${v.spentTodayUsd.toFixed(4)} spent today of $${v.caps.dailyUsd} (resets ${v.resets.dailyAt}), ${month}, ${life}, $${v.reservedUsd.toFixed(4)} reserved for calls in flight (counted against every cap until settled)${v.uncertainRequests ? `, ${v.uncertainRequests} request(s) charged at their upper bound because the cost was unknown` : ""}; $${v.remainingTodayUsd.toFixed(4)} can still be reserved now. This is ORBIT's own count, not a hard spending ceiling.`;
     const spent = v.exhausted.length ? ` Every paid call is refused for now: the ${v.exhausted.join(" and ")} cap${v.exhausted.length > 1 ? "s are" : " is"} used up.` : "";
+    // Headroom above zero but below the reservation of the smallest possible request (an empty body) refuses every call too. This is a
+    // lower bound: a real request reserves more, and a refusal of a larger one is caught by `lastCall` instead.
+    const smallest = config.state === "ready" ? toMicro(reservationUsd(0, config.priceIn, config.priceOut, config.outputBoundTokens)) : 0;
+    const headroom = Math.round(v.remainingTodayUsd * 1_000_000);
+    const tooLittle = !v.exhausted.length && headroom < smallest;
+    const short = tooLittle ? ` Every paid call is refused for now: $${v.remainingTodayUsd.toFixed(4)} is left under the caps, less than the $${toUsd(smallest).toFixed(4)} the smallest possible call reserves.` : "";
+    const offWhy = v.exhausted.length
+      ? `The OpenRouter fallback's ${v.exhausted.join(" and ")} spend cap${v.exhausted.length > 1 ? "s are" : " is"} used up`
+      : tooLittle
+        ? `The OpenRouter fallback's remaining allowance is below the smallest possible call's reservation`
+        : undefined;
     // A used-up cap refuses every paid call until it resets: armed (configured, ledger sound) but not usable now.
-    return { armed: true, usable: !v.exhausted.length, ...(v.exhausted.length ? { off: `The OpenRouter fallback's ${v.exhausted.join(" and ")} spend cap${v.exhausted.length > 1 ? "s are" : " is"} used up` } : {}), text: ` OpenRouter fallback armed: ${client!.model}, used only while ChatGPT is limited.${allowance}${spent}${unverified}${bal}` };
+    return { armed: true, usable: !offWhy, ...(offWhy ? { off: offWhy } : {}), text: ` OpenRouter fallback armed: ${client!.model}, used only while ChatGPT is limited.${allowance}${spent}${short}${unverified}${bal}` };
   };
 
   const wrapper: FallbackModel = {
@@ -277,13 +305,37 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       const off = !paid.usable;
       if (l) {
         const passed = l.until <= now();
-        // down: the primary is limited AND no paid call can be admitted, so no reply can come from either. degraded: one still can.
-        const state = passed ? "degraded" : off ? "down" : "degraded";
+        const failed = lastCall && !lastCall.ok;
+        const callWord: FallbackRoute["lastCall"] = !lastCall ? "none" : lastCall.ok ? "succeeded" : "failed";
+        // While the limit is in force:
+        //   down, available false: no paid call can be admitted, or the latest one in this window failed. Neither model replies.
+        //   degraded, available true: the latest paid call in this window succeeded. Replies come from the fallback.
+        //   degraded, available null: usable, but not tried yet in this window. A configured fallback is not evidence.
+        // After the limit time and before a primary call succeeds: degraded and available as the primary's own "not confirmed"
+        // (amber), since the next call goes to the primary and the fallback still takes over if it is limited again.
+        const answering = !passed && !off && callWord === "succeeded";
+        const state = passed ? "degraded" : off || failed ? "down" : "degraded";
+        const usableText = `Replies come from OpenRouter ${client?.model} (fallback, paid; same tools and confirmations as ChatGPT; no photos) until then; ChatGPT is not called.`;
         const text = passed
           ? `The ${why(l)} has passed. ORBIT will try ChatGPT on the next call; it is not confirmed recovered until one succeeds.`
-          : `${why(l)}. ${off ? `${paid.off ?? "No fallback is available"}, so replies fail until then.` : `Replies come from OpenRouter ${client?.model} (fallback, paid; same tools and confirmations as ChatGPT; no photos) until then; ChatGPT is not called.`}`;
-        const route: FallbackRoute | undefined = client ? { provider: "openrouter", model: client.model, answering: !passed && !off, reason: l.kind, until: iso(l.until), estimated: l.estimated } : undefined;
-        return { ...base, state, detail: `${text}${armed}${lastFallbackError ? ` Last fallback error: ${lastFallbackError}` : ""}`, ...(route ? { fallback: route } : {}) };
+          : off
+            ? `${why(l)}. ${paid.off ?? "No fallback is available"}, so replies fail until then.`
+            : failed
+              ? `${why(l)}. The latest OpenRouter fallback call (${lastCall!.at}) failed, so no reply is known to work until one succeeds; ChatGPT is not called until then.`
+              : callWord === "succeeded"
+                ? `${why(l)}. ${usableText}`
+                : `${why(l)}. The OpenRouter fallback (${client?.model}) is configured but has not been called since the limit began, so whether it answers is not known. ${usableText}`;
+        const availability: ModelAvailability = passed
+          ? { available: true, via: "primary", reason: "ChatGPT's limit has passed; it is expected to answer but not confirmed until a call succeeds." }
+          : off
+            ? { available: false, via: "none", reason: `ChatGPT is limited and ${(paid.off ?? "no fallback is available").replace(/^The /, "the ")}: no reply can come from either model.` }
+            : failed
+              ? { available: false, via: "none", reason: "ChatGPT is limited and the latest OpenRouter fallback call failed: no reply is known to work from either model." }
+              : callWord === "succeeded"
+                ? { available: true, via: "fallback", reason: "ChatGPT is limited; the OpenRouter fallback answered the latest call." }
+                : { available: null, via: "unknown", reason: "ChatGPT is limited and the OpenRouter fallback has not been tried since, so whether it answers is not known." };
+        const route: FallbackRoute | undefined = client ? { provider: "openrouter", model: client.model, answering, reason: l.kind, until: iso(l.until), estimated: l.estimated, lastCall: callWord } : undefined;
+        return { ...base, state, detail: `${text}${armed}${lastFallbackError ? ` Last fallback error: ${lastFallbackError}` : ""}`, ...(route ? { fallback: route } : {}), availability };
       }
       const recovered = recoveredAt ? ` ChatGPT recovered at ${recoveredAt} (a primary call succeeded).` : "";
       return armed || recovered ? { ...base, detail: `${base.detail}${recovered}${armed}` } : base;

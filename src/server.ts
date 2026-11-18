@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Identify } from "./identity.ts";
+import { withAvailability } from "./model-availability.ts";
 import { jobLauncher } from "./job-launch.ts";
 import { dispatchEvidence } from "./launch-evidence.ts";
 import { researchStore } from "./research.ts";
@@ -246,7 +247,7 @@ export function buildServer({
       fixed("policy", "fail-closed", "Allows reads and chat replies; memory, vault writes, the config view, notify, schedule, runs, tools, devices and jobs for the owner only; refuses everything else."),
       fixed("channel", "web", "Web chat at /. Discord and CLI are not built."),
       ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...(jobs ? [launcherStatus(jobs.status())] : []), ...ports.map((p) => p.status()), ...(photoSemantic ? [photoSemantic.status()] : []), ...(watch ? [watch.status()] : [])].map((s) => withFreshness(s, now)),
-    ].map((s) => withCheck(s, smoke?.forPort(s.port, now)));
+    ].map((s) => withAvailability(withCheck(s, smoke?.forPort(s.port, now))));
   };
   watch?.attach(() => statuses().filter((st) => st.port !== "watch"));
   const limits = (isOwner: boolean): string[] => [
