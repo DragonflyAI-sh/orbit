@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { MAX_OUTPUT_CHARS, runChat } from "../src/agent.ts";
+import { MAX_OUTPUT_CHARS, REPEAT_FAILURES_MAX, runChat } from "../src/agent.ts";
 import { assistantStore } from "../src/assistant-store.ts";
 import { FALLBACK_TOOLS } from "../src/fallback.ts";
 import { type Item, type ModelPort, responsesTools, type Step } from "../src/model.ts";
@@ -53,7 +53,7 @@ const copperFinch = (threads: ReturnType<typeof threadStore>) => {
 
 // A model that makes the given tool calls, one per round, then answers. `next` sees the outputs so far, so a call can depend on
 // the previous page (its nextCursor), exactly as a model would copy it.
-type Out = { ok: boolean; error?: string; result?: any; raw: string };
+type Out = { ok: boolean; error?: string; result?: any; raw: string; notRun?: boolean };
 const driver = (next: (outs: Out[]) => Record<string, unknown> | undefined) => {
   const outs: Out[] = [];
   let n = 0;
@@ -340,13 +340,17 @@ test("mutation between pages: a stale cursor fails explicitly with a bounded res
   assert.equal(after.at(-1).text, ACK);
 });
 
-test("an agent turn is capped: a model that keeps repeating a failing call stops at maxRounds", async () => {
+test("an agent turn stops a model that keeps repeating a failing call: it runs twice, the repeat is not run, and the tools are withdrawn", async () => {
   const s = stores();
   const id = `chat:${copperFinch(s.threads)}`;
   const { outs, outcome } = await turn(s.tools, () => ({ id, cursor: "repeat-me" }), 5);
-  assert.ok(outs.length <= 5);
-  assert.ok(outs.every((o) => !o.ok && o.error === BAD_READ_CURSOR));
-  assert.ok(outcome);
+  // Two real runs with the same error, then one repeat answered by ORBIT without running it; the next step gets no tools.
+  assert.equal(outs.length, REPEAT_FAILURES_MAX + 1);
+  assert.ok(outs.slice(0, REPEAT_FAILURES_MAX).every((o) => !o.ok && o.error === BAD_READ_CURSOR));
+  assert.equal(outs.at(-1)!.notRun, true);
+  assert.equal(outcome.stalled, true);
+  assert.equal(outcome.capped, false);
+  assert.equal(outcome.rounds, REPEAT_FAILURES_MAX + 1);
 });
 
 test("unavailable and deleted sources: explicit answers with recovery guidance, nothing fabricated", async () => {

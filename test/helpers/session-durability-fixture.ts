@@ -32,10 +32,15 @@ export function durabilityConversation() {
 // What a model reading its own context would do to continue: take the nextCursor of the newest session_read result in the given
 // model input items, whether the result is whole (JSON) or was shortened for the context (the ORBIT cut note). undefined when that
 // newest result has none (null at the edge, or lost).
+// When the turn's calls were omitted from the context ("calls-omitted"), the cursor is read from ORBIT's omitted-calls note instead.
 export function findCursor(items: unknown[]): string | undefined {
-  const all = items as { type?: string; name?: string; call_id?: string; output?: string }[];
+  const all = items as { type?: string; name?: string; call_id?: string; output?: string; role?: string; content?: unknown }[];
   const call = [...all].reverse().find((i) => i.type === "function_call" && i.name === "session_read");
-  const out = call && all.find((i) => i.type === "function_call_output" && i.call_id === call.call_id);
+  if (!call) {
+    const notes = all.flatMap((i) => (i.role === "assistant" && typeof i.content === "string" ? [...i.content.matchAll(/session_read(?: \(id [^)]*\))? nextCursor: "([A-Za-z0-9_-]{16,})"/g)] : []));
+    return notes.at(-1)?.[1];
+  }
+  const out = all.find((i) => i.type === "function_call_output" && i.call_id === call.call_id);
   if (!out?.output) return undefined;
   const hits = [...out.output.matchAll(/nextCursor"?:\s?"([A-Za-z0-9_-]{16,})"/g)];
   return hits.at(-1)?.[1];

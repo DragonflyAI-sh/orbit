@@ -55,7 +55,18 @@ export type Reply = Result<string> & { fallback?: FallbackInfo; accounting?: str
 // `rounds`: where a tool-using reply stands in its tool-round budget (runChat, src/agent.ts), so the instructions can say it. `round` is
 // this step's index (0-based); steps 0 .. max-1 may call tools; the step at `max` is the forced final answer, sent with no tools.
 // `offered`: the names of every tool runChat was given for this reply, so that final step can say they exist but are withheld.
-export type ToolRounds = { round: number; max: number; offered: string[] };
+// `stalled`: the no-progress guard (runChat) withheld the tools before the budget ran out; this step is the final one, with no tools.
+export type ToolRounds = { round: number; max: number; offered: string[]; stalled?: boolean };
+
+// No-progress guard (runChat, src/agent.ts): an identical call (same tool, same arguments) that has failed with an identical result this
+// many times in a row in one reply is not run again in that reply. Different arguments (a new cursor or page), a different result (a
+// retry that got further), or a success reset it, so polling, pagination and retries that make progress are unaffected. Only failures
+// count. Defined here, not in agent.ts, because the round instructions below name it and agent.ts already depends on this module.
+export const REPEAT_FAILURES_MAX = 2;
+
+// Whether this step is the final one, sent without tools, and why: the budget ran out, or the no-progress guard stopped the loop.
+export const toolsWithheld = (rounds: ToolRounds | undefined): "budget" | "stalled" | undefined =>
+  !rounds ? undefined : rounds.round >= rounds.max ? "budget" : rounds.stalled ? "stalled" : undefined;
 export type ReplyOptions = { fallback?: boolean; signal?: AbortSignal; rounds?: ToolRounds };
 
 // Whether this model can be sent photos. `ok: false` says why in words the owner can act on.
@@ -93,9 +104,10 @@ const offers = (tooling: string[], n: string) => tooling.some((t) => toolName(t)
 
 export function recordCheckInstruction(tooling: string[], rounds?: ToolRounds): string {
   const available = RECORD_TOOLS.filter((n) => offers(tooling, n));
-  const withheld = rounds && rounds.round >= rounds.max ? RECORD_TOOLS.filter((n) => rounds.offered.includes(n)) : [];
+  const why = toolsWithheld(rounds);
+  const withheld = rounds && why ? RECORD_TOOLS.filter((n) => rounds.offered.includes(n)) : [];
   if (!available.length && withheld.length)
-    return `The record tools (${withheld.join(", ")}) are withheld in this final step because the tool-round budget ran out; they are not missing. Claim a job or action outcome only where a tool result above shows it; otherwise say it is unverified.`;
+    return `The record tools (${withheld.join(", ")}) are withheld in this final step because ${why === "budget" ? "the tool-round budget ran out" : "ORBIT stopped the tool calls for lack of progress"}; they are not missing. Claim a job or action outcome only where a tool result above shows it; otherwise say it is unverified.`;
   return available.length
     ? `Before you say that a job or an action did happen or did not happen (launched, steered, confirmed, restarted, finished, failed), check ORBIT's actual records in this turn with ${available.join(", ")}. What earlier messages, a thread summary, the recent-work note or a proposal card says is not proof: the records are. If the records disagree with something you said earlier, say so and correct it. If a check is not possible, say the outcome is unverified. Before proposing a new job, check whether the same work is already running or waiting for Rai's confirmation, and do not offer a proposal he already confirmed.`
     : "None of the tools that read ORBIT's job and operation records are available in this reply, so you cannot check whether a job or action happened: say its outcome is unverified instead of claiming it, and do not re-offer a proposal that earlier messages show was already confirmed.";
@@ -133,17 +145,27 @@ export function photoGuidance(tooling: string[]): string[] {
 // The tool-round lines (docs/assistant.md, "Tool rounds and capability claims"). Built from runChat's own counters and tool list.
 export function roundGuidance(rounds: ToolRounds | undefined, offeredNow: boolean): string[] {
   if (!rounds || rounds.max < 1) return [];
-  if (rounds.round >= rounds.max) {
+  const still = rounds.offered.length ? ` The tools offered earlier in this reply still exist and are only withheld for this step: ${rounds.offered.join(", ")}. Do not say that any of them is unavailable, missing or not connected.` : "";
+  const honest =
+    "Report only what the tool results above show: summarize what was completed and what is still pending, and say plainly which requested actions were not done. A tool that was not called did nothing, a failed or refused call did nothing unless its result says otherwise, and a proposal is not a completed action.";
+  const why = toolsWithheld(rounds);
+  if (why === "budget") {
     return [
       "",
-      `TOOL-ROUND BUDGET EXHAUSTED: this reply has used all ${rounds.max} steps that may call tools, so ORBIT offers no tools in this final step.${rounds.offered.length ? ` The tools offered earlier in this reply still exist and are only withheld for this step: ${rounds.offered.join(", ")}. Do not say that any of them is unavailable, missing or not connected.` : ""} Say that this reply's tool-round budget ran out. Report only what the tool results above show, and say plainly which requested actions were not done: a tool that was not called did nothing, and a proposal is not a completed action. Rai can ask again (for example "continue") for a new reply with a fresh budget.`,
+      `TOOL-ROUND BUDGET EXHAUSTED: this reply has used all ${rounds.max} steps that may call tools, so ORBIT offers no tools in this final step.${still} Say that this reply's tool-round budget ran out. ${honest} Rai can ask again (for example "continue") for a new reply with a fresh budget.`,
+    ];
+  }
+  if (why === "stalled") {
+    return [
+      "",
+      `TOOL CALLS STOPPED FOR LACK OF PROGRESS: the last step only repeated calls that had already failed with the same result, so ORBIT did not run them and offers no tools in this final step. This is not the tool-round budget (${rounds.round} of ${rounds.max} steps were used).${still} Say which calls kept failing and quote their error. ${honest}`,
     ];
   }
   if (!offeredNow) return [];
   const left = rounds.max - rounds.round;
   return [
     "",
-    `Tool rounds: this is step ${rounds.round + 1}; at most ${rounds.max} steps of this reply may call tools (${left} left, this one included). After that ORBIT asks for an answer without tools. When Rai has asked for an action, do it before spending steps on optional reading.`,
+    `Tool rounds: this is step ${rounds.round + 1}; at most ${rounds.max} steps of this reply may call tools (${left} left, this one included). After that ORBIT asks for an answer without tools. This is a ceiling, not a target: answer as soon as you can, without further calls. When Rai has asked for an action, do it before spending steps on optional reading. Repeating a call that failed, with the same arguments, returns the same failure; after ${REPEAT_FAILURES_MAX} identical failures ORBIT stops running it.`,
   ];
 }
 

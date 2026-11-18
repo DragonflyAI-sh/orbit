@@ -65,7 +65,7 @@ test("the loop stops at the round cap and withdraws the tools", async () => {
   assert.equal(out.calls.length, MAX_ROUNDS);
   assert.equal(model.seen.length, MAX_ROUNDS + 1);
   assert.deepEqual(model.seen.at(-1)!.tools, []);
-  assert.match(out.text, /stopped after 5 rounds/);
+  assert.match(out.text, new RegExp(`stopped after ${MAX_ROUNDS} rounds`));
 });
 
 test("bad arguments, unknown tools and refused tools come back as errors, not runs", async () => {
