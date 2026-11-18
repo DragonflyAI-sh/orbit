@@ -12,11 +12,32 @@ export type PortStatus = {
   // keeps its four values and its meaning, so consumers that ignore `check` are unchanged.
   check?: CheckRecord;
   // Optional, model port only, set by the OpenRouter fallback wrapper while the primary's limit is recorded (src/fallback.ts). Additive
-  // like `check`: `state` keeps its meaning. `answering` is true only while the limit is in force and a paid call could be admitted.
+  // like `check`: `state` keeps its meaning. `answering` is true only while the limit is in force, the fallback is usable (configured,
+  // ledger sound, enough allowance left for the smallest possible call) AND the latest paid fallback call in this limit window
+  // succeeded. It is evidence, not a promise: a larger request can still be refused by the caps, and that refusal turns it false.
   fallback?: FallbackRoute;
+  // Optional, model port only: whether a real reply can come from some model right now (src/model-availability.ts). Additive like
+  // `check`. `/status` always sets it on the model port; the page's overall indicator reads it before `state`. It is about the model,
+  // not about the ORBIT process: a status answer at all already shows the process is running.
+  availability?: ModelAvailability;
 };
 
-export type FallbackRoute = { provider: "openrouter"; model: string; answering: boolean; reason: "usage_limit" | "rate_limit"; until: string; estimated: boolean };
+export type FallbackRoute = {
+  provider: "openrouter";
+  model: string;
+  answering: boolean;
+  reason: "usage_limit" | "rate_limit";
+  until: string;
+  estimated: boolean;
+  // Additive. What the latest paid fallback call in this limit window did: "succeeded", "failed" (refused by the caps or the ledger,
+  // a provider or network error), or "none" (no paid call yet in this window). A configured fallback with no call is not evidence.
+  lastCall?: "succeeded" | "failed" | "none";
+};
+
+// `available`: true, a real reply is expected from the primary or the fallback; false, none can come (both unusable, or the model
+// is down or a mock); null, not known (for example a fallback that has not been tried yet while the primary is limited). `via` names
+// the route a reply would take.
+export type ModelAvailability = { available: boolean | null; via: "primary" | "fallback" | "none" | "unknown"; reason: string };
 
 export type Result<T> = {
   value: T;

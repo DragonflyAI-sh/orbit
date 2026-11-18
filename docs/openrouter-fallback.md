@@ -10,7 +10,16 @@ ChatGPT token sharing stays ORBIT's model. While ChatGPT reports a **usage limit
 - After the reset/pause time the next call goes to ChatGPT. Only a **successful ChatGPT call** counts as recovered; status says "not confirmed recovered" until then. If it is limited again, the fallback resumes.
 - A model turn is atomic: the fallback is used only when the primary returned nothing, so no partial output is ever mixed or replayed. Mid-reply (after tool rounds) the fallback continues from the recorded tool results; tools are never re-run. Such a reply is marked as mixed.
 - Missing key, disabled, or invalid config: the limit error is thrown as before, with "The OpenRouter fallback did not answer: <reason>" appended, and the port is reported `down` with that reason.
-- **Model port state** (what the page's overall indicator reads, `docs/assistant.md`, "Overall status"): while the limit is in force the model port is `degraded` if a paid call can be admitted (the fallback answers) and `down` if none can (configuration missing, ledger not provisioned, failed or latched, or a spend cap used up), because then neither model can reply. After the reset and before a ChatGPT call succeeds it is `degraded` ("not confirmed recovered"); after one succeeds it is the primary's own state again. While a limit is recorded the port also carries an additive `fallback` object: `provider`, `model`, `reason`, `until`, `estimated` and `answering` (true only while the fallback can answer). A failed fallback call is shown in the detail ("Last fallback error") but does not by itself make the port `down`.
+- **Model port state** (what the page's overall indicator reads, `docs/assistant.md`, "Overall status"). A configured fallback is not evidence that it answers: ORBIT keeps the outcome of the latest paid fallback call in the current limit window (cleared when a new limit window starts and when ChatGPT recovers) and reports, while the limit is in force:
+
+  | Fallback | `state` | `availability.available` | `fallback.answering` | Indicator |
+  | --- | --- | --- | --- | --- |
+  | No paid call can be admitted: configuration missing, ledger not provisioned, failed or latched, a spend cap used up, or less left under the caps than the smallest possible call reserves | `down` | `false` | `false` | red |
+  | Usable, but the latest paid call in this window failed (refused by the caps or the ledger, a provider, network or timeout error) | `down` | `false` | `false` | red |
+  | Usable, and the latest paid call in this window succeeded | `degraded` | `true` (`via: fallback`) | `true` | amber, "Degraded: fallback model" |
+  | Usable, but not called since the limit began (for example the limit was hit by a background call, which never spends) | `degraded` | `null` | `false` | grey, "Status unknown: model" |
+
+  After the reset and before a ChatGPT call succeeds the port is `degraded` ("not confirmed recovered") with `available: true` (`via: primary`), amber, as for ChatGPT alone; after one succeeds it is the primary's own state again (green when it and everything else is live). Other ChatGPT failures (sign-in, authentication, overload) are not routed to the fallback, so they are the primary's own state (`down`, red) whatever the fallback could do. While a limit is recorded the port also carries an additive `fallback` object: `provider`, `model`, `reason`, `until`, `estimated`, `answering` and `lastCall` (`succeeded`, `failed` or `none`). `answering` is evidence from the latest call, not a promise: a larger request can still be refused by the caps (the smallest-call check is a lower bound), and that refusal then turns it false. The latest failure is also shown in the detail ("Last fallback error"). Photos on the newest message (refused before any request) and background callers do not count as fallback calls.
 
 ## Provenance
 
@@ -18,12 +27,19 @@ Every fallback reply has `source` = `model/openrouter/<model> (FALLBACK, paid: C
 
 ## Tools (capability parity)
 
-Which model answers does not change what ORBIT may do. Rai asked for this (2026-11-18): the fallback-only allowlist (`FALLBACK_TOOLS`) that offered the fallback only read-only tools plus `job_launch` is removed. While the fallback answers it is offered **exactly the tools the primary would be offered for the same request**, in the same order with the same schemas, and the instructions list the same tools. That includes proposing jobs (`job_launch`), steering, `notify`, every `ops_propose_*`, the policy-checked vault write tools, sessions, research and photo tools.
+Which model answers does not change what ORBIT may do. The PR that made this change (#126) records it as Rai's request of 2026-11-18; the code cannot attest to that. The fallback-only allowlist (`FALLBACK_TOOLS`) that offered the fallback only read-only tools plus `job_launch` is removed. While the fallback answers it is offered **exactly the tools the primary would be offered for the same request**, in the same order with the same schemas, and the instructions list the same tools. That includes proposing jobs (`job_launch`), steering, `notify`, every `ops_propose_*`, the policy-checked vault write tools, sessions, research and photo tools.
 
 **The policy boundary is model-independent and unchanged.** None of these safeguards lived in the allowlist, and none depends on which model asked:
 
 - **Owner check and tool set:** the caller decides what is offered (only the owner's chat gets tools; a non-owner gets none from either model), and `allowAgent` (owner check, policy port, audit log) runs on every call.
-- **Confirmation cards:** `job_launch`, every `ops_propose_*` and the vault write tools only create a proposal; nothing launches, runs on the server or is written until Rai confirms the card with its digest. `ops_admin_operations` alone says whether an operation was verified.
+- **Confirmation cards, where a tool has one:** `job_launch`, `job_steer`, `research_launch` and every `ops_propose_*` only create a proposal; nothing launches, is steered or runs on the server until Rai confirms the card (with its digest where the card has one). `ops_admin_operations` alone says whether an operation was verified.
+- **Not every action is a card.** These act at once, on either model, under their existing owner, policy and audit checks, exactly as they do for ChatGPT:
+  - the vault write tools (`vault_create_note`, `vault_append_section`, `vault_replace_text`, `vault_set_frontmatter`, `vault_archive_note`) and `research_save_to_vault`, which shares their pipeline: a write the vault's `AGENTS.md` section 3 allows (`Projects/`, `Tasks/`, `Areas/`, `Resources/`, `Memory/`, `Inbox/`, `now.md`, `Machines/orbit.md`) is committed and pushed directly, with its Log line and remote verification; only a change section 4 protects (Journal beyond a plan section, a note tagged `#rai`, a new sensitive personal detail, `AGENTS.md`, `System/`, `.obsidian/`, `scripts/`) becomes a card Rai confirms. Secret-shaped text is refused either way (`docs/vault-writes.md`);
+  - `notify` sends a notification at once (the page, and Discord when connected);
+  - `ops_sys_cancel_reboot` cancels a reboot Rai already confirmed, at once, if it has not fired; it is recorded and audited;
+  - `photos_correct` and `photos_forget` change ORBIT's own photo observation store (`photos_observe` is refused on a fallback step, see below).
+
+  So while the fallback answers, a third-party model can commit to section 3 areas of Rai's vault, send notifications and cancel a confirmed reboot without a card. This is the intended parity; Rai should confirm this scope with this list in front of them before activation (`docs/openrouter-activation-runbook.md`).
 - **Each tool's own checks:** vault policy checks and secret filters, PR inspection limits, session scoping, tool deadlines and the per-reply tool-round and tool-result budgets apply as before.
 - **Unknown tools run nothing:** a call to a tool that was not offered gets `No tool named …` from `runChat`, whichever model asked.
 
@@ -37,7 +53,7 @@ Tests: `test/fallback-parity.test.ts` (same tools as the primary through the rea
 
 ## Privacy
 
-While the fallback answers, the conversation, memory excerpts, tool results and device summary are sent to OpenRouter and its provider. Requests set `provider.data_collection: "deny"`, `allow_fallbacks: false`, `require_parameters: true`, no plugins, no web search, no routing to other models. Rai must approve this data flow.
+While the fallback answers, the conversation, memory excerpts, tool results and device summary are sent to OpenRouter and its provider. With tool parity the tool results include whatever the owner's tools return: vault notes (`memory_read`, `vault_policy` and the vault write results), other conversations' content from the session tools (`sessions_list`, `session_inspect`, `session_read`, Assistant only), research reports, job and pull-request text, server operation reads (`ops_*`, redacted by the helper) and photo metadata, captions and saved observations (never the images themselves). Requests set `provider.data_collection: "deny"`, `allow_fallbacks: false`, `require_parameters: true`, no plugins, no web search, no routing to other models. Rai must approve this data flow.
 
 ## Configuration (all in `orbit.env`, by hand; not in the ops config allowlist)
 
