@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { ProviderError } from "./chatgpt.ts";
-import { REPEAT_FAILURES_MAX } from "./model.ts";
+import { REPEAT_FAILURES_MAX, REPEAT_RECOVERIES_MAX } from "./model.ts";
 import type { FallbackInfo, ImageSupport, Item, Message, ModelPort, ToolDef } from "./model.ts";
 import type { MutatingAction } from "./ops/admin-protocol.ts";
 import type { SysMutatingAction } from "./ops/sys-protocol.ts";
@@ -19,7 +19,7 @@ import { callItemBytes, fitOutput, NOT_RUN_ERROR, notRunOutput, outputItemBytes,
 // derive from it, so they cannot disagree.
 export const MAX_ROUNDS = 20;
 // The no-progress guard's threshold (defined beside ToolRounds in src/model.ts, which the instructions also read; re-exported here).
-export { REPEAT_FAILURES_MAX };
+export { REPEAT_FAILURES_MAX, REPEAT_RECOVERIES_MAX };
 export const MAX_OUTPUT_CHARS = 8000;
 
 // What a tool is given besides its arguments. `signal` is aborted when ORBIT stops waiting for the call (its deadline passed or the
@@ -161,9 +161,12 @@ export const BUDGET_NOTE = (max: number) =>
 export const NO_PROGRESS_NOTE = (used: number, max: number) =>
   `ORBIT stopped offering tools in this reply after ${used} of its ${max} tool rounds because the model kept repeating calls that had already failed with the same result; the repeats were not run. This is not the round budget running out, and no tool is missing. Anything not shown as a completed tool call below was not done.`;
 
-// The output a blocked repeat gets instead of running. It says nothing ran, so the model cannot read it as an outcome.
-export const repeatRefusal = (name: string, times: number) =>
-  `ORBIT did not run this ${name} call: the same call (same tool, same arguments) already failed ${times} times in this reply with the same result, so repeating it cannot make progress. Nothing was run or changed by this call. Change the arguments, try a different approach, or tell Rai what failed and what is still not done.`;
+// The output a blocked repeat gets instead of running. It says nothing ran, so the model cannot read it as an outcome. `retried`: how
+// many recovery retries (REPEAT_RECOVERIES_MAX) this call already had in this reply; at the limit it says no further progress reopens it.
+export const repeatRefusal = (name: string, times: number, retried = 0) =>
+  retried >= REPEAT_RECOVERIES_MAX
+    ? `ORBIT did not run this ${name} call: the same call (same tool, same arguments) already failed ${times} times in this reply with the same result, including ${retried} retries after other calls made progress, which is the most one reply allows. Nothing was run or changed by this call. Change the arguments, try a different approach, or tell Rai what failed and what is still not done.`
+    : `ORBIT did not run this ${name} call: the same call (same tool, same arguments) already failed ${times} times in this reply with the same result, and no other call has succeeded with a new result since, so repeating it cannot make progress. Nothing was run or changed by this call. If something else must happen first, do that; once another call succeeds with a new result ORBIT runs this call again (at most ${REPEAT_RECOVERIES_MAX - retried} more time${REPEAT_RECOVERIES_MAX - retried === 1 ? "" : "s"} in this reply). Otherwise change the arguments, try a different approach, or tell Rai what failed and what is still not done.`;
 
 // One key per distinct call: the tool name and its arguments with object keys sorted, so whitespace or key order does not make a
 // repeat look new. Arguments that are not valid JSON are keyed as sent.
@@ -326,9 +329,15 @@ export async function runChat(options: {
     return undefined;
   };
 
-  // The no-progress guard's ledger: for each distinct call (callKey) that last failed, its output and how many times in a row that
-  // identical call failed with that identical output. A success or a different output resets it.
-  const failures = new Map<string, { output: string; times: number }>();
+  // The no-progress guard's ledger: for each distinct call (callKey) that last failed, its output, how many times in a row that
+  // identical call failed with that identical output, and the progress count at that failure. A success or a different output resets it.
+  const failures = new Map<string, { output: string; times: number; progress: number }>();
+  // Progress: successful calls whose (call, full output) pair had not already succeeded in this reply. An identical call returning an
+  // identical result (a no-op poll) is not progress. A blocked call may run again once progress has happened since its last failure,
+  // at most REPEAT_RECOVERIES_MAX times per distinct call per reply (`retries`), so it stays bounded whatever succeeds around it.
+  let progress = 0;
+  const succeeded = new Set<string>();
+  const retries = new Map<string, number>();
   // Set when every call of a round was a blocked repeat: the next step is the final one, without tools (unless the budget is out anyway).
   let stalled = false;
 
@@ -406,9 +415,15 @@ export async function runChat(options: {
       // No-progress guard: a call that already failed identically REPEAT_FAILURES_MAX times in a row is answered without running it.
       // It never reaches `allow` or the tool, so it cannot have an effect; it is still recorded, like any refused call. Its short refusal
       // is counted in the tool-result budget like any other output (it was admitted above).
+      // Bounded recovery: a blocked call runs again when another call made progress after its last failure (it may have satisfied a
+      // prerequisite) and this call still has recovery retries left. If it then fails identically again it is blocked again at once.
       const key = callKey(call.name, call.arguments);
       const before = failures.get(key);
-      const repeat = before && before.times >= REPEAT_FAILURES_MAX ? repeatRefusal(call.name, before.times) : undefined;
+      const retried = retries.get(key) ?? 0;
+      const exhausted = before !== undefined && before.times >= REPEAT_FAILURES_MAX;
+      const recovery = exhausted && progress > before.progress && retried < REPEAT_RECOVERIES_MAX;
+      if (recovery) retries.set(key, retried + 1);
+      const repeat = exhausted && !recovery ? repeatRefusal(call.name, before.times, retried) : undefined;
       if (repeat) blocked++;
       const ran: Awaited<ReturnType<typeof execute>> = repeat
         ? { output: JSON.stringify({ ok: false, notRun: true, error: repeat }), record: { name: call.name, args: argsOf(call.arguments), ok: false, summary: repeat } }
@@ -435,8 +450,14 @@ export async function runChat(options: {
       }
       // The guard compares the full output (what the tool returned), never the budget-cut view, so a cut cannot make a repeat look new.
       if (!repeat) {
-        if (record.ok) failures.delete(key);
-        else failures.set(key, { output, times: before?.output === output ? before.times + 1 : 1 });
+        if (record.ok) {
+          failures.delete(key);
+          const seen = createHash("sha256").update(key).update("\u0000").update(output).digest("base64url");
+          if (!succeeded.has(seen)) {
+            succeeded.add(seen);
+            progress += 1;
+          }
+        } else failures.set(key, { output, times: before?.output === output ? before.times + 1 : 1, progress });
       }
       // What the model sees of the output: whole when it fits in what is left of the budget, otherwise its head with ORBIT's note and
       // the facts kept whole (ok, provenance, source, outcome ids, paging cursor). The full output is what the conversation stores.

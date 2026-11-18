@@ -71,6 +71,11 @@ export type ToolRounds = {
 // retry that got further), or a success reset it, so polling, pagination and retries that make progress are unaffected. Only failures
 // count. Defined here, not in agent.ts, because the round instructions below name it and agent.ts already depends on this module.
 export const REPEAT_FAILURES_MAX = 2;
+// Bounded recovery (runChat): a call the guard blocked may run again once another call has made progress since its last failure (a
+// success with a result not already seen in this reply), because that progress may have satisfied a prerequisite. At most this many
+// such retries per distinct call per reply, so successes that do not help (or no-op calls whose output changes) cannot reopen it
+// indefinitely: an identical call failing identically runs at most REPEAT_FAILURES_MAX + REPEAT_RECOVERIES_MAX times in a reply.
+export const REPEAT_RECOVERIES_MAX = 2;
 
 // Whether this step is the final one, sent without tools, and why: the round budget ran out, the no-progress guard stopped the loop, or
 // the reply's tool-result budget is spent. When several apply, the first in that order is the one reported as the reason.
@@ -189,7 +194,7 @@ export function roundGuidance(rounds: ToolRounds | undefined, offeredNow: boolea
   const left = rounds.max - rounds.round;
   return [
     "",
-    `Tool rounds: this is step ${rounds.round + 1}; at most ${rounds.max} steps of this reply may call tools (${left} left, this one included). After that ORBIT asks for an answer without tools. This is a ceiling, not a target: answer as soon as you can, without further calls. When Rai has asked for an action, do it before spending steps on optional reading. Repeating a call that failed, with the same arguments, returns the same failure; after ${REPEAT_FAILURES_MAX} identical failures ORBIT stops running it.`,
+    `Tool rounds: this is step ${rounds.round + 1}; at most ${rounds.max} steps of this reply may call tools (${left} left, this one included). After that ORBIT asks for an answer without tools. This is a ceiling, not a target: answer as soon as you can, without further calls. When Rai has asked for an action, do it before spending steps on optional reading. Repeating a call that failed, with the same arguments, returns the same failure; after ${REPEAT_FAILURES_MAX} identical failures ORBIT stops running it, and runs it again only after another call has succeeded with a new result (at most ${REPEAT_RECOVERIES_MAX} such retries per call in a reply).`,
   ];
 }
 
