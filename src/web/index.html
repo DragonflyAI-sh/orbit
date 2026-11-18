@@ -267,6 +267,69 @@
   #jobs .steerbox button { align-self: flex-start; padding: 6px 16px; }
   #jobs button.back, #jobs button.cancel { background: var(--card); color: var(--fg); border: 1px solid var(--line); padding: 4px 12px; align-self: flex-start; }
   #jobs .empty { color: var(--muted); }
+  /* Jobs list and detail (docs/jobs-page.md). */
+  #jobs .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  #jobs .jlistview, #jobs .jdetail { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  #jobs .jtools { display: flex; flex-direction: column; gap: 6px; }
+  #jobs .jtools input[type=search] { font: inherit; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--fg); width: 100%; box-sizing: border-box; }
+  #jobs select { font: inherit; font-size: 13px; padding: 4px 6px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); max-width: 100%; }
+  #jobs .chk { font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
+  #jobs button.mini { font-size: 12px; padding: 3px 10px; min-height: 26px; background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; }
+  #jobs button.mini:disabled { opacity: .5; }
+  #jobs .jlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  #jobs .jtitle { font-weight: 600; color: var(--fg); text-decoration: none; }
+  #jobs .jtitle:hover { text-decoration: underline; }
+  #jobs .chips { margin-top: 2px; }
+  #jobs .chip, #jobs .badge { font-size: 12px; padding: 0 7px; border-radius: 8px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  #jobs .badge.state-done { color: var(--live); border-color: var(--live); }
+  #jobs .badge.state-failed, #jobs .badge.state-blocked { color: var(--down); border-color: var(--down); }
+  #jobs .badge.health-not-started, #jobs .badge.health-quiet { color: var(--mock); border-color: var(--mock); }
+  #jobs .badge.health-launch-failed { color: var(--down); border-color: var(--down); }
+  #jobs .badge.basis-recorded { color: var(--live); }
+  #jobs .badge.basis-unavailable, #jobs .badge.steer-queued, #jobs .badge.steer-proposed { color: var(--mock); }
+  #jobs .badge.steer-delivered, #jobs .badge.steer-replied { color: var(--live); }
+  #jobs .latest.one { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  #jobs .jrow .meta { margin-top: 4px; }
+  #jobs .jpager { justify-content: space-between; }
+  #jobs a.back { align-self: flex-start; color: var(--accent-2); }
+  #jobs .jtitlebig { font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
+  #jobs details.jsec { border-top: 1px solid var(--line); padding-top: 4px; }
+  #jobs details.jsec > summary { cursor: pointer; min-height: 28px; display: flex; align-items: center; }
+  #jobs details.jsec > summary h2 { display: inline; margin: 0; }
+  #jobs .jsecbody { display: flex; flex-direction: column; gap: 8px; padding: 6px 0 4px; min-width: 0; }
+  #jobs h3 { margin: 6px 0 0; font-size: 14px; }
+  #jobs .jdl { display: grid; grid-template-columns: minmax(7em, max-content) 1fr; gap: 3px 12px; margin: 6px 0 0; font-size: 13px; }
+  #jobs .jdl dt { color: var(--muted); }
+  #jobs .jdl dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  #jobs .jlinks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  #jobs .lrow { display: grid; grid-template-columns: minmax(10em, 16em) minmax(0, 1fr) auto auto; gap: 2px 10px; align-items: baseline; padding: 4px 0; border-top: 1px solid var(--line); font-size: 13px; }
+  #jobs .lrow .lval { min-width: 0; overflow-wrap: anywhere; }
+  #jobs .lrow .lnote { grid-column: 1 / -1; }
+  #jobs .lrow a { color: var(--accent-2); }
+  #jobs .lrow button.mini, #jobs .lrow .badge { justify-self: start; }
+  #jobs .meta { font-size: 12.5px; color: var(--muted); }
+  #jobs .stages { margin: 0; padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+  #jobs .stage { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; }
+  #jobs .stage .meta { flex-basis: 100%; padding-left: 1.6em; }
+  #jobs .smark { width: 1.2em; text-align: center; font-weight: 700; }
+  #jobs .stage-done .smark { color: var(--live); } #jobs .stage-failed .smark { color: var(--down); } #jobs .stage-unknown .smark, #jobs .stage-pending .smark { color: var(--mock); }
+  #jobs .lt { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  #jobs .lthead { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+  #jobs .ltlabel { font-weight: 600; font-size: 13px; }
+  #jobs pre.ltbody { margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-monospace, monospace; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); overflow: auto; max-height: 70vh; overscroll-behavior: contain; }
+  #jobs pre.ltbody.folded { max-height: 16em; }
+  #jobs .steeritem { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; border-top: 1px solid var(--line); }
+  #jobs .warnline { color: var(--mock); }
+  #jobs .times { margin: 0; padding-left: 1.1em; font-size: 13px; }
+  #jobs .evs { display: flex; flex-direction: column; }
+  #jobs .evtext { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
+  #jobs .ev a { color: var(--accent-2); }
+  @media (max-width: 560px) {
+    #jobs .lrow { grid-template-columns: minmax(0, 1fr) auto; }
+    #jobs .lrow .llabel { grid-column: 1 / -1; font-weight: 600; }
+    #jobs .jdl { grid-template-columns: 1fr; }
+    #jobs .jdl dd { margin-bottom: 4px; }
+  }
   @media (max-width: 480px) { #jobs, #log { padding: 12px; } .card { padding: 8px 10px; } }
   form { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
   textarea { flex: 1; resize: none; font: inherit; padding: 8px; border-radius: 10px; border: 1px solid var(--line);
@@ -743,7 +806,7 @@
   const writeSel = (id) => { try { id ? localStorage.setItem(THREAD_KEY, id) : localStorage.removeItem(THREAD_KEY); } catch { /* per-device convenience only */ } };
   // The stored selection is shared by every tab of this browser and is only the fallback for plain /sessions. The address
   // (/sessions/<id>) is what this tab shows; another tab writing the stored selection never moves it (no storage listener).
-  const onChatAddress = () => isLegacyChat(location.hash) || (isSessionsPath(location.pathname) && location.hash !== "#assistant" && location.hash !== "#jobs");
+  const onChatAddress = () => isLegacyChat(location.hash) || (isSessionsPath(location.pathname) && location.hash !== "#assistant" && !isJobsHash(location.hash));
   // Puts this tab's address on a session (or plain /sessions for none). Only while the address is a Sessions one, so
   // loading sessions behind the Assistant never changes the address. push adds a history entry (an explicit choice:
   // picking a session, New); otherwise the entry is replaced (resolving plain /sessions, canonicalizing). Plain /sessions
@@ -802,7 +865,7 @@
     return threadList.length ? "No session open" : "No sessions yet";
   }
   function updateTitle() {
-    document.title = tab === "chat" ? (threadMode === "server" ? `${sessionLabel()} · Sessions · ORBIT` : "Sessions · ORBIT") : tab === "jobs" ? "Jobs · ORBIT" : "ORBIT";
+    document.title = tab === "chat" ? (threadMode === "server" ? `${sessionLabel()} · Sessions · ORBIT` : "Sessions · ORBIT") : tab === "jobs" ? (openJob ? `${jv.detail?.data?.overview?.title?.text ? jv.detail.data.overview.title.text.slice(0, 60) + " · " : ""}${openJob} · Jobs · ORBIT` : "Jobs · ORBIT") : "ORBIT";
   }
   function renderBar() {
     // The picker marks where the reader is going (a pending navigation), otherwise the session that is drawn.
@@ -1446,6 +1509,7 @@
   const jobsTab = document.getElementById("jobstab");
   function setTab(next) {
     tab = next;
+    if (next === "jobs") openJob = jobFromHash(location.hash);
     document.body.dataset.tab = next;
     if (next !== "chat") closePicker(false);
     updateTitle();
@@ -1470,10 +1534,12 @@
   // <routing>
   const isLegacyChat = (hash) => hash === "#chat" || hash.startsWith("#chat/");
   const isSessionsPath = (path) => path === "/sessions" || path.startsWith("/sessions/");
+  // The Jobs page is #jobs; one job is #jobs/<job id>.
+  const isJobsHash = (hash) => hash === "#jobs" || hash.startsWith("#jobs/");
   function pageFor(path, hash, jobsAvailable, assistantAvailable) {
     if (isLegacyChat(hash)) return "chat";
-    if (hash === "#jobs" && jobsAvailable) return "jobs";
-    if (hash !== "#assistant" && hash !== "#jobs" && isSessionsPath(path)) return "chat";
+    if (isJobsHash(hash) && jobsAvailable) return "jobs";
+    if (hash !== "#assistant" && !isJobsHash(hash) && isSessionsPath(path)) return "chat";
     return assistantAvailable ? "assistant" : "chat";
   }
   // One session is addressed as /sessions/<session id> (the canonical form: lowercase, unencoded). Plain /sessions (or
@@ -1508,7 +1574,7 @@
       const t = chatTarget(hash);
       return t.kind === "invalid" ? null : sessionPath(t.kind === "thread" ? t.id : null) + search;
     }
-    if ((hash === "#assistant" || hash === "#jobs") && path !== "/") return `/${search}${hash}`;
+    if ((hash === "#assistant" || isJobsHash(hash)) && path !== "/") return `/${search}${hash}`;
     if (path === "/sessions/") return `/sessions${search}${hash}`;
     if (!isSessionsPath(path)) return null;
     const t = sessionTarget(path, hash);
@@ -1583,40 +1649,240 @@
   }
   // </verdict-label>
 
-  function jobCard(r) {
-    const bad = r.health === "launch-failed", warn = r.health === "not-started" || r.health === "quiet";
-    const card = el("div", { className: `card${bad ? " bad" : warn ? " warn" : ""}` });
-    const row = el("div", { className: "row" }, el("span", { className: "id", textContent: r.id }), el("span", { className: "meta", textContent: r.kind === "review" ? `review of ${r.reviewOf}` : "work" }), el("span", { textContent: r.state }),
-      el("span", { className: `health-${r.health}`, textContent: r.health }));
-    const link = safeLink(r.sessionUrl, "session on claude.ai");
-    if (link) row.append(link);
-    row.append(toolCommitBadge(r));
-    const pr = safeLink(r.prUrl, "pull request");
-    if (pr) row.append(pr); else if (r.prOpening) row.append(el("span", { className: "meta", textContent: "opening pull request…" }));
-    if (r.kind === "review" && r.reviewVerdict) {
-      const v = verdictLabel(r.reviewVerdict, r.reviewVerdictReason);
-      row.append(el("span", { className: v.bad ? "health-launch-failed" : "meta", textContent: v.text }));
+  // ---- The Jobs page (docs/jobs-page.md): a compact list that searches, filters and pages every stored job, and one job's detail at
+  // /#jobs/<id> in five sections (Overview, Links & artifacts, Inputs sent to Claude, Activity, Results & review). All runner and user
+  // text goes in through textContent or linkify (no HTML parsing). Polling only patches what changed: the search box, open sections,
+  // expanded text, the steer draft, focus and scroll positions stay put.
+  // <jobs-lib>
+  const JOB_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+  // The job a Jobs address names: /#jobs/<id>. Anything else after "#jobs/" names none.
+  function jobFromHash(hash) {
+    if (!String(hash).startsWith("#jobs/")) return null;
+    let id;
+    try { id = decodeURIComponent(hash.slice("#jobs/".length)); } catch { return null; }
+    return JOB_ID_RE.test(id) ? id : null;
+  }
+  const jobHref = (id) => `/#jobs/${encodeURIComponent(id)}`;
+  // Text this long starts folded: all of it is there (scroll it, or Expand it), never cut.
+  const LONG_CHARS = 1200, LONG_LINES = 16;
+  const isLongText = (t) => String(t).length > LONG_CHARS || String(t).split("\n").length > LONG_LINES;
+  const BASIS_TEXT = { recorded: "recorded", derived: "derived by ORBIT", unavailable: "not available" };
+  const STEER_STATE_TEXT = { queued: "queued, not yet received by the runner", delivered: "received by the runner", replied: "answered by the runner", proposed: "proposed, not confirmed" };
+  const STAGE_MARK = { done: "✓", failed: "✗", pending: "…", unknown: "?", "n/a": "–" };
+  const STEER_SOURCE_TEXT = { owner: "sent by Rai from the Jobs page", proposal: "a confirmed chat proposal", unrecorded: "source not recorded (older steer)" };
+  const TITLE_SOURCE_TEXT = { "pr-title": "pull request title", "summary-pr-title": "the summary's PR title", review: "review job", "research-report": "research report title", brief: "first line of the brief", none: "no title recorded" };
+  const SESSION_PATH = /^\/sessions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  // An in-page link from a job record: a job, a session or the Assistant. Anything else is not linked.
+  const internalHref = (l) => (l.job && JOB_ID_RE.test(l.job) ? jobHref(l.job) : l.session && (SESSION_PATH.test(l.session) || l.session === "/#assistant") ? l.session : null);
+  // The list query as URL parameters (the cursor pages it).
+  function rowsQuery(q, cursor) {
+    const p = new URLSearchParams();
+    for (const k of ["q", "state", "health", "lane", "kind", "routine"]) if (q[k]) p.set(k, q[k]);
+    if (q.attention) p.set("attention", "1");
+    if (cursor) p.set("cursor", cursor);
+    const s = p.toString();
+    return s ? `&${s}` : "";
+  }
+  // </jobs-lib>
+
+  const jv = {
+    query: { q: "", state: "", health: "", lane: "", kind: "", routine: "", attention: false },
+    cursor: null, back: [], list: null, listScroll: 0, listSeq: 0, detail: null, drafts: new Map(), expanded: new Set(), sigs: new WeakMap(),
+  };
+  const chip = (text, cls = "chip") => el("span", { className: cls, textContent: text });
+  // "5 min ago", or "in 3 h" for a time still ahead (a token expiry).
+  const rel = (iso) => { const t = new Date(iso).getTime(); if (Number.isNaN(t)) return String(iso); return t > Date.now() + 1000 ? `in ${ago(new Date(Date.now() - (t - Date.now())).toISOString()).replace(/ ago$/, "")}` : ago(iso); };
+  function when(iso, prefix) {
+    const p = prefix ? `${prefix} ` : "";
+    if (!iso) return el("span", { className: "meta", textContent: `${p}never` });
+    const d = new Date(iso);
+    const t = el("time", { dateTime: iso, title: Number.isNaN(d.getTime()) ? String(iso) : d.toLocaleString(), textContent: `${p}${rel(iso)}` });
+    t.dataset.at = iso;
+    if (prefix) t.dataset.prefix = prefix;
+    return t;
+  }
+  function relabelJobTimes() {
+    for (const t of jobsBox.querySelectorAll("time[data-at]")) t.textContent = `${t.dataset.prefix ? t.dataset.prefix + " " : ""}${rel(t.dataset.at)}`;
+  }
+  function copyButton(getText, label, key) {
+    const b = el("button", { type: "button", className: "mini", textContent: "Copy" });
+    b.setAttribute("aria-label", `Copy ${label}`);
+    if (key) b.dataset.key = `${key}:copy`;
+    b.addEventListener("click", async () => {
+      const text = getText();
+      let ok = false;
+      try { await navigator.clipboard.writeText(text); ok = true; } catch {
+        try {
+          const ta = el("textarea", { value: text, readOnly: true });
+          ta.style.position = "fixed"; ta.style.opacity = "0";
+          document.body.append(ta); ta.select(); ok = document.execCommand("copy"); ta.remove();
+        } catch { ok = false; }
+      }
+      b.textContent = ok ? "Copied" : "Copy failed";
+      setTimeout(() => { b.textContent = "Copy"; }, 1500);
+    });
+    return b;
+  }
+  // Whole text with a label, a Copy button and, when long, Expand/Fold. Expanded state is kept by key across refreshes.
+  function longText(key, label, text, meta) {
+    const src = String(text ?? "");
+    const head = el("div", { className: "lthead" }, el("span", { className: "ltlabel", textContent: label }));
+    if (meta) head.append(el("span", { className: "meta", textContent: meta }));
+    head.append(copyButton(() => src, label, key));
+    const pre = el("pre", { className: "ltbody", tabIndex: 0 }, ...linkify(src, el));
+    pre.dataset.key = key;
+    pre.setAttribute("aria-label", label);
+    if (isLongText(src)) {
+      const tog = el("button", { type: "button", className: "mini" });
+      tog.dataset.key = `${key}:fold`;
+      const show = () => {
+        const open = jv.expanded.has(key);
+        pre.classList.toggle("folded", !open);
+        tog.setAttribute("aria-expanded", String(open));
+        tog.textContent = open ? "Fold" : "Expand full text";
+      };
+      tog.addEventListener("click", () => { if (jv.expanded.has(key)) jv.expanded.delete(key); else jv.expanded.add(key); show(); });
+      show();
+      head.append(tog);
     }
+    return el("div", { className: "lt" }, head, pre);
+  }
+  // Replaces a holder's content only when its data changed, and keeps focus and scroll positions of keyed elements inside it.
+  function patch(holder, data, build) {
+    const sig = JSON.stringify(data);
+    if (jv.sigs.get(holder) === sig) return false;
+    const active = document.activeElement;
+    const focusKey = active && holder.contains(active) ? active.dataset.key : undefined;
+    const scrolls = new Map([...holder.querySelectorAll("[data-key]")].map((n) => [n.dataset.key, n.scrollTop]));
+    holder.replaceChildren(...build());
+    jv.sigs.set(holder, sig);
+    for (const n of holder.querySelectorAll("[data-key]")) if (scrolls.get(n.dataset.key)) n.scrollTop = scrolls.get(n.dataset.key);
+    if (focusKey) [...holder.querySelectorAll("[data-key]")].find((n) => n.dataset.key === focusKey)?.focus({ preventScroll: true });
+    return true;
+  }
+  const note = (text, cls = "meta") => el("div", { className: cls, textContent: text });
+  // The first line worth showing in a one-line preview: Markdown headings (a summary's "## PR title") are skipped when there is more.
+  const firstLineOf = (t) => { const lines = String(t ?? "").split("\n").map((l) => l.trim()).filter(Boolean); return lines.find((l) => !l.startsWith("#")) ?? lines[0] ?? ""; };
+
+  // ---- the list ----
+  function jobRowEl(r) {
+    const bad = r.health === "launch-failed", warn = r.health === "not-started" || r.health === "quiet";
+    const li = el("li", { className: `card jrow${bad ? " bad" : warn ? " warn" : ""}` });
+    const title = el("a", { className: "jtitle", href: jobHref(r.id), textContent: r.title?.text || r.id });
+    title.dataset.key = `row:${r.id}`;
+    li.append(el("div", { className: "row" }, title));
+    const chips = el("div", { className: "row chips" }, el("span", { className: "id", textContent: r.id }),
+      chip(`${r.lane === "research" ? "research" : "build"} · ${r.routine || "no routine"}`),
+      chip(r.kind === "review" ? `review of ${r.reviewOf}` : r.kind || "work"),
+      el("span", { className: `badge state state-${r.state}`, textContent: `state: ${r.state}` }),
+      el("span", { className: `badge health health-${r.health}`, textContent: `health: ${r.health}` }));
+    if (r.toolCommitStatus === "mismatch") chips.append(toolCommitBadge(r));
+    li.append(chips);
+    const latest = r.latest?.text ? firstLineOf(r.latest.text) : r.latest ? `${r.latest.type}${r.latest.status ? ": " + r.latest.status : ""}` : "No report yet";
+    li.append(el("div", { className: "latest one", textContent: latest }));
+    const problems = [];
+    if (r.launchError) problems.push(r.launchError);
+    if (r.prError) problems.push(`Pull request not opened: ${r.prError}`);
+    if (r.reviewError) problems.push(`Review: ${r.reviewError}`);
+    if (r.prDelivery && r.prDelivery.posted < r.prDelivery.total) problems.push(`PR description: ${r.prDelivery.posted} of ${r.prDelivery.total} parts posted`);
+    if (r.reviewDelivery && r.reviewDelivery.posted < r.reviewDelivery.total) problems.push(`Review comments: ${r.reviewDelivery.posted} of ${r.reviewDelivery.total} parts posted`);
+    if (r.summaryState === "partial" || r.summaryState === "oversize") problems.push(r.summaryState === "partial" ? "Summary: only the start reached ORBIT over the API; waiting for the full text from git" : `Summary: ${r.summaryChars} characters, over ORBIT's limit; only git has the full text`);
+    for (const p of problems) li.append(el("div", { className: "latest one health-launch-failed", textContent: p }));
+    const meta = el("div", { className: "row meta" }, when(r.launchedAt || r.createdAt, r.launchedAt ? "launched" : "registered"), when(r.activityAt, "· last activity"));
+    if (r.latest) meta.append(el("span", { textContent: `via ${r.latest.via === "git" ? "git" : "the API"}` }));
+    if (r.pendingSteers) meta.append(el("span", { className: "health-quiet", textContent: `${r.pendingSteers} steer(s) not yet received` }));
+    const pr = safeLink(r.prUrl, "pull request");
+    if (pr) meta.append(pr); else if (r.prOpening) meta.append(el("span", { textContent: "opening pull request…" }));
+    if (r.prTitleSource && r.prTitleSource !== "pr-title-section") meta.append(el("span", { textContent: "PR title made by ORBIT" }));
+    if (r.kind === "review" && r.reviewVerdict) { const v = verdictLabel(r.reviewVerdict, r.reviewVerdictReason); meta.append(el("span", { className: v.bad ? "health-launch-failed" : "", textContent: v.text })); }
     if (r.kind !== "review" && r.reviewJobId) {
       const v = r.reviewVerdict ? verdictLabel(r.reviewVerdict, r.reviewVerdictReason) : undefined;
-      const text = v ? v.text : r.reviewError ? "review did not complete" : "review running…";
-      row.append(el("span", { className: (v && v.bad) || (!v && r.reviewError) ? "health-launch-failed" : "meta", textContent: text }));
+      meta.append(el("span", { className: (v && v.bad) || (!v && r.reviewError) ? "health-launch-failed" : "", textContent: v ? v.text : r.reviewError ? "review did not complete" : "review running…" }));
       const c = safeLink(r.reviewCommentUrl, "review comment");
-      if (c) row.append(c);
+      if (c) meta.append(c);
     }
-    card.append(row);
-    if (r.reviewError) card.append(el("div", { className: "latest health-launch-failed", textContent: `Review: ${r.reviewError}` }));
-    if (r.prTitleSource && r.prTitleSource !== "pr-title-section") card.append(el("div", { className: "meta", textContent: `PR title: made by ORBIT from ${r.prTitleSource === "summary-first-line" ? "the summary's first line" : "the job id and routine"} (the runner gave no usable ## PR title)` }));
-    if (r.prDelivery && r.prDelivery.posted < r.prDelivery.total) card.append(el("div", { className: "latest health-launch-failed", textContent: `PR description: ${r.prDelivery.posted} of ${r.prDelivery.total} parts posted` }));
-    if (r.reviewDelivery && r.reviewDelivery.posted < r.reviewDelivery.total) card.append(el("div", { className: "latest health-launch-failed", textContent: `Review comments: ${r.reviewDelivery.posted} of ${r.reviewDelivery.total} parts posted` }));
-    if (r.summaryState === "partial" || r.summaryState === "oversize") card.append(el("div", { className: "latest health-launch-failed", textContent: r.summaryState === "partial" ? "Summary: only the start reached ORBIT over the API; waiting for the full text from git" : `Summary: ${r.summaryChars} characters, over ORBIT's limit; only git has the full text` }));
-    if (r.prError) card.append(el("div", { className: "latest health-launch-failed", textContent: `Pull request not opened: ${r.prError}` }));
-    if (r.launchError) card.append(el("div", { className: "latest health-launch-failed", textContent: r.launchError }));
-    card.append(el("div", { className: "latest" }, ...linkify(r.latest?.text || (r.latest ? `${r.latest.type}${r.latest.status ? ": " + r.latest.status : ""}` : "No report yet"), el)));
-    const reported = r.latest ? `reported ${ago(r.latest.at)} through ${r.latest.via === "git" ? "git" : "the API"}` : `launched ${ago(r.launchedAt)}; nothing reported`;
-    card.append(el("div", { className: "meta", textContent: reported + (r.pendingSteers ? ` · ${r.pendingSteers} steer(s) waiting` : "") }));
-    card.append(el("button", { type: "button", className: "open", textContent: "Open", onclick: () => { openJob = r.id; steerNote = ""; refreshJobs(); } }));
-    return card;
+    li.append(meta);
+    return li;
+  }
+
+  function buildListShell() {
+    const q = jv.query;
+    const go = () => { jv.cursor = null; jv.back = []; refreshJobs(); };
+    const search = el("input", { type: "search", id: "jobsearch", value: q.q, placeholder: "Search id, title, routine, PR, latest line", autocomplete: "off" });
+    search.dataset.key = "search";
+    let timer = null;
+    search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => { q.q = search.value.trim(); go(); }, 250); });
+    const select = (key, name, values) => {
+      const s = el("select", { id: `jobf-${key}` });
+      s.dataset.key = `f:${key}`;
+      s.setAttribute("aria-label", name);
+      const fill = (vals) => {
+        const keep = q[key];
+        s.replaceChildren(el("option", { value: "", textContent: `${name}: any` }), ...vals.map((v) => el("option", { value: v, textContent: `${name}: ${v}` })));
+        if (keep && !vals.includes(keep)) s.append(el("option", { value: keep, textContent: `${name}: ${keep}` }));
+        s.value = keep;
+      };
+      fill(values);
+      s.addEventListener("change", () => { q[key] = s.value; go(); });
+      return { s, fill };
+    };
+    const state = select("state", "State", ["registered", "running", "done", "blocked", "failed"]);
+    const health = select("health", "Health", ["ok", "not-started", "quiet", "launch-failed", "finished"]);
+    const lane = select("lane", "Lane", ["build", "research"]);
+    const kind = select("kind", "Kind", ["work", "review", "research"]);
+    const routine = select("routine", "Routine", []);
+    const attention = el("input", { type: "checkbox", id: "jobattention", checked: q.attention });
+    attention.dataset.key = "f:attention";
+    attention.addEventListener("change", () => { q.attention = attention.checked; go(); });
+    const clear = el("button", { type: "button", className: "mini", textContent: "Clear" });
+    clear.addEventListener("click", () => {
+      Object.assign(q, { q: "", state: "", health: "", lane: "", kind: "", routine: "", attention: false });
+      search.value = ""; attention.checked = false;
+      for (const f of [state, health, lane, kind, routine]) f.s.value = "";
+      go();
+    });
+    const toolbar = el("div", { className: "jtools", role: "search" },
+      el("label", { className: "sr", htmlFor: "jobsearch", textContent: "Search jobs" }), search,
+      el("div", { className: "row" }, state.s, health.s, lane.s, kind.s, routine.s, el("label", { className: "chk" }, attention, " Needs attention"), clear));
+    const proposals = el("div", { className: "jprops" });
+    const status = el("div", { className: "meta", role: "status", ariaLive: "polite" });
+    const results = el("ul", { className: "jlist", ariaLabel: "Jobs" });
+    const prev = el("button", { type: "button", className: "mini", textContent: "← Newer" });
+    const next = el("button", { type: "button", className: "mini", textContent: "Older →" });
+    prev.dataset.key = "pg:prev"; next.dataset.key = "pg:next";
+    prev.addEventListener("click", () => { jv.cursor = jv.back.pop() ?? null; refreshJobs(); });
+    next.addEventListener("click", () => { if (!jv.list.next) return; jv.back.push(jv.cursor); jv.cursor = jv.list.next; refreshJobs(); });
+    const pager = el("nav", { className: "row jpager", ariaLabel: "Job pages" }, prev, next);
+    const retention = note("");
+    const root = el("div", { className: "jlistview" }, proposals, el("h2", { textContent: "Jobs" }), toolbar, status, results, pager, retention);
+    return { root, proposals, status, results, prev, nextBtn: next, retention, routine, next: null };
+  }
+
+  async function renderList() {
+    const seq = ++jv.listSeq;
+    const [jr, pr] = await Promise.all([fetch(`/jobs?view=rows${rowsQuery(jv.query, jv.cursor)}`), fetch("/chat/proposals")]);
+    if (!jr.ok) { jobsTab.hidden = true; setTab(tabFromHash()); return; }
+    const page = await jr.json();
+    const proposals = pr.ok ? (await pr.json()).proposals : [];
+    if (seq !== jv.listSeq || openJob) return;
+    const attention = ["not-started", "quiet", "launch-failed"].reduce((n, h) => n + (page.facets?.health?.[h] ?? 0), 0) + proposals.length;
+    document.getElementById("jobsbadge").textContent = attention ? `(${attention})` : "";
+    if (jv.detail || !jv.list) {
+      jv.detail = null;
+      if (!jv.list) jv.list = buildListShell();
+      jobsBox.replaceChildren(jv.list.root);
+      jobsBox.scrollTop = jv.listScroll;
+    }
+    const L = jv.list;
+    L.next = page.next;
+    L.routine.fill(page.facets?.routines ?? []);
+    patch(L.proposals, proposals.map((p) => p.id), () => proposals.length ? [el("h2", { textContent: `Waiting for your click (${proposals.length})` }), ...proposals.map(proposalBox)] : []);
+    const from = page.matched ? page.offset + 1 : 0, to = page.offset + page.jobs.length;
+    const filtered = Object.values(jv.query).some(Boolean);
+    L.status.textContent = page.matched ? `Showing ${from}–${to} of ${page.matched}${filtered ? ` matching (${page.total} stored)` : ""}, newest first.` : filtered ? `No job matches (${page.total} stored).` : "No jobs yet.";
+    if (!patch(L.results, page.jobs, () => page.jobs.map(jobRowEl))) relabelJobTimes();
+    L.prev.disabled = !jv.cursor; L.nextBtn.disabled = !page.next;
+    L.retention.textContent = page.total >= (page.retention?.maxJobs ?? Infinity) ? page.retention.note : "";
   }
 
   function proposalBox(p) {
@@ -1628,23 +1894,14 @@
     return holder;
   }
 
-  let steerDraft = "", steerNote = "";
-  async function renderDetail(id) {
-    const res = await fetch(`/jobs/${encodeURIComponent(id)}`);
-    if (!res.ok) { openJob = null; return renderList(); }
-    const j = await res.json();
-    const existing = jobsBox.querySelector("textarea.steer");
-    if (existing) steerDraft = existing.value;
-    const events = el("div", { className: "card" }, ...(j.events.length ? [...j.events].reverse().slice(0, 100).map((ev) =>
-      el("div", { className: "ev" }, ...linkify(`${ago(ev.at)} · ${ev.type}${ev.status ? " " + ev.status : ""} · ${ev.via === "git" ? "git" : "API"}${ev.text ? "\n" + ev.text : ""}`, el))) : [el("div", { className: "empty", textContent: "No events yet." })]));
-    const summaryBox = j.summary && j.summary.text
-      ? el("details", { className: "card" }, el("summary", { textContent: `Full summary (${j.summary.chars} characters, ${j.summary.state}, via ${j.summary.via})` }), mdScroll(el("pre", { textContent: j.summary.text }), "Full summary", el))
-      : null;
-    const steers = el("div", { className: "card" }, ...(j.steers.length ? [...j.steers].reverse().map((s) =>
-      el("div", { className: "ev" }, ...linkify(`#${s.n} · ${ago(s.at)} · ${s.deliveredAt ? "picked up " + ago(s.deliveredAt) : "waiting for the runner"}\n${s.text}`, el))) : [el("div", { className: "empty", textContent: "No steers yet." })]));
+  // ---- one job ----
+  function steerBox(id) {
     const area = el("textarea", { className: "steer", rows: 3, placeholder: "Steer this job. It picks the message up at its next check-in." });
-    area.value = steerDraft;
-    const status = el("div", { className: "meta", textContent: steerNote });
+    area.dataset.key = "steer";
+    area.setAttribute("aria-label", `Steer for job ${id}`);
+    area.value = jv.drafts.get(id) ?? "";
+    area.addEventListener("input", () => jv.drafts.set(id, area.value));
+    const status = el("div", { className: "meta", role: "status", ariaLive: "polite" });
     const send = el("button", { type: "button", textContent: "Send steer" });
     send.addEventListener("click", async () => {
       const text = area.value.trim();
@@ -1653,32 +1910,236 @@
       try {
         const r = await fetch(`/jobs/${encodeURIComponent(id)}/steer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
         const b = await r.json();
-        if (!r.ok) { steerNote = status.textContent = `Not sent: ${b.error}`; }
-        else { steerDraft = ""; area.value = ""; steerNote = status.textContent = `Steer ${b.n} queued.`; refreshJobs(); }
+        if (!r.ok) status.textContent = `Not sent: ${b.error}`;
+        else { jv.drafts.delete(id); area.value = ""; status.textContent = `Steer ${b.n} queued. It is received when the runner acknowledges it.`; refreshJobs(); }
       } catch { status.textContent = "ORBIT did not answer."; }
       send.disabled = false;
     });
-    const head = el("div", { className: "card" + (j.health === "launch-failed" ? " bad" : "") },
-      el("div", { className: "row" }, el("span", { className: "id", textContent: j.id }), el("span", { textContent: j.state }), el("span", { className: `health-${j.health}`, textContent: j.health }),
-        ...[safeLink(j.launch?.sessionUrl, "session on claude.ai"), safeLink(j.pr?.url, "pull request")].filter(Boolean), toolCommitBadge(j)),
-      ...(j.pr?.error ? [el("div", { className: "latest health-launch-failed", textContent: `Pull request not opened: ${j.pr.error}` })] : []));
-    jobsBox.replaceChildren(
-      el("button", { type: "button", className: "back", textContent: "← All jobs", onclick: () => { openJob = null; refreshJobs(); } }),
-      head, el("h2", { textContent: "Steer" }), el("div", { className: "card steerbox" }, area, send, status),
-      ...(summaryBox ? [el("h2", { textContent: "Final summary" }), summaryBox] : []), el("h2", { textContent: "Steers" }), steers, el("h2", { textContent: "Events (newest first)" }), events);
+    return el("div", { className: "card steerbox" }, area, send, status);
+  }
+  function section(key, title) {
+    const body = el("div", { className: "jsecbody" });
+    const d = el("details", { className: "jsec", open: true }, el("summary", {}, el("h2", { textContent: title })), body);
+    d.dataset.sec = key;
+    return { d, body };
+  }
+  function buildDetailShell(id) {
+    const overview = el("div", { className: "card jover" });
+    const s = { links: section("links", "Links & artifacts"), inputs: section("inputs", "Inputs sent to Claude"), activity: section("activity", "Activity"), results: section("results", "Results & review") };
+    const older = el("div", { className: "jolder" });
+    const root = el("article", { className: "jdetail", ariaLabel: `Job ${id}` },
+      el("a", { className: "back", href: "/#jobs", textContent: "← All jobs" }),
+      el("h2", { textContent: "Overview" }), overview, el("h2", { textContent: "Steer" }), steerBox(id), s.links.d, s.inputs.d, s.activity.d, s.results.d);
+    return { id, root, overview, s, older: [], olderNext: undefined, olderInit: false };
+  }
+  const dl = (pairs) => el("dl", { className: "jdl" }, ...pairs.filter(Boolean).flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, ...(Array.isArray(v) ? v : [v]))]));
+
+  function overviewParts(d) {
+    const o = d.overview;
+    const head = el("div", { className: "jtitlebig", textContent: o.title.text });
+    const src = note(`Title: ${TITLE_SOURCE_TEXT[o.title.source] ?? o.title.source}`);
+    const chips = el("div", { className: "row chips" }, el("span", { className: "id", textContent: o.id }), copyButton(() => o.id, "job id", "id"),
+      chip(`${o.lane} · ${o.routine || "no routine"}`), chip(o.kind === "review" ? `review of ${o.reviewOf}` : o.kind),
+      el("span", { className: `badge state state-${o.state}`, textContent: `state: ${o.state}` }), el("span", { className: `badge health health-${o.health}`, textContent: `health: ${o.health}` }), toolCommitBadge(o));
+    const session = safeLink(o.sessionUrl, "Claude session"), pr = safeLink(o.prUrl, "pull request");
+    if (session) chips.append(session);
+    if (pr) chips.append(pr);
+    const disp = o.dispatch;
+    const times = dl([
+      ["Registered", when(o.createdAt)],
+      o.launch && ["Launched", when(o.launch.at)],
+      o.launch?.fireStartedAt && ["Fire sent", when(o.launch.fireStartedAt)],
+      o.launch?.firedAt && ["Accepted", when(o.launch.firedAt)],
+      o.launch?.failedAt && ["Launch failed", [when(o.launch.failedAt), el("span", { className: "health-launch-failed", textContent: ` ${o.launch.error}` })]],
+      ["Last activity", o.latest ? [when(o.activityAt), el("span", { className: "meta", textContent: ` (${o.latest.type} via ${o.latest.via === "git" ? "git" : "the API"})` })] : when(o.activityAt)],
+      ["Token expires", when(o.expiresAt)],
+      ["Dispatch", [el("span", { className: "badge", textContent: disp.state }), el("span", { className: "meta", textContent: ` ${disp.basis}` })]],
+      disp.caveat && ["Caveat", el("span", { className: "meta", textContent: disp.caveat })],
+      o.pendingSteers && ["Steers", el("span", { className: "health-quiet", textContent: `${o.pendingSteers} queued, not yet received` })],
+    ]);
+    const parts = [head, src, chips, times];
+    if (o.prError) parts.push(note(`Pull request not opened: ${o.prError}`, "latest health-launch-failed"));
+    if (o.legacyContext) parts.push(note(`${o.legacyContext.note} Paths: ${o.legacyContext.paths.join(", ")}`));
+    return parts;
   }
 
-  async function renderList() {
-    const [jr, pr] = await Promise.all([fetch("/jobs?view=rows"), fetch("/chat/proposals")]);
-    if (!jr.ok) { jobsTab.hidden = true; setTab(tabFromHash()); return; }
-    const rows = (await jr.json()).jobs;
-    const proposals = pr.ok ? (await pr.json()).proposals : [];
-    const attention = rows.filter((r) => ["not-started", "quiet", "launch-failed"].includes(r.health)).length + proposals.length;
-    document.getElementById("jobsbadge").textContent = attention ? `(${attention})` : "";
-    jobsBox.replaceChildren(
-      ...(proposals.length ? [el("h2", { textContent: `Waiting for your click (${proposals.length})` }), ...proposals.map(proposalBox)] : []),
-      el("h2", { textContent: `Jobs (${rows.length})` }),
-      ...(rows.length ? rows.map(jobCard) : [el("div", { className: "empty", textContent: "No jobs yet." })]));
+  function linkParts(d) {
+    const groups = [["claude", "Claude"], ["control", "Control record (orbit-work)"], ["tool", "Tool commit and Routine prompt"], ["code", "Code"], ["review", "Review"], ["related", "Related"]];
+    const out = [note("Recorded: the address is on the job as GitHub or the provider gave it. Derived: ORBIT built it from recorded values; the target is not checked unless the note says so. Not available: the record does not hold it.")];
+    for (const [g, name] of groups) {
+      const links = d.links.filter((l) => l.group === g);
+      if (!links.length) continue;
+      out.push(el("h3", { textContent: name }), el("ul", { className: "jlinks" }, ...links.map((l) => {
+        const inner = internalHref(l);
+        const target = inner ? el("a", { href: inner, textContent: l.value || l.job || l.label }) : safeLink(l.url, l.value || l.url);
+        const value = target || (l.value ? el("span", { className: "id", textContent: l.value }) : el("span", { className: "meta", textContent: "—" }));
+        const li = el("li", { className: "lrow" }, el("span", { className: "llabel", textContent: l.label }), el("span", { className: "lval" }, value), el("span", { className: `badge basis-${l.basis}`, textContent: BASIS_TEXT[l.basis] ?? l.basis }));
+        if (l.value && target && l.url && l.value !== l.url) li.append(copyButton(() => l.value, l.label));
+        if (l.note) li.append(el("div", { className: "lnote meta", textContent: l.note }));
+        return li;
+      })));
+    }
+    return out;
+  }
+
+  function inputParts(d) {
+    const i = d.inputs, id = d.id;
+    const out = [];
+    out.push(el("h3", { textContent: "How far the launch got" }), el("ol", { className: "stages" }, ...i.stages.map((s) => el("li", { className: `stage stage-${s.status.replace("/", "")}` },
+      el("span", { className: "smark", textContent: STAGE_MARK[s.status] ?? "?", ariaLabel: s.status }), el("span", { className: "slabel", textContent: `${s.label}: ${s.status}` }), ...(s.at ? [when(s.at)] : []), el("div", { className: "meta", textContent: s.evidence })))));
+    out.push(note(i.snapshot ? `Dispatch snapshot v${i.snapshot.v}, recorded ${new Date(i.snapshot.at).toLocaleString()} (${i.snapshot.lane} lane, ${i.snapshot.origin}${i.snapshot.proposal ? `, proposal ${i.snapshot.proposal}` : ""}).` : "No dispatch snapshot: this job was launched before ORBIT kept one, so only the fields below were recorded."));
+    out.push(el("h3", { textContent: "Brief" }));
+    if (i.brief.state === "recorded") {
+      out.push(longText(`${id}:brief`, "Brief", i.brief.text, `${i.brief.chars.toLocaleString()} characters as sent${i.brief.sha256 ? ` · sha256 ${i.brief.sha256.slice(0, 12)}…` : ""} · delivered ${i.brief.delivery === "job-api" ? "by the job API" : "in orbit-work .orbit/brief.md"}`));
+      for (const r of i.brief.redactions || []) out.push(note(`Redacted: ${r.count} ${r.what}. The value is not stored or shown.`, "meta warnline"));
+      if (i.brief.note) out.push(note(i.brief.note, "meta warnline"));
+    } else {
+      out.push(note(i.brief.note, "meta warnline"));
+      const l = safeLink(i.brief.url, "brief file in orbit-work (derived link)");
+      if (l) out.push(el("div", {}, l));
+    }
+    out.push(el("h3", { textContent: "Routine fire text" }));
+    if (i.fireText.state === "recorded") {
+      out.push(longText(`${id}:fire`, "Routine fire text", i.fireText.text, `sent ${new Date(i.fireText.at).toLocaleString()}`));
+      for (const r of i.fireText.redactions || []) out.push(note(`Redacted: ${r.count} × ${r.what}.`, "meta"));
+      out.push(note(i.fireText.note));
+    } else out.push(note(`${i.fireText.note}${i.fireText.toolCommitSent ? ` Tool commit line sent: ${i.fireText.toolCommitSent}.` : ""}`, "meta warnline"));
+    out.push(el("h3", { textContent: "Routine prompt" }), note(i.routinePrompt.note));
+    if (i.research) out.push(el("h3", { textContent: "Research brief delivery" }), note(i.research.briefServed ? `Fetched by the runner ${i.research.briefServed.count} time(s), first ${new Date(i.research.briefServed.firstAt).toLocaleString()}, last ${new Date(i.research.briefServed.lastAt).toLocaleString()}.` : "Not fetched by the runner (or fetched before ORBIT recorded it)."), note(i.research.note));
+    if (i.review) {
+      const pr = safeLink(i.review.prUrl, i.review.prUrl);
+      out.push(el("h3", { textContent: "Review input" }), el("div", { className: "meta" }, `Reviews job `, el("a", { href: jobHref(i.review.of), textContent: i.review.of }), ` in ${i.review.repo}`, ...(pr ? [" · ", pr] : []), ` · PR head at launch: ${i.review.reviewedSha || "not recorded"}`), note(i.review.note));
+    }
+    if (i.work) out.push(el("h3", { textContent: "Work session" }), note(`Proposal ${i.work.proposal} · work session ${i.work.workSession} · origin ${i.work.origin ?? "unknown"}`));
+    out.push(el("h3", { textContent: `Steers (${i.steers.length})` }));
+    if (!i.steers.length) out.push(note("No steers."));
+    for (const s of i.steers) {
+      const box = el("div", { className: "steeritem" }, el("div", { className: "row" }, el("span", { className: "id", textContent: `#${s.n}` }),
+        el("span", { className: `badge steer-${s.state}`, textContent: STEER_STATE_TEXT[s.state] ?? s.state }), when(s.at, "queued"), ...(s.deliveredAt ? [when(s.deliveredAt, "· received")] : []),
+        el("span", { className: "meta", textContent: `· ${STEER_SOURCE_TEXT[s.source] ?? s.source}${s.proposal ? ` ${s.proposal}` : ""}` })));
+      box.append(longText(`${id}:steer:${s.n}`, `Steer ${s.n}`, s.text, `${s.chars.toLocaleString()} characters`));
+      if (s.clipped) box.append(note(`ORBIT stored the first ${i.maxSteerChars.toLocaleString()} of ${s.chars.toLocaleString()} characters; the rest was not kept.`, "meta warnline"));
+      if (s.redacted) box.append(note(`Redacted: ${s.redacted} secret-shaped value(s).`));
+      if (s.reply) {
+        box.append(longText(`${id}:reply:${s.n}`, `Runner's reply to steer ${s.n}`, s.reply.text, `${s.reply.textChars.toLocaleString()} characters · via ${s.reply.via === "git" ? "git" : "the API"}`));
+        if (s.reply.textClipped) box.append(note(`The reply event keeps the first 4,000 of ${s.reply.textChars.toLocaleString()} characters; the whole reply is in orbit-work (.orbit/replies/${s.n}.md).`, "meta warnline"));
+      }
+      out.push(box);
+    }
+    if (i.proposedSteers.length) {
+      out.push(el("h3", { textContent: `Proposed steers (${i.proposedSteers.length})` }));
+      for (const p of i.proposedSteers) out.push(el("div", { className: "steeritem" }, el("div", { className: "row" }, el("span", { className: "badge steer-proposed", textContent: STEER_STATE_TEXT.proposed }), when(p.createdAt, "proposed"), el("span", { className: "meta", textContent: `· expires ${new Date(p.expiresAt).toLocaleString()}` })),
+        longText(`${id}:prop:${p.id}`, "Proposed steer", p.text), note(`${p.note} Confirm or cancel it under "Waiting for your click" on the jobs list.`)));
+    }
+    return out;
+  }
+
+  function eventEl(ev, id) {
+    const head = el("div", { className: "row" }, el("span", { className: "id", textContent: `#${ev.seq}` }), when(ev.at), el("span", { className: "badge", textContent: `${ev.type}${ev.status ? " " + ev.status : ""}${ev.n !== undefined ? " " + ev.n : ""}` }), el("span", { className: "meta", textContent: `via ${ev.via === "git" ? "git" : "the API"}` }));
+    const sha = ev.sha ? safeLink(ev.shaUrl, ev.sha.slice(0, 7)) : null;
+    if (sha) { sha.title = `orbit-work commit ${ev.sha} (derived link)`; head.append(sha); }
+    if (ev.toolCommit) head.append(el("span", { className: "meta", textContent: `tool ${ev.toolCommit.slice(0, 7)}` }));
+    const box = el("div", { className: "ev" }, head);
+    if (ev.text !== undefined) {
+      if (isLongText(ev.text)) box.append(longText(`${id}:ev:${ev.seq}`, `Event ${ev.seq} text`, ev.text, `${ev.text.length.toLocaleString()} characters`));
+      else box.append(el("div", { className: "evtext" }, ...linkify(ev.text, el)));
+      if (ev.textClipped) box.append(note(`ORBIT kept the first ${ev.text.length.toLocaleString()} of ${ev.textChars.toLocaleString()} characters of this event${ev.type === "summary" ? "; the stored summary is under Results" : "; the whole text is in orbit-work"}.`, "meta warnline"));
+      if (ev.redacted) box.append(note(`Redacted: ${ev.redacted} secret-shaped value(s).`));
+    }
+    return box;
+  }
+
+  function activityParts(d, view) {
+    const t = d.timeline, page = t.events, id = d.id;
+    const out = [el("h3", { textContent: "Key times" }), el("ul", { className: "times" }, ...t.keyTimes.map((k) => el("li", {}, when(k.at), el("span", { textContent: ` ${k.what}` }))))];
+    const seen = new Set(page.events.map((e) => e.seq));
+    const events = [...page.events, ...view.older.filter((e) => !seen.has(e.seq))].sort((a, b) => b.seq - a.seq);
+    const more = view.olderInit ? view.olderNext : page.next;
+    const left = events.length ? events[events.length - 1].seq - (page.dropped ?? 0) - 1 : 0;
+    out.push(el("h3", { textContent: `Events (${page.retained} retained, newest first)` }));
+    if (page.note) out.push(note(page.note, "meta warnline"));
+    out.push(events.length ? el("div", { className: "card evs" }, ...events.map((e) => eventEl(e, id))) : note("No events yet."));
+    if (more) {
+      const b = el("button", { type: "button", className: "mini", textContent: `Load older events (${left} more retained)` });
+      b.dataset.key = "older";
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try {
+          const r = await fetch(`/jobs/${encodeURIComponent(id)}/events?before=${more}`);
+          const p = await r.json();
+          if (r.ok && jv.detail === view) { view.older.push(...p.events); view.olderNext = p.next; view.olderInit = true; fillActivity(view); }
+        } finally { b.disabled = false; }
+      });
+      out.push(b);
+    } else if (events.length) out.push(note("This is the oldest retained event."));
+    return out;
+  }
+  function fillActivity(view) { patch(view.s.activity.body, [view.data.timeline, view.older.map((e) => e.seq), view.olderNext], () => activityParts(view.data, view)); }
+
+  function resultParts(d) {
+    const r = d.results, id = d.id, out = [];
+    out.push(el("h3", { textContent: "Final summary" }));
+    if (r.summary) {
+      out.push(longText(`${id}:summary`, "Final summary", r.summary.text, `${r.summary.chars.toLocaleString()} characters · ${r.summary.state} · via ${r.summary.via} · ${new Date(r.summary.at).toLocaleString()}`));
+      if (r.summary.note) out.push(note(r.summary.note, "meta warnline"));
+      if (r.summary.redacted) out.push(note(`Redacted: ${r.summary.redacted} secret-shaped value(s).`));
+    } else out.push(note(r.state === "done" || r.state === "blocked" || r.state === "failed" ? "No summary text is stored on this job." : "No summary yet."));
+    if (r.pr) {
+      out.push(el("h3", { textContent: "Pull request" }));
+      const l = safeLink(r.pr.url, r.pr.url);
+      out.push(dl([["Address", l || el("span", { className: "meta", textContent: r.pr.error ? "not opened" : "being opened" })], r.pr.title && ["Title", el("span", { textContent: r.pr.title })], r.pr.titleSource && ["Title source", el("span", { textContent: r.pr.titleSource === "pr-title-section" ? "the summary's ## PR title" : r.pr.titleSource === "summary-first-line" ? "made by ORBIT from the summary's first line" : "made by ORBIT from the job id and routine" })],
+        r.pr.parts && ["Description parts", el("span", { className: r.pr.parts.posted < r.pr.parts.total ? "health-launch-failed" : "", textContent: `${r.pr.parts.posted} of ${r.pr.parts.total} posted` })], r.pr.attempts && ["Attempts", el("span", { textContent: String(r.pr.attempts) })], r.pr.error && ["Error", el("span", { className: "health-launch-failed", textContent: r.pr.error })], ["At", when(r.pr.at)]]));
+    }
+    if (r.reviewOutcome) {
+      out.push(el("h3", { textContent: "Review of this job" }));
+      const v = r.reviewOutcome.verdict ? verdictLabel(r.reviewOutcome.verdict, r.reviewOutcome.verdictReason) : null;
+      const c = safeLink(r.reviewOutcome.commentUrl, "review comment");
+      out.push(dl([["Review job", r.reviewOutcome.id ? el("a", { href: jobHref(r.reviewOutcome.id), textContent: r.reviewOutcome.id }) : el("span", { className: "meta", textContent: "not launched" })], ["Verdict", el("span", { className: v?.bad || (!v && r.reviewOutcome.error) ? "health-launch-failed" : "", textContent: v ? v.text : r.reviewOutcome.error ? "review did not complete" : "review running, no verdict yet" })], c && ["Comment", c], r.reviewOutcome.error && ["Error", el("span", { className: "health-launch-failed", textContent: r.reviewOutcome.error })]]));
+    }
+    if (r.review) {
+      out.push(el("h3", { textContent: "This review" }));
+      const v = r.review.verdict ? verdictLabel(r.review.verdict, r.review.verdictReason) : null;
+      out.push(dl([["Reviews", el("a", { href: jobHref(r.review.of), textContent: r.review.of })], ["Verdict", el("span", { className: !v || v.bad ? "health-launch-failed" : "", textContent: v ? v.text : "no verdict recorded yet" })], r.review.comment?.parts && ["Comment parts", el("span", { textContent: `${r.review.comment.parts.posted} of ${r.review.comment.parts.total} posted` })], r.review.comment?.error && ["Comment error", el("span", { className: "health-launch-failed", textContent: r.review.comment.error })]]));
+    }
+    if (r.research) {
+      const rep = r.research.report;
+      out.push(el("h3", { textContent: "Research report" }));
+      out.push(rep ? dl([["Status", el("span", { textContent: `${rep.status}, ${rep.valid ? "passed ORBIT's checks" : "did not pass ORBIT's checks"}` })], ["Size", el("span", { textContent: `${rep.chars} characters${rep.sources !== undefined ? `, ${rep.sources} sources` : ""}` })], rep.title && ["Title", el("span", { textContent: rep.title })], rep.problems?.length && ["Problems", el("ul", {}, ...rep.problems.map((p) => el("li", { textContent: p })))], rep.storeError && ["Store error", el("span", { className: "health-launch-failed", textContent: rep.storeError })]]) : note("No report recorded."));
+      if (r.research.isolation) out.push(note(`Isolation checked ${new Date(r.research.isolation.checkedAt).toLocaleString()}: orbit-work branch ${r.research.isolation.orbitWorkBranch}, PR record ${r.research.isolation.pr}.`));
+      if (r.research.vault) out.push(note(`Vault save: ${r.research.vault.state} at ${r.research.vault.path}${r.research.vault.commit ? ` (commit ${r.research.vault.commit})` : ""}${r.research.vault.error ? `: ${r.research.vault.error}` : ""}.`));
+    }
+    out.push(note(r.readiness));
+    return out;
+  }
+
+  async function renderDetail(id) {
+    const res = await fetch(`/jobs/${encodeURIComponent(id)}?view=detail`);
+    if (openJob !== id) return;
+    if (!res.ok) {
+      const missing = res.status === 404;
+      jv.detail = null;
+      jobsBox.replaceChildren(el("a", { className: "back", href: "/#jobs", textContent: "← All jobs" }), note(missing ? `No job ${id} is stored. ORBIT keeps the most recent 200 job records, so an older job may have been removed.` : "ORBIT did not answer; trying again shortly.", "empty"));
+      if (!missing) throw new Error("detail not read");
+      return;
+    }
+    const d = await res.json();
+    if (openJob !== id) return;
+    if (!jv.detail || jv.detail.id !== id) {
+      if (jv.list && !jv.detail) jv.listScroll = jobsBox.scrollTop;
+      jv.detail = buildDetailShell(id);
+      jobsBox.replaceChildren(jv.detail.root);
+      jobsBox.scrollTop = 0;
+    }
+    const v = jv.detail;
+    v.data = d;
+    updateTitle();
+    let changed = false;
+    changed = patch(v.overview, d.overview, () => overviewParts(d)) || changed;
+    changed = patch(v.s.links.body, d.links, () => linkParts(d)) || changed;
+    changed = patch(v.s.inputs.body, d.inputs, () => inputParts(d)) || changed;
+    changed = patch(v.s.activity.body, [d.timeline, v.older.map((e) => e.seq), v.olderNext], () => activityParts(d, v)) || changed;
+    changed = patch(v.s.results.body, d.results, () => resultParts(d)) || changed;
+    relabelJobTimes();
   }
 
   // <notes>
@@ -2311,7 +2772,12 @@
   // Fetches and draws the Jobs tab. Called by the poller and by the user's own clicks on that tab.
   async function refreshJobs() {
     try {
-      if (openJob) await renderDetail(openJob); else await renderList();
+      // The address can change while a request is out (a link to another job, or back to the list): draw what it names now.
+      for (let i = 0; i < 3; i++) {
+        const target = openJob;
+        if (target) await renderDetail(target); else await renderList();
+        if (target === openJob) break;
+      }
     } catch { /* the next refresh tries again */ }
   }
   // The Jobs tab refreshes once when it opens and every 15 seconds while it is showing and the page is visible.
