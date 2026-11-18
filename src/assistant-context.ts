@@ -78,34 +78,93 @@ export const pageCursor = (name: string, output: string): string | undefined => 
     return undefined;
   }
 };
-// When a turn's calls are omitted (form "calls-omitted"), the newest page cursor of each paged tool is still named in the note, with
-// the session id it was reading, so a turn that read many pages (up to MAX_ROUNDS) can still be continued by the next one.
-const lastCursors = (calls: readonly { name: string; arguments: string; output: string }[]): string => {
-  const seen = new Map<string, string>();
-  for (const c of [...calls].reverse()) {
-    if (seen.has(c.name)) continue;
-    const cursor = pageCursor(c.name, c.output);
-    if (!cursor) continue;
-    let id: unknown;
-    try {
-      id = (JSON.parse(c.arguments) as { id?: unknown } | null)?.id;
-    } catch {
-      id = undefined;
-    }
-    const of = typeof id === "string" && /^[A-Za-z0-9:_.-]{1,200}$/.test(id) ? ` (id ${id})` : "";
-    seen.set(c.name, `${c.name}${of} nextCursor: "${cursor}"`);
+// What a paged tool's output says about continuing: a cursor to continue from, `done` when the page says explicitly that there is no
+// next page (a successful result whose nextCursor is null), or undefined when it says nothing usable (a failed call, an output that is
+// not JSON, or a cursor ORBIT would not repeat). Missing information is never read as completion, and completion never as missing.
+export type PageState = { cursor: string } | { done: true };
+export const pageState = (name: string, output: string): PageState | undefined => {
+  if (!PAGED_TOOLS.has(name)) return undefined;
+  const cursor = pageCursor(name, output);
+  if (cursor) return { cursor };
+  try {
+    const v = JSON.parse(output) as { ok?: unknown; result?: Record<string, unknown> } | null;
+    return v && v.ok !== false && v.result && typeof v.result === "object" && Object.hasOwn(v.result, "nextCursor") && v.result.nextCursor === null ? { done: true } : undefined;
+  } catch {
+    return undefined;
   }
-  return [...seen.values()].reverse().join("; ");
 };
+
+// The paging streams of one turn's calls, oldest first, each with its newest state. A stream is one read: session_read of one session
+// id in one direction, or sessions_list of one query (its arguments other than cursor and limit, which the cursor is bound to). A call
+// that passes a cursor this turn returned continues that cursor's stream, so a continuation (whose direction is in its cursor) is never
+// confused with another read of the same session. A newer page supersedes an older one; a page with nextCursor null marks its stream
+// complete, so a completed read's older cursor is never offered again. A failed or unreadable page changes nothing.
+export type PageStream = { tool: string; identity: string; state: PageState };
+const MAX_STREAMS = 8;
+const IDENTITY_MAX_CHARS = 300;
+const canonicalArgs = (v: unknown): unknown =>
+  Array.isArray(v) ? v.map(canonicalArgs) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonicalArgs((v as Record<string, unknown>)[k])])) : v;
+export function pageStreams(calls: readonly { name: string; arguments: string; output: string }[]): PageStream[] {
+  const streams = new Map<string, PageStream>();
+  // `${tool}\u0000${scope}\u0000${cursor}` -> the key of the stream whose newest page returned that cursor.
+  const chain = new Map<string, string>();
+  for (const c of calls) {
+    const state = pageState(c.name, c.output);
+    if (!state) continue;
+    let args: Record<string, unknown>;
+    try {
+      const v = c.arguments.trim() ? JSON.parse(c.arguments) : {};
+      args = v && typeof v === "object" && !Array.isArray(v) ? v : {};
+    } catch {
+      continue;
+    }
+    const given = typeof args.cursor === "string" && args.cursor !== "" ? args.cursor : undefined;
+    // `scope`: what a cursor is bound to (the session id, or the list query). `first`: the stream a first-page call starts; for
+    // session_read the direction is part of it (a continuation leaves `from` out: its cursor carries the direction).
+    let scope: string;
+    let first: string;
+    let identity: string;
+    if (c.name === "session_read") {
+      if (typeof args.id !== "string" || !args.id) continue;
+      const from = args.from === "start" ? "start" : "end";
+      scope = JSON.stringify(args.id);
+      first = `${scope}\u0000${from}`;
+      identity = `id ${scope.slice(1, -1)}${!given && from === "start" ? ", from start" : ""}`;
+    } else {
+      scope = JSON.stringify(canonicalArgs(Object.fromEntries(Object.entries(args).filter(([k, v]) => k !== "cursor" && k !== "limit" && v !== null && v !== undefined))));
+      first = scope;
+      identity = `query ${scope}`;
+    }
+    if (identity.length > IDENTITY_MAX_CHARS) continue;
+    // A continuation of a cursor this turn returned joins that stream; one of a cursor from an earlier turn is its own stream.
+    const key = given ? (chain.get(`${c.name}\u0000${scope}\u0000${given}`) ?? `${c.name}\u0000${scope}\u0000cursor\u0000${given}`) : `${c.name}\u0000first\u0000${first}`;
+    const prior = streams.get(key);
+    streams.delete(key);
+    streams.set(key, { tool: c.name, identity: prior?.identity ?? identity, state });
+    if ("cursor" in state) chain.set(`${c.name}\u0000${scope}\u0000${state.cursor}`, key);
+  }
+  return [...streams.values()].slice(-MAX_STREAMS);
+}
+
+// When a turn's calls are omitted (form "calls-omitted", or the whole turn as a placeholder), each paging stream's newest state is
+// still named in the note with what it was reading, so a turn that read many pages (up to MAX_ROUNDS) can still be continued by the
+// next one, and a read it finished is said to be finished. Cursors are copied exactly as the tool returned them.
+const pagingNote = (calls: readonly { name: string; arguments: string; output: string }[]): string =>
+  pageStreams(calls)
+    .map((p) => ("cursor" in p.state ? `${p.tool} (${p.identity}) nextCursor: "${p.state.cursor}"` : `${p.tool} (${p.identity}) complete: nextCursor null, no further page`))
+    .join("; ");
+const PAGING_NOTE_INTRO = "Paging state at the end of this turn (newest page of each read; a cursor is kept whole so reading can continue from where it stopped, with the same id or query; a complete read has no cursor to continue from):";
 // Likewise a write or proposal's outcome facts (status, proposal id, commit; thread-context callFacts) are kept whole at the end of a
 // cut output, so a shortened history still says whether something was committed or only proposed, and under which id.
 const cutOutput = (name: string, output: string, seq: number): string => {
   if (output.length <= BOUNDED_OUTPUT_CHARS) return output;
-  const cursor = pageCursor(name, output);
-  const facts = cursor ? "" : callFacts({ output });
-  if (!cursor && !facts) return cut(output, BOUNDED_OUTPUT_CHARS, `the output of ${name}`, seq);
-  const keep = cursor
-    ? `[ORBIT: this page's nextCursor, kept whole so reading can continue from where it stopped] nextCursor: "${cursor}"`
+  const page = pageState(name, output);
+  const facts = page ? "" : callFacts({ output });
+  if (!page && !facts) return cut(output, BOUNDED_OUTPUT_CHARS, `the output of ${name}`, seq);
+  const keep = page
+    ? "cursor" in page
+      ? `[ORBIT: this page's nextCursor, kept whole so reading can continue from where it stopped] nextCursor: "${page.cursor}"`
+      : `[ORBIT: this page's nextCursor, kept from its full result] nextCursor: null (this was the last page: the read is complete)`
     : `[ORBIT: this call's outcome, kept whole from its full result] ${facts}`;
   const tail = `\n${marker(`the output of ${name}`, output.length, BOUNDED_OUTPUT_CHARS, seq)}\n${keep}`;
   return `${output.slice(0, Math.max(0, BOUNDED_OUTPUT_CHARS - tail.length))}${tail}`;
@@ -133,8 +192,8 @@ export function boundChunk(chunk: ChunkLike, cap: number = ASSISTANT_CHUNK_MAX_C
     const list = (full[mi]!.calls ?? m.calls).map((c) => `${c.name} (${callOutcome(c)})`).join(", ").slice(0, 1200);
     // A gallery shown in this turn stays addressable ("the second one") even when its photos_show call is omitted: its ordered refs.
     const shown = (m.gallery ?? []).map((g, i) => `gallery ${i + 1}: ${g.refs.map((r, j) => `${j + 1}=${r}`).join(", ")}`).join("; ");
-    const cursors = lastCursors(full[mi]!.calls ?? []);
-    const note = `[ORBIT: ${m.calls.length} tool call(s) of this turn are omitted from the model's context to stay within budget: ${list}. They are stored in full in assistant chunk ${chunk.seq}.${cursors ? ` Last page cursor, kept whole so reading can continue from where it stopped: ${cursors}.` : ""}${shown ? ` Photos displayed to Rai in this turn (display only, never seen by the model), by position: ${shown}.` : ""}]`;
+    const paging = pagingNote(full[mi]!.calls ?? []);
+    const note = `[ORBIT: ${m.calls.length} tool call(s) of this turn are omitted from the model's context to stay within budget: ${list}. They are stored in full in assistant chunk ${chunk.seq}.${paging ? ` ${PAGING_NOTE_INTRO} ${paging}.` : ""}${shown ? ` Photos displayed to Rai in this turn (display only, never seen by the model), by position: ${shown}.` : ""}]`;
     // An errored reply's own text is not sent (as in chat threads); the note is, so the model knows calls happened.
     const text = m.status === "error" || m.status === "interrupted" ? note : `${note}\n${m.text}`;
     return { ...m, calls: [], text, status: "done" as const };
@@ -142,8 +201,12 @@ export function boundChunk(chunk: ChunkLike, cap: number = ASSISTANT_CHUNK_MAX_C
   const noCallsChars = total(noCalls);
   if (noCallsChars <= cap) return { messages: noCalls, chars: noCallsChars, form: "calls-omitted" };
 
+  // Even a placeholder keeps the turn's paging state when it fits (whole, never cut), so a read it left open or finished is not lost.
+  const paging = pagingNote(full.flatMap((m) => m.calls ?? []));
+  const bare = `[ORBIT: the turn stored as assistant chunk ${chunk.seq} (${chunk.createdAt}, ${fullChars} characters) is too large for the model's context and is omitted. It is stored in full.]`;
+  const withPaging = paging ? `${bare.slice(0, -1)} ${PAGING_NOTE_INTRO} ${paging}.]` : bare;
   const placeholder: ThreadMessage[] = [
-    { id: `${chunk.id}:placeholder`, role: "assistant", at: chunk.createdAt, status: "done", text: `[ORBIT: the turn stored as assistant chunk ${chunk.seq} (${chunk.createdAt}, ${fullChars} characters) is too large for the model's context and is omitted. It is stored in full.]`.slice(0, cap) },
+    { id: `${chunk.id}:placeholder`, role: "assistant", at: chunk.createdAt, status: "done", text: withPaging.length <= cap ? withPaging : bare.slice(0, cap) },
   ];
   return { messages: placeholder, chars: total(placeholder), form: "placeholder" };
 }

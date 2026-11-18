@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { BUDGET_NOTE, callKey, MAX_ROUNDS, NO_PROGRESS_NOTE, REPEAT_FAILURES_MAX, runChat, TurnInterrupted } from "../src/agent.ts";
+import { BUDGET_NOTE, callKey, MAX_ROUNDS, NO_PROGRESS_NOTE, REPEAT_FAILURES_MAX, REPEAT_RECOVERIES_MAX, runChat, TurnInterrupted } from "../src/agent.ts";
 import type { ChatTool } from "../src/agent.ts";
 import { chatgptModel, ProviderError, tokenFile } from "../src/chatgpt.ts";
 import type { Tokens } from "../src/chatgpt.ts";
@@ -240,7 +240,8 @@ test("no progress: a round with a blocked repeat and a new call carries on; only
   const r = counter();
   const m = model((n) => (n < 6 ? { text: "", calls: [call("bad", {}, `b${n}`), call("read", { page: n }, `p${n}`)] } : say("ok")));
   const out = await runChat({ model: m.port, messages: user, limits: [], tools: [bad.tool, r.tool] });
-  assert.equal(bad.runs.length, REPEAT_FAILURES_MAX);
+  // Each new page is progress, so the blocked call is retried, but only REPEAT_RECOVERIES_MAX times (test/progress-and-paging.test.ts).
+  assert.equal(bad.runs.length, REPEAT_FAILURES_MAX + REPEAT_RECOVERIES_MAX);
   assert.equal(r.runs.length, 6);
   assert.equal(out.stalled, undefined);
   assert.equal(out.text, "ok");
