@@ -232,14 +232,22 @@ test("job state: active, quiet/stale and unknown are distinguished (and an unper
   const jobs = jobRegistry(jsonStore(dir, "jobs", []), Buffer.alloc(32, 2), notifier(jsonStore(undefined, "n", [])), r.now);
   jobs.register("fresh");
   jobs.register("old");
-  jobs.setLaunch("old", { routine: "orbit", at: new Date(r.now().getTime() - 3600_000).toISOString() });
+  jobs.setLaunch("old", { routine: "orbit", at: new Date(r.now().getTime() - 3600_000).toISOString(), briefCommit: "b0" });
+  // ORBIT stopped during the brief write an hour ago: no brief commit, and this process is not running the launch, so it never fired.
+  jobs.register("stopped-before-brief");
+  jobs.setLaunch("stopped-before-brief", { routine: "orbit", at: new Date(r.now().getTime() - 3600_000).toISOString() });
   jobs.register("failed-launch");
-  jobs.setLaunch("failed-launch", { routine: "orbit", at: r.now().toISOString(), failedAt: r.now().toISOString(), error: "x" });
+  jobs.setLaunch("failed-launch", { routine: "orbit", at: r.now().toISOString(), failedAt: r.now().toISOString(), error: "brief not written: x" });
+  jobs.register("refused-launch");
+  jobs.setLaunch("refused-launch", { routine: "orbit", at: r.now().toISOString(), briefCommit: "b1", failedAt: r.now().toISOString(), error: "routine not fired: Routine orbit fire returned HTTP 401", fireFailure: "rejected" });
+  // An unclassified failure ("x") is not proof that no session exists (src/launch-evidence.ts): possibly working.
+  jobs.register("unknown-failure");
+  jobs.setLaunch("unknown-failure", { routine: "orbit", at: r.now().toISOString(), briefCommit: "b2", failedAt: r.now().toISOString(), error: "x" });
   const ok = jobStateOf(jobs, r.now)();
   assert.equal(ok.known, true);
   assert.deepEqual(ok.active, ["fresh"]);
-  assert.deepEqual(ok.uncertain, ["old"], "launched an hour ago and never started: possibly dead, possibly working");
-  assert.ok(!ok.active.includes("failed-launch") && !ok.uncertain.includes("failed-launch"));
+  assert.deepEqual(ok.uncertain, ["old", "unknown-failure"], "launched an hour ago and never started, or a fire whose outcome is unknown: possibly dead, possibly working");
+  for (const id of ["stopped-before-brief", "failed-launch", "refused-launch"]) assert.ok(!ok.active.includes(id) && !ok.uncertain.includes(id), `${id} provably reached no runner`);
   r.advance(48 * 3600_000);
   const later = jobStateOf(jobs, r.now)();
   assert.deepEqual([later.active, later.uncertain], [[], []], "expired registrations cannot report any more");

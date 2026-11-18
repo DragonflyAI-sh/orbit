@@ -1,4 +1,6 @@
 import type { Job, Jobs } from "./jobs.ts";
+import { processLaunches } from "./launch-evidence.ts";
+import type { LaunchTracker } from "./launch-evidence.ts";
 import { fireFailureOf } from "./launcher.ts";
 import type { ControlRepo, Routine } from "./launcher.ts";
 import { briefWords } from "./duplicates.ts";
@@ -33,8 +35,10 @@ export type JobLauncher = (routineName: string, briefText: string, review?: NonN
 // The research lane (src/research.ts): its own routines (never the build ones) and the runner tool the listener serves.
 export type ResearchLaunch = { routines: Map<string, Routine>; tool?: ResearchTool; unavailable?: string };
 
-export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines?: Map<string, Routine>; notify: Notifier; publicJobUrl?: string; commit?: string; research?: ResearchLaunch }): JobLauncher {
+export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines?: Map<string, Routine>; notify: Notifier; publicJobUrl?: string; commit?: string; research?: ResearchLaunch; inFlight?: LaunchTracker }): JobLauncher {
   const { jobs, control, notify, publicJobUrl } = deps;
+  // Which launches this process is running (src/launch-evidence.ts): only these can be reported as in flight.
+  const inFlight = deps.inFlight ?? processLaunches;
   const commit = toolCommit(deps.commit);
   const routines = deps.routines ?? new Map<string, Routine>();
   const researchRoutines = deps.research?.routines ?? new Map<string, Routine>();
@@ -60,6 +64,16 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
     const id = `${routine.name}-${stamp}-${Math.random().toString(36).slice(2, 6)}`;
     const registered = jobs.register(id, undefined, work ? { work } : {});
     if ("error" in registered) return { code: 400, body: { error: registered.error } };
+    inFlight.begin(id);
+    try {
+      return await launchBuild(id, registered.token, routine, briefText, review);
+    } finally {
+      inFlight.end(id);
+    }
+  };
+
+  async function launchBuild(id: string, token: string, routine: Routine, briefText: string, review?: NonNullable<Job["review"]>): Promise<LaunchResult> {
+    if (!jobs || !control) throw new Error("unreachable: checked by the caller");
     if (review) jobs.setReview(id, review);
     const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString(), briefWords: briefWords(briefText) };
     // Recorded before the brief write, so ORBIT stopping during it leaves a launch record without a brief commit (provably never fired),
@@ -78,7 +92,7 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
       return fail(`brief not written: ${err instanceof Error ? err.message : err}`);
     }
     // The token goes to the runner in the fire text, server to server; it is never returned or logged here.
-    const text = [`Job id: ${id}`, ...(publicJobUrl ? [`API: ${publicJobUrl}`, `Token: ${registered.token}`] : []), `Tool commit: ${commit}`].join("\n");
+    const text = [`Job id: ${id}`, ...(publicJobUrl ? [`API: ${publicJobUrl}`, `Token: ${token}`] : []), `Tool commit: ${commit}`].join("\n");
     // Persisted before the request is sent, so a fire cut off by a restart is recorded as started, never as not attempted.
     Object.assign(launch, { fireStartedAt: new Date().toISOString(), toolCommitSent: commit });
     jobs.setLaunch(id, launch);
@@ -89,7 +103,7 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
       return fail(fireError(err), fireFailureOf(err));
     }
     return { code: 202, body: withHealth(jobs.get(id)!) };
-  };
+  }
 
   // "routine not fired" is kept as the prefix older readers match on; when the provider may have received the request, it says so.
   function fireError(err: unknown): string {
@@ -112,8 +126,18 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
     const id = `${routine.name}-${stamp}-${Math.random().toString(36).slice(2, 6)}`;
     const registered = jobs!.register(id, RESEARCH_LIMITS.tokenTtlMs, { ...(work ? { work } : {}), research: { brief } });
     if ("error" in registered) return { code: 400, body: { error: registered.error } };
+    inFlight.begin(id);
+    try {
+      return await fireResearch(id, registered.token, routine, brief);
+    } finally {
+      inFlight.end(id);
+    }
+  }
+
+  async function fireResearch(id: string, token: string, routine: Routine, brief: string): Promise<LaunchResult> {
+    if (!deps.research?.tool) throw new Error("unreachable: checked by the caller");
     const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString(), briefWords: briefWords(brief) };
-    const text = ["Lane: research", `Job id: ${id}`, `API: ${publicJobUrl}`, `Token: ${registered.token}`, `Tool commit: ${commit}`, `Tool sha256: ${deps.research.tool.sha256}`].join("\n");
+    const text = ["Lane: research", `Job id: ${id}`, `API: ${publicJobUrl}`, `Token: ${token}`, `Tool commit: ${commit}`, `Tool sha256: ${deps.research.tool.sha256}`].join("\n");
     Object.assign(launch, { fireStartedAt: new Date().toISOString(), toolCommitSent: commit });
     jobs!.setLaunch(id, launch);
     try {

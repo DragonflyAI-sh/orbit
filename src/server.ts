@@ -263,7 +263,7 @@ export function buildServer({
       detail: `${st.detail} ${ready ? `Launches through Routines: ${names.join(", ")}.` : `Cannot launch yet: ${control ? "" : "no orbit-work GitHub credential. "}${names.length ? "" : "no Routine configured."}`} ${researchStatus()}`.trim(),
     };
   };
-  const withHealth = (job: Job) => ({ ...job, toolCommit: job.toolCommit ?? "unknown", toolCommitStatus: toolCommitStatus(job.toolCommit, commit), health: jobs!.health(job), dispatch: dispatchEvidence(job, clock()) });
+  const withHealth = (job: Job) => ({ ...job, toolCommit: job.toolCommit ?? "unknown", toolCommitStatus: toolCommitStatus(job.toolCommit, commit), health: jobs!.health(job), dispatch: dispatchEvidence(job) });
   const launchable = () => ({
     routines: [...routines.keys()],
     problem: !jobs ? "jobs are not enabled" : !control ? "no orbit-work GitHub credential is installed" : routines.size ? undefined : "no Routine is configured",

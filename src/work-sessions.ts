@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { JOB_ID, type Job } from "./jobs.ts";
+import { JOB_ID, type Job, type Launch } from "./jobs.ts";
+import { failureIsDefinitive, launchOutcome, legacyFailure } from "./launch-evidence.ts";
 
 // Work sessions and run links (docs/adr/0002-work-sessions.md). Session awareness slice 4.
 //
@@ -47,9 +48,11 @@ export type WorkSession = {
 export type Attachment = "new" | "follow-up" | "retry";
 // What is known about the launch a confirmation started. `launching`: recorded before the launch began and not settled (in progress, or
 // ORBIT stopped before it could record the result). `not-launched`: refused before any external step (no job, or the job was never
-// fired). `failed`: the launcher recorded a failure. `launched`: the routine was fired (or the runner reported in). `ambiguous`: a job was
-// registered and its brief written, but whether the routine was fired is unknown; it is never retried automatically.
+// fired). `failed`: the launcher recorded a definitive failure (brief not written, or the provider refused the fire). `launched`: the
+// routine was fired (or the runner reported in). `ambiguous`: a job was registered and its brief written, but whether a runner session was
+// started is unknown (ORBIT stopped mid-fire, or the fire failed without a definitive answer); it is never retried automatically.
 export type LaunchState = "launching" | "launched" | "failed" | "not-launched" | "ambiguous";
+const AMBIGUOUS_DETAIL = "Whether the routine started a runner session is unknown. It is not retried automatically: check the job (it reports in if it started) and launch again explicitly only once it is known not to have run.";
 export type RunLink = {
   proposal: string;
   workSession: string;
@@ -166,8 +169,13 @@ export function workSessions(backend: WorkBackend, now: () => Date = () => new D
     }
     // The runner's own events outrank a recorded fire failure: a fire whose answer was lost can still start a runner (src/launch-evidence.ts).
     if (job.events.length) return { state: "launched", basis: "the runner reported to the job record" };
-    if (job.launch?.failedAt) return { state: "failed", basis: "the job record has a launch failure" };
-    if (job.launch?.sessionId || job.events.length) return { state: "launched", basis: job.events.length ? "the runner reported to the job record" : "the routine accepted the fire (the job record has its cloud session)" };
+    // Only a definitive failure (brief never written, or the provider refused the fire) is `failed`; any other recorded failure may have
+    // started a session, so it is `ambiguous` and never retried automatically.
+    if (job.launch?.failedAt) {
+      if (failureIsDefinitive(job.launch)) return { state: "failed", basis: "the job record has a launch failure that proves no session was started (brief not written, or the provider refused the fire)" };
+      return { state: "ambiguous", basis: `the job record has a launch failure whose outcome is unknown (${(job.launch.error ?? "no error recorded").slice(0, 160)}): a runner session may exist` };
+    }
+    if (job.launch?.sessionId) return { state: "launched", basis: "the routine accepted the fire (the job record has its cloud session)" };
     if (!settled && l.launch.state === "launching") return { state: "launching", basis: "the job is registered and has no launch result yet (in progress, or ORBIT stopped before recording it; a restart reconciles it)" };
     if (job.launch?.briefCommit) return { state: "ambiguous", basis: "the brief was written but the job record holds no fire result: whether the routine was fired is unknown" };
     return { state: "not-launched", basis: "the job was registered but its brief was never recorded, so the routine was never fired" };
@@ -217,8 +225,20 @@ export function workSessions(backend: WorkBackend, now: () => Date = () => new D
         } catch {
           throw new WorkError(503, "The job store could not be read, so whether that run has ended is unknown. Nothing was done; the proposal is still open.");
         }
-        const ended = job ? job.state === "failed" || job.state === "blocked" || Boolean(job.launch?.failedAt) : prior.launch.state === "failed" || prior.launch.state === "not-launched";
-        if (!ended) throw new WorkError(409, "Only a run that failed or is blocked can be retried; that run has not ended that way (or its state is unknown). Nothing was done; the proposal is still open.");
+        // The shared reading (src/launch-evidence.ts): a run can be retried when its runner ended it as failed or blocked, or when the record
+        // proves it never reached a runner. A recorded fire failure does not end a run whose runner reported, and a launch whose outcome is
+        // unknown is never retried: a session may exist, and a retry could run the same work twice.
+        if (job) {
+          const { outcome, dispatch } = launchOutcome(job);
+          if (outcome === "runner-active") throw new WorkError(409, "That run's runner has reported and the run has not ended (a recorded launch failure does not end it), so it cannot be retried. Nothing was done; the proposal is still open.");
+          if (outcome === "unresolved") throw new WorkError(409, `That run's launch outcome is unresolved (${dispatch.state}): a runner session may exist, so it is not retried, to avoid running the same work twice. Check the job; it reports in if it started. Nothing was done; the proposal is still open.`);
+          if (outcome === "runner-ended" && job.state !== "failed" && job.state !== "blocked") throw new WorkError(409, "Only a run that failed or is blocked can be retried; that run has not ended that way. Nothing was done; the proposal is still open.");
+        } else {
+          // The job left the job store: only the link's own record is left. A legacy `failed` link counts only when its recorded error is a
+          // definitive failure.
+          const definitive = prior.launch.state === "not-launched" || (prior.launch.state === "failed" && ["brief", "rejected"].includes(legacyFailure(prior.launch.detail)));
+          if (!definitive) throw new WorkError(409, "Only a run that failed or is blocked can be retried; that run has not ended that way (or its state is unknown). Nothing was done; the proposal is still open.");
+        }
         return { attachment: "retry", workSession: ws.id, retryOf: attach.retryOf as string };
       }
       return { attachment: "follow-up", workSession: ws.id };
@@ -247,8 +267,12 @@ export function workSessions(backend: WorkBackend, now: () => Date = () => new D
       const b = (result.body ?? {}) as { id?: unknown; job?: { id?: unknown }; error?: unknown };
       const job = typeof b.id === "string" ? b.id : typeof b.job?.id === "string" ? b.job.id : undefined;
       const error = typeof b.error === "string" ? b.error.slice(0, 300) : undefined;
-      const state: LaunchState = result.code < 300 && job ? "launched" : job ? "failed" : "not-launched";
-      patchLink(proposal, (l) => ({ ...l, launch: { state, ...(job && JOB_ID.test(job) ? { job } : {}), at: now().toISOString(), ...(error ? { detail: error } : {}) } }));
+      // A failure the launcher recorded on the job is `failed` only when it is definitive; a fire whose outcome is unknown is `ambiguous`.
+      const launch = isObj(b.job) && isObj((b.job as { launch?: unknown }).launch) ? ((b.job as { launch: unknown }).launch as Launch) : undefined;
+      const unresolved = result.code >= 300 && job !== undefined && launch?.failedAt !== undefined && !failureIsDefinitive(launch);
+      const state: LaunchState = result.code < 300 && job ? "launched" : unresolved ? "ambiguous" : job ? "failed" : "not-launched";
+      const detail = unresolved ? `${AMBIGUOUS_DETAIL}${error ? ` (${error.slice(0, 200)})` : ""}` : error;
+      patchLink(proposal, (l) => ({ ...l, launch: { state, ...(job && JOB_ID.test(job) ? { job } : {}), at: now().toISOString(), ...(detail ? { detail } : {}) } }));
       return linkOf(proposal);
     },
 
@@ -276,7 +300,7 @@ export function workSessions(backend: WorkBackend, now: () => Date = () => new D
         } else {
           const e = evidence(l, job, true);
           if (e.state === l.launch.state && l.launch.job === job.id) continue;
-          next = { state: e.state, job: job.id, at: l.launch.at, ...(e.state === "ambiguous" ? { detail: "The brief was written but whether the routine was fired is unknown. It is not retried automatically: check the job (it reports in if it started) and retry explicitly if it did not." } : job.launch?.error ? { detail: job.launch.error.slice(0, 300) } : {}), repairedAt: now().toISOString(), repairBasis: e.basis };
+          next = { state: e.state, job: job.id, at: l.launch.at, ...(e.state === "ambiguous" ? { detail: AMBIGUOUS_DETAIL } : job.launch?.error ? { detail: job.launch.error.slice(0, 300) } : {}), repairedAt: now().toISOString(), repairBasis: e.basis };
         }
         patchLink(l.proposal, (x) => ({ ...x, launch: next }));
         changed.push(linkOf(l.proposal)!);

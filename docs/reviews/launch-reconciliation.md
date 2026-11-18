@@ -103,8 +103,10 @@ unchanged. Nothing retries, redispatches, cancels or calls the provider beyond t
 * **`dispatchEvidence(job)`** (`src/launch-evidence.ts`): a read-only classification with a basis and a caveat. The states are
   `no-launch-record`, `in-flight`, `never-dispatched`, `dispatch-unknown`, `provider-rejected`, `provider-accepted` and `runner-reported`. Legacy records
   (no `fireStartedAt`) are read conservatively, and a missing field is never taken as proof of no dispatch. Every state where a session may
-  exist carries the caveat "No runner callback is not evidence that no cloud session exists". `in-flight` lasts 30 minutes (longer than
-  fetch's default timeouts let a request hang), after which a launch with no result was cut off by ORBIT stopping.
+  exist carries the caveat "No runner callback is not evidence that no cloud session exists". `in-flight` means this ORBIT process is
+  running the launch right now (an in-memory launch tracker, `processLaunches`, that `src/job-launch.ts` fills and empties); it is never
+  inferred from the launch's age. A launch with no result that this process is not running was cut off by ORBIT stopping (see the
+  follow-up below; the first version used a 30-minute age bound, which a review showed was wrong after a restart).
 * **Reported where people look**: `/jobs/:id` and `/jobs` (`dispatch` object), the jobs-page rows (`dispatch` state), the `job_status`
   tool view (state, plus basis and caveat while the runner has said nothing; `src/job-view.ts`), and the not-started alert
   (`src/watch.ts`), which now ends with `Dispatch: <state> (<basis>)`. `health` keeps its existing values. The `jobs_list` rows are
@@ -242,4 +244,34 @@ the full research report before any file tools are designed.
 * The exact restart times between 01:15Z and 01:23:30Z, and which release fired the original launch.
 * Whether the provider created a session for the original fire, and, if so, what it did.
 * Whether any journal for 01:18Z is still retained.
-* The 30-minute `in-flight` bound assumes fetch's default timeouts (no explicit timeout is set on the GitHub or Routine requests).
+* No explicit timeout is set on the GitHub or Routine requests, so a launch this process is still running stays `in-flight` for as long as
+  fetch waits. `in-flight` no longer depends on a time bound (follow-up below).
+
+## 8. Follow-up: one evidence reading for alerts, host-operation warnings and retries
+
+The review of PR #122 (ORBIT job `orbit-202611180253-dbxc`) found three places that still read a launch differently from
+`dispatchEvidence`. All three were reproduced on main `ac10125` and are fixed by sharing one reading, `launchOutcome(job)` in
+`src/launch-evidence.ts`: `runner-active` (the runner reported and has not ended; a recorded fire failure does not change that),
+`runner-ended` (a terminal summary), `not-launched` (no runner event, and `never-dispatched` or `provider-rejected`: no session can exist)
+and `unresolved` (no runner event, and a session may exist or the launch is still running here).
+
+1. **Restart mid-fire was alerted as `in-flight`.** The alert fires at ten minutes and `in-flight` lasted thirty, so a fire cut off by a
+   restart always read `in-flight`, and the alert was never updated. Now `in-flight` is only a launch in this process's tracker, so after
+   a restart the same record reads `dispatch-unknown` at once. The watcher records `not-started:<dispatch state>` and sends one more
+   message when that state changes (for example `in-flight` → `dispatch-unknown` after a restart, or `in-flight` → `provider-accepted`),
+   never one per tick. A bare `not-started` record from before this change is taken as already reported and upgraded silently, so a deploy
+   does not re-send old alerts.
+2. **Host-operation warnings dropped every job with `failedAt`.** `jobStateOf` (`src/ops-sys.ts`) now leaves out only `not-launched`
+   jobs. A job with a fire failure and runner events is counted by its health (active or quiet), and a failure whose outcome is unknown is
+   counted as possibly working (`uncertain`).
+3. **The retry gate treated any `failedAt` as ended.** `plan()` (`src/work-sessions.ts`) now allows a retry only for `runner-ended` with
+   `failed` or `blocked`, or for `not-launched`. A `runner-active` run and an `unresolved` launch are refused (409, nothing done). The
+   link state agrees: an unknown-outcome failure is recorded and observed as `ambiguous` (never retried automatically), and only a
+   definitive one as `failed`. When the job has left the job store, a legacy `failed` link is retryable only if its recorded error is a
+   definitive failure. Starting a new, separately confirmed launch is unchanged; nothing relaunches automatically.
+
+Not changed: the minor review notes 4 (`record: "legacy"` for a new record stopped before the fire; the state is right) and 6 (the dead
+condition, removed in passing). Note 5 (views using the wall clock) no longer matters, because no dispatch state depends on the clock.
+Tests: `test/launch-outcome.test.ts` (restart interruption, in-process dispatch, unknown outcomes, explicit rejection, `failedAt` with
+runner events, late runner events, terminal runner evidence, alert transitions and deduplication, legacy alert records), all synthetic.
+

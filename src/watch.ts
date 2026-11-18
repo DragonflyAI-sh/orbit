@@ -1,5 +1,6 @@
 import type { Job } from "./jobs.ts";
 import { dispatchEvidence } from "./launch-evidence.ts";
+import type { DispatchState, EvidenceContext } from "./launch-evidence.ts";
 import type { Notifier } from "./notify.ts";
 import type { PortState, PortStatus } from "./ports.ts";
 import type { Store } from "./store.ts";
@@ -11,9 +12,13 @@ export const ALERT_AFTER_MS = 5 * 60_000;
 type Bad = { since: string; state: PortState; stateSince: string; detail: string };
 // What was already reported. This is what survives a restart.
 export type Alerted = { since: string; state: PortState };
-// jobs: job id -> the health we already reported ("not-started" or "quiet"); cleared when the job reports again or ends.
-export type WatchState = { ports: Record<string, Alerted>; jobs?: Record<string, string> };
+// jobs: job id -> what we already reported: "quiet", or "not-started:<dispatch state>" (src/launch-evidence.ts); cleared when the job
+// reports again or ends. A bare "not-started" is a record from before the dispatch state was kept: it is taken as already reported, and
+// upgraded silently to the current state, so a deploy never re-sends every old alert.
+export type JobsTold = Record<string, string>;
+export type WatchState = { ports: Record<string, Alerted>; jobs?: JobsTold };
 export type JobSource = { all(): Job[]; health(job: Job): string };
+export type WatchOptions = { inFlight?: EvidenceContext["inFlight"] };
 
 const isBad = (s: PortStatus) => s.state === "degraded" || s.state === "down";
 // An epoch verifiedAt means "not used yet" (for example the model right after a restart), not "broken".
@@ -26,7 +31,11 @@ export function duration(ms: number): string {
 
 export type Watch = ReturnType<typeof watcher>;
 
-export function watcher(store: Store<WatchState>, notify: Notifier, now: () => Date = () => new Date(), jobs?: JobSource) {
+const NOT_STARTED = "not-started";
+const toldDispatch = (told: string | undefined): DispatchState | "legacy" | undefined =>
+  told === NOT_STARTED ? "legacy" : told?.startsWith(`${NOT_STARTED}:`) ? (told.slice(NOT_STARTED.length + 1) as DispatchState) : undefined;
+
+export function watcher(store: Store<WatchState>, notify: Notifier, now: () => Date = () => new Date(), jobs?: JobSource, opts: WatchOptions = {}) {
   let source: () => PortStatus[] = () => [];
   const bad = new Map<string, Bad>();
   let lastTick: string | undefined;
@@ -70,7 +79,9 @@ export function watcher(store: Store<WatchState>, notify: Notifier, now: () => D
     return { ...state, ports };
   }
 
-  // A job that never started or went quiet is reported once. Finished jobs never alert.
+  // A job that never started or went quiet is reported once. A not-started job is reported again only when what ORBIT's record proves about
+  // its dispatch changes (for example "in-flight" in this process, then "dispatch-unknown" after a restart cut the fire off): one message
+  // per material change, never one per tick. Finished jobs never alert.
   function watchJobs(state: WatchState): WatchState {
     if (!jobs) return state;
     const told = { ...state.jobs };
@@ -81,15 +92,28 @@ export function watcher(store: Store<WatchState>, notify: Notifier, now: () => D
         delete told[job.id];
         continue;
       }
-      if (told[job.id] === health) continue;
-      const last = [...job.events].reverse().find((e) => e.type === "checkin" && e.text);
       const link = job.launch?.sessionUrl ?? "no session link";
-      const lastLine = last ? `last check-in ${last.at}: ${last.text}` : "no check-in yet";
+      if (health === "quiet") {
+        if (told[job.id] === "quiet") continue;
+        const last = [...job.events].reverse().find((e) => e.type === "checkin" && e.text);
+        const lastLine = last ? `last check-in ${last.at}: ${last.text}` : "no check-in yet";
+        notify.send(`Job ${job.id} is quiet (no event for 15 minutes). Session: ${link}. ${lastLine}`);
+        told[job.id] = "quiet";
+        continue;
+      }
       // A job with no runner event says what ORBIT's record shows about the dispatch, so "not started" is never read as "no session".
-      const dispatch = health === "not-started" ? dispatchEvidence(job, now()) : undefined;
-      const evidence = dispatch ? ` Dispatch: ${dispatch.state} (${dispatch.basis}).` : "";
-      notify.send(`Job ${job.id} is ${health === "quiet" ? "quiet (no event for 15 minutes)" : "not started (no event 10 minutes after launch)"}. Session: ${link}. ${lastLine}${evidence}`);
-      told[job.id] = health;
+      const dispatch = dispatchEvidence(job, { inFlight: opts.inFlight });
+      const key = `${NOT_STARTED}:${dispatch.state}`;
+      const before = toldDispatch(told[job.id]);
+      if (before === dispatch.state) continue;
+      if (before === "legacy") {
+        told[job.id] = key;
+        continue;
+      }
+      const caveat = dispatch.caveat ? ` ${dispatch.caveat}` : "";
+      if (before === undefined) notify.send(`Job ${job.id} is not started (no event 10 minutes after launch). Session: ${link}. no check-in yet Dispatch: ${dispatch.state} (${dispatch.basis}).${caveat}`);
+      else notify.send(`Job ${job.id} is still not started; its dispatch evidence changed from ${before} to ${dispatch.state} (${dispatch.basis}). Session: ${link}.${caveat}`);
+      told[job.id] = key;
     }
     const ids = new Set(all.map((j) => j.id));
     for (const id of Object.keys(told)) if (!ids.has(id)) delete told[id];
@@ -112,7 +136,10 @@ export function watcher(store: Store<WatchState>, notify: Notifier, now: () => D
     status(): PortStatus {
       const alerting = Object.entries(read().ports).map(([p, a]) => `${p} ${a.state} since ${a.since}`);
       const waiting = [...bad].filter(([p]) => !read().ports[p]).map(([p, b]) => `${p} ${b.state} since ${b.since}`);
-      const jobsAlerting = Object.entries(read().jobs ?? {}).map(([id, h]) => `${id} ${h}`);
+      const jobsAlerting = Object.entries(read().jobs ?? {}).map(([id, h]) => {
+        const d = toldDispatch(h);
+        return d && d !== "legacy" ? `${id} not-started (dispatch ${d})` : `${id} ${h}`;
+      });
       const parts = [
         alerting.length ? `Alerting: ${alerting.join("; ")}.` : "Nothing alerting.",
         ...(jobsAlerting.length ? [`Jobs alerting: ${jobsAlerting.join("; ")}.`] : []),

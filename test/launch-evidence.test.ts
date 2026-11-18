@@ -4,7 +4,8 @@ import { jobLauncher } from "../src/job-launch.ts";
 import { compactJob, detailJob, jobRow } from "../src/job-view.ts";
 import { jobs as jobRegistry } from "../src/jobs.ts";
 import type { Job, Launch } from "../src/jobs.ts";
-import { dispatchEvidence, IN_FLIGHT_MS } from "../src/launch-evidence.ts";
+import { dispatchEvidence, launchTracker, processLaunches } from "../src/launch-evidence.ts";
+import type { LaunchTracker } from "../src/launch-evidence.ts";
 import { fireFailureOf, gitReconciler, routineTrigger, RoutineFireError } from "../src/launcher.ts";
 import type { ControlRepo, Fired, GitRecord, Routine } from "../src/launcher.ts";
 import { notifier } from "../src/notify.ts";
@@ -19,7 +20,7 @@ import { watcher } from "../src/watch.ts";
 const COMMIT = "4297487b753847104433af7d43a0890f81d4fad9";
 const MIN = 60_000;
 
-function harness(opts: { pushBrief?: () => Promise<{ branch: string; commit: string }>; fire?: (text: string) => Promise<Fired>; commit?: string } = {}) {
+function harness(opts: { pushBrief?: () => Promise<{ branch: string; commit: string }>; fire?: (text: string) => Promise<Fired>; commit?: string; inFlight?: LaunchTracker } = {}) {
   const calls: string[] = [];
   const sent: string[] = [];
   const control: ControlRepo = {
@@ -39,8 +40,10 @@ function harness(opts: { pushBrief?: () => Promise<{ branch: string; commit: str
   const notes = notifier(jsonStore<Notification[]>(undefined, "n", []));
   let clock = new Date();
   const jobs = jobRegistry(jsonStore<Job[]>(undefined, "j", []), Buffer.alloc(32, 7), notes, () => clock);
-  const launch = jobLauncher({ jobs, control, routines: new Map([["orbit", routine]]), notify: notes, publicJobUrl: "https://orbit.example", commit: opts.commit ?? COMMIT });
-  return { calls, sent, jobs, launch, notes, advance: (ms: number) => (clock = new Date(clock.getTime() + ms)), at: (ms: number) => new Date(Date.now() + ms) };
+  // This process's launch tracker; `restarted` stands for a new ORBIT process, which holds no launch from before it started.
+  const inFlight = opts.inFlight ?? launchTracker();
+  const launch = jobLauncher({ jobs, control, routines: new Map([["orbit", routine]]), notify: notes, publicJobUrl: "https://orbit.example", commit: opts.commit ?? COMMIT, inFlight });
+  return { calls, sent, jobs, launch, notes, inFlight, here: { inFlight }, restarted: { inFlight: launchTracker() }, advance: (ms: number) => (clock = new Date(clock.getTime() + ms)) };
 }
 
 const flush = () => new Promise((r) => setImmediate(r));
@@ -58,8 +61,8 @@ test("a fire cut off mid-flight (ORBIT stopped before the provider answered) is 
   assert.equal(job.launch?.toolCommitSent, COMMIT);
   assert.equal(job.launch?.sessionId, undefined);
   assert.equal(job.launch?.failedAt, undefined);
-  assert.equal(dispatchEvidence(job, h.at(MIN)).state, "in-flight");
-  const later = dispatchEvidence(job, h.at(IN_FLIGHT_MS + MIN));
+  assert.equal(dispatchEvidence(job, h.here).state, "in-flight");
+  const later = dispatchEvidence(job, h.restarted);
   assert.equal(later.state, "dispatch-unknown");
   assert.equal(later.record, "new");
   assert.match(later.basis, /no provider answer and no failure were ever recorded/);
@@ -75,8 +78,8 @@ test("ORBIT stopping during the brief write leaves a record that proves the rout
   const job = only(h.jobs);
   assert.deepEqual(h.calls, ["pushBrief"]);
   assert.equal(job.launch?.briefCommit, undefined);
-  assert.equal(dispatchEvidence(job, h.at(MIN)).state, "in-flight");
-  assert.equal(dispatchEvidence(job, h.at(IN_FLIGHT_MS + MIN)).state, "never-dispatched");
+  assert.equal(dispatchEvidence(job, h.here).state, "in-flight");
+  assert.equal(dispatchEvidence(job, h.restarted).state, "never-dispatched");
 });
 
 test("a failed brief write is never-dispatched and nothing is fired", async () => {
@@ -92,7 +95,7 @@ test("a provider-accepted fire with a silent runner is provider-accepted, and mi
   assert.equal((await h.launch("orbit", "Do the thing.")).code, 202);
   const job = only(h.jobs);
   assert.ok(job.launch?.firedAt);
-  const e = dispatchEvidence(job, h.at(2 * IN_FLIGHT_MS));
+  const e = dispatchEvidence(job, h.here);
   assert.equal(e.state, "provider-accepted");
   assert.equal(e.sessionId, "cse_accepted");
   assert.match(e.caveat ?? "", /not evidence that no cloud session exists/);
@@ -173,20 +176,19 @@ test("the git reconciler still reads a failed launch whose outcome is unknown, a
 
 test("legacy records (no fire-start field) are read conservatively", () => {
   const at = "2026-11-18T01:18:14.000Z";
-  const later = new Date("2026-11-18T02:38:00Z");
   const job = (launch: Launch): Job => ({ id: "legacy", createdAt: at, expiresAt: "2026-11-19T01:18:14.000Z", state: "registered", events: [], steers: [], launch });
   const base = { routine: "orbit", at, branch: "orbit/legacy", briefCommit: "9f36a472f088bfcf85da5d222676b0d82a97044d" };
-  const unknown = dispatchEvidence(job(base), later);
+  const unknown = dispatchEvidence(job(base));
   assert.equal(unknown.state, "dispatch-unknown");
   assert.equal(unknown.record, "legacy");
   assert.match(unknown.basis, /older record/);
-  assert.equal(dispatchEvidence(job({ ...base, sessionId: "cse_old", sessionUrl: "u" }), later).state, "provider-accepted");
-  assert.equal(dispatchEvidence(job({ ...base, failedAt: at, error: "routine not fired: Routine orbit fire returned HTTP 404" }), later).state, "provider-rejected");
-  assert.equal(dispatchEvidence(job({ ...base, failedAt: at, error: "routine not fired: Routine orbit fire returned HTTP 500" }), later).state, "dispatch-unknown");
-  assert.equal(dispatchEvidence(job({ ...base, failedAt: at, error: "routine not fired: fetch failed" }), later).state, "dispatch-unknown");
-  assert.equal(dispatchEvidence(job({ ...base, failedAt: at, error: "routine not fired: Routine orbit fire returned no session" }), later).state, "provider-accepted");
-  assert.equal(dispatchEvidence(job({ routine: "orbit", at, failedAt: at, error: "brief not written: x" }), later).state, "never-dispatched");
-  assert.equal(dispatchEvidence({ ...job(base), launch: undefined }, later).state, "no-launch-record");
+  assert.equal(dispatchEvidence(job({ ...base, sessionId: "cse_old", sessionUrl: "u" })).state, "provider-accepted");
+  assert.equal(dispatchEvidence(job({ ...base, failedAt: at, error: "routine not fired: Routine orbit fire returned HTTP 404" })).state, "provider-rejected");
+  assert.equal(dispatchEvidence(job({ ...base, failedAt: at, error: "routine not fired: Routine orbit fire returned HTTP 500" })).state, "dispatch-unknown");
+  assert.equal(dispatchEvidence(job({ ...base, failedAt: at, error: "routine not fired: fetch failed" })).state, "dispatch-unknown");
+  assert.equal(dispatchEvidence(job({ ...base, failedAt: at, error: "routine not fired: Routine orbit fire returned no session" })).state, "provider-accepted");
+  assert.equal(dispatchEvidence(job({ routine: "orbit", at, failedAt: at, error: "brief not written: x" })).state, "never-dispatched");
+  assert.equal(dispatchEvidence({ ...job(base), launch: undefined }).state, "no-launch-record");
 });
 
 test("the reported state of orbit-202611180118-hcey (registered, brief commit, no events, no tool commit) fits more than one outcome", () => {
@@ -200,9 +202,9 @@ test("the reported state of orbit-202611180118-hcey (registered, brief commit, n
   const health = jobRegistry(jsonStore<Job[]>(undefined, "j", [reported]), Buffer.alloc(32, 7), notes, () => now).health(reported);
   assert.equal(health, "not-started");
   assert.equal(reported.toolCommit, undefined);
-  assert.equal(dispatchEvidence(reported, now).state, "dispatch-unknown", "without a session id: ORBIT stopped before the fire returned");
+  assert.equal(dispatchEvidence(reported).state, "dispatch-unknown", "without a session id: ORBIT stopped before the fire returned");
   const withSession = { ...reported, launch: { ...reported.launch!, sessionId: "cse_placeholder", sessionUrl: "https://claude.ai/code/cse_placeholder" } };
-  assert.equal(dispatchEvidence(withSession, now).state, "provider-accepted", "with one: the provider accepted it and the session never reported");
+  assert.equal(dispatchEvidence(withSession).state, "provider-accepted", "with one: the provider accepted it and the session never reported");
 });
 
 test("a tool commit the Routine prompt would refuse is recorded and called out; the token never is", async () => {
@@ -214,7 +216,7 @@ test("a tool commit the Routine prompt would refuse is recorded and called out; 
   assert.match(h.sent[0], /^Tool commit: unknown$/m);
   const token = h.sent[0].match(/^Token: (.+)$/m)![1];
   assert.equal(JSON.stringify(job).includes(token), false, "the launch record never holds the token");
-  assert.match(dispatchEvidence(job, h.at(IN_FLIGHT_MS + MIN)).caveat ?? "", /tool commit "unknown", which the Routine prompt refuses/);
+  assert.match(dispatchEvidence(job, h.restarted).caveat ?? "", /tool commit "unknown", which the Routine prompt refuses/);
 });
 
 test("the fire text is unchanged: ids only, in the same order", async () => {
@@ -224,21 +226,23 @@ test("the fire text is unchanged: ids only, in the same order", async () => {
 });
 
 test("job views and the not-started alert carry the dispatch evidence", async () => {
-  const h = harness({ fire: () => new Promise<Fired>(() => {}) });
+  // The views read this process's own tracker, so this launch runs on it.
+  const h = harness({ fire: () => new Promise<Fired>(() => {}), inFlight: processLaunches });
   void h.launch("orbit", "Do the thing.");
   await flush();
   const job = only(h.jobs);
   assert.equal("dispatch" in compactJob(job, "ok"), false, "jobs_list rows stay short (the tool result is clipped at 8000 characters)");
   assert.equal(jobRow(job, "ok").dispatch, "in-flight");
   assert.equal(detailJob(job, "ok").dispatch.state, "in-flight");
-  assert.match(String((detailJob(job, "ok").dispatch as { basis?: string }).basis), /may still be running/, "a job with no runner event gets the basis");
+  assert.match(String((detailJob(job, "ok").dispatch as { basis?: string }).basis), /still running the launch \(firing the routine/, "a job with no runner event gets the basis");
   assert.deepEqual(detailJob({ ...job, events: [{ at: job.createdAt, type: "started", via: "api" }] }, "ok").dispatch, { state: "runner-reported" });
 
   const notes = notifier(jsonStore<Notification[]>(undefined, "n", []));
-  const old = new Date(Date.now() - IN_FLIGHT_MS - MIN).toISOString();
+  const old = new Date(Date.now() - 11 * MIN).toISOString();
   const stale: Job = { ...job, launch: { ...job.launch!, at: old, fireStartedAt: old } };
   const registry = jobRegistry(jsonStore<Job[]>(undefined, "j", [stale]), Buffer.alloc(32, 7), notes);
-  watcher(jsonStore(undefined, "w", { ports: {} }), notes, () => new Date(), registry).tick();
+  // After a restart: a new process, whose tracker holds nothing from before it started.
+  watcher(jsonStore(undefined, "w", { ports: {} }), notes, () => new Date(), registry, { inFlight: launchTracker() }).tick();
   const alert = notes.recent().find((n) => n.text.includes("not started"));
   assert.ok(alert, "the not-started alert is still sent");
   assert.match(alert.text, /Dispatch: dispatch-unknown \(/);
@@ -250,7 +254,9 @@ test("work-session evidence: the runner's own events outrank a recorded fire fai
   const at = new Date().toISOString();
   const link = { proposal: "p1", workSession: "ws1", origin: { session: null, basis: "unknown" as const, why: "test" }, attachment: "new" as const, confirmedAt: at, launch: { state: "failed" as const, job: "j1", at } };
   const failed: Job = { id: "j1", createdAt: at, expiresAt: at, state: "registered", events: [], steers: [], launch: { routine: "orbit", at, briefCommit: "b1", failedAt: at, error: "routine not fired: fetch failed (outcome unknown: the request may have reached the provider)", fireFailure: "transport" } };
-  assert.equal(work.evidence(link as never, failed).state, "failed");
+  assert.equal(work.evidence(link as never, failed).state, "ambiguous", "a transport failure may have started a session: never read as failed");
+  const refused: Job = { ...failed, launch: { ...failed.launch!, error: "routine not fired: Routine orbit fire returned HTTP 401", fireFailure: "rejected" } };
+  assert.equal(work.evidence(link as never, refused).state, "failed", "a provider refusal is definitive");
   const reported: Job = { ...failed, state: "running", events: [{ at, type: "started", via: "api" }] };
   assert.equal(work.evidence(link as never, reported).state, "launched");
 });

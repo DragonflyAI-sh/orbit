@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { proposals as newProposals } from "../src/agent.ts";
 import { assistantStore } from "../src/assistant-store.ts";
 import { jobs as jobRegistry, type Job } from "../src/jobs.ts";
+import { RoutineFireError } from "../src/launcher.ts";
 import type { ControlRepo, Routine } from "../src/launcher.ts";
 import type { Item } from "../src/model.ts";
 import { notifier } from "../src/notify.ts";
@@ -212,7 +213,8 @@ test("attaching to another conversation's work session is refused before the job
 test("retry: a failed run can be retried as a new run in the same work session; the old run is not changed; a running one cannot", async () => {
   let fail = true;
   const fired: string[] = [];
-  const routine: Routine = { name: "orbit", fire: async (text) => { if (fail) throw new Error("routine down"); fired.push(text); return { sessionId: "cse_2", sessionUrl: "https://claude.ai/code/cse_2" }; } };
+  // A provider refusal (4xx) is a definitive failure: no session can exist, so a retry cannot run the same work twice.
+  const routine: Routine = { name: "orbit", fire: async (text) => { if (fail) throw new RoutineFireError("Routine orbit fire returned HTTP 401", "rejected", 401); fired.push(text); return { sessionId: "cse_2", sessionUrl: "https://claude.ai/code/cse_2" }; } };
   const x = stack({ routines: new Map([["orbit", routine]]) });
   const t = await x.create("Retry chat");
   const first = await x.confirm((await x.propose(t.id, "flaky")).id);
