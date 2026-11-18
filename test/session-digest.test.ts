@@ -455,7 +455,7 @@ test("no digest outside the owner's Assistant: chat threads, the legacy /chat ro
   for (const s of model.seen.slice(n)) assert.equal(blocks(s.notes), 0);
 });
 
-test("Assistant under the OpenRouter fallback: the same digest reaches the fallback, with no session tools and no policy change", async () => {
+test("Assistant under the OpenRouter fallback: the same digest reaches the fallback, with the same session tools and no policy change", async () => {
   const T0 = Date.now();
   const cfg = openrouterConfig(
     { ORBIT_OPENROUTER_ENABLED: "1", ORBIT_OPENROUTER_MODEL: "vendor/cheap-model", ORBIT_OPENROUTER_PRICE_IN_USD_PER_MTOK: "0.2", ORBIT_OPENROUTER_PRICE_OUT_USD_PER_MTOK: "0.4", ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS: "2048", CREDENTIALS_DIRECTORY: "/creds" },
@@ -502,7 +502,8 @@ test("Assistant under the OpenRouter fallback: the same digest reaches the fallb
   assert.equal(system.split(`\\u003corbit-data name=\\"${DIGEST_BLOCK}\\"\\u003e`).length - 1 + (system.split(`<orbit-data name=\\"${DIGEST_BLOCK}\\">`).length - 1), 1, "one digest in the fallback's input");
   assert.ok(system.includes(`chat:${t.id}`), "the same session is visible to the fallback");
   assert.deepEqual(viaPrimary.sessions.map((s: any) => s.id), [`chat:${t.id}`]);
-  // The fallback's tool allowlist is unchanged: no session tools reach it.
+  // Capability parity (docs/openrouter-fallback.md, "Tools"): the fallback is offered the Assistant's session tools like the primary;
+  // they stay owner-only and Assistant-only through allowAgent, whichever model calls them.
   const offered = (requests[0].tools ?? []).map((tool: any) => tool.function?.name ?? tool.name);
-  for (const name of SESSION_TOOL_NAMES) assert.ok(!offered.includes(name), `${name} not offered to the fallback`);
+  for (const name of SESSION_TOOL_NAMES) assert.ok(offered.includes(name), `${name} offered to the fallback`);
 });

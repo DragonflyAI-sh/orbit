@@ -383,10 +383,12 @@ test("real server without a smoke runner: /status has no smoke block and no chec
   r.server.close();
 });
 
-test("the status pill shows the smoke record on hover only; the overall dot still keys on state alone", () => {
+test("the status pill shows the smoke record on hover only; the overall indicator still keys on state (and the model's fallback route) alone", () => {
   const html = readFileSync(new URL("../src/web/index.html", import.meta.url), "utf8");
   assert.match(html, /Startup check: \$\{c\.state\}/);
-  assert.match(html, /const bad = ports\.filter\(\(p\) => !p \|\| p\.state !== "live"\);/);
+  const dot = html.match(/\/\/ <status-dot>([\s\S]*?)\/\/ <\/status-dot>/)![1]!;
+  assert.match(dot, /const bad = entries\.filter\(\(e\) => e\.state !== "live"\);/);
+  assert.doesNotMatch(dot, /\.check\b/, "the smoke record never changes the overall level");
 });
 
 // ---- the actual startup wiring: node src/main.ts --------------------------------------------------------------------------------

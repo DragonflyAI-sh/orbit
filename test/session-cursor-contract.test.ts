@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { MAX_OUTPUT_CHARS, REPEAT_FAILURES_MAX, runChat } from "../src/agent.ts";
 import { assistantStore } from "../src/assistant-store.ts";
-import { FALLBACK_TOOLS } from "../src/fallback.ts";
 import { type Item, type ModelPort, responsesTools, type Step } from "../src/model.ts";
 import { assistantAdapter, BAD_READ_CURSOR, chatAdapter, type SessionAdapter, sessionRegistry, sessionTools, SESSION_TOOL_NAMES, TRANSCRIPT_NOTICE, UNAVAILABLE_RECOVERY } from "../src/sessions.ts";
 import { threadStore } from "../src/threads.ts";
@@ -113,7 +112,7 @@ test("schema: session_read requires only id; cursor is an optional string whose 
   assert.match((list.parameters as any).properties.cursor.description, /Leave out for the first page/);
 });
 
-test("transport: the primary (Responses API) tool definitions carry the schema unchanged; the paid fallback is never offered the session tools", () => {
+test("transport: the primary (Responses API) tool definitions carry the schema unchanged, as does the paid fallback (Chat Completions)", () => {
   const s = stores();
   const defs = s.tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
   const sent = responsesTools(defs);
@@ -122,8 +121,8 @@ test("transport: the primary (Responses API) tool definitions carry the schema u
     // ORBIT sends no `strict` flag and no schema rewrite: optional properties stay optional.
     assert.equal("strict" in sent[i]!, false);
   }
-  // OpenRouter (fallback) only ever sees FALLBACK_TOOLS, which excludes every session tool, so no schema translation applies there.
-  for (const name of SESSION_TOOL_NAMES) assert.equal(FALLBACK_TOOLS.has(name), false);
+  // OpenRouter (fallback) is offered the same session tools; Chat Completions takes `parameters` as defined, so nothing is translated.
+  for (const name of SESSION_TOOL_NAMES) assert.ok(defs.some((d) => d.name === name), name);
 });
 
 // ---- first read: omitted, null, empty ------------------------------------------------------------------------------------------

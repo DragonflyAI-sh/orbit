@@ -322,7 +322,7 @@ test("browser: dismissing is per browser and explicit; collapsing is not dismiss
   }
 });
 
-test("browser: the status indicator says not read yet before the first answer, and could not be read after a failure", { skip }, async () => {
+test("browser: the status indicator says not read yet before the first answer, and disconnected (unknown) after a failed request", { skip }, async () => {
   const o = orbit(stateDir());
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -335,8 +335,9 @@ test("browser: the status indicator says not read yet before the first answer, a
     assert.match(await page.getAttribute("#health", "title"), /^ORBIT's status has not been read yet/);
     assert.match(await page.getAttribute("#health", "aria-label"), /has not been read yet/);
     release();
-    await page.waitForFunction(() => /could not be read/.test(document.getElementById("health")!.title));
-    assert.equal(await page.getAttribute("#health", "class"), "bad");
+    await page.waitForFunction(() => /could not be reached/.test(document.getElementById("health")!.title));
+    assert.equal(await page.getAttribute("#health", "class"), "unknown", "no answer is unknown (grey), never green and not claimed down");
+    assert.equal(await page.textContent("#health .label"), "Disconnected");
   } finally {
     await context.close();
   }

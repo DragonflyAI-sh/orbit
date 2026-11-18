@@ -1,4 +1,3 @@
-import { PR_INSPECT_TOOL_NAMES } from "./pr-inspect.ts";
 import { MAX_RESET_MS, ProviderError, RATE_PAUSE_MS, USAGE_PAUSE_MS } from "./chatgpt.ts";
 import { replySource } from "./model.ts";
 import type { FallbackInfo, ImageSupport, Item, Message, ModelPort, Reply, ReplyOptions, Step, ToolDef, ToolRounds } from "./model.ts";
@@ -7,7 +6,7 @@ import { BALANCE_EVERY_MS, openrouterClient } from "./openrouter.ts";
 import type { OpenRouterClient, OpenRouterConfig } from "./openrouter.ts";
 import { SpendError } from "./spend-ledger.ts";
 import type { SpendLedger } from "./spend-ledger.ts";
-import type { PortStatus } from "./ports.ts";
+import type { FallbackRoute, PortStatus } from "./ports.ts";
 
 // The fallback model: ChatGPT token sharing stays primary; OpenRouter answers only while ChatGPT is limited.
 //
@@ -15,34 +14,13 @@ import type { PortStatus } from "./ports.ts";
 // Never for authentication, overload, incomplete or any other error: those are reported as they are.
 // How long: until the primary's reset time, or, when it gave none, ORBIT's own estimated pause. The primary is not called before
 // then. After it, the next call goes to the primary, and only a successful primary call counts as recovered.
-// What it may do: the tools below, filtered on the way in and checked on the way out, so a model that names another tool gets nothing run.
-
-// Read-only tools plus job_launch, which only creates a proposal Rai must confirm. Everything else (notify, job_steer, vault writes,
-// every ops_propose_*, ops_sys_cancel_reboot) is refused here, in code, whatever the prompt says. A tool not listed is not allowed.
-export const FALLBACK_TOOLS: ReadonlySet<string> = new Set([
-  "memory_search",
-  "memory_read",
-  "github_repo_status",
-  "orbit_config_view",
-  "ops_orbit_status",
-  "ops_orbit_logs",
-  "ops_deploy_state",
-  "ops_host_health",
-  "ops_tailscale_status",
-  "ops_vault_sync",
-  "ops_credentials",
-  "ops_admin_operations",
-  "ops_sys_operations",
-  "jobs_list",
-  "job_status",
-  "vault_policy",
-  "job_launch",
-  // The lane tools that only read or only propose (research_save_to_vault writes, so it is not here).
-  "routines_list",
-  "research_result",
-  "research_launch",
-  ...PR_INSPECT_TOOL_NAMES,
-]);
+// What it may do: exactly what the primary may do in the same reply. The fallback is offered the caller's whole tool list, unchanged
+// (docs/openrouter-fallback.md, "Tools"). Every safeguard that matters is model-independent and lives where the tool runs, not here:
+// the owner check and the tool list are decided by the caller (the owner's chat), each tool keeps its own policy checks, confirmation
+// cards (job_launch, every ops_propose_*, vault writes) still wait for Rai, and a call to a tool that was not offered runs nothing
+// (runChat answers "No tool named ..."), whichever model asked. What stays different is only what the route really cannot do or must
+// not spend: no photos are sent to it (it is not given images in this build), background callers never spend it, and every paid call
+// is admitted by the spend ledger and its caps.
 
 type Limit = { kind: "usage_limit" | "rate_limit"; until: number; estimated: boolean };
 
@@ -129,19 +107,14 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     const photos = withoutPhotos(input);
     if (photos.current) throw augment(stand, FALLBACK_NO_PHOTOS, []);
     input = photos.items;
-    const allowed = tools.filter((t) => FALLBACK_TOOLS.has(t.name));
-    const names = new Set(allowed.map((t) => t.name));
-    // The tools ORBIT offers this reply that fallback mode withholds, named, so a withheld tool is reported as withheld while the
-    // fallback answers, never as something ORBIT lacks (docs/assistant.md, "Tool rounds and capability claims").
-    const offered = rounds?.offered ?? tools.map((t) => t.name);
-    const withheld = offered.filter((n) => !FALLBACK_TOOLS.has(n));
+    // The fallback is told who it is and why it answers, so attribution stays honest; it gets the same tools as the primary would.
     const told = [
       ...limits,
-      `you are the OpenRouter fallback model (${client!.model}), answering because ${why(l)}. Say so if asked which model you are. You may only use the tools offered in this reply; everything else is refused by ORBIT.${withheld.length ? ` Withheld while the fallback answers (ORBIT has them; the primary model can use them once its limit ends): ${withheld.join(", ")}. If Rai asks for one of these, say it is withheld in fallback mode and nothing was done; do not say ORBIT lacks it.` : ""}`,
+      `you are the OpenRouter fallback model (${client!.model}), answering because ${why(l)}. Say so if asked which model you are. You have the same ORBIT tools as the primary model in this reply, under the same owner, policy and confirmation checks: a proposal still waits for Rai's confirmation, and a refused call did nothing. You are not given images in this build: you cannot see any photo, so never describe one; if a tool says images were blocked, say so.`,
     ];
     let paid;
     try {
-      paid = await client!.step(input, told, notes, allowed, rounds ? { ...rounds, offered: rounds.offered.filter((n) => FALLBACK_TOOLS.has(n)) } : undefined);
+      paid = await client!.step(input, told, notes, tools, rounds);
     } catch (err) {
       lastFallbackError = err instanceof Error ? err.message : String(err);
       if (err instanceof SpendError) {
@@ -158,10 +131,6 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     lastFallbackError = undefined;
     // A billed answer whose ledger write failed is returned (never discarded), but the ledger is then not trustworthy.
     if (paid.accounting?.length) latch("the ledger could not record a paid call");
-    const outside = paid.calls.find((c) => !names.has(c.name));
-    if (outside) {
-      throw augment(stand, `it asked for the tool ${JSON.stringify(outside.name.slice(0, 60))}, which fallback mode does not allow. Nothing was run.`, paid.accounting ?? []);
-    }
     lastUse = { at: iso(now()), ...(paid.costUsd !== undefined ? { costUsd: paid.costUsd } : {}) };
     const info: FallbackInfo = {
       provider: "openrouter",
@@ -204,11 +173,12 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   // this process has already seen, and at the clock. It sends no provider request, balance or otherwise, so polling it spends nothing.
   // "armed" is claimed only when the config is complete AND the ledger was read and validated just now. The key, model and prices come
   // from configuration; nothing here has been verified with OpenRouter.
-  // `usable` is whether a paid call could be attempted at all (false: config missing, or the ledger is known bad).
-  const paidState = (): { armed: boolean; usable: boolean; text: string } => {
+  // `usable` is whether a paid call could be attempted at all (false: config missing, the ledger is known bad, or a spend cap is used
+  // up, so the ledger refuses every call until it resets). `off` says why, for the status line, when it is false.
+  const paidState = (): { armed: boolean; usable: boolean; text: string; off?: string } => {
     if (config.state === "disabled") return { armed: false, usable: false, text: "" };
     const off = unavailable();
-    if (off) return { armed: false, usable: false, text: ` OpenRouter fallback unavailable: ${off}` };
+    if (off) return { armed: false, usable: false, off: "No fallback is available", text: ` OpenRouter fallback unavailable: ${off}` };
     let seen: ReturnType<SpendLedger["inspect"]>;
     try {
       seen = ledger!.inspect();
@@ -219,14 +189,15 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       return {
         armed: false,
         usable: false,
+        off: "No fallback is available",
         text: ` OpenRouter fallback NOT armed, no paid call will be made: the spend ledger has not been provisioned${seen.requested ? " (a provision request is waiting and is applied when ORBIT next starts)" : ""}. It is never created by a status check or by a first call; see docs/openrouter-ledger-integrity.md.`,
       };
     }
     if (seen.state === "failed") {
-      return { armed: false, usable: false, text: ` OpenRouter fallback NOT armed, no paid call will be made: ${seen.reason}. The ledger is never reset automatically; fix or restore it by hand.` };
+      return { armed: false, usable: false, off: "No fallback is available", text: ` OpenRouter fallback NOT armed, no paid call will be made: ${seen.reason}. The ledger is never reset automatically; fix or restore it by hand.` };
     }
     if (ledgerFault) {
-      return { armed: false, usable: false, text: ` OpenRouter fallback NOT armed, no paid call will be made: ${ledgerFault}. Check the spend ledger, then restart ORBIT; polling this status never clears it, and a restart charges the unrecorded call at its upper bound.` };
+      return { armed: false, usable: false, off: "No fallback is available", text: ` OpenRouter fallback NOT armed, no paid call will be made: ${ledgerFault}. Check the spend ledger, then restart ORBIT; polling this status never clears it, and a restart charges the unrecorded call at its upper bound.` };
     }
     const unverified = ` Model ${client!.model}, key and prices come from ORBIT's configuration; they have not been verified with OpenRouter.`;
     const bal = !balance
@@ -241,7 +212,8 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     const life = v.caps.totalUsd === null ? `$${v.lifetimeUsd.toFixed(4)} lifetime (no lifetime cap)` : `$${v.lifetimeUsd.toFixed(4)} of $${v.caps.totalUsd} lifetime (never resets)`;
     const allowance = ` Local OpenRouter allowance as last written (UTC ${v.day}): $${v.spentTodayUsd.toFixed(4)} spent today of $${v.caps.dailyUsd} (resets ${v.resets.dailyAt}), ${month}, ${life}, $${v.reservedUsd.toFixed(4)} reserved for calls in flight (counted against every cap until settled)${v.uncertainRequests ? `, ${v.uncertainRequests} request(s) charged at their upper bound because the cost was unknown` : ""}; $${v.remainingTodayUsd.toFixed(4)} can still be reserved now. This is ORBIT's own count, not a hard spending ceiling.`;
     const spent = v.exhausted.length ? ` Every paid call is refused for now: the ${v.exhausted.join(" and ")} cap${v.exhausted.length > 1 ? "s are" : " is"} used up.` : "";
-    return { armed: true, usable: true, text: ` OpenRouter fallback armed: ${client!.model}, used only while ChatGPT is limited.${allowance}${spent}${unverified}${bal}` };
+    // A used-up cap refuses every paid call until it resets: armed (configured, ledger sound) but not usable now.
+    return { armed: true, usable: !v.exhausted.length, ...(v.exhausted.length ? { off: `The OpenRouter fallback's ${v.exhausted.join(" and ")} spend cap${v.exhausted.length > 1 ? "s are" : " is"} used up` } : {}), text: ` OpenRouter fallback armed: ${client!.model}, used only while ChatGPT is limited.${allowance}${spent}${unverified}${bal}` };
   };
 
   const wrapper: FallbackModel = {
@@ -305,11 +277,13 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       const off = !paid.usable;
       if (l) {
         const passed = l.until <= now();
+        // down: the primary is limited AND no paid call can be admitted, so no reply can come from either. degraded: one still can.
         const state = passed ? "degraded" : off ? "down" : "degraded";
         const text = passed
           ? `The ${why(l)} has passed. ORBIT will try ChatGPT on the next call; it is not confirmed recovered until one succeeds.`
-          : `${why(l)}. ${off ? "No fallback is available, so replies fail until then." : `Replies come from OpenRouter ${client?.model} (fallback, paid, restricted tools) until then; ChatGPT is not called.`}`;
-        return { ...base, state, detail: `${text}${armed}${lastFallbackError ? ` Last fallback error: ${lastFallbackError}` : ""}` };
+          : `${why(l)}. ${off ? `${paid.off ?? "No fallback is available"}, so replies fail until then.` : `Replies come from OpenRouter ${client?.model} (fallback, paid; same tools and confirmations as ChatGPT; no photos) until then; ChatGPT is not called.`}`;
+        const route: FallbackRoute | undefined = client ? { provider: "openrouter", model: client.model, answering: !passed && !off, reason: l.kind, until: iso(l.until), estimated: l.estimated } : undefined;
+        return { ...base, state, detail: `${text}${armed}${lastFallbackError ? ` Last fallback error: ${lastFallbackError}` : ""}`, ...(route ? { fallback: route } : {}) };
       }
       const recovered = recoveredAt ? ` ChatGPT recovered at ${recoveredAt} (a primary call succeeded).` : "";
       return armed || recovered ? { ...base, detail: `${base.detail}${recovered}${armed}` } : base;

@@ -15,22 +15,91 @@ const block = (name: string) => html.match(new RegExp(`// <${name}>([\\s\\S]*?)/
 
 // ---- pure helpers -----------------------------------------------------------------------------------------------------
 
-const { aggregateStatus } = new Function(`${block("status-dot")}; return { aggregateStatus };`)() as { aggregateStatus: (s: unknown) => { ok: boolean; label: string; detail: string } };
+type Overall = { level: "ok" | "degraded" | "down" | "unknown"; ok: boolean; label: string; detail: string };
+const { aggregateStatus } = new Function(`${block("status-dot")}; return { aggregateStatus };`)() as { aggregateStatus: (s: unknown, failure?: unknown) => Overall };
 const { pageFor } = new Function(`${block("routing")}; return { pageFor };`)() as { pageFor: (path: string, hash: string, jobs: boolean, assistant: boolean) => string };
 
-test("status dot: green only when every entry is exactly live; anything else, or no usable answer, is red", () => {
-  const live = (port: string) => ({ port, state: "live", detail: "", verifiedAt: "t" });
-  assert.equal(aggregateStatus({ ports: [live("model"), live("memory")] }).ok, true);
-  assert.equal(aggregateStatus({ ports: [live("model"), live("memory")] }).label, "All live");
-  for (const state of ["degraded", "down", "mock", "LIVE", "live ", "", undefined, null]) {
-    const r = aggregateStatus({ ports: [live("model"), { port: "memory", state }] });
-    assert.equal(r.ok, false, `state ${JSON.stringify(state)} is not live`);
-    assert.equal(r.label, "1 not live");
-    assert.match(r.detail, /memory/);
+// What /status says (src/fallback.ts): the model port while the paid fallback answers, and when neither model can.
+const P = (port: string, state: unknown = "live", extra: Record<string, unknown> = {}) => ({ port, state, detail: `${port} detail`, verifiedAt: "t", ...extra });
+const ROUTE = { provider: "openrouter", model: "vendor/cheap-model", reason: "usage_limit", until: "2026-11-18T05:00:00.000Z", estimated: false };
+const onFallback = () => P("model", "degraded", { fallback: { ...ROUTE, answering: true } });
+const bothDown = () => P("model", "down", { fallback: { ...ROUTE, answering: false } });
+const healthy = () => [P("policy"), P("channel"), P("model"), P("memory"), P("notify"), P("jobs"), P("watch")];
+const withPort = (list: ReturnType<typeof P>[], p: ReturnType<typeof P>) => list.map((x) => (x.port === p.port ? p : x));
+
+test("status: green only when every entry is exactly live", () => {
+  const r = aggregateStatus({ ports: healthy() });
+  assert.deepEqual([r.level, r.ok, r.label], ["ok", true, "All live"]);
+  assert.equal(aggregateStatus({ ports: [P("model"), P("memory")] }).level, "ok");
+});
+
+test("status: a working fallback is amber (degraded, still working) and names the provider, model and why", () => {
+  const r = aggregateStatus({ ports: withPort(healthy(), onFallback()) });
+  assert.deepEqual([r.level, r.ok, r.label], ["degraded", false, "Degraded: fallback model"]);
+  assert.match(r.detail, /^Working, with degradation\. Replies come from the fallback model openrouter\/vendor\/cheap-model, not ChatGPT: ChatGPT usage limit until 2026-11-18T05:00:00\.000Z\./);
+  assert.match(r.detail, /Not live: model: degraded\./);
+  // An estimated pause says so.
+  assert.match(aggregateStatus({ ports: [P("model", "degraded", { fallback: { ...ROUTE, reason: "rate_limit", estimated: true, answering: true } })] }).detail, /ChatGPT rate limit until .*\(ORBIT's estimate\)/);
+  // A model that is degraded for another reason (not confirmed after a reset, token unconfirmed) is amber without a route claim.
+  const unconfirmed = aggregateStatus({ ports: [P("model", "degraded", { fallback: { ...ROUTE, answering: false } })] });
+  assert.deepEqual([unconfirmed.level, unconfirmed.label], ["degraded", "Degraded: 1 not live"]);
+  assert.doesNotMatch(unconfirmed.detail, /Replies come from the fallback/);
+});
+
+test("status: optional subsystems degraded, down, mock or unreadable are amber, never red", () => {
+  for (const state of ["degraded", "down", "mock", "LIVE", "", undefined, null]) {
+    for (const port of ["memory", "notify", "jobs", "watch"]) {
+      const r = aggregateStatus({ ports: withPort(healthy(), { ...P(port), state }) });
+      assert.equal(r.level, "degraded", `${port} ${JSON.stringify(state)}`);
+      assert.equal(r.label, "Degraded: 1 not live");
+      assert.match(r.detail, new RegExp(`${port}: ${typeof state === "string" && ["degraded", "down", "mock"].includes(state) ? state : "unreadable state"}`));
+    }
   }
-  // Missing, unavailable, error or not yet known: red, never green.
-  for (const s of [null, undefined, {}, { ports: [] }, { ports: "live" }, { error: "x" }, { ports: [null] }]) assert.equal(aggregateStatus(s).ok, false, JSON.stringify(s));
-  assert.equal(aggregateStatus(null).label, "Status unknown");
+  const several = aggregateStatus({ ports: withPort(withPort(healthy(), P("memory", "degraded")), P("watch", "down")) });
+  assert.deepEqual([several.level, several.label], ["degraded", "Degraded: 2 not live"]);
+  assert.equal(aggregateStatus({ ports: [P("model"), null] }).level, "degraded", "a malformed optional entry is a caveat, not a core failure");
+});
+
+test("status: a core failure is red and overrides fallback amber and every optional caveat", () => {
+  // Both providers unavailable (ChatGPT limited, no fallback call can be admitted): the model port is down.
+  const both = aggregateStatus({ ports: withPort(healthy(), bothDown()) });
+  assert.deepEqual([both.level, both.ok, both.label], ["down", false, "Down: model"]);
+  assert.match(both.detail, /Core functionality is unavailable: model: down\. No reply can come from ChatGPT or a fallback model\./);
+  // Core failure wins over optional degradation, and the other caveats stay in the detail.
+  const mixed = aggregateStatus({ ports: withPort(withPort(healthy(), P("model", "down")), P("memory", "degraded")) });
+  assert.equal(mixed.level, "down");
+  assert.match(mixed.detail, /Also not live: memory: degraded\./);
+  // A mock model is not a real answer; policy and channel are core too.
+  for (const port of ["model", "policy", "channel"]) {
+    for (const state of ["down", "mock"]) assert.equal(aggregateStatus({ ports: withPort(healthy(), P(port, state)) }).level, "down", `${port} ${state}`);
+  }
+  // Red wins over unknown too: a down core port with another core entry unreadable is still red.
+  assert.equal(aggregateStatus({ ports: [P("model", "down"), P("policy", "???")] }).level, "down");
+});
+
+test("status: unknown (grey) is told apart from red and green: no answer, not reachable, or the core cannot be read", () => {
+  for (const s of [null, undefined, {}, { ports: [] }, { ports: "live" }, { error: "x" }]) {
+    const r = aggregateStatus(s);
+    assert.deepEqual([r.level, r.ok, r.label], ["unknown", false, "Status unknown"], JSON.stringify(s));
+  }
+  const off = aggregateStatus(null, "network");
+  assert.deepEqual([off.level, off.label], ["unknown", "Disconnected"]);
+  assert.match(off.detail, /could not be reached/);
+  assert.match(aggregateStatus(null, 502).detail, /HTTP 502/);
+  const noModel = aggregateStatus({ ports: [P("memory")] });
+  assert.equal(noModel.level, "unknown");
+  assert.match(noModel.detail, /model's status is not reported/);
+  const unreadable = aggregateStatus({ ports: [P("model", "LIVE"), P("memory", "degraded")] });
+  assert.equal(unreadable.level, "unknown");
+  assert.match(unreadable.detail, /model: unreadable state/);
+  assert.match(unreadable.detail, /Also not live: memory: degraded/);
+});
+
+test("status: transitions are deterministic: green, fallback amber, both down red, reset unconfirmed amber, recovered green", () => {
+  const steps = [healthy(), withPort(healthy(), onFallback()), withPort(healthy(), bothDown()), withPort(healthy(), P("model", "degraded", { fallback: { ...ROUTE, answering: false } })), healthy()];
+  assert.deepEqual(steps.map((ports) => aggregateStatus({ ports }).level), ["ok", "degraded", "down", "degraded", "ok"]);
+  // The same answer always gives the same result.
+  for (const ports of steps) assert.deepEqual(aggregateStatus({ ports }), aggregateStatus({ ports: JSON.parse(JSON.stringify(ports)) }));
 });
 
 test("routing: the root and unknown hashes open the Assistant; /sessions, legacy #chat and #jobs are kept; owner-only pages fall back", () => {
@@ -58,7 +127,7 @@ test("the page markup: Assistant first in the nav, then Jobs, Sessions (no Statu
   assert.match(dot, /aria-expanded="false"/);
   assert.match(dot, /aria-controls="statusline"/);
   assert.match(dot, /aria-label="Overall status: unknown, not all live/);
-  assert.doesNotMatch(dot, /class="ok"/, "it starts red, never green before an answer");
+  assert.match(dot, /class="unknown"/, "it starts unknown, never green before an answer");
   // No session picker, New, Rename, Archive or delete control on the Assistant: the only controls are the input and Send.
   const aform = html.match(/<form id="aform">[\s\S]*?<\/form>/)![0];
   assert.doesNotMatch(aform, /<select|New|Rename|Archive|Delete/);
@@ -188,31 +257,65 @@ test("browser: a viewer who is not the owner gets no Assistant link and lands on
   assert.equal(await shown("#form"), true);
 });
 
-test("browser: the status dot is green only when all entries are live, red for a non-live entry, an error or no answer", { skip }, async () => {
+test("browser: the indicator follows green, amber (fallback, optional), red (core), grey (error, disconnected), in text as well as colour", { skip }, async () => {
   reset();
-  status = { code: 200, body: { ports: [{ port: "model", state: "live" }, { port: "memory", state: "live" }] } };
+  const at = async (level: string) => page.waitForFunction((l: string) => document.getElementById("health")!.className === l, level);
+  const set = async (body: unknown, code = 200) => { status = { code, body }; await page.evaluate("refreshStatus()"); };
+  status = { code: 200, body: { ports: healthy() } };
   await open();
-  await page.waitForFunction(() => document.getElementById("health")!.className === "ok");
-  assert.match(await page.getAttribute("#health", "aria-label"), /all live/);
+  await at("ok");
+  assert.match(await page.getAttribute("#health", "aria-label"), /^Overall status: healthy, all live\. All live\./);
   assert.equal(await page.getAttribute("#health", "href"), null, "the dot toggles the status line; the status page link is inside it");
   assert.equal(await page.getAttribute("#statusopen", "href"), "/status");
-  status = { code: 200, body: { ports: [{ port: "model", state: "live" }, { port: "watch", state: "degraded" }] } };
-  await page.evaluate("refreshStatus()");
-  await page.waitForFunction(() => document.getElementById("health")!.className === "bad");
+  const dot = () => page.$eval("#health .dot", (d: HTMLElement) => { const c = getComputedStyle(d); return { bg: c.backgroundColor, radius: c.borderRadius, transform: c.transform }; });
+  const green = await dot();
+
+  // The fallback answers: amber, labelled, with the provider and model.
+  await set({ ports: withPort(healthy(), onFallback()) });
+  await at("degraded");
+  assert.equal(await page.textContent("#health .label"), "Degraded: fallback model");
+  assert.match(await page.getAttribute("#health", "aria-label"), /^Overall status: degraded but working\. Degraded: fallback model\. .*openrouter\/vendor\/cheap-model/);
+  assert.match(await page.getAttribute("#health", "title"), /Replies come from the fallback model openrouter\/vendor\/cheap-model/);
+  const amber = await dot();
+  assert.notEqual(amber.bg, green.bg);
+  assert.notEqual(amber.transform, green.transform, "a different shape, not only a different colour");
+  assert.deepEqual(await page.$$eval("#ports .pill", (ps: HTMLElement[]) => ps.filter((p) => p.textContent!.startsWith("model")).map((p) => p.className)), ["pill degraded"]);
+
+  // Both providers unavailable: red, and it overrides the amber.
+  await set({ ports: withPort(withPort(healthy(), bothDown()), P("memory", "degraded")) });
+  await at("down");
+  assert.equal(await page.textContent("#health .label"), "Down: model");
+  assert.match(await page.getAttribute("#health", "aria-label"), /^Overall status: down, core functionality unavailable\./);
+  const red = await dot();
+  assert.notEqual(red.bg, amber.bg);
+  assert.notEqual(red.radius, green.radius);
+  const pillColour = (cls: string) => page.$eval(`#ports .pill.${cls}`, (p: HTMLElement) => getComputedStyle(p).color);
+  assert.notEqual(await pillColour("down"), await pillColour("degraded"), "a down pill is not coloured like a degraded one");
+
+  // Recovery: green again.
+  await set({ ports: healthy() });
+  await at("ok");
+  // An optional subsystem only: amber.
+  await set({ ports: withPort(healthy(), P("watch", "degraded")) });
+  await at("degraded");
+  assert.equal(await page.textContent("#health .label"), "Degraded: 1 not live");
   assert.match(await page.getAttribute("#health", "title"), /watch: degraded/);
-  assert.equal(await page.textContent("#health .label"), "1 not live");
-  status = { code: 500, body: { error: "boom" } };
-  await page.evaluate("refreshStatus()");
-  assert.equal(await page.getAttribute("#health", "class"), "bad");
+
+  // No usable answer: grey "unknown", never green and not claimed red.
+  await set({ error: "boom" }, 500);
+  await at("unknown");
   assert.equal(await page.textContent("#health .label"), "Status unknown");
-  status = { code: 200, body: { ports: [{ port: "model", state: "live" }] } };
-  await page.evaluate("refreshStatus()");
-  await page.waitForFunction(() => document.getElementById("health")!.className === "ok");
+  assert.match(await page.getAttribute("#health", "title"), /HTTP 500/);
+  await set({ ports: healthy() });
+  await at("ok");
   status = { code: 0, body: null };
   await page.evaluate("refreshStatus()");
-  assert.equal(await page.getAttribute("#health", "class"), "bad", "no answer at all is red");
-  // The dot's colours differ (green vs red), and the state is also in text, not colour alone.
-  assert.match(await page.getAttribute("#health", "aria-label"), /Overall status: Status unknown/);
+  await at("unknown");
+  assert.equal(await page.textContent("#health .label"), "Disconnected");
+  assert.match(await page.getAttribute("#health", "aria-label"), /^Overall status: unknown\. Disconnected\. ORBIT could not be reached/);
+  assert.equal(await page.textContent("#ports"), healthy().map((p) => `${p.port}: ${p.state}`).join(""), "the last pills stay while disconnected");
+  const grey = await dot();
+  assert.notEqual(grey.bg, green.bg);
 });
 
 test("browser: tool output and resource usage are collapsed panes; warnings and the confirmation stay visible and work", { skip }, async () => {

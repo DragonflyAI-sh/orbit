@@ -11,7 +11,12 @@ export type PortStatus = {
   // Optional, added by /status only: this process's startup smoke-check record for the port (docs/smoke-checks.md). Additive: `state`
   // keeps its four values and its meaning, so consumers that ignore `check` are unchanged.
   check?: CheckRecord;
+  // Optional, model port only, set by the OpenRouter fallback wrapper while the primary's limit is recorded (src/fallback.ts). Additive
+  // like `check`: `state` keeps its meaning. `answering` is true only while the limit is in force and a paid call could be admitted.
+  fallback?: FallbackRoute;
 };
+
+export type FallbackRoute = { provider: "openrouter"; model: string; answering: boolean; reason: "usage_limit" | "rate_limit"; until: string; estimated: boolean };
 
 export type Result<T> = {
   value: T;

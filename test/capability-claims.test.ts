@@ -226,7 +226,7 @@ test("budget exhausted through the Assistant: the stored reply is marked capped 
   assert.equal(fx.remoteHead(), head);
 });
 
-test("budget exhausted while the paid fallback answers: it is told which tools are withheld in fallback mode, and is not sent them", async () => {
+test("the paid fallback answers with the same tools as the primary: all are sent, none is called withheld or missing", async () => {
   const or: any[] = [];
   const fetcher = (async (_u: string, init: RequestInit) => {
     or.push(JSON.parse(String(init.body)));
@@ -239,10 +239,12 @@ test("budget exhausted while the paid fallback answers: it is told which tools a
   const defs: ToolDef[] = ["vault_policy", "vault_create_note", "session_read"].map((name) => ({ name, description: "d", parameters: { type: "object", properties: {} } }));
   await model.step!(user, [], undefined, defs, { fallback: true, rounds: { round: 0, max: 5, offered: defs.map((d) => d.name) } });
   const body = or[0];
-  assert.deepEqual(body.tools.map((t: any) => t.function.name), ["vault_policy"]);
+  assert.deepEqual(body.tools.map((t: any) => t.function.name), ["vault_policy", "vault_create_note", "session_read"]);
   const system = body.messages[0].content as string;
-  assert.match(system, /Withheld while the fallback answers \(ORBIT has them; the primary model can use them once its limit ends\): vault_create_note, session_read/);
-  assert.match(system, /do not say ORBIT lacks it/);
+  assert.match(system, /You can call exactly these tools in this step/);
+  assert.match(system, /vault_policy, vault_create_note, session_read/);
+  assert.match(system, /same ORBIT tools as the primary model/);
+  assert.doesNotMatch(system, /[Ww]ithheld while the fallback|fallback mode\b|refused by ORBIT/);
 });
 
 // ---- 7. long, clipped history that carries an earlier false inability claim ------------------------------------------------

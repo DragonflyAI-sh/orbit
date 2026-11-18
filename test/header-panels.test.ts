@@ -194,11 +194,11 @@ test("browser: a collapsed status line keeps updating, and the indicator keeps i
   assert.equal(await page.getAttribute("#health", "class"), "ok");
   ports = [live("model"), live("memory", "degraded")];
   await page.evaluate("refreshStatus()");
-  await page.waitForFunction(() => document.getElementById("health")!.className === "bad");
+  await page.waitForFunction(() => document.getElementById("health")!.className === "degraded");
   assert.equal(await visible("#statusline"), false, "a bad status does not open the line by itself");
   assert.equal(await expanded("#health"), "false");
   assert.deepEqual(await page.$$eval("#ports .pill", (ps: HTMLElement[]) => ps.map((p) => `${p.className}|${p.textContent}`)), ["pill live|model: live", "pill degraded|memory: degraded"], "pills current while hidden");
-  assert.match(await page.getAttribute("#health", "aria-label"), /Overall status: 1 not live\. Not all live\. memory: degraded\./);
+  assert.match(await page.getAttribute("#health", "aria-label"), /Overall status: degraded but working\. Degraded: 1 not live\. Working, with degradation\. Not live: memory: degraded\./);
   await page.click("#health");
   assert.equal(await page.textContent("#ports"), "model: livememory: degraded");
 });
@@ -321,7 +321,7 @@ test("browser: refreshes never take focus from the message box, and note text is
   ports = [live("model", "down")];
   await page.evaluate("refreshStatus(); refreshInbox()");
   await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "1");
-  await page.waitForFunction(() => document.getElementById("health")!.className === "bad");
+  await page.waitForFunction(() => document.getElementById("health")!.className === "down");
   assert.equal(await page.evaluate(() => document.activeElement!.id), "ainput");
   assert.equal(await page.inputValue("#ainput"), "half-typed");
   assert.equal(await page.$$eval("#inbox img", (n: unknown[]) => n.length), 0);

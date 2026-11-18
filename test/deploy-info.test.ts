@@ -214,7 +214,7 @@ test("browser: missing, mismatched or unreadable metadata shows a quiet Unavaila
   await page.waitForFunction(() => document.querySelector("#deployedat time") !== null);
   answer = { code: 500, body: { error: "x" } };
   await page.evaluate("refreshStatus()");
-  await page.waitForFunction(() => document.getElementById("health")!.className === "bad");
+  await page.waitForFunction(() => document.getElementById("health")!.className === "unknown");
   assert.deepEqual(await rows(), ["DT:Deployed", "DD:Nov 17, 2026, 2:04 PM PST", "DT:Commit", "DD:2d2228b"]);
 });
 
