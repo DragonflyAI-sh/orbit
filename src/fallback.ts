@@ -1,7 +1,7 @@
 import { PR_INSPECT_TOOL_NAMES } from "./pr-inspect.ts";
 import { MAX_RESET_MS, ProviderError, RATE_PAUSE_MS, USAGE_PAUSE_MS } from "./chatgpt.ts";
 import { replySource } from "./model.ts";
-import type { FallbackInfo, ImageSupport, Item, Message, ModelPort, Reply, ReplyOptions, Step, ToolDef } from "./model.ts";
+import type { FallbackInfo, ImageSupport, Item, Message, ModelPort, Reply, ReplyOptions, Step, ToolDef, ToolRounds } from "./model.ts";
 import { FALLBACK_NO_PHOTOS, withoutPhotos } from "./photo-context.ts";
 import { BALANCE_EVERY_MS, openrouterClient } from "./openrouter.ts";
 import type { OpenRouterClient, OpenRouterConfig } from "./openrouter.ts";
@@ -117,7 +117,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   const augment = (err: ProviderError, detail: string, accounting: readonly string[]) =>
     new ProviderError(err.kind, `${err.base.replace(/\s*$/, "")} The OpenRouter fallback did not answer: ${detail}`, err.resetsAt, err.code, [...accounting], err);
 
-  const viaFallback = async (cause: ProviderError | undefined, input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], paidOk = true): Promise<Step> => {
+  const viaFallback = async (cause: ProviderError | undefined, input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], paidOk = true, rounds?: ToolRounds): Promise<Step> => {
     const l = limit!;
     const stand = cause ?? new ProviderError(l.kind, `${why(l)}.`, l.estimated ? undefined : iso(l.until));
     // Background callers never spend the paid fallback: they get the limit as it is.
@@ -131,13 +131,17 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     input = photos.items;
     const allowed = tools.filter((t) => FALLBACK_TOOLS.has(t.name));
     const names = new Set(allowed.map((t) => t.name));
+    // The tools ORBIT offers this reply that fallback mode withholds, named, so a withheld tool is reported as withheld while the
+    // fallback answers, never as something ORBIT lacks (docs/assistant.md, "Tool rounds and capability claims").
+    const offered = rounds?.offered ?? tools.map((t) => t.name);
+    const withheld = offered.filter((n) => !FALLBACK_TOOLS.has(n));
     const told = [
       ...limits,
-      `you are the OpenRouter fallback model (${client!.model}), answering because ${why(l)}. Say so if asked which model you are. You may only use the tools offered in this reply; everything else is refused by ORBIT.`,
+      `you are the OpenRouter fallback model (${client!.model}), answering because ${why(l)}. Say so if asked which model you are. You may only use the tools offered in this reply; everything else is refused by ORBIT.${withheld.length ? ` Withheld while the fallback answers (ORBIT has them; the primary model can use them once its limit ends): ${withheld.join(", ")}. If Rai asks for one of these, say it is withheld in fallback mode and nothing was done; do not say ORBIT lacks it.` : ""}`,
     ];
     let paid;
     try {
-      paid = await client!.step(input, told, notes, allowed);
+      paid = await client!.step(input, told, notes, allowed, rounds ? { ...rounds, offered: rounds.offered.filter((n) => FALLBACK_TOOLS.has(n)) } : undefined);
     } catch (err) {
       lastFallbackError = err instanceof Error ? err.message : String(err);
       if (err instanceof SpendError) {
@@ -171,8 +175,8 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   };
 
   // One model turn: the primary unless its limit is still in force.
-  const turn = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], viaPrimary: () => Promise<Step>, paidOk = true): Promise<Step> => {
-    if (active()) return viaFallback(undefined, input, limits, notes, tools, paidOk);
+  const turn = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], viaPrimary: () => Promise<Step>, paidOk = true, rounds?: ToolRounds): Promise<Step> => {
+    if (active()) return viaFallback(undefined, input, limits, notes, tools, paidOk, rounds);
     try {
       const step = await viaPrimary();
       if (limit) {
@@ -184,7 +188,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     } catch (err) {
       if (!isLimit(err)) throw err;
       noteLimit(err);
-      return viaFallback(err, input, limits, notes, tools, paidOk);
+      return viaFallback(err, input, limits, notes, tools, paidOk, rounds);
     }
   };
 
@@ -192,7 +196,8 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   // background one, gets the limit as it is. reply() is the other way round (see ReplyOptions in model.ts).
   const step = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], opts?: ReplyOptions): Promise<Step> => {
     if (!primary.step) throw new Error("This model cannot call tools.");
-    return turn(input, limits, notes, tools, () => primary.step!(input, limits, notes, tools, opts?.signal ? { signal: opts.signal } : undefined), opts?.fallback === true);
+    const pass = { ...(opts?.signal ? { signal: opts.signal } : {}), ...(opts?.rounds ? { rounds: opts.rounds } : {}) };
+    return turn(input, limits, notes, tools, () => primary.step!(input, limits, notes, tools, Object.keys(pass).length ? pass : undefined), opts?.fallback === true, opts?.rounds);
   };
 
   // What status() may say about the paid fallback. READ-ONLY: it looks at the ledger file (never creates, repairs or writes it), at what

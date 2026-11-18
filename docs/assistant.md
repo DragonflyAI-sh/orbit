@@ -76,7 +76,7 @@ Characters are counted as chat threads count them (`messageChars`: message text 
 
 The chat thread budget is 48,000 characters of live messages; the Assistant's 52,000 conversation cap is of the same order, chosen so the existing model/context settings (the same models, the same 8,000-character tool output clip, the same 20,000-character message cap) need no change.
 
-Within one turn, the model's input also grows with that turn's own tool calls, exactly as in chat (`runChat`: at most 5 rounds, each tool output clipped to 8,000 characters). That growth is the existing behaviour and is not counted in the 52,000.
+Within one turn, the model's input also grows with that turn's own tool calls, exactly as in chat (`runChat`: at most 5 rounds, each tool output clipped to 8,000 characters unless the tool sets its own bound: `vault_policy` does, see "Tool rounds and capability claims"). That growth is the existing behaviour and is not counted in the 52,000.
 
 ## The context bound
 
@@ -89,7 +89,7 @@ Within one turn, the model's input also grows with that turn's own tool calls, e
 The bounded representation of a chunk (`boundChunk`), tried in order, never changing the stored chunk:
 
 - `full`: as stored, when it is at most 12,000 characters.
-- `clipped`: each tool output cut to 1,500 and each text to 4,000 characters; each cut ends with `[ORBIT: … cut from N to M characters for the model's context; the full text is stored in assistant chunk <seq>]`. A cut page of `session_read` or `sessions_list` keeps its `nextCursor` whole at the end, inside the same 1,500 characters, so a later turn can continue where a turn capped at 5 tool rounds stopped (`test/session-durability.test.ts`).
+- `clipped`: each tool output cut to 1,500 and each text to 4,000 characters; each cut ends with `[ORBIT: … cut from N to M characters for the model's context; the full text is stored in assistant chunk <seq>]`. A cut page of `session_read` or `sessions_list` keeps its `nextCursor` whole at the end, inside the same 1,500 characters, so a later turn can continue where a turn capped at 5 tool rounds stopped (`test/session-durability.test.ts`). Likewise a cut write or proposal result keeps its outcome facts (status, saved, proposal id, commit) whole at the end, and `calls-omitted` lists each omitted call with those facts (`test/capability-claims.test.ts`).
 - `calls-omitted`: the turn's tool calls are removed as whole pairs (a call is never sent without its result, or a result without its call) and replaced by a one-line note listing them and their outcomes. Tool arguments are never cut, because a cut argument would no longer be valid JSON.
 - `placeholder`: one short note stands for the whole turn.
 
@@ -190,6 +190,95 @@ Limits:
 - `test/session-durability.test.ts`: durability and pagination acceptance with a synthetic long chat (see `docs/adr/0001-session-registry.md`, "Durability and pagination acceptance").
 - `test/session-digest.test.ts`: the session activity digest (selection, bounds, runs, failing sources, visibility, adversarial titles, Assistant integration, restart, fallback).
 - Existing tests: the nav tests now expect the Assistant link first; the Chat browser tests open `/#chat` explicitly. Nothing else in them changed.
+
+## Tool rounds and capability claims
+
+Why this exists: in a reported incident (reconstructed here only as sanitized fixtures, never from the transcript), Rai asked the
+Assistant to plan shell/filesystem access and save it as a vault note. It called `vault_policy` and read helpers, then said it had no
+research-launch or vault-write tool and gave an unsaved draft; asked again, it called the policy and paged `session_read` repeatedly,
+then said no vault-write tool was available "in this reply"; challenged, it then reported `vault_create_note` success.
+
+### What the code shows (supported causes)
+
+1. **The round cap looked like a missing tool.** `runChat` allows `MAX_ROUNDS` (5) steps that may call tools; the next step is sent
+   with no tools at all. Its instructions then listed no tools and said "None of the tools that read ORBIT's job and operation
+   records are available in this reply", and nothing said the tools were withheld because the budget ran out. A model answering that
+   step truthfully sees no write tool. Policy + several `session_read` pages exhaust 5 steps, which matches the second turn. And
+   `capped` was only set when the final step still asked for tools, so a capped reply that answered in text was not marked at all.
+2. **The vault policy never reached the model whole.** `vault_policy` returns AGENTS.md (up to 8,000 characters) plus two documents
+   (up to 6,000 each); every tool output was cut at 8,000 characters of JSON. The vault's AGENTS.md is currently about 7,600
+   characters, so with the JSON wrapper it alone takes about 7,850 of the 8,000: `System/conventions.md` was cut after its first
+   lines and `System/memory.md` never arrived, with only "(truncated)" to say so, and any growth of AGENTS.md would cut the
+   authoritative rules themselves. A policy the model is told to obey but only partly sees invites re-reading it instead of acting.
+3. **Status lines contradicted the tool list.** The instructions headed every non-live port with "These parts of you are not
+   connected yet, so you know nothing from them", including degraded ones that work (a stale vault clone). The memory port's
+   fallback detail always said "Vault write tools are unavailable", even when the credential is present and a write would clone first.
+4. **The paid fallback withholds tools without naming them.** OpenRouter fallback steps get only `FALLBACK_TOOLS` (no vault writes,
+   no session tools) and were told only "You may only use the tools offered in this reply".
+5. **Tool descriptions were sent twice** (once in the instructions, once in the request's tool list), and the omitted-call note in
+   a shortened Assistant chunk said only `vault_create_note (ok)`, which reads the same for "committed" and "pending-confirmation".
+
+### Hypotheses (not established)
+
+- Which of 1, 3 and 4 applied to each incident turn. The stored reply's `source` (FALLBACK or not), `capped`, and the tool calls on
+  the turn would say; the historical provider requests were not recorded, so exactly which tools each step carried is unknown.
+- The first turn's claim may also come from the model generalising from status lines or from the clipped policy rather than from
+  the round cap (that turn's call count is not known here).
+- The later, confident "capability-reporting failure" diagnosis in the conversation is itself a model claim, not evidence.
+
+### What changed
+
+- `runChat` passes each step its position (`rounds`: step, budget, every tool offered). The instructions say how many tool steps are
+  left and, on the forced final step, that the budget ran out, which tools are withheld for that step only, and that nothing not
+  shown by a tool result was done. The record-check line says the record tools are withheld rather than unavailable.
+  `capped` is now true whenever the budget ran out, and the reply carries an owner-visible `incomplete` note (`BUDGET_NOTE`).
+- The tool list in the instructions is the names of the tools in that very request (no separate catalogue, no repeated
+  descriptions), with: the list is the only authority; earlier claims (including the model's own) are not evidence and should be
+  corrected; for a clear request a listed tool can do, call it after any policy check its description asks for; never call a tool
+  only to probe it; refused or failed is not absent; never rebuild cut or missing text from memory.
+- `vault_policy` has its own output bound (`maxOutputChars`) that fits its three documents and reports `complete` per document.
+  Any other cut output now says how much was cut and that repeating the same call returns the same cut.
+- Status lines: degraded is described as working with a caveat, and the memory port's write line is derived from the clone's state.
+- Fallback steps name the tools withheld in fallback mode.
+- Outcome facts (status, saved, proposal id, commit, job/op id; id-shaped values only) survive Assistant clipping, call omission and
+  the chat digest/summary input.
+
+Unchanged: every approval, the owner checks, policy refusals, proposal confirmation, secret refusal, round and context budgets, and
+the absence of any automatic retry. No reply text is checked or rewritten; no tool is ever called to test whether it exists.
+
+### Skills and the comparison with Rai's OpenClaw workspace
+
+No skills framework was added. Every supported cause above is in tool plumbing or in instructions generated from the live tool list;
+a skill (more prompt text loaded on demand) would add another catalogue to keep in step with the registry, without addressing the
+round cap, the clipped policy or the status lines. Revisit only if evaluation shows a specific multi-step workflow (for example
+"draft, check policy, save") still failing with the tools exposed and the budget sufficient.
+
+The comparison with `phairow/raiclaw` was **not done**: that repository is not available to the job runner, and the job did not
+broaden its access. To do it, Rai can provide redacted excerpts of: the core system/agent instructions (the section on tool use and
+capability claims), any "skills" or workflow files that cover saving notes or confirmations, and how that workspace reports a tool
+budget or a refused tool. No credentials, hostnames or private notes are needed.
+
+### Tests and evaluation
+
+- `test/capability-claims.test.ts` (deterministic, offline): exposed vault write with an explicit save (chat and Assistant, real
+  OpenAI adapter request bodies over a fake fetch, real vault fixture); absent tool; exposed but refused; exposed but unconfigured;
+  pending confirmation vs committed; tool errors; budget exhausted (loop, Assistant record, paid fallback); a history carrying the
+  false claim and a clipped draft; large policy; cut-output note; retry after success (refused, one commit); research launch truthful
+  and only proposed; evidence surviving shortening; secret refusal, protected path and untrusted-text boundaries unchanged.
+- `test/capability-fixture.ts` + `tools/capability-eval/eval.ts`: synthetic scenarios scored against a LIVE model. Owner-run and
+  possibly paid; refuses unless `--confirm-synthetic-live-eval`, `--key-file` and `--model` are given; bounded request count; tools
+  are doubles that write nothing. `test/capability-eval.test.ts` checks the harness with scripted models only. **No live run was made
+  by the job that built this.**
+
+### Acceptance by Rai (manual)
+
+1. Assistant: ask it to draft a short plan and "save it to the vault as Projects/<name>.md". Expect a `vault_create_note` call and a
+   reply that says saved only with a commit; the call list shows `status committed`.
+2. Ask for something that needs many reads first (for example "read the whole <long chat> and then save a summary"). If it runs out
+   of rounds, the reply should say the tool-round budget ran out (not that a tool is unavailable), the details show "round limit
+   reached" and the budget note, and "continue" should then save.
+3. Ask for a note under `System/`: expect a proposal card and "waiting for your confirmation", never "saved", until you confirm.
+4. Optional, paid: run `tools/capability-eval/eval.ts` as its header says and read the JSON report.
 
 ## Manual browser acceptance (not performed by the job that built this)
 

@@ -10,6 +10,11 @@ import { maskVaultDeep, maskVaultText } from "./filter.ts";
 // its digest, and is validated again when it runs. There is no tool that deletes, runs commands or writes an arbitrary file.
 
 export const VAULT_PROPOSAL_TTL_MS = 30 * 60 * 1000;
+// vault_policy's document bounds, and its output bound: the three documents at their bounds, JSON-escaped (newlines and quotes double
+// in size at worst), plus the small fixed fields. Set so the documents are never cut by the generic tool output bound.
+export const POLICY_AGENTS_MAX = 8000;
+export const POLICY_DOC_MAX = 6000;
+export const POLICY_OUTPUT_MAX = 2 * (POLICY_AGENTS_MAX + 2 * POLICY_DOC_MAX) + 2000;
 
 const obj = (properties: Record<string, unknown>, required: string[]) => ({ type: "object", properties, required, additionalProperties: false });
 const str = (description: string) => ({ type: "string", description });
@@ -114,6 +119,9 @@ export function vaultEdits(deps: { clone: VaultClone; memory: MemoryPort; propos
     {
       name: "vault_policy",
       readOnly: true,
+      // The three documents at their own bounds (8000 + 6000 + 6000 characters) are larger, as JSON, than the generic 8000-character
+      // tool output bound, which cut the authoritative AGENTS.md short and dropped the other two entirely. They reach the model whole.
+      maxOutputChars: POLICY_OUTPUT_MAX,
       description: "Read the vault's own rules from the writable clone: AGENTS.md (the authority), System/conventions.md and System/memory.md, with the AGENTS.md hash. Read-only. Obey it when writing.",
       parameters: obj({}, []),
       run: async (a) => {
@@ -123,7 +131,15 @@ export function vaultEdits(deps: { clone: VaultClone; memory: MemoryPort; propos
           const d = clone.policyDocs();
           const st = clone.state();
           return {
-            value: { agentsMd: clip(d.agents, 8000), agentsMdSha: d.agentsSha.slice(0, 12), conventions: d.conventions ? clip(d.conventions, 6000) : "(System/conventions.md not found)", memoryRules: d.memory ? clip(d.memory, 6000) : "(System/memory.md not found)", clone: { head: st.head?.slice(0, 7), fetchedAt: st.fetchedAt, syncError: st.syncError?.message } },
+            value: {
+              agentsMd: clip(d.agents, POLICY_AGENTS_MAX),
+              agentsMdSha: d.agentsSha.slice(0, 12),
+              conventions: d.conventions ? clip(d.conventions, POLICY_DOC_MAX) : "(System/conventions.md not found)",
+              memoryRules: d.memory ? clip(d.memory, POLICY_DOC_MAX) : "(System/memory.md not found)",
+              // Whether each document reached the model whole: a cut document is named, never passed off as complete.
+              complete: { agentsMd: d.agents.length <= POLICY_AGENTS_MAX, conventions: (d.conventions ?? "").length <= POLICY_DOC_MAX, memoryRules: (d.memory ?? "").length <= POLICY_DOC_MAX },
+              clone: { head: st.head?.slice(0, 7), fetchedAt: st.fetchedAt, syncError: st.syncError?.message },
+            },
             provenance: "live" as const,
             source: `vault/clone@${(st.head ?? "unknown").slice(0, 7)} (fetched ${st.fetchedAt ?? "never"})`,
           };

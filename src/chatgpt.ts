@@ -777,7 +777,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
     async step(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], opts?: ReplyOptions): Promise<Step> {
       const body = JSON.stringify({
         model,
-        instructions: instructions(limits, notes, tools.map((t) => `${t.name}: ${t.description}`)),
+        instructions: instructions(limits, notes, tools.map((t) => t.name), opts?.rounds),
         input: responsesInput(input),
         ...(tools.length ? { tools: responsesTools(tools) } : {}),
         stream: true,

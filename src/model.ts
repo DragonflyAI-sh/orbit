@@ -52,7 +52,11 @@ export type Reply = Result<string> & { fallback?: FallbackInfo; accounting?: str
 // owner-chat users (server.ts /chat, thread-service.ts turn), which opt in.
 // `signal`: the caller's cancellation. A model that supports it abandons the request and fails with a cancellation (never a timeout,
 // never a limit). No caller passes one today; every request is bounded by its own deadlines regardless (src/model-deadline.ts).
-export type ReplyOptions = { fallback?: boolean; signal?: AbortSignal };
+// `rounds`: where a tool-using reply stands in its tool-round budget (runChat, src/agent.ts), so the instructions can say it. `round` is
+// this step's index (0-based); steps 0 .. max-1 may call tools; the step at `max` is the forced final answer, sent with no tools.
+// `offered`: the names of every tool runChat was given for this reply, so that final step can say they exist but are withheld.
+export type ToolRounds = { round: number; max: number; offered: string[] };
+export type ReplyOptions = { fallback?: boolean; signal?: AbortSignal; rounds?: ToolRounds };
 
 // Whether this model can be sent photos. `ok: false` says why in words the owner can act on.
 // `resolution`: how the answer was reached (source, freshness, conflicts), for diagnostics. Absent for the mock.
@@ -82,8 +86,16 @@ export const RECORD_TOOLS = ["jobs_list", "job_status", "research_result", "ops_
 
 // The instruction that asks the model to check records before claiming an outcome. This is a request, not a guarantee: ORBIT
 // cannot force a model to comply, which is why proposal cards and job state on the page come from the records themselves.
-export function recordCheckInstruction(tooling: string[]): string {
-  const available = RECORD_TOOLS.filter((n) => tooling.some((t) => t.startsWith(`${n}:`)));
+// A tooling entry is a tool name, or "name: description" (older callers and tests). Only the name is ever sent in the instructions:
+// the request's own tool list carries each description and schema, so the instructions never repeat them.
+export const toolName = (t: string): string => t.replace(/:[\s\S]*$/, "").trim();
+const offers = (tooling: string[], n: string) => tooling.some((t) => toolName(t) === n);
+
+export function recordCheckInstruction(tooling: string[], rounds?: ToolRounds): string {
+  const available = RECORD_TOOLS.filter((n) => offers(tooling, n));
+  const withheld = rounds && rounds.round >= rounds.max ? RECORD_TOOLS.filter((n) => rounds.offered.includes(n)) : [];
+  if (!available.length && withheld.length)
+    return `The record tools (${withheld.join(", ")}) are withheld in this final step because the tool-round budget ran out; they are not missing. Claim a job or action outcome only where a tool result above shows it; otherwise say it is unverified.`;
   return available.length
     ? `Before you say that a job or an action did happen or did not happen (launched, steered, confirmed, restarted, finished, failed), check ORBIT's actual records in this turn with ${available.join(", ")}. What earlier messages, a thread summary, the recent-work note or a proposal card says is not proof: the records are. If the records disagree with something you said earlier, say so and correct it. If a check is not possible, say the outcome is unverified. Before proposing a new job, check whether the same work is already running or waiting for Rai's confirmation, and do not offer a proposal he already confirmed.`
     : "None of the tools that read ORBIT's job and operation records are available in this reply, so you cannot check whether a job or action happened: say its outcome is unverified instead of claiming it, and do not re-offer a proposal that earlier messages show was already confirmed.";
@@ -91,7 +103,7 @@ export function recordCheckInstruction(tooling: string[]): string {
 
 // How to answer about stored photos when the photo tools are offered (src/photo-access.ts, docs/photos.md "Earlier photos").
 export function photoGuidance(tooling: string[]): string[] {
-  const has = (n: string) => tooling.some((t) => t.startsWith(`${n}:`));
+  const has = (n: string) => offers(tooling, n);
   if (!has("photos_list") && !has("photos_inspect")) return [];
   return [
     "",
@@ -118,25 +130,50 @@ export function photoGuidance(tooling: string[]): string[] {
   ];
 }
 
-export function instructions(limits: string[], notes?: string, tooling?: string[]): string {
+// The tool-round lines (docs/assistant.md, "Tool rounds and capability claims"). Built from runChat's own counters and tool list.
+export function roundGuidance(rounds: ToolRounds | undefined, offeredNow: boolean): string[] {
+  if (!rounds || rounds.max < 1) return [];
+  if (rounds.round >= rounds.max) {
+    return [
+      "",
+      `TOOL-ROUND BUDGET EXHAUSTED: this reply has used all ${rounds.max} steps that may call tools, so ORBIT offers no tools in this final step.${rounds.offered.length ? ` The tools offered earlier in this reply still exist and are only withheld for this step: ${rounds.offered.join(", ")}. Do not say that any of them is unavailable, missing or not connected.` : ""} Say that this reply's tool-round budget ran out. Report only what the tool results above show, and say plainly which requested actions were not done: a tool that was not called did nothing, and a proposal is not a completed action. Rai can ask again (for example "continue") for a new reply with a fresh budget.`,
+    ];
+  }
+  if (!offeredNow) return [];
+  const left = rounds.max - rounds.round;
+  return [
+    "",
+    `Tool rounds: this is step ${rounds.round + 1}; at most ${rounds.max} steps of this reply may call tools (${left} left, this one included). After that ORBIT asks for an answer without tools. When Rai has asked for an action, do it before spending steps on optional reading.`,
+  ];
+}
+
+export function instructions(limits: string[], notes?: string, tooling?: string[], rounds?: ToolRounds): string {
+  const names = (tooling ?? []).map(toolName).filter(Boolean);
   return [
     "You are ORBIT (Operational Reasoning Bot for Intelligent Tasks), Rai's personal assistant.",
     "Be concise and technical. Never present a guess as fact.",
-    "These parts of you are not connected yet, so you know nothing from them. Say so plainly when it matters:",
-    ...limits.map((l) => `- ${l}`),
-    ...(tooling?.length
+    ...(limits.length
       ? [
-          "",
-          "You can call these tools. Every call goes through ORBIT's owner and policy checks, and each result says where it came from:",
-          ...tooling.map((t) => `- ${t}`),
-          "Only say an action happened if its tool result says so. job_launch only proposes: Rai must click Confirm on the proposal before anything launches, so say it is waiting for his confirmation, never that it started. The same holds for every ops_propose_* tool (restart, deploy, rollback, config change, vault refresh): they only propose. After he confirms, an operation is only done when ops_admin_operations shows state verified; accepted or running is not verified, so never claim success on those.",
-          "If a tool returns an error or is refused, report that plainly.",
+          "These parts of ORBIT are not fully live. Each line says its state: down or mock means you know nothing from it; degraded means it works with the caveat given. Say so plainly when it matters. These lines describe services, not which tools you can call: the tool list below is the only authority on that.",
+          ...limits.map((l) => `- ${l}`),
         ]
       : []),
-    ...photoGuidance(tooling ?? []),
-    ...laneGuidance(tooling ?? []),
+    ...(names.length
+      ? [
+          "",
+          "You can call exactly these tools in this step; the request carries each one's description and parameters. This list is generated by ORBIT from the tools it is offering right now. What earlier messages (including your own), a summary or a note say about which tools exist or are unavailable is not evidence: if an earlier reply said one of these tools was unavailable, it was wrong, so correct it. Every call goes through ORBIT's owner and policy checks, and each result says where it came from:",
+          `- ${names.join(", ")}`,
+          "When Rai clearly asks for something a listed tool does (for example saving a note to the vault), call that tool, after any policy check its description asks for, instead of saying you cannot or only handing him a draft. Never say a listed tool is unavailable. Never call a tool only to find out whether it works.",
+          "Only say an action happened if its tool result says so. job_launch only proposes: Rai must click Confirm on the proposal before anything launches, so say it is waiting for his confirmation, never that it started. The same holds for every ops_propose_* tool (restart, deploy, rollback, config change, vault refresh): they only propose. After he confirms, an operation is only done when ops_admin_operations shows state verified; accepted or running is not verified, so never claim success on those. A pending-confirmation result means nothing was written or launched yet.",
+          "If a tool returns an error or is refused, report that plainly and quote the reason: a refused or failed call is not the tool being absent, and it did nothing unless its result says otherwise.",
+          "If text you need (an earlier draft, a policy document) is cut or omitted in your context, say so. Re-read it with a tool when one can return it; otherwise ask Rai. Never rebuild missing text from memory and present it as the original. When ORBIT cut a tool output it says so, and calling the same tool again with the same arguments returns the same cut.",
+        ]
+      : []),
+    ...roundGuidance(rounds, names.length > 0),
+    ...photoGuidance(names),
+    ...laneGuidance(names),
     "",
-    recordCheckInstruction(tooling ?? []),
+    recordCheckInstruction(names, rounds),
     ...(notes
       ? [
           "",
@@ -277,7 +314,7 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch, 
   const impl = `openai/${model}`;
   const bounds: Bounds = { ...OPENAI_BOUNDS, ...opts.bounds };
 
-  const request = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], signal?: AbortSignal): Promise<Step> => {
+  const request = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], signal?: AbortSignal, rounds?: ToolRounds): Promise<Step> => {
     const at = new Date().toISOString();
     const d = deadline(bounds, { timers: opts.timers, signal });
     try {
@@ -286,7 +323,7 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch, 
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
         body: JSON.stringify({
           model,
-          instructions: instructions(limits, notes, tools.map((t) => `${t.name}: ${t.description}`)),
+          instructions: instructions(limits, notes, tools.map((t) => t.name), rounds),
           input: responsesInput(input),
           ...(tools.length ? { tools: responsesTools(tools) } : {}),
         }),
@@ -317,7 +354,7 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch, 
   return {
     images: () => supportFrom(capability.resolve()),
     maintain: () => capability.refresh(),
-    step: (input, limits, notes, tools, o) => request(input, limits, notes, tools, o?.signal),
+    step: (input, limits, notes, tools, o) => request(input, limits, notes, tools, o?.signal, o?.rounds),
     status: () => {
       if (lastError && (!lastOk || lastError.at > lastOk)) {
         return { port: "model", state: "down", impl, detail: `Last call failed: ${lastError.detail}`, verifiedAt: lastError.at };

@@ -281,7 +281,10 @@ export function cloneMemory(clone: VaultClone, fallback: MemoryPort | undefined,
       const i = info();
       if (i.via === "clone") return inClone.status();
       const base = fallback ? fallback.status() : ({ port: "memory", state: "down", impl: "none", detail: "No read-only copy is configured.", verifiedAt: now().toISOString() } as PortStatus);
-      return { ...base, state: base.state === "down" ? "down" : "degraded", detail: `FALLBACK: ${i.reason}. ${base.detail} Vault write tools are unavailable.` };
+      // What a vault write would do now, from the clone's own state, not a fixed claim: without the credential every write fails;
+      // with it, a write first tries to clone (src/vault/clone.ts ensureClone), and its own result says whether anything was saved.
+      const writes = clone.state().credential === "missing" ? "Vault writes fail until that credential is installed (a vault write tool returns the error; nothing is saved)." : "A vault write first tries to set up the writable clone; only its result says whether anything was saved.";
+      return { ...base, state: base.state === "down" ? "down" : "degraded", detail: `FALLBACK: ${i.reason}. ${base.detail} ${writes}` };
     },
     search: (query, limit) => answer((m) => m.search(query, limit)),
     read: (path) => answer((m) => m.read(path)),
