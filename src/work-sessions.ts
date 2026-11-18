@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { join } from "node:path";
 import { JOB_ID, type Job, type Launch } from "./jobs.ts";
 import { failureIsDefinitive, launchOutcome, legacyFailure } from "./launch-evidence.ts";
+import type { ReconciliationView } from "./launch-reconciliation.ts";
 
 // Work sessions and run links (docs/adr/0002-work-sessions.md). Session awareness slice 4.
 //
@@ -114,6 +115,9 @@ export type AttachPlan = { attachment: "new" } | { attachment: "follow-up" | "re
 export type JobWorkLink = { proposal: string; workSession: string; origin: string | null };
 
 export type JobsReader = { all(): Job[]; health(job: Job): string };
+// The owner's reconciliation of an unresolved launch (src/launch-reconciliation.ts). Absent: none is consulted, and an unresolved launch is
+// never retried.
+export type ReconReader = (job: Job) => Pick<ReconciliationView, "state" | "retry">;
 
 export type WorkSessions = ReturnType<typeof workSessions>;
 
@@ -202,7 +206,7 @@ export function workSessions(backend: WorkBackend, now: () => Date = () => new D
     // Validates an attachment against this store (and, for a retry, the job store) before anything is spent. Throws WorkError.
     // Rules: the work session exists and is open; the confirmation's origin is known and is the work session's own origin (no link is
     // ever made across conversations); a retry names a job that is a run of that work session and has ended (failed or blocked).
-    plan(attach: unknown, origin: Origin, jobs?: JobsReader): AttachPlan {
+    plan(attach: unknown, origin: Origin, jobs?: JobsReader, recon?: ReconReader): AttachPlan {
       if (attach === undefined || attach === null) return { attachment: "new" };
       if (!isObj(attach)) throw new WorkError(400, "attach must be an object {workSession, as, retryOf?}.");
       const extra = Object.keys(attach).filter((k) => !["workSession", "as", "retryOf"].includes(k));
@@ -231,7 +235,20 @@ export function workSessions(backend: WorkBackend, now: () => Date = () => new D
         if (job) {
           const { outcome, dispatch } = launchOutcome(job);
           if (outcome === "runner-active") throw new WorkError(409, "That run's runner has reported and the run has not ended (a recorded launch failure does not end it), so it cannot be retried. Nothing was done; the proposal is still open.");
-          if (outcome === "unresolved") throw new WorkError(409, `That run's launch outcome is unresolved (${dispatch.state}): a runner session may exist, so it is not retried, to avoid running the same work twice. Check the job; it reports in if it started. Nothing was done; the proposal is still open.`);
+          // An unresolved launch is retried only on the owner's recorded provider evidence that no session ran, or that it ended without
+          // output (src/launch-reconciliation.ts). Abandoning tracking, a running session or an unreadable log never allow it.
+          if (outcome === "unresolved") {
+            let r: Pick<ReconciliationView, "state" | "retry"> | undefined;
+            try {
+              r = recon?.(job);
+            } catch {
+              throw new WorkError(503, "The launch reconciliation log could not be read, so whether that run's session exists is unknown. Nothing was done; the proposal is still open.");
+            }
+            if (!r?.retry.allowed) {
+              const why = r && r.state !== "none" ? ` Your reconciliation reads ${r.state}: ${r.retry.basis}.` : " Check the job; it reports in if it started, or record what the provider shows (POST /jobs/<id>/reconcile).";
+              throw new WorkError(409, `That run's launch outcome is unresolved (${dispatch.state}): a runner session may exist, so it is not retried, to avoid running the same work twice.${why} Nothing was done; the proposal is still open.`);
+            }
+          }
           if (outcome === "runner-ended" && job.state !== "failed" && job.state !== "blocked") throw new WorkError(409, "Only a run that failed or is blocked can be retried; that run has not ended that way. Nothing was done; the proposal is still open.");
         } else {
           // The job left the job store: only the link's own record is left. A legacy `failed` link counts only when its recorded error is a
