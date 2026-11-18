@@ -5,6 +5,7 @@ import type { FallbackInfo, ImageSupport, Item, Message, ModelPort, ToolDef } fr
 import type { MutatingAction } from "./ops/admin-protocol.ts";
 import type { SysMutatingAction } from "./ops/sys-protocol.ts";
 import type { Result } from "./ports.ts";
+import { callItemBytes, fitOutput, NOT_RUN_ERROR, notRunOutput, outputItemBytes, REPLY_TOOL_RESULT_BUDGET_BYTES, RESULT_BUDGET_NOTE, TOOL_RESULT_MIN_BYTES, utf8Bytes } from "./tool-result-budget.ts";
 
 // Tool use inside a chat reply. The model may call ChatTools; every call is checked by `allow` (ORBIT's policy)
 // before it runs, and the reply lists every call with where its result came from.
@@ -123,6 +124,11 @@ export type CallRecord = {
   interrupted?: Interruption;
   abort?: "requested" | "confirmed";
   outcomeUnknown?: boolean;
+  // The reply's tool-result budget (src/tool-result-budget.ts) acted on this call. `notRun`: the model asked for it, but there was no
+  // room left, so it was never started (nothing was done). `budgetCut`: it ran, and what the model saw of its output was cut to fit;
+  // the full output is what onCall stores.
+  notRun?: "tool-result-budget";
+  budgetCut?: { fromBytes: number; toBytes: number };
 };
 
 // `fallback` is set when any round was answered by the OpenRouter fallback; `mixed` when other rounds of the same reply came from the primary.
@@ -131,7 +137,21 @@ export type CallRecord = {
 // `capped`: the tool-round budget ran out, so the final step was sent with no tools (whatever it then answered).
 // `stalled`: the no-progress guard withheld the tools before the budget ran out (every call of a round was a blocked repeat of a call
 // that kept failing the same way), so the final step was sent with no tools. Never set together with `capped`.
-export type ChatOutcome = { text: string; calls: CallRecord[]; rounds: number; capped: boolean; stalled?: boolean; fallback?: FallbackInfo; mixed?: boolean; accounting?: string[]; incomplete?: string[] };
+// `resultBudget`: present when the reply's tool-result budget acted (an output cut, a call not run, or the tools withheld because it
+// was spent). `usedBytes` never exceeds `maxBytes`. It is independent of `capped` and `stalled`: either may be set beside it.
+export type ResultBudgetOutcome = { maxBytes: number; usedBytes: number; cut: number; notRun: number; stopped: boolean };
+export type ChatOutcome = {
+  text: string;
+  calls: CallRecord[];
+  rounds: number;
+  capped: boolean;
+  stalled?: boolean;
+  fallback?: FallbackInfo;
+  mixed?: boolean;
+  accounting?: string[];
+  incomplete?: string[];
+  resultBudget?: ResultBudgetOutcome;
+};
 
 // The owner-visible note on a reply whose tool-round budget ran out. Never part of `text`, so no later model turn reads it as prose.
 export const BUDGET_NOTE = (max: number) =>
@@ -200,12 +220,16 @@ export async function runChat(options: {
   // Policy hook: returns an error string when the call is refused.
   allow?: (tool: string) => string | undefined;
   maxRounds?: number;
+  // The reply's tool-result budget in bytes (default REPLY_TOOL_RESULT_BUDGET_BYTES). Tests pass smaller values.
+  resultBudgetBytes?: number;
   // Whether the paid fallback model may answer these rounds. Off unless the caller says so: only the interactive owner chat does.
   fallback?: boolean;
   // Called after each tool call has run, with exactly what the model is about to see. A thread stores it here, call by call,
   // so a later failure cannot lose the calls that already happened. A throw ends the turn.
   // `display`: the gallery a call asked for, only when it completed in time and this reply admitted it (see `display` below).
-  onCall?: (done: { call_id: string; name: string; arguments: string; output: string; record: CallRecord; display?: ToolDisplay }) => void | Promise<void>;
+  // `output` is the call's full output (after the tool's own bound); `sent` is present only when the reply's tool-result budget cut
+  // what the model saw, and is exactly that. A call the budget did not run is reported too, with record.notRun and a not-run output.
+  onCall?: (done: { call_id: string; name: string; arguments: string; output: string; sent?: string; record: CallRecord; display?: ToolDisplay }) => void | Promise<void>;
   // Execution deadline for one tool call (a tool's own `deadlineMs` wins). Tests pass a few milliseconds.
   toolDeadlineMs?: number;
   // How long to wait, after asking an overdue call to stop, to see whether it did.
@@ -228,6 +252,13 @@ export async function runChat(options: {
   const { model, limits, notes, tools, allow } = options;
   const maxRounds = options.maxRounds ?? MAX_ROUNDS;
   if (!model.step) throw new Error("This model cannot call tools.");
+  // The reply's tool-result ledger (src/tool-result-budget.ts): bytes of the call and result items this reply added to `input`.
+  const budget = options.resultBudgetBytes ?? REPLY_TOOL_RESULT_BUDGET_BYTES;
+  let used = 0;
+  let cutCount = 0;
+  const notRunNames: string[] = [];
+  // Set once the budget has acted so that no further call may run: the next step is the final one, without tools.
+  let spent = false;
   const byName = new Map(tools.map((t) => [t.name, t]));
   const input: Item[] = [...options.messages];
   const calls: CallRecord[] = [];
@@ -236,6 +267,7 @@ export async function runChat(options: {
   const accounting: string[] = [];
   const incomplete: string[] = [];
   const provenance = () => ({
+    ...(cutCount || notRunNames.length || spent ? { resultBudget: { maxBytes: budget, usedBytes: used, cut: cutCount, notRun: notRunNames.length, stopped: spent } } : {}),
     ...(fallback ? { fallback, ...(primaryRounds ? { mixed: true } : {}) } : {}),
     ...(accounting.length ? { accounting: [...accounting] } : {}),
     ...(incomplete.length ? { incomplete: [...incomplete] } : {}),
@@ -302,13 +334,15 @@ export async function runChat(options: {
 
   for (let round = 0; ; round++) {
     const capped = round >= maxRounds;
-    const stop = capped || stalled;
-    // At the cap (or once the guard stopped the loop) the model gets no tools, so it has to answer with what it has.
+    // At the round cap, once the no-progress guard stopped the loop, or once the tool-result budget is spent, the model gets no tools,
+    // so it has to answer with what it has.
+    const stop = capped || stalled || spent;
     let step;
     try {
       if (options.signal?.aborted) throw new TurnInterrupted("cancelled", undefined, 0, "The turn was cancelled before the next model request. Nothing further was run.");
       // `rounds` lets the instructions say how many tool steps are left and, at the cap, that the tools are withheld, not missing.
-      const rounds = { round, max: maxRounds, offered: tools.map((t) => t.name), ...(stalled && !capped ? { stalled: true } : {}) };
+      const resultStop = spent ? { stop: { reason: "tool-results" as const, budgetBytes: budget, usedBytes: used, notRun: [...notRunNames] } } : {};
+      const rounds = { round, max: maxRounds, offered: tools.map((t) => t.name), ...(stalled && !capped ? { stalled: true } : {}), ...resultStop };
       step = await model.step(input, limits, notes, stop ? [] : tools.map(def), { fallback: options.fallback === true, ...(options.signal ? { signal: options.signal } : {}), rounds });
     } catch (err) {
       // Diagnostics from earlier rounds are not lost because a later round failed.
@@ -326,10 +360,14 @@ export async function runChat(options: {
           ? `I stopped after ${maxRounds} rounds of tool calls without reaching an answer: this reply's tool-round budget ran out. Calls made are listed below; anything not listed was not done.`
           : stalled
             ? `I stopped calling tools after ${round} rounds because the same calls kept failing with the same result. Calls made are listed below; anything not listed as completed was not done.`
-            : "");
-      // A round-capped (or guard-stopped) reply says so to Rai beside the text (never inside it), whatever the final step answered.
+            : spent
+              ? `I stopped because this reply's tool results reached ORBIT's per-reply budget (${budget} bytes) before I reached an answer. Calls made are listed below; anything not listed as completed was not done.`
+              : "");
+      // A round-capped, guard-stopped or result-budget-stopped reply says so to Rai beside the text (never inside it), whatever the final
+      // step answered. The result-budget note is independent of the other two: both appear when both apply.
       if (capped) merge(incomplete, [BUDGET_NOTE(maxRounds)]);
       else if (stalled) merge(incomplete, [NO_PROGRESS_NOTE(round, maxRounds)]);
+      if (spent) merge(incomplete, [RESULT_BUDGET_NOTE(budget, notRunNames.length, cutCount)]);
       return { text, calls, rounds: round, capped, ...(stalled && !capped ? { stalled: true } : {}), ...provenance() };
     }
     const stepFacts = { index: round, fallback: Boolean(step.fallback), incomplete: Boolean(step.incomplete?.length) };
@@ -350,9 +388,24 @@ export async function runChat(options: {
       const left = step.calls.length - i;
       // A cancelled turn starts no new tool call.
       if (options.signal?.aborted) throw new TurnInterrupted("cancelled", undefined, left, `The turn was cancelled. ${notStartedText(left)}`);
+      // Admission: the call item and at least TOOL_RESULT_MIN_BYTES for its result must fit in what is left of the reply's budget.
+      // Otherwise the call is not started. It is not added to the model input (neither the call nor a stub, so the pairing stays valid
+      // and the stubs of many calls cannot themselves grow without bound); the final step's instructions name it instead, and the
+      // conversation records it as not run.
+      const callBytes = callItemBytes(call);
+      if (spent || used + callBytes + outputItemBytes(call.call_id, "") + TOOL_RESULT_MIN_BYTES > budget) {
+        spent = true;
+        notRunNames.push(call.name);
+        const record: CallRecord = { name: call.name, args: argsOf(call.arguments), ok: false, summary: clip(NOT_RUN_ERROR(budget), 300), notRun: "tool-result-budget" };
+        calls.push(record);
+        await options.onCall?.({ call_id: call.call_id, name: call.name, arguments: call.arguments, output: notRunOutput(budget), record });
+        continue;
+      }
       input.push({ type: "function_call", call_id: call.call_id, name: call.name, arguments: call.arguments });
+      used += callBytes;
       // No-progress guard: a call that already failed identically REPEAT_FAILURES_MAX times in a row is answered without running it.
-      // It never reaches `allow` or the tool, so it cannot have an effect; it is still recorded, like any refused call.
+      // It never reaches `allow` or the tool, so it cannot have an effect; it is still recorded, like any refused call. Its short refusal
+      // is counted in the tool-result budget like any other output (it was admitted above).
       const key = callKey(call.name, call.arguments);
       const before = failures.get(key);
       const repeat = before && before.times >= REPEAT_FAILURES_MAX ? repeatRefusal(call.name, before.times) : undefined;
@@ -380,13 +433,23 @@ export async function runChat(options: {
           for (const img of ran.media.images) if (!delivered.has(img.ref)) delivered.set(img.ref, { ref: img.ref, sha256: createHash("sha256").update(img.bytes).digest("hex"), via: "photos_inspect", callId: call.call_id, step: round + 1 });
         }
       }
+      // The guard compares the full output (what the tool returned), never the budget-cut view, so a cut cannot make a repeat look new.
       if (!repeat) {
         if (record.ok) failures.delete(key);
         else failures.set(key, { output, times: before?.output === output ? before.times + 1 : 1 });
       }
+      // What the model sees of the output: whole when it fits in what is left of the budget, otherwise its head with ORBIT's note and
+      // the facts kept whole (ok, provenance, source, outcome ids, paging cursor). The full output is what the conversation stores.
+      const sent = fitOutput(call.name, call.call_id, output, budget - used, budget);
+      if (sent !== output) {
+        cutCount += 1;
+        spent = true;
+        record = { ...record, budgetCut: { fromBytes: utf8Bytes(output), toBytes: utf8Bytes(sent) } };
+      }
+      used += outputItemBytes(call.call_id, sent);
       calls.push(record);
-      input.push({ type: "function_call_output", call_id: call.call_id, output });
-      await options.onCall?.({ call_id: call.call_id, name: call.name, arguments: call.arguments, output, record, ...(display ? { display } : {}) });
+      input.push({ type: "function_call_output", call_id: call.call_id, output: sent });
+      await options.onCall?.({ call_id: call.call_id, name: call.name, arguments: call.arguments, output, ...(sent !== output ? { sent } : {}), record, ...(display ? { display } : {}) });
       // The call that was cut off is on record (above); the turn ends here, exactly once. No later call starts and the model is not
       // asked again, so a call that is still running cannot be followed by more effects in this turn.
       if (record.interrupted) throw new TurnInterrupted(record.interrupted, record, left - 1, interruptedText(record, bound, left - 1));
@@ -394,6 +457,9 @@ export async function runChat(options: {
     if (roundImages.length) input.push(toolImageMessage(roundImages));
     // Every call this round was a blocked repeat: the model is not making progress, so the next step gets no tools.
     if (blocked === step.calls.length) stalled = true;
+    // Too little left for another call and its minimal result (with a typical call item): offer no tools in the next step rather
+    // than a step whose calls could not run.
+    if (budget - used < 2 * TOOL_RESULT_MIN_BYTES) spent = true;
   }
 }
 

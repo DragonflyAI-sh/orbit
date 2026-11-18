@@ -281,7 +281,7 @@ export function threadService(d: {
             if (!threads.holds(id, token)) throw new Error("This turn no longer holds the thread.");
             // A tool may keep its arguments and output out of the transcript (photo observations): the stub is what is stored and replayed.
             const kept = prep.tools.find((t) => t.name === name)?.transcript?.({ arguments: args, output, summary: record.summary, ok: record.ok }) ?? { arguments: args, output, summary: record.summary };
-            threads.addCall(id, mid, { callId: call_id, name, arguments: kept.arguments, output: kept.output, ok: record.ok, provenance: record.provenance, source: record.source, summary: kept.summary, at: now().toISOString(), ...(record.interrupted ? { interrupted: record.interrupted } : {}), ...(record.abort ? { abort: record.abort } : {}), ...(record.outcomeUnknown ? { outcomeUnknown: true } : {}) });
+            threads.addCall(id, mid, { callId: call_id, name, arguments: kept.arguments, output: kept.output, ok: record.ok, provenance: record.provenance, source: record.source, summary: kept.summary, at: now().toISOString(), ...(record.interrupted ? { interrupted: record.interrupted } : {}), ...(record.abort ? { abort: record.abort } : {}), ...(record.outcomeUnknown ? { outcomeUnknown: true } : {}), ...(record.notRun ? { notRun: record.notRun } : {}), ...(record.budgetCut ? { budgetCut: record.budgetCut } : {}) });
             const pid = proposalIdOf(output);
             const p = pid ? proposals.peek(pid) : undefined;
             if (p && (!d.origin || proposals.bind(p.id, d.origin(id)))) threads.addCard(id, mid, cardOf(p));

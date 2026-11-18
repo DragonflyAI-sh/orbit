@@ -56,7 +56,15 @@ export type Reply = Result<string> & { fallback?: FallbackInfo; accounting?: str
 // this step's index (0-based); steps 0 .. max-1 may call tools; the step at `max` is the forced final answer, sent with no tools.
 // `offered`: the names of every tool runChat was given for this reply, so that final step can say they exist but are withheld.
 // `stalled`: the no-progress guard (runChat) withheld the tools before the budget ran out; this step is the final one, with no tools.
-export type ToolRounds = { round: number; max: number; offered: string[]; stalled?: boolean };
+// `stop`: set when the reply's tool-result budget (src/tool-result-budget.ts) is spent: this step is then final and sent with no tools
+// even though `round` < `max`. `notRun`: names of the calls the model asked for that were never started (in request order).
+export type ToolRounds = {
+  round: number;
+  max: number;
+  offered: string[];
+  stalled?: boolean;
+  stop?: { reason: "tool-results"; budgetBytes: number; usedBytes: number; notRun: string[] };
+};
 
 // No-progress guard (runChat, src/agent.ts): an identical call (same tool, same arguments) that has failed with an identical result this
 // many times in a row in one reply is not run again in that reply. Different arguments (a new cursor or page), a different result (a
@@ -64,9 +72,12 @@ export type ToolRounds = { round: number; max: number; offered: string[]; stalle
 // count. Defined here, not in agent.ts, because the round instructions below name it and agent.ts already depends on this module.
 export const REPEAT_FAILURES_MAX = 2;
 
-// Whether this step is the final one, sent without tools, and why: the budget ran out, or the no-progress guard stopped the loop.
-export const toolsWithheld = (rounds: ToolRounds | undefined): "budget" | "stalled" | undefined =>
-  !rounds ? undefined : rounds.round >= rounds.max ? "budget" : rounds.stalled ? "stalled" : undefined;
+// Whether this step is the final one, sent without tools, and why: the round budget ran out, the no-progress guard stopped the loop, or
+// the reply's tool-result budget is spent. When several apply, the first in that order is the one reported as the reason.
+export const toolsWithheld = (rounds: ToolRounds | undefined): "budget" | "stalled" | "results" | undefined =>
+  !rounds ? undefined : rounds.round >= rounds.max ? "budget" : rounds.stalled ? "stalled" : rounds.stop ? "results" : undefined;
+// Whether this step is the forced final one (no tools), for any of those reasons.
+export const finalStep = (rounds: ToolRounds | undefined): boolean => toolsWithheld(rounds) !== undefined;
 export type ReplyOptions = { fallback?: boolean; signal?: AbortSignal; rounds?: ToolRounds };
 
 // Whether this model can be sent photos. `ok: false` says why in words the owner can act on.
@@ -106,8 +117,9 @@ export function recordCheckInstruction(tooling: string[], rounds?: ToolRounds): 
   const available = RECORD_TOOLS.filter((n) => offers(tooling, n));
   const why = toolsWithheld(rounds);
   const withheld = rounds && why ? RECORD_TOOLS.filter((n) => rounds.offered.includes(n)) : [];
+  const because = why === "budget" ? "the tool-round budget ran out" : why === "stalled" ? "ORBIT stopped the tool calls for lack of progress" : "this reply's tool-result budget is spent";
   if (!available.length && withheld.length)
-    return `The record tools (${withheld.join(", ")}) are withheld in this final step because ${why === "budget" ? "the tool-round budget ran out" : "ORBIT stopped the tool calls for lack of progress"}; they are not missing. Claim a job or action outcome only where a tool result above shows it; otherwise say it is unverified.`;
+    return `The record tools (${withheld.join(", ")}) are withheld in this final step because ${because}; they are not missing. Claim a job or action outcome only where a tool result above shows it; otherwise say it is unverified.`;
   return available.length
     ? `Before you say that a job or an action did happen or did not happen (launched, steered, confirmed, restarted, finished, failed), check ORBIT's actual records in this turn with ${available.join(", ")}. What earlier messages, a thread summary, the recent-work note or a proposal card says is not proof: the records are. If the records disagree with something you said earlier, say so and correct it. If a check is not possible, say the outcome is unverified. Before proposing a new job, check whether the same work is already running or waiting for Rai's confirmation, and do not offer a proposal he already confirmed.`
     : "None of the tools that read ORBIT's job and operation records are available in this reply, so you cannot check whether a job or action happened: say its outcome is unverified instead of claiming it, and do not re-offer a proposal that earlier messages show was already confirmed.";
@@ -148,17 +160,29 @@ export function roundGuidance(rounds: ToolRounds | undefined, offeredNow: boolea
   const still = rounds.offered.length ? ` The tools offered earlier in this reply still exist and are only withheld for this step: ${rounds.offered.join(", ")}. Do not say that any of them is unavailable, missing or not connected.` : "";
   const honest =
     "Report only what the tool results above show: summarize what was completed and what is still pending, and say plainly which requested actions were not done. A tool that was not called did nothing, a failed or refused call did nothing unless its result says otherwise, and a proposal is not a completed action.";
+  // Calls the tool-result budget did not run (src/tool-result-budget.ts). Named whichever reason is reported for the final step.
+  const notRun = rounds.stop?.notRun ?? [];
+  const n = notRun.length;
+  const names = `${notRun.slice(0, 20).join(", ").slice(0, 600)}${n > 20 ? ", …" : ""}`;
+  const notRunLine = n ? ` ORBIT did NOT run ${n} tool call${n === 1 ? "" : "s"} you asked for (${names}): ${n === 1 ? "it" : "they"} did nothing and returned nothing.` : "";
+  const alsoResults = rounds.stop ? ` This reply's tool-result budget was also reached.${notRunLine} A tool output marked as cut to fit this budget is incomplete.` : "";
   const why = toolsWithheld(rounds);
   if (why === "budget") {
     return [
       "",
-      `TOOL-ROUND BUDGET EXHAUSTED: this reply has used all ${rounds.max} steps that may call tools, so ORBIT offers no tools in this final step.${still} Say that this reply's tool-round budget ran out. ${honest} Rai can ask again (for example "continue") for a new reply with a fresh budget.`,
+      `TOOL-ROUND BUDGET EXHAUSTED: this reply has used all ${rounds.max} steps that may call tools, so ORBIT offers no tools in this final step.${still}${alsoResults} Say that this reply's tool-round budget ran out. ${honest} Rai can ask again (for example "continue") for a new reply with a fresh budget.`,
     ];
   }
   if (why === "stalled") {
     return [
       "",
-      `TOOL CALLS STOPPED FOR LACK OF PROGRESS: the last step only repeated calls that had already failed with the same result, so ORBIT did not run them and offers no tools in this final step. This is not the tool-round budget (${rounds.round} of ${rounds.max} steps were used).${still} Say which calls kept failing and quote their error. ${honest}`,
+      `TOOL CALLS STOPPED FOR LACK OF PROGRESS: the last step only repeated calls that had already failed with the same result, so ORBIT did not run them and offers no tools in this final step. This is not the tool-round budget (${rounds.round} of ${rounds.max} steps were used).${still}${alsoResults} Say which calls kept failing and quote their error. ${honest}`,
+    ];
+  }
+  if (why === "results" && rounds.stop) {
+    return [
+      "",
+      `TOOL-RESULT BUDGET REACHED: the tool calls and results of this reply have used ${rounds.stop.usedBytes} of the ${rounds.stop.budgetBytes} bytes ORBIT allows one reply, so ORBIT offers no tools in this final step. This is a size bound, not the tool-round budget and not a missing tool.${still}${notRunLine} A tool output marked as cut to fit this budget is incomplete. Say that this reply's tool-result budget was reached. ${honest} Say which reads are incomplete, and do not present a partial result as complete. Rai can ask again (for example "continue") for a new reply with a fresh budget.`,
     ];
   }
   if (!offeredNow) return [];

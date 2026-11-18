@@ -54,8 +54,9 @@ export function maskDeep<T>(value: T): T {
 
 // ---- types ---------------------------------------------------------------------------------------------------------
 
-// One tool call with its result, exactly as the model saw them (masked). `output` is the JSON the model received, which
-// carries ok, provenance, source and the result; `provenance` and `source` are repeated for the page.
+// One tool call with its result (masked). `output` is the JSON the tool returned after its own bound, which carries ok, provenance,
+// source and the result; `provenance` and `source` are repeated for the page. It is what the model saw unless `budgetCut` is set: then
+// the reply's tool-result budget (src/tool-result-budget.ts) cut what the model saw, and the full output is still stored here.
 export type StoredCall = {
   callId: string;
   name: string;
@@ -70,6 +71,10 @@ export type StoredCall = {
   interrupted?: "timeout" | "cancelled";
   abort?: "requested" | "confirmed";
   outcomeUnknown?: boolean;
+  // The reply's tool-result budget acted on this call (src/agent.ts CallRecord): never started (nothing was done), or its output was cut
+  // for the model (sizes in UTF-8 bytes).
+  notRun?: "tool-result-budget";
+  budgetCut?: { fromBytes: number; toBytes: number };
 };
 
 export type DuplicateJob = { job: string; similarity: number; state: string; launchedAt?: string };

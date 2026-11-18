@@ -1,25 +1,35 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MAX_OUTPUT_CHARS, MAX_ROUNDS } from "../src/agent.ts";
-import { ASSISTANT_ACTIVE_BUDGET_CHARS, ASSISTANT_CHUNK_MAX_CHARS, ASSISTANT_CONTEXT_BUDGET_CHARS, ASSISTANT_NOTES_MAX_CHARS } from "../src/assistant-context.ts";
+import { ASSISTANT_ACTIVE_BUDGET_CHARS, ASSISTANT_CHUNK_MAX_CHARS, ASSISTANT_CONTEXT_BUDGET_CHARS, ASSISTANT_MIN_TURNS, ASSISTANT_NOTES_MAX_CHARS } from "../src/assistant-context.ts";
 import { MAX_MESSAGE_CHARS } from "../src/threads.ts";
+import { REPLY_TOOL_RESULT_BUDGET_BYTES } from "../src/tool-result-budget.ts";
 import { captureAssistantRequest } from "./history-audit-capture.ts";
-import { buildReport, contextBudget, floorTurns, HISTORIES, historyItems, OPTIONS, retention, rounds, ROUND_LOADS } from "./history-audit-fixture.ts";
+import { buildReport, contextBudget, floorTurns, HISTORIES, historyItems, NO_RESULT_BUDGET, OPTIONS, retention, rounds, ROUND_LOADS } from "./history-audit-fixture.ts";
 
 // The SYNTHETIC measurement harness of docs/reviews/assistant-history-sizing-audit.md. It checks the harness and the properties the
-// audit relies on; it does not pin the report's numbers (they change whenever a budget or a tool description changes, and
-// `node tools/history-audit/report.ts` regenerates them). Offline: no provider, no real vault, no network.
+// audit and its implementation rely on. It pins the code's budget constants (so a change to them is a deliberate change here and in
+// the audit's tables), not the report's numbers (they change whenever a tool description changes; `node tools/history-audit/report.ts`
+// regenerates them). It does not pin the tool-round cap: it reads MAX_ROUNDS, so a change of the round cap (a separate, approval-gated
+// change) does not fail it. Offline: no provider, no real vault, no network.
 
-test("the baseline option is the current code: budgets, round cap and output clip the audit cites", () => {
-  const base = OPTIONS.find((o) => o.id === "baseline")!;
-  assert.equal(base.active, ASSISTANT_ACTIVE_BUDGET_CHARS);
-  assert.equal(contextBudget(base), ASSISTANT_CONTEXT_BUDGET_CHARS);
+test("the 'after' option is the current code (48,000 / 68,000, floor 4); 'before' is the audited 32bfcc7 (32,000 / 52,000, floor 2)", () => {
+  const before = OPTIONS.find((o) => o.id === "before")!;
+  const after = OPTIONS.find((o) => o.id === "after")!;
+  assert.equal(before.active, 32_000);
+  assert.equal(floorTurns(before), 2);
+  assert.equal(after.active, ASSISTANT_ACTIVE_BUDGET_CHARS);
+  assert.equal(ASSISTANT_ACTIVE_BUDGET_CHARS, 48_000);
+  assert.equal(contextBudget(after), ASSISTANT_CONTEXT_BUDGET_CHARS);
+  assert.equal(ASSISTANT_CONTEXT_BUDGET_CHARS, 68_000);
   assert.equal(ASSISTANT_CONTEXT_BUDGET_CHARS, ASSISTANT_ACTIVE_BUDGET_CHARS + MAX_MESSAGE_CHARS);
-  assert.equal(floorTurns(base), 2, "two bounded chunks of at most 12,000 always fit in 32,000");
+  assert.equal(floorTurns(after), ASSISTANT_MIN_TURNS);
+  assert.equal(ASSISTANT_MIN_TURNS, 4);
   assert.equal(ASSISTANT_CHUNK_MAX_CHARS, 12_000);
   assert.equal(ASSISTANT_NOTES_MAX_CHARS, 12_000);
-  assert.equal(MAX_ROUNDS, 5);
   assert.equal(MAX_OUTPUT_CHARS, 8_000);
+  assert.equal(REPLY_TOOL_RESULT_BUDGET_BYTES, 96_000);
+  assert.ok(!OPTIONS.some((o) => o.active > ASSISTANT_ACTIVE_BUDGET_CHARS), "no larger history option is measured or offered");
 });
 
 test("floor: every option always sends at least its floor of newest turns, whatever the history and the message size", () => {
@@ -37,25 +47,50 @@ test("floor: every option always sends at least its floor of newest turns, whate
   }
 });
 
-test("a larger option never keeps fewer turns than a smaller one", () => {
+test("after keeps more turns than before in every history; heavy history goes from 2 to 4 turns", () => {
   for (const h of Object.keys(HISTORIES) as (keyof typeof HISTORIES)[]) {
-    const sent = OPTIONS.map((o) => retention(o, h).turnsSent);
-    for (let i = 1; i < sent.length; i++) assert.ok(sent[i]! >= sent[i - 1]!, `${h}: ${sent.join(" <= ")}`);
+    const [b, a] = OPTIONS.map((o) => retention(o, h).turnsSent);
+    assert.ok(a! > b!, `${h}: ${b} -> ${a}`);
   }
+  assert.equal(retention(OPTIONS[0]!, "heavy").turnsSent, 2);
+  assert.equal(retention(OPTIONS[1]!, "heavy").turnsSent, 4);
 });
 
-test("tool rounds: the real loop makes max + 1 requests, the last without tools, and the input only grows", async () => {
+test("tool rounds without a result budget (before): max + 1 requests, the last without tools, and the input grows every step", async () => {
   for (const m of [MAX_ROUNDS, 20]) {
     for (const l of Object.keys(ROUND_LOADS) as (keyof typeof ROUND_LOADS)[]) {
-      const r = await rounds(l, m, historyItems(1_000));
+      const r = await rounds(l, m, historyItems(1_000), NO_RESULT_BUDGET);
       assert.equal(r.steps, m + 1, `${l}/${m}`);
       assert.equal(r.capped, true);
+      assert.equal(r.resultBudget, undefined);
       for (let i = 1; i < r.stepInputChars.length; i++) assert.ok(r.stepInputChars[i]! > r.stepInputChars[i - 1]!);
     }
   }
   // Each output is clipped to MAX_OUTPUT_CHARS (plus the clip note): a heavy round adds at most 3 clipped outputs and their arguments.
-  const one = await rounds("heavy", 1, historyItems(0));
+  const one = await rounds("heavy", 1, historyItems(0), NO_RESULT_BUDGET);
   assert.ok(one.stepInputChars[1]! - one.stepInputChars[0]! < 3 * (MAX_OUTPUT_CHARS + 600));
+});
+
+test("tool rounds with the result budget (after): synthetic 5- and 20-round heavy workloads stay bounded, and growth stops at the budget", async () => {
+  const peaks: number[] = [];
+  for (const m of [5, 20]) {
+    const r = await rounds("heavy", m, historyItems(1_000));
+    const grown = r.stepInputBytes.at(-1)! - r.stepInputBytes[0]!;
+    // The serialized conversation of the last request grew by at most the budget (responsesInput items carry the same fields the
+    // budget counts; the array separators add one byte per item).
+    assert.ok(grown <= REPLY_TOOL_RESULT_BUDGET_BYTES + 64, `${m} rounds grew ${grown}`);
+    assert.ok(r.resultBudget && r.resultBudget.stopped && r.resultBudget.usedBytes <= r.resultBudget.maxBytes);
+    assert.ok(r.steps < m + 1 || m === 5, "the budget, not the round cap, ended the 20-round run");
+    peaks.push(Math.max(...r.stepInputBytes));
+  }
+  // The 20-round ceiling buys no more accumulation than 5 rounds: the bound is the budget, not the round count.
+  assert.equal(peaks[0], peaks[1]);
+  // Light and typical 5-round replies are unchanged by the budget (same requests, same sizes).
+  for (const l of ["light", "typical"] as const) {
+    const [b, a] = [await rounds(l, 5, historyItems(1_000), NO_RESULT_BUDGET), await rounds(l, 5, historyItems(1_000))];
+    assert.deepEqual(a.stepInputBytes, b.stepInputBytes, l);
+    assert.equal(a.resultBudget, undefined);
+  }
 });
 
 test("the fixed request part is captured offline from a real Assistant turn, and the report builds", async () => {
@@ -74,4 +109,5 @@ test("the fixed request part is captured offline from a real Assistant turn, and
   assert.match(report, /SYNTHETIC/);
   assert.match(report, /ESTIMATES/);
   for (const o of OPTIONS) assert.ok(report.includes(o.label));
+  assert.match(report, /result budget/);
 });
