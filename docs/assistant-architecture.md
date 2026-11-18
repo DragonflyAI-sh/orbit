@@ -117,7 +117,7 @@ flowchart TD
     BUSY -- no --> NEW["appendUser: chunk seq N, state open,<br/>user text masked, capped at 20,000 chars,<br/>written atomically (temp, fsync, rename)"]
     NEW --> ACT
     NEW --> PLAN["plan(): complete active chunks only<br/>(the open chunk is never history)"]
-    PLAN --> WALK["planContext: newest first, each chunk in its bounded form,<br/>stop at the first that does not fit<br/>budget 52,000 chars = history + new message"]
+    PLAN --> WALK["planContext: newest first, each chunk in its bounded form,<br/>stop at the first that does not fit<br/>budget 68,000 chars = history + new message"]
     WALK --> BOUND{"boundChunk:<br/>chunk over 12,000 chars?"}
     BOUND -- no --> FULL["full"]
     BOUND -- yes --> CLIP["clipped: outputs to 1,500, texts to 4,000"]
@@ -130,7 +130,7 @@ flowchart TD
     CTX["Model input: contiguous newest run + new message<br/>+ bounded notes (vault excerpts, devices: max 12,000)<br/>+ up to 20 proposal-card lines. Recorded on the chunk as context"]
     CTX --> TURN["turn: model rounds and tools (shared runChat limits),<br/>each call, card and the reply written to chunk N"]
     TURN --> END["end(): chunk complete, a reply still pending becomes interrupted"]
-    END --> ROT{"rotate(): keep newest complete chunks whose<br/>bounded sizes fit 32,000 chars"}
+    END --> ROT{"rotate(): keep newest complete chunks whose<br/>bounded sizes fit 48,000 chars<br/>(always at least the 4 newest)"}
     ROT -- "older chunk, complete, no confirmable card" --> MV["rename active/ to archive/ (one rename each), fsync both dirs"]
     MV --> ARC
     ROT -- "open chunk, or a card that can still be confirmed" --> STOP["stop: that chunk and later stay active until decided or expired"]
@@ -153,9 +153,9 @@ flowchart TD
 
 How to read it, using what the code does:
 
-- **Visible transcript, bounded model context, chat session memory and vault memory are four separate things.** The page shows every active chunk and any archived pages the reader loads. The model is sent only the newest complete active chunks that fit, each in its bounded form, plus the new message (`planContext`, at most 52,000 characters of conversation). Chat threads (`<state>/threads/`, with compaction and the recent-work note) are a separate store. The Assistant neither reads nor refreshes them. The vault is searched for each message, the same way chat does it (`prepare()`), and its excerpts arrive as bounded reference notes. Nothing from the archive is ever added to the model input automatically. There is no summarization of the archive and no retrieval from it.
+- **Visible transcript, bounded model context, chat session memory and vault memory are four separate things.** The page shows every active chunk and any archived pages the reader loads. The model is sent only the newest complete active chunks that fit, each in its bounded form, plus the new message (`planContext`, at most 68,000 characters of conversation, always at least the 4 newest complete turns). Chat threads (`<state>/threads/`, with compaction and the recent-work note) are a separate store. The Assistant neither reads nor refreshes them. The vault is searched for each message, the same way chat does it (`prepare()`), and its excerpts arrive as bounded reference notes. Nothing from the archive is ever added to the model input automatically. There is no summarization of the archive and no retrieval from it.
 - **Durable writes.** Every chunk change is a synchronous read, modify and write of a copy, written atomically before it replaces the copy in memory. Archiving is one `rename` per chunk, so a chunk is always in exactly one directory, even after a crash in the middle of a rotation.
-- **What blocks rotation.** Rotation stops at an open chunk (a turn in progress) and at a chunk with a proposal card that can still be confirmed (the proposal is present and has not expired). Meanwhile the active window can exceed 32,000 characters, but the 52,000 prompt bound still holds, because `planContext` leaves out what does not fit.
+- **What blocks rotation.** Rotation stops at an open chunk (a turn in progress) and at a chunk with a proposal card that can still be confirmed (the proposal is present and has not expired). Meanwhile the active window can exceed 48,000 characters, but the 68,000 prompt bound still holds, because `planContext` leaves out what does not fit.
 - **Recovery.** At start the store closes an open chunk (its pending reply becomes `interrupted`, and nothing is re-run). It reports unreadable files without touching them, never reuses their sequence numbers, raises the revision epoch and then rotates.
 
 ## Manual two-tab restart acceptance (not performed by the job that wrote this)

@@ -1912,7 +1912,8 @@
   // How a tool call ended. A call ORBIT stopped waiting for is never shown as "failed": if it may have had an effect, its outcome is
   // unknown (docs/tool-deadlines.md).
   function callState(c) {
-    if (c.ok) return `${c.provenance} · ${c.source}${c.interrupted ? " · completed after the deadline" : ""}`;
+    if (c.notRun) return "not run: the reply's tool-result budget was spent";
+    if (c.ok) return `${c.provenance} · ${c.source}${c.interrupted ? " · completed after the deadline" : ""}${c.budgetCut ? ` · cut for the model to ${c.budgetCut.toBytes} of ${c.budgetCut.fromBytes} bytes (full output stored)` : ""}`;
     if (c.outcomeUnknown) return "outcome unknown, not retried";
     if (c.interrupted) return c.interrupted === "timeout" ? "timed out, no result" : "cancelled, no result";
     return "failed";

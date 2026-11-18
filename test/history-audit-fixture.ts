@@ -1,12 +1,13 @@
 import { runChat } from "../src/agent.ts";
-import type { ChatTool } from "../src/agent.ts";
-import { ASSISTANT_CHUNK_MAX_CHARS, planContext } from "../src/assistant-context.ts";
+import type { ChatTool, ResultBudgetOutcome } from "../src/agent.ts";
+import { ASSISTANT_ACTIVE_BUDGET_CHARS, ASSISTANT_CHUNK_MAX_CHARS, planContext } from "../src/assistant-context.ts";
 import type { ChunkForm } from "../src/assistant-context.ts";
 import { ASSISTANT_ID, assistantStore } from "../src/assistant-store.ts";
 import type { Item, ModelPort, Step, ToolDef } from "../src/model.ts";
 import { responsesInput } from "../src/model.ts";
 import { MAX_MESSAGE_CHARS } from "../src/threads.ts";
 import type { ThreadMessage } from "../src/threads.ts";
+import { REPLY_TOOL_RESULT_BUDGET_BYTES } from "../src/tool-result-budget.ts";
 
 // SYNTHETIC workloads for the Assistant history-sizing audit (docs/reviews/assistant-history-sizing-audit.md). Everything here is
 // invented: no ORBIT state, no vault, no provider, no live chat is read or called. The sizes are chosen to be representative shapes,
@@ -57,13 +58,14 @@ export const HISTORIES: Record<"small" | "typical" | "heavy", (keyof typeof TURN
 
 // ---- history options -------------------------------------------------------------------------------------------------
 // `active`: ASSISTANT_ACTIVE_BUDGET_CHARS (rotation and history ceiling). The context budget is active + MAX_MESSAGE_CHARS, exactly as
-// ASSISTANT_CONTEXT_BUDGET_CHARS is built today, so the whole active window always fits beside the largest new message. The per-chunk
+// ASSISTANT_CONTEXT_BUDGET_CHARS is built, so the whole active window always fits beside the largest new message. The per-chunk
 // cap stays ASSISTANT_CHUNK_MAX_CHARS (12,000) in every option. `floorTurns`: complete turns that always fit (active / chunk cap).
+// "before" is the audited commit 32bfcc7 (run here through today's code with its ceiling); "after" is the code now. The audit's third,
+// larger option was not approved and is no longer measured (its figures stay in the audit's section 9 as of 32bfcc7).
 export type HistoryOption = { id: string; label: string; active: number };
 export const OPTIONS: HistoryOption[] = [
-  { id: "baseline", label: "Baseline (current code)", active: 32_000 },
-  { id: "modest", label: "Modest (recommended)", active: 48_000 },
-  { id: "larger", label: "Larger", active: 72_000 },
+  { id: "before", label: "Before (32bfcc7)", active: 32_000 },
+  { id: "after", label: "After (current code)", active: ASSISTANT_ACTIVE_BUDGET_CHARS },
 ];
 export const contextBudget = (o: HistoryOption) => o.active + MAX_MESSAGE_CHARS;
 export const floorTurns = (o: HistoryOption) => Math.floor(o.active / ASSISTANT_CHUNK_MAX_CHARS);
@@ -137,23 +139,32 @@ export const ROUND_LOADS: Record<"light" | "typical" | "heavy", { args: number; 
 export type RoundsRun = {
   load: string;
   maxRounds: number;
-  // Characters of the conversation part of each model request (responsesInput JSON), step 0 .. last.
+  // The reply's tool-result budget the run used (bytes); NO_RESULT_BUDGET reproduces the code before it existed.
+  budgetBytes: number;
+  // Characters and UTF-8 bytes of the conversation part of each model request (responsesInput JSON), step 0 .. last.
   stepInputChars: number[];
+  stepInputBytes: number[];
   steps: number;
   capped: boolean;
+  resultBudget?: ResultBudgetOutcome;
 };
+// A budget no synthetic run reaches: the loop as it was before the tool-result budget (audited commit 32bfcc7).
+export const NO_RESULT_BUDGET = Number.MAX_SAFE_INTEGER;
 
 // Runs the real tool loop (runChat) with a scripted model that calls the load's tools in every step it may, and a synthetic read tool.
 // Returns the size of the conversation input of every model request. Nothing outside this process is touched.
-export async function rounds(load: keyof typeof ROUND_LOADS, maxRounds: number, history: Item[]): Promise<RoundsRun> {
+export async function rounds(load: keyof typeof ROUND_LOADS, maxRounds: number, history: Item[], budgetBytes: number = REPLY_TOOL_RESULT_BUDGET_BYTES): Promise<RoundsRun> {
   const calls = ROUND_LOADS[load];
   const stepInputChars: number[] = [];
+  const stepInputBytes: number[] = [];
   let n = 0;
   const model: ModelPort = {
     status: () => ({ port: "model", state: "live", impl: "fake/history-audit", detail: "synthetic", verifiedAt: "" }),
     reply: async () => ({ value: "unused", provenance: "live", source: "model/fake" }),
     step: async (input: Item[], _limits: string[], _notes: string | undefined, tools: ToolDef[]): Promise<Step> => {
-      stepInputChars.push(JSON.stringify(responsesInput(input)).length);
+      const body = JSON.stringify(responsesInput(input));
+      stepInputChars.push(body.length);
+      stepInputBytes.push(Buffer.byteLength(body, "utf8"));
       const i = n++;
       if (!tools.length) return { text: "final answer", calls: [] };
       return { text: "", calls: calls.map((c, j) => ({ call_id: `r${i}_${j}`, name: "synthetic_read", arguments: JSON.stringify({ q: filler(Math.max(0, c.args - 9), j), size: c.output }) })) };
@@ -166,8 +177,8 @@ export async function rounds(load: keyof typeof ROUND_LOADS, maxRounds: number, 
     readOnly: true,
     run: async (args) => ({ value: { text: filler(Number(args.size), 1) }, provenance: "live", source: "synthetic" }),
   };
-  const out = await runChat({ model, messages: history, limits: [], tools: [tool], maxRounds });
-  return { load, maxRounds, stepInputChars, steps: stepInputChars.length, capped: out.capped };
+  const out = await runChat({ model, messages: history, limits: [], tools: [tool], maxRounds, resultBudgetBytes: budgetBytes });
+  return { load, maxRounds, budgetBytes, stepInputChars, stepInputBytes, steps: stepInputChars.length, capped: out.capped, ...(out.resultBudget ? { resultBudget: out.resultBudget } : {}) };
 }
 
 // A history as model input items, from a retention plan's size alone: one user/assistant pair per kept turn is not needed for the
@@ -195,7 +206,7 @@ const fmt = (n: number) => n.toLocaleString("en-US");
 const row = (cells: (string | number)[]) => `| ${cells.map((c) => (typeof c === "number" ? fmt(c) : c)).join(" | ")} |`;
 const formsText = (f: Partial<Record<ChunkForm, number>>) => Object.entries(f).map(([k, v]) => `${v} ${k}`).join(", ") || "none";
 
-export type Scenario = { option: HistoryOption; history: keyof typeof HISTORIES; retrieved: keyof typeof RETRIEVED; load: keyof typeof ROUND_LOADS; maxRounds: number; currentChars: number };
+export type Scenario = { option: HistoryOption; history: keyof typeof HISTORIES; retrieved: keyof typeof RETRIEVED; load: keyof typeof ROUND_LOADS; maxRounds: number; currentChars: number; budgetBytes?: number };
 export type ScenarioResult = {
   scenario: Scenario;
   retention: Retention;
@@ -210,10 +221,11 @@ export type ScenarioResult = {
 
 export async function scenario(fixed: Fixed, s: Scenario): Promise<ScenarioResult> {
   const ret = retention(s.option, s.history, s.currentChars);
-  const run = await rounds(s.load, s.maxRounds, historyItems(ret.historyChars, s.currentChars));
+  const run = await rounds(s.load, s.maxRounds, historyItems(ret.historyChars, s.currentChars), s.budgetBytes);
   const retrieved = retrievedChars(RETRIEVED[s.retrieved]);
   const at = (i: number) => {
-    const last = i === run.steps - 1 && run.capped;
+    // The forced final step (round cap or tool-result budget) is sent without tool schemas.
+    const last = i === run.steps - 1 && (run.capped || Boolean(run.resultBudget?.stopped));
     const fixedChars = last ? fixed.instructionsFinalChars : fixed.instructionsChars + fixed.toolSchemaChars;
     return occupancy(fixedChars, retrieved, ret.historyChars, ret.currentChars, run.stepInputChars[i]!, run.stepInputChars[0]!);
   };
@@ -240,33 +252,49 @@ export async function buildReport(fixed: Fixed): Promise<string> {
     }
   out.push("");
 
-  out.push("### Current-turn tool rounds (real runChat loop, history = typical/baseline)", "", row(["load", "max rounds", "model requests", "tool-result chars added by the last request", "est. tokens"]), row(["---", "---:", "---:", "---:", "---:"]));
-  const base = retention(OPTIONS[0]!, "typical");
-  for (const l of Object.keys(ROUND_LOADS) as (keyof typeof ROUND_LOADS)[])
-    for (const m of [5, 20]) {
-      const r = await rounds(l, m, historyItems(base.historyChars));
-      const added = r.stepInputChars.at(-1)! - r.stepInputChars[0]!;
-      out.push(row([`${l} (${ROUND_LOADS[l].map((c) => fmt(c.output)).join(" + ")} per round)`, m, r.steps, added, estTokens(added)]));
-    }
-  out.push("");
+  // Before = the audited commit's history ceiling and no tool-result budget; after = the current code. Same scripted workloads.
+  const STATES = [
+    { id: "before", option: OPTIONS[0]!, budget: NO_RESULT_BUDGET, label: "before (32,000; no result budget)" },
+    { id: "after", option: OPTIONS[1]!, budget: REPLY_TOOL_RESULT_BUDGET_BYTES, label: `after (${fmt(OPTIONS[1]!.active)}; result budget ${fmt(REPLY_TOOL_RESULT_BUDGET_BYTES)} bytes)` },
+  ] as const;
+  const stopText = (r: RoundsRun) => (r.resultBudget?.stopped && r.capped ? "round cap (result budget also spent)" : r.resultBudget?.stopped ? "result budget" : r.capped ? "round cap" : "answer");
 
-  out.push("### Whole request: occupancy and cumulative input (typical history, typical reference material, current message 400 chars)", "");
-  out.push(row(["option", "load", "max rounds", "requests", "first request (fixed / retrieved / history / current) chars", "first est. tokens", "peak request chars (step)", "peak est. tokens", "tool results at peak", "cumulative input est. tokens"]));
-  out.push(row(["---", "---", "---:", "---:", "---", "---:", "---:", "---:", "---:", "---:"]));
-  for (const o of OPTIONS)
-    for (const l of ["typical", "heavy"] as const)
-      for (const m of [5, 20]) {
-        const r = await scenario(fixed, { option: o, history: "typical", retrieved: "typical", load: l, maxRounds: m, currentChars: 400 });
-        const f = r.first;
-        out.push(row([o.id, l, m, r.steps, `${fmt(f.total)} (${fmt(f.fixed)} / ${fmt(f.retrieved)} / ${fmt(f.history)} / ${fmt(f.current)})`, f.estTokens, `${fmt(r.peak.total)} (${r.peak.step})`, r.peak.estTokens, r.peak.toolResults, r.cumulativeEstTokens]));
+  out.push("### Current-turn tool rounds (real runChat loop, typical history of the current code)", "", row(["load", "max rounds", "result budget", "model requests", "ended by", "calls not run / cut", "tool-result chars added by the last request", "bytes added (serialized)", "est. tokens added"]), row(["---", "---:", "---", "---:", "---", "---", "---:", "---:", "---:"]));
+  const hist = retention(OPTIONS[1]!, "typical");
+  for (const l of Object.keys(ROUND_LOADS) as (keyof typeof ROUND_LOADS)[])
+    for (const m of [5, 20])
+      for (const st of STATES) {
+        const r = await rounds(l, m, historyItems(hist.historyChars), st.budget);
+        const added = r.stepInputChars.at(-1)! - r.stepInputChars[0]!;
+        const addedBytes = r.stepInputBytes.at(-1)! - r.stepInputBytes[0]!;
+        out.push(row([`${l} (${ROUND_LOADS[l].map((c) => fmt(c.output)).join(" + ")} per round)`, m, st.budget === NO_RESULT_BUDGET ? "none (before)" : fmt(st.budget), r.steps, stopText(r), r.resultBudget ? `${r.resultBudget.notRun} / ${r.resultBudget.cut}` : "0 / 0", added, addedBytes, estTokens(added)]));
       }
   out.push("");
 
-  out.push("### Bound case (heavy history, maximum reference material, 20,000-char message)", "", row(["option", "load", "max rounds", "first request chars", "first est. tokens", "peak request chars", "peak est. tokens", "over 300,000 (fallback request cap)?"]), row(["---", "---", "---:", "---:", "---:", "---:", "---:", "---"]));
-  for (const o of OPTIONS)
+  out.push("### Whole request: before and after (typical history, typical reference material, current message 400 chars)", "");
+  out.push(row(["state", "load", "max rounds", "requests", "history turns sent", "first request chars (est. tokens)", "peak request chars, step (est. tokens)", "tool results at peak", "cumulative input est. tokens", "change vs before"]));
+  out.push(row(["---", "---", "---:", "---:", "---:", "---:", "---:", "---:", "---:", "---:"]));
+  for (const l of ["typical", "heavy"] as const)
+    for (const m of [5, 20]) {
+      let beforeCum = 0;
+      for (const st of STATES) {
+        const r = await scenario(fixed, { option: st.option, history: "typical", retrieved: "typical", load: l, maxRounds: m, currentChars: 400, budgetBytes: st.budget });
+        if (st.id === "before") beforeCum = r.cumulativeEstTokens;
+        const delta = st.id === "before" ? "" : `${r.cumulativeEstTokens >= beforeCum ? "+" : ""}${Math.round(((r.cumulativeEstTokens - beforeCum) / beforeCum) * 100)}%`;
+        out.push(row([st.label, l, m, r.steps, r.retention.turnsSent, `${fmt(r.first.total)} (${fmt(r.first.estTokens)})`, `${fmt(r.peak.total)}, ${r.peak.step} (${fmt(r.peak.estTokens)})`, r.peak.toolResults, r.cumulativeEstTokens, delta]));
+      }
+    }
+  out.push("");
+
+  out.push("### Retained turns by history (current message 400 chars)", "", row(["history", ...STATES.map((st) => st.label)]), row(["---", ...STATES.map(() => "---:")]));
+  for (const h of Object.keys(HISTORIES) as (keyof typeof HISTORIES)[]) out.push(row([h, ...STATES.map((st) => retention(st.option, h).turnsSent)]));
+  out.push("");
+
+  out.push("### Bound case (heavy history, maximum reference material, 20,000-char message)", "", row(["state", "load", "max rounds", "first request chars", "first est. tokens", "peak request chars", "peak est. tokens", "over 300,000 (fallback request cap)?"]), row(["---", "---", "---:", "---:", "---:", "---:", "---:", "---"]));
+  for (const st of STATES)
     for (const [l, m] of [["typical", 5], ["heavy", 5], ["heavy", 20]] as const) {
-      const r = await scenario(fixed, { option: o, history: "heavy", retrieved: "max", load: l, maxRounds: m, currentChars: MAX_MESSAGE_CHARS });
-      out.push(row([o.id, l, m, r.first.total, r.first.estTokens, r.peak.total, r.peak.estTokens, r.peak.total > 300_000 ? "yes (approx.)" : "no"]));
+      const r = await scenario(fixed, { option: st.option, history: "heavy", retrieved: "max", load: l, maxRounds: m, currentChars: MAX_MESSAGE_CHARS, budgetBytes: st.budget });
+      out.push(row([st.label, l, m, r.first.total, r.first.estTokens, r.peak.total, r.peak.estTokens, r.peak.total > 300_000 ? "yes (approx.)" : "no"]));
     }
   out.push("");
   return out.join("\n");
