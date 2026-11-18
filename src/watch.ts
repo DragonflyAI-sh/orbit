@@ -1,4 +1,5 @@
 import type { Job } from "./jobs.ts";
+import { dispatchEvidence } from "./launch-evidence.ts";
 import type { Notifier } from "./notify.ts";
 import type { PortState, PortStatus } from "./ports.ts";
 import type { Store } from "./store.ts";
@@ -84,7 +85,10 @@ export function watcher(store: Store<WatchState>, notify: Notifier, now: () => D
       const last = [...job.events].reverse().find((e) => e.type === "checkin" && e.text);
       const link = job.launch?.sessionUrl ?? "no session link";
       const lastLine = last ? `last check-in ${last.at}: ${last.text}` : "no check-in yet";
-      notify.send(`Job ${job.id} is ${health === "quiet" ? "quiet (no event for 15 minutes)" : "not started (no event 10 minutes after launch)"}. Session: ${link}. ${lastLine}`);
+      // A job with no runner event says what ORBIT's record shows about the dispatch, so "not started" is never read as "no session".
+      const dispatch = health === "not-started" ? dispatchEvidence(job, now()) : undefined;
+      const evidence = dispatch ? ` Dispatch: ${dispatch.state} (${dispatch.basis}).` : "";
+      notify.send(`Job ${job.id} is ${health === "quiet" ? "quiet (no event for 15 minutes)" : "not started (no event 10 minutes after launch)"}. Session: ${link}. ${lastLine}${evidence}`);
       told[job.id] = health;
     }
     const ids = new Set(all.map((j) => j.id));

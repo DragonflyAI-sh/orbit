@@ -1,4 +1,5 @@
 import type { Job, Jobs } from "./jobs.ts";
+import { fireFailureOf } from "./launcher.ts";
 import type { ControlRepo, Routine } from "./launcher.ts";
 import { briefWords } from "./duplicates.ts";
 import type { Notifier } from "./notify.ts";
@@ -61,9 +62,12 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
     if ("error" in registered) return { code: 400, body: { error: registered.error } };
     if (review) jobs.setReview(id, review);
     const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString(), briefWords: briefWords(briefText) };
-    const fail = (error: string) => {
-      jobs.setLaunch(id, { ...launch, failedAt: new Date().toISOString(), error });
-      notify.send(`Job ${id} could not launch: ${error}`, false);
+    // Recorded before the brief write, so ORBIT stopping during it leaves a launch record without a brief commit (provably never fired),
+    // not a job with no launch record at all.
+    jobs.setLaunch(id, launch);
+    const fail = (error: string, fireFailure?: NonNullable<Job["launch"]>["fireFailure"]) => {
+      jobs.setLaunch(id, { ...launch, failedAt: new Date().toISOString(), error, ...(fireFailure ? { fireFailure } : {}) });
+      notify.send(`Job ${id} could not launch: ${error}${fireFailure && fireFailure !== "rejected" ? ". Not retried; check the job before launching again." : ""}`, false);
       return { code: 502, body: { error, job: withHealth(jobs.get(id)!) } };
     };
     try {
@@ -75,14 +79,26 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
     }
     // The token goes to the runner in the fire text, server to server; it is never returned or logged here.
     const text = [`Job id: ${id}`, ...(publicJobUrl ? [`API: ${publicJobUrl}`, `Token: ${registered.token}`] : []), `Tool commit: ${commit}`].join("\n");
+    // Persisted before the request is sent, so a fire cut off by a restart is recorded as started, never as not attempted.
+    Object.assign(launch, { fireStartedAt: new Date().toISOString(), toolCommitSent: commit });
+    jobs.setLaunch(id, launch);
     try {
       const fired = await routine.fire(text);
-      jobs.setLaunch(id, { ...launch, ...fired });
+      jobs.setLaunch(id, { ...launch, ...fired, firedAt: new Date().toISOString() });
     } catch (err) {
-      return fail(`routine not fired: ${err instanceof Error ? err.message : err}`);
+      return fail(fireError(err), fireFailureOf(err));
     }
     return { code: 202, body: withHealth(jobs.get(id)!) };
   };
+
+  // "routine not fired" is kept as the prefix older readers match on; when the provider may have received the request, it says so.
+  function fireError(err: unknown): string {
+    const kind = fireFailureOf(err);
+    const why = `routine not fired: ${err instanceof Error ? err.message : err}`;
+    if (kind === "rejected") return why;
+    if (kind === "no-session") return `${why} (the provider accepted the request; which session it started is unknown)`;
+    return `${why} (outcome unknown: the request may have reached the provider)`;
+  }
 
   // A research launch writes nothing to any repository: the brief is held on the job and served to the runner by the job listener
   // (src/ingress.ts), so the job API and the runner tool are required. The fire text says which lane it is and carries the tool digest.
@@ -97,15 +113,17 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
     const registered = jobs!.register(id, RESEARCH_LIMITS.tokenTtlMs, { ...(work ? { work } : {}), research: { brief } });
     if ("error" in registered) return { code: 400, body: { error: registered.error } };
     const launch: NonNullable<Job["launch"]> = { routine: routine.name, at: new Date().toISOString(), briefWords: briefWords(brief) };
-    jobs!.setLaunch(id, launch);
     const text = ["Lane: research", `Job id: ${id}`, `API: ${publicJobUrl}`, `Token: ${registered.token}`, `Tool commit: ${commit}`, `Tool sha256: ${deps.research.tool.sha256}`].join("\n");
+    Object.assign(launch, { fireStartedAt: new Date().toISOString(), toolCommitSent: commit });
+    jobs!.setLaunch(id, launch);
     try {
       const fired = await routine.fire(text);
-      jobs!.setLaunch(id, { ...launch, ...fired });
+      jobs!.setLaunch(id, { ...launch, ...fired, firedAt: new Date().toISOString() });
     } catch (err) {
-      const error = `routine not fired: ${err instanceof Error ? err.message : err}`;
-      jobs!.setLaunch(id, { ...launch, failedAt: new Date().toISOString(), error });
-      notify.send(`Research job ${id} could not launch: ${error}`, false);
+      const error = fireError(err);
+      const fireFailure = fireFailureOf(err);
+      jobs!.setLaunch(id, { ...launch, failedAt: new Date().toISOString(), error, fireFailure });
+      notify.send(`Research job ${id} could not launch: ${error}${fireFailure !== "rejected" ? ". Not retried; check the job before launching again." : ""}`, false);
       return { code: 502, body: { error, job: withHealth(jobs!.get(id)!) } };
     }
     return { code: 202, body: withHealth(jobs!.get(id)!) };

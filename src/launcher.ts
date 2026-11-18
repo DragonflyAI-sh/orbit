@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { normalizeToolCommit } from "./jobs.ts";
+import { dispatchEvidence } from "./launch-evidence.ts";
 
 // Starting cloud jobs: write the brief to orbit-work through GitHub's API, then fire a saved Routine
 // through its documented API trigger. Both tokens are systemd credentials and never leave this process.
@@ -116,7 +117,12 @@ export function gitReconciler(jobs: import("./jobs.ts").Jobs, control: ControlRe
         continue;
       }
       if (job.state !== "registered" && job.state !== "running") continue;
-      if (job.launch?.failedAt) continue;
+      // A launch that provably never reached a runner (brief not written, or the provider refused the fire) has no git record to read.
+      // Any other failed launch may have started a session (src/launch-evidence.ts), so its git record is still read: read-only, never a retry.
+      if (job.launch?.failedAt && !job.events.length) {
+        const e = dispatchEvidence(job, new Date(now()));
+        if (e.state === "never-dispatched" || e.state === "provider-rejected") continue;
+      }
       const lastApi = job.lastEventAt ? new Date(job.lastEventAt).getTime() : new Date(job.launch?.at ?? job.createdAt).getTime();
       if (now() - lastApi < QUIET_MS || now() - (lastRead.get(job.id) ?? 0) < QUIET_MS) continue;
       lastRead.set(job.id, now());
@@ -142,6 +148,26 @@ export function gitReconciler(jobs: import("./jobs.ts").Jobs, control: ControlRe
 export type Fired = { sessionId: string; sessionUrl: string };
 export type Routine = { name: string; fire(text: string): Promise<Fired> };
 
+// What a failed fire says about whether the provider received it (docs/reviews/launch-reconciliation.md). Only an answer from the
+// provider is evidence: "rejected" is a 4xx answer (the provider refused the request), "server-error" a 5xx answer (it may or may not
+// have created a session), "no-session" a 2xx answer without a usable session (the provider accepted the request, but which session it
+// started is unknown). "transport" is everything else (connection reset, timeout, process-level error): the request may have reached
+// the provider, so the outcome is unknown.
+export type FireFailure = "rejected" | "server-error" | "no-session" | "transport";
+export class RoutineFireError extends Error {
+  readonly kind: Exclude<FireFailure, "transport">;
+  readonly status?: number;
+  constructor(message: string, kind: Exclude<FireFailure, "transport">, status?: number) {
+    super(message);
+    this.name = "RoutineFireError";
+    this.kind = kind;
+    this.status = status;
+  }
+}
+export function fireFailureOf(err: unknown): FireFailure {
+  return err instanceof RoutineFireError ? err.kind : "transport";
+}
+
 export function routineTrigger(name: string, triggerId: string, token: string, fetcher: Fetch = fetch): Routine {
   return {
     name,
@@ -156,9 +182,14 @@ export function routineTrigger(name: string, triggerId: string, token: string, f
         },
         body: JSON.stringify({ text }),
       });
-      if (!res.ok) throw new Error(`Routine ${name} fire returned HTTP ${res.status}`);
-      const body = (await res.json()) as { claude_code_session_id?: string; claude_code_session_url?: string };
-      if (!body.claude_code_session_id || !body.claude_code_session_url) throw new Error(`Routine ${name} fire returned no session`);
+      if (!res.ok) throw new RoutineFireError(`Routine ${name} fire returned HTTP ${res.status}`, res.status >= 500 ? "server-error" : "rejected", res.status);
+      let body: { claude_code_session_id?: string; claude_code_session_url?: string };
+      try {
+        body = (await res.json()) as typeof body;
+      } catch {
+        body = {};
+      }
+      if (!body?.claude_code_session_id || !body.claude_code_session_url) throw new RoutineFireError(`Routine ${name} fire returned no session`, "no-session", res.status);
       return { sessionId: body.claude_code_session_id, sessionUrl: body.claude_code_session_url };
     },
   };

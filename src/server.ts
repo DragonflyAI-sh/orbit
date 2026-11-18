@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Identify } from "./identity.ts";
 import { jobLauncher } from "./job-launch.ts";
+import { dispatchEvidence } from "./launch-evidence.ts";
 import { researchStore } from "./research.ts";
 import type { ResearchLane, ResearchStore, ResearchTool } from "./research.ts";
 import { researchTools, watchResearchVault, withLaneGuard } from "./research-tools.ts";
@@ -262,7 +263,7 @@ export function buildServer({
       detail: `${st.detail} ${ready ? `Launches through Routines: ${names.join(", ")}.` : `Cannot launch yet: ${control ? "" : "no orbit-work GitHub credential. "}${names.length ? "" : "no Routine configured."}`} ${researchStatus()}`.trim(),
     };
   };
-  const withHealth = (job: Job) => ({ ...job, toolCommit: job.toolCommit ?? "unknown", toolCommitStatus: toolCommitStatus(job.toolCommit, commit), health: jobs!.health(job) });
+  const withHealth = (job: Job) => ({ ...job, toolCommit: job.toolCommit ?? "unknown", toolCommitStatus: toolCommitStatus(job.toolCommit, commit), health: jobs!.health(job), dispatch: dispatchEvidence(job, clock()) });
   const launchable = () => ({
     routines: [...routines.keys()],
     problem: !jobs ? "jobs are not enabled" : !control ? "no orbit-work GitHub credential is installed" : routines.size ? undefined : "no Routine is configured",

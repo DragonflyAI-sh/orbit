@@ -1,4 +1,5 @@
 import type { Job } from "./jobs.ts";
+import { dispatchEvidence } from "./launch-evidence.ts";
 
 // How a job's reported tool commit compares with the commit ORBIT is running (the ORBIT_COMMIT /status reports).
 // "unknown" covers a job that never reported one and an ORBIT that does not know its own commit: neither is a mismatch.
@@ -35,6 +36,13 @@ export function compactList(all: Job[], health: (j: Job) => Health) {
   return { total: all.length, jobs: newest.map((j) => compactJob(j, health(j))) };
 }
 
+// How far the launch got on ORBIT's side (src/launch-evidence.ts): "not-started" health alone never says whether a session exists. The
+// basis and caveat matter only while the runner has said nothing; once it has, the state alone keeps the record inside the tool clip.
+function dispatchView(job: Job) {
+  const e = dispatchEvidence(job);
+  return job.events.length ? { state: e.state } : { state: e.state, basis: e.basis, ...(e.caveat ? { caveat: e.caveat } : {}) };
+}
+
 // Full record, but only the last DETAIL_EVENTS events, with a count of the ones left out.
 export function detailJob(job: Job, health: Health, running?: string) {
   const events = job.events.slice(-DETAIL_EVENTS);
@@ -42,7 +50,7 @@ export function detailJob(job: Job, health: Health, running?: string) {
   const { briefWords: _words, ...launch } = job.launch ?? ({} as NonNullable<Job["launch"]>);
   // The full summary is stored on the job and shown on the Jobs page; the model gets its size and state, not 200,000 characters.
   const { summary, ...rest } = job;
-  return { ...rest, ...(summary ? { summary: { chars: summary.chars, state: summary.state, via: summary.via, at: summary.at } } : {}), ...(job.launch ? { launch } : {}), ...toolCommitFields(job, running), health, events, eventsOmitted: omitted, eventsNote: omitted ? `${omitted} earlier events left out; ${events.length} of ${job.events.length} shown.` : undefined };
+  return { ...rest, ...(summary ? { summary: { chars: summary.chars, state: summary.state, via: summary.via, at: summary.at } } : {}), ...(job.launch ? { launch } : {}), ...toolCommitFields(job, running), health, dispatch: dispatchView(job), events, eventsOmitted: omitted, eventsNote: omitted ? `${omitted} earlier events left out; ${events.length} of ${job.events.length} shown.` : undefined };
 }
 
 // One row for the jobs page: no events or steers, and the latest check-in line with how it arrived.
@@ -56,6 +64,7 @@ export function jobRow(job: Job, health: Health, running?: string) {
     launchedAt: job.launch?.at,
     launchError: job.launch?.error,
     sessionUrl: job.launch?.sessionUrl,
+    dispatch: dispatchEvidence(job).state,
     latest: last ? { at: last.at, type: last.type, status: last.status, text: last.text?.slice(0, 300), via: last.via ?? "api" } : null,
     lastEventAt: job.lastEventAt,
     prUrl: job.pr?.url,
