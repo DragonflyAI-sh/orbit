@@ -167,7 +167,7 @@ test("job_launch returns a proposal and launches nothing until confirmed", async
   assert.equal(body.proposals[0].brief, "Fix X.");
   assert.deepEqual([pushed.length, fired.length, jobs.list().length], [0, 0, 0]);
   const toolsOffered = (model as ReturnType<typeof scripted>).seen[0].tools;
-  assert.ok(["memory_search", "memory_read", "github_repo_status", "jobs_list", "job_status", "job_steer", "job_launch", "notify"].every((t) => toolsOffered.includes(t)));
+  assert.ok(["memory_search", "memory_read", "memory_read_page", "github_repo_status", "jobs_list", "job_status", "job_summary_read", "job_steer", "job_launch", "notify", "research_result", "research_report_read"].every((t) => toolsOffered.includes(t)), toolsOffered.join(","));
 
   const confirm = await fetch(`${base}/chat/proposals/${body.proposals[0].id}/confirm`, { method: "POST" });
   assert.equal(confirm.status, 202);

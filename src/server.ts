@@ -22,6 +22,7 @@ import type { Message, ModelPort } from "./model.ts";
 import { proposals as newProposals, runChat } from "./agent.ts";
 import type { ChatTool, Proposals } from "./agent.ts";
 import { chatTools } from "./chat-tools.ts";
+import { textReaderTools } from "./text-readers.ts";
 import { PR_INSPECT_TOOL_NAMES } from "./pr-inspect.ts";
 import type { VaultEdits } from "./vault/tools.ts";
 import type { Nodes } from "./nodes.ts";
@@ -471,7 +472,7 @@ export function buildServer({
     }
     const current = limits(isOwner);
     const offered = isOwner && model.step
-      ? [...refuseLegacyContext(withDuplicateWarning([...withLaneGuard(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), () => researchLane().names, () => [...routines.keys()]), ...laneTools()], proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? [...photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...observationTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE, onChange: semantic ? (ref) => semantic.invalidate(ref) : undefined }), ...(semantic ? [photoSearchTool({ semantic, attachments, caller: conversation, isOwner, zone: ZONE })] : [])] : [])]
+      ? [...refuseLegacyContext(withDuplicateWarning([...withLaneGuard(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), () => researchLane().names, () => [...routines.keys()]), ...textReaderTools({ memory, jobs }), ...laneTools()], proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? [...photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...observationTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE, onChange: semantic ? (ref) => semantic.invalidate(ref) : undefined }), ...(semantic ? [photoSearchTool({ semantic, attachments, caller: conversation, isOwner, zone: ZONE })] : [])] : [])]
       : [];
     if (!offered.length) {
       current.push(

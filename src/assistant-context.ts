@@ -66,10 +66,11 @@ const cut = (s: string, keep: number, what: string, seq: number): string => {
   return `${s.slice(0, Math.max(0, keep - note.length - 1))}\n${note}`;
 };
 
-// A page of a paged session tool carries its nextCursor after the page's items, so cutting the output would drop it, and with it
+// A page of a paged tool (the session tools, and the complete text readers of src/text-pages.ts) carries its nextCursor after the
+// page's items, so cutting the output would drop it, and with it
 // the only way a later turn can continue where this one stopped (a turn is capped at MAX_ROUNDS pages). When such an output is cut,
 // its cursor is kept whole at the end, inside the same BOUNDED_OUTPUT_CHARS.
-export const PAGED_TOOLS = new Set(["session_read", "sessions_list"]);
+export const PAGED_TOOLS = new Set(["session_read", "sessions_list", "memory_read_page", "job_summary_read", "research_report_read"]);
 export const pageCursor = (name: string, output: string): string | undefined => {
   if (!PAGED_TOOLS.has(name)) return undefined;
   try {
