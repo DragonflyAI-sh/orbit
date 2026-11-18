@@ -28,6 +28,12 @@ import type { FallbackRoute, ModelAvailability, PortStatus } from "./ports.ts";
 // Availability (status()): a configured fallback is not evidence that it answers. While the primary's limit is in force the port is
 // `down` (available false) when no paid call can be admitted OR the latest paid call in this limit window failed, `degraded` with
 // available true only after a paid call in this window succeeded, and `degraded` with available null (not known) before any.
+// "Latest" is the latest to START among the calls of this window that have finished: a call keeps the window (generation) it started
+// in, and a call that finishes after a new window began, after the primary recovered, or after a newer call finished, writes nothing.
+// Refusals that sent nothing and say nothing about the route are not evidence either: one "busy" ledger lock collision, and a cap
+// refusal of a request larger than one that already succeeded in this window while a request of that size still fits. A second
+// consecutive "busy", and a cap refusal with no smaller request known to fit, are evidence (failed). After the limit time has passed
+// the primary's own state decides: a primary that is down or a mock is never reported available.
 
 type Limit = { kind: "usage_limit" | "rate_limit"; until: number; estimated: boolean };
 
@@ -63,7 +69,39 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   // The outcome of the latest paid fallback call in the current limit window: the only evidence that the fallback answers. Cleared
   // when a new limit window starts and when the primary recovers. Not touched by refusals that are not about the route (a background
   // caller, photos on the newest message) or by an unusable configuration, which status reads directly.
-  let lastCall: { ok: boolean; at: string } | undefined;
+  // `seq` is the call's start order, so an older call finishing late cannot replace a newer call's outcome.
+  let lastCall: { ok: boolean; at: string; seq: number } | undefined;
+  // The evidence window. Bumped whenever the evidence is reset (a new limit window, a primary recovery); every call captures it when
+  // it starts, and a call from an earlier window writes no evidence (and a primary call from an earlier window recovers nothing).
+  let gen = 0;
+  let started = 0;
+  // The smallest spend bound of a paid call that succeeded in this window: a request of that size is known to be admitted and answered.
+  let fitsMicro: number | undefined;
+  // Consecutive "busy" refusals in this window: one is a transient collision, a second in a row is treated as the route not working.
+  let busyStreak = 0;
+  const resetEvidence = () => {
+    gen++;
+    lastCall = undefined;
+    lastFallbackError = undefined;
+    fitsMicro = undefined;
+    busyStreak = 0;
+  };
+  // Evidence from a finished paid call that started in window `g` as call number `seq`.
+  const record = (g: number, seq: number, ok: boolean, error?: string) => {
+    if (g !== gen || (lastCall && lastCall.seq > seq)) return;
+    lastCall = { ok, at: iso(now()), seq };
+    lastFallbackError = ok ? undefined : error;
+    busyStreak = 0;
+  };
+  // Headroom under every cap right now, from a read-only look at the ledger (undefined when it cannot be read).
+  const headroomMicro = (): number | undefined => {
+    try {
+      const seen = ledger?.inspect();
+      return seen?.state === "ok" ? toMicro(seen.view.remainingTodayUsd) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   // Fail-closed latch. Set when a paid call showed the ledger cannot be trusted: it refused to admit a call, or it could not record a
   // call's outcome (billed answer, failed call, unreadable body, timeout). While it is set NO paid call is admitted (unavailable()),
   // and status says so. Nothing in this process clears it: not polling status, not a later call (none is made), not time. The way out is
@@ -91,7 +129,7 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     // A limit in force is never shortened by a later report; a provider reset replaces an estimate.
     if (limit && limit.until > t && next.until <= limit.until && !(limit.estimated && !next.estimated)) return;
     // A new window (no limit in force before): evidence from an earlier window says nothing about the fallback now.
-    if (!limit || limit.until <= t) lastCall = undefined;
+    if (!limit || limit.until <= t) resetEvidence();
     limit = next;
     recoveredAt = undefined;
   };
@@ -110,6 +148,9 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
 
   const viaFallback = async (cause: ProviderError | undefined, input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], paidOk = true, rounds?: ToolRounds): Promise<Step> => {
     const l = limit!;
+    // The window and start order of this call, taken before anything is awaited.
+    const g = gen;
+    const seq = ++started;
     const stand = cause ?? new ProviderError(l.kind, `${why(l)}.`, l.estimated ? undefined : iso(l.until));
     // Background callers never spend the paid fallback: they get the limit as it is.
     if (!paidOk) throw stand;
@@ -129,22 +170,33 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     try {
       paid = await client!.step(input, told, notes, tools, rounds);
     } catch (err) {
-      lastFallbackError = err instanceof Error ? err.message : String(err);
-      // Any failed paid attempt (caps or ledger refusal, provider, network, timeout) is evidence the fallback is not answering now.
-      lastCall = { ok: false, at: iso(now()) };
+      const message = err instanceof Error ? err.message : String(err);
       if (err instanceof SpendError) {
         // "ledger": it could not be read or written. "busy" (another process holds the lock) and the caps refused this one call before
         // anything was charged or sent: nothing is uncertain, so nothing latches.
         if (err.code === "ledger") latch("the spend ledger refused a paid call");
+        // Admission refusals that sent nothing and say nothing about the route: shown in the detail, not recorded as evidence. One
+        // "busy" is a lock collision; a cap refusal while a request of a size that already succeeded in this window still fits is
+        // about this request's size. Everything else (a repeated "busy", a cap refusal with no smaller request known to fit, a
+        // ledger fault) is evidence that no reply is known to work.
+        const cap = err.code === "daily_cap" || err.code === "monthly_cap" || err.code === "total_cap";
+        const room = cap && fitsMicro !== undefined ? headroomMicro() : undefined;
+        const notEvidence = g === gen && ((err.code === "busy" && busyStreak === 0) || (cap && fitsMicro !== undefined && room !== undefined && room >= fitsMicro));
+        if (notEvidence) {
+          lastFallbackError = message;
+          if (err.code === "busy") busyStreak++;
+        } else record(g, seq, false, message);
         throw augment(stand, err.message, []);
       }
+      // A provider, network or timeout failure is evidence the fallback is not answering now.
+      record(g, seq, false, message);
       // A failed paid call whose outcome the ledger could not record is as uncertain as a billed answer that could not be recorded.
       const unrecorded = err instanceof ProviderError ? (err.accounting ?? []) : [];
       if (unrecorded.length) latch("the ledger could not record the outcome of a paid call");
-      throw augment(stand, err instanceof ProviderError ? err.base : lastFallbackError, unrecorded);
+      throw augment(stand, err instanceof ProviderError ? err.base : message, unrecorded);
     }
-    lastFallbackError = undefined;
-    lastCall = { ok: true, at: iso(now()) };
+    record(g, seq, true);
+    if (g === gen && paid.reservedMicro !== undefined) fitsMicro = Math.min(fitsMicro ?? paid.reservedMicro, paid.reservedMicro);
     // A billed answer whose ledger write failed is returned (never discarded), but the ledger is then not trustworthy.
     if (paid.accounting?.length) latch("the ledger could not record a paid call");
     lastUse = { at: iso(now()), ...(paid.costUsd !== undefined ? { costUsd: paid.costUsd } : {}) };
@@ -162,12 +214,14 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   // One model turn: the primary unless its limit is still in force.
   const turn = async (input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], viaPrimary: () => Promise<Step>, paidOk = true, rounds?: ToolRounds): Promise<Step> => {
     if (active()) return viaFallback(undefined, input, limits, notes, tools, paidOk, rounds);
+    const g = gen;
     try {
       const step = await viaPrimary();
-      if (limit) {
-        // The pause or reset has passed and the primary answered: only now is it recovered.
+      // The pause or reset has passed and the primary answered: only now is it recovered. A primary call that started before the
+      // current window began (a limit reported while it was in flight) does not end that window.
+      if (limit && g === gen) {
         limit = undefined;
-        lastCall = undefined;
+        resetEvidence();
         recoveredAt = iso(now());
       }
       return step;
@@ -311,13 +365,19 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
         //   down, available false: no paid call can be admitted, or the latest one in this window failed. Neither model replies.
         //   degraded, available true: the latest paid call in this window succeeded. Replies come from the fallback.
         //   degraded, available null: usable, but not tried yet in this window. A configured fallback is not evidence.
-        // After the limit time and before a primary call succeeds: degraded and available as the primary's own "not confirmed"
-        // (amber), since the next call goes to the primary and the fallback still takes over if it is limited again.
+        // After the limit time and before a primary call succeeds the next call goes to the primary, so the primary's own state
+        // decides. Live or degraded: degraded and available as the primary's own "not confirmed" (amber); the fallback still takes
+        // over if it is limited again. Down (for example signed out, or every call since the reset failed with a non-limit error,
+        // which the fallback never answers) or mock: that state, available false, red. Anything else: that state, not known.
+        const primaryUp = base.state === "live" || base.state === "degraded";
+        const primaryOff = base.state === "down" || base.state === "mock";
         const answering = !passed && !off && callWord === "succeeded";
-        const state = passed ? "degraded" : off || failed ? "down" : "degraded";
+        const state = passed ? (primaryUp ? "degraded" : base.state) : off || failed ? "down" : "degraded";
         const usableText = `Replies come from OpenRouter ${client?.model} (fallback, paid; same tools and confirmations as ChatGPT; no photos) until then; ChatGPT is not called.`;
         const text = passed
-          ? `The ${why(l)} has passed. ORBIT will try ChatGPT on the next call; it is not confirmed recovered until one succeeds.`
+          ? primaryUp
+            ? `The ${why(l)} has passed. ORBIT will try ChatGPT on the next call; it is not confirmed recovered until one succeeds.`
+            : `The ${why(l)} has passed, so replies go to ChatGPT again, and ChatGPT is ${base.state}: ${base.detail} The OpenRouter fallback answers only ChatGPT usage or rate limits, so it does not answer for this.`
           : off
             ? `${why(l)}. ${paid.off ?? "No fallback is available"}, so replies fail until then.`
             : failed
@@ -326,7 +386,11 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
                 ? `${why(l)}. ${usableText}`
                 : `${why(l)}. The OpenRouter fallback (${client?.model}) is configured but has not been called since the limit began, so whether it answers is not known. ${usableText}`;
         const availability: ModelAvailability = passed
-          ? { available: true, via: "primary", reason: "ChatGPT's limit has passed; it is expected to answer but not confirmed until a call succeeds." }
+          ? primaryUp
+            ? { available: true, via: "primary", reason: "ChatGPT's limit has passed; it is expected to answer but not confirmed until a call succeeds." }
+            : primaryOff
+              ? { available: false, via: "none", reason: base.state === "mock" ? "The model is a mock: its answers are not real." : "ChatGPT's limit has passed but ChatGPT is down for another reason, which the OpenRouter fallback does not answer: no reply can come from either model." }
+              : { available: null, via: "unknown", reason: "ChatGPT's limit has passed and its own state could not be read, so whether a model can reply is not known." }
           : off
             ? { available: false, via: "none", reason: `ChatGPT is limited and ${(paid.off ?? "no fallback is available").replace(/^The /, "the ")}: no reply can come from either model.` }
             : failed
