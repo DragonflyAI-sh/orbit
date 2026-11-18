@@ -252,8 +252,13 @@ test("a patch longer than one result is read in chunks that join back to the exa
   }
   assert.equal(text, patch);
   assert.ok(chunks > 2);
-  await rejects(f, "pr_diff", { ...A, path: "src/big.ts", expectedPatchSha256: "0".repeat(64) }, /patch is different/);
-  await rejects(f, "pr_diff", { ...A, path: "src/big.ts", offset: patch.length + 5 }, /past the end/);
+  // A digest that does not match returns no chunk, and the arguments of a fresh first chunk (it never claims to know why).
+  const changed = await use(f, "pr_diff", { ...A, path: "src/big.ts", expectedPatchSha256: "0".repeat(64) });
+  assert.equal(changed.data, null);
+  assert.ok(!("text" in changed));
+  assert.match(changed.changed, /changed since that digest was read, or the digest did not come from an earlier chunk/);
+  assert.deepEqual(changed.restart, { tool: "pr_diff", arguments: { ...A, path: "src/big.ts", offset: 0, expectedHead: HEAD } });
+  await rejects(f, "pr_diff", { ...A, path: "src/big.ts", offset: patch.length + 5, expectedHead: HEAD, expectedPatchSha256: digest }, /past the end/);
   await rejects(f, "pr_diff", { ...A, path: "src/missing.ts" }, /No changed file named/);
 });
 
@@ -412,7 +417,11 @@ test("pr_text refuses an id from another PR and detects a changed text between c
   assert.equal(v.item.commitRelation, "none");
   const other = fake({ comments: [{ id: 50, user: { login: "rai" }, body: "hi", issue_url: `https://api.github.com/repos/${REPO}/issues/99` }] });
   await rejects(other, "pr_text", { ...A, kind: "issue_comment", id: 50 }, /does not belong to PR #7/);
-  await rejects(f, "pr_text", { ...A, kind: "issue_comment", id: 50, expectedTextSha256: "1".repeat(64) }, /changed since/);
+  const changed = await use(f, "pr_text", { ...A, kind: "issue_comment", id: 50, expectedTextSha256: "1".repeat(64) });
+  assert.equal(changed.data, null);
+  assert.ok(!("body" in changed));
+  assert.match(changed.changed, /changed since that digest was read/);
+  assert.deepEqual(changed.restart, { tool: "pr_text", arguments: { ...A, kind: "issue_comment", id: 50, offset: 0, expectedHead: HEAD } });
   await rejects(f, "pr_text", { ...A, kind: "issue_comment", id: 51 }, /not found/);
   const d = await use(f, "pr_text", { ...A, kind: "description" });
   assert.equal(d.body, "Description.");
@@ -483,15 +492,18 @@ test("a failure log excerpt is bounded, redacted, starts at the error, and is fe
   const big = `##[error]start\n${"e".repeat(7) + " word ".repeat(9000)}`;
   const g = fake({ runById: { 3: run(3, "test", "completed", "failure") }, log: { status: 200, body: big } });
   let off = 0;
+  let next: Record<string, unknown> | undefined;
   let joined = "";
   for (let n = 0; n < 20; n++) {
-    const r = await use(g, "pr_check_log", { ...A, checkId: 3, offset: off });
+    const r: Record<string, any> = await use(g, "pr_check_log", off === 0 ? { ...A, checkId: 3 } : next!);
     joined += r.text;
     if (r.excerpt.nextOffset === null) {
       assert.equal(r.excerpt.cappedAtChars, 20_000);
       break;
     }
     off = r.excerpt.nextOffset;
+    next = r.continuation.next.arguments;
+    assert.equal(next!.offset, off);
   }
   assert.equal(joined.length, 20_000);
 });
@@ -899,7 +911,7 @@ test("a long review posted as several comments verifies each part against its ow
   const t = await use(f, "pr_text", { ...A, kind: "issue_comment", id: 920 });
   assert.equal(t.item.orbitReview.status, "verified");
   assert.ok(t.text.nextOffset !== null);
-  const rest = await use(f, "pr_text", { ...A, kind: "issue_comment", id: 920, offset: t.text.nextOffset, expectedTextSha256: t.text.textSha256 });
+  const rest = await use(f, "pr_text", { ...A, kind: "issue_comment", id: 920, offset: t.text.nextOffset, expectedTextSha256: t.text.textSha256, expectedHead: HEAD });
   assert.equal(rest.item.orbitReview.status, "verified");
 });
 
