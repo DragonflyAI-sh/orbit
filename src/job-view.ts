@@ -51,8 +51,9 @@ export function detailJob(job: Job, health: Health, running?: string) {
   // The dispatch snapshot holds the whole brief; the model gets its shape (the Jobs page shows the text).
   const launch = { ...rest0, ...(snap ? { dispatch: { v: snap.v, at: snap.at, lane: snap.lane, origin: snap.origin, briefChars: snap.brief.chars, briefSha256: snap.brief.sha256 } } : {}) };
   // The full summary is stored on the job and shown on the Jobs page; the model gets its size and state, not 200,000 characters.
-  const { summary, ...rest } = job;
-  return { ...rest, ...(summary ? { summary: { chars: summary.chars, state: summary.state, via: summary.via, at: summary.at } } : {}), ...(job.launch ? { launch } : {}), ...toolCommitFields(job, running), health, dispatch: dispatchView(job), events, eventsOmitted: omitted, eventsNote: omitted ? `${omitted} earlier events left out; ${events.length} of ${job.events.length} shown.` : undefined };
+  const { summary, id, ...rest } = job;
+  // The summary's facts come first (after the id), so they survive when a long event list is cut at the tool-output limit.
+  return { id, ...(summary ? { summary: { chars: summary.chars, state: summary.state, via: summary.via, at: summary.at, readWith: { tool: "job_summary_read", arguments: { id } } } } : {}), ...rest, ...(job.launch ? { launch } : {}), ...toolCommitFields(job, running), health, dispatch: dispatchView(job), events, eventsOmitted: omitted, eventsNote: omitted ? `${omitted} earlier events left out; ${events.length} of ${job.events.length} shown.` : undefined };
 }
 
 // One row for the jobs page: no events or steers, and the latest check-in line with how it arrived.
