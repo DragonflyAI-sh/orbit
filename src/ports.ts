@@ -14,7 +14,8 @@ export type PortStatus = {
   // Optional, model port only, set by the OpenRouter fallback wrapper while the primary's limit is recorded (src/fallback.ts). Additive
   // like `check`: `state` keeps its meaning. `answering` is true only while the limit is in force, the fallback is usable (configured,
   // ledger sound, enough allowance left for the smallest possible call) AND the latest paid fallback call in this limit window
-  // succeeded. It is evidence, not a promise: a larger request can still be refused by the caps, and that refusal turns it false.
+  // succeeded. It is evidence, not a promise: a larger request can still be refused by the caps; that refusal turns it false only when
+  // no request in this window is known to fit (src/fallback.ts, status()). After the limit time it is false.
   fallback?: FallbackRoute;
   // Optional, model port only: whether a real reply can come from some model right now (src/model-availability.ts). Additive like
   // `check`. `/status` always sets it on the model port; the page's overall indicator reads it before `state`. It is about the model,
@@ -29,8 +30,9 @@ export type FallbackRoute = {
   reason: "usage_limit" | "rate_limit";
   until: string;
   estimated: boolean;
-  // Additive. What the latest paid fallback call in this limit window did: "succeeded", "failed" (refused by the caps or the ledger,
-  // a provider or network error), or "none" (no paid call yet in this window). A configured fallback with no call is not evidence.
+  // Additive. What the latest paid fallback call in this limit window did (latest to start among those finished): "succeeded",
+  // "failed" (a provider or network error, a ledger fault, or a cap or lock refusal that counts as evidence; see src/fallback.ts), or
+  // "none" (no paid call yet in this window). A configured fallback with no call is not evidence.
   lastCall?: "succeeded" | "failed" | "none";
 };
 

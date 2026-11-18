@@ -246,7 +246,8 @@ export function toMessages(system: string, input: Item[]): ChatMessage[] {
   return out;
 }
 
-export type PaidStep = Step & { costUsd: number | undefined; model: string };
+// `reservedMicro`: the spend bound this call reserved (micro-USD), so the caller knows the size of a request that was admitted.
+export type PaidStep = Step & { costUsd: number | undefined; model: string; reservedMicro?: number };
 
 export type OpenRouterClient = {
   readonly model: string;
@@ -395,7 +396,7 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
       else if (!NORMAL_FINISH.has(finish)) incomplete.push(`The provider gave an unrecognised finish reason (${sanitize(finish, cfg.key, 40)}), not a normal stop; the reply may be incomplete.`);
       if (full.length > content.length) incomplete.push(`ORBIT shortened the reply to ${MAX_REPLY_CHARS} characters.`);
       if (rawCalls.length > calls.length) incomplete.push(`${rawCalls.length - calls.length} tool call(s) from the model had no id or name and were dropped; nothing was run for them.`);
-      return { text: content, calls, costUsd: cost, model: cfg.model, ...(settleNote.length ? { accounting: settleNote } : {}), ...(incomplete.length ? { incomplete } : {}) };
+      return { text: content, calls, costUsd: cost, model: cfg.model, reservedMicro: bound, ...(settleNote.length ? { accounting: settleNote } : {}), ...(incomplete.length ? { incomplete } : {}) };
     },
 
     async balance() {
