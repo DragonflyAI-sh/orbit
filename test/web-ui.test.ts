@@ -362,7 +362,7 @@ test("navigation is real links to the page's views, nothing invented; the status
   assert.match(server, /return pathname === "\/" \|\| pathname === "\/sessions" \|\|/);
   assert.match(server, /req\.method === "GET" && url\.pathname === "\/status"\)/);
   assert.match(server, /url\.pathname === "\/jobs" && req\.method === "GET"/, "the Jobs view has its owner-only data route");
-  const statusLine = html.match(/<div id="statusline"[^>]*>[\s\S]*?<\/a><\/div>/)?.[0] ?? "";
+  const statusLine = html.match(/<div id="statusline"[^>]*>[\s\S]*?<\/a>(?:<dl id="deployinfo"[\s\S]*?<\/dl>)?<\/div>/)?.[0] ?? "";
   const status = statusLine.match(/<a ([^>]*)>/)?.[1] ?? "";
   assert.match(status, /href="\/status"/);
   assert.match(status, /target="_blank"/);

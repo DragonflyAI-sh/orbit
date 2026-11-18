@@ -50,10 +50,20 @@
   .hctl { display: flex; align-items: center; gap: 4px; margin-left: auto; flex: none; }
   @media (max-width: 560px) { .bar nav { order: 3; flex-basis: 100%; } }
   .ico { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-  #statusline { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; min-width: 0; }
-  #statusline #ports { flex: 1 1 auto; min-width: 0; }
+  #statusline { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; margin-top: 8px; min-width: 0; }
+  #statusline #ports { flex: 1 1 0; min-width: 0; }
   #statusopen { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; border-radius: 8px; color: var(--accent-2); border: 1px solid var(--line); background: var(--card); }
   #statusopen:hover { box-shadow: 0 0 0 2px var(--ring); }
+  /* The running release, under the pills on its own row: a quiet two-column list (labels, then values), aligned whatever the
+     width. Long values wrap inside their column; nothing scrolls sideways. */
+  #deployinfo { flex: 1 0 100%; display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: baseline; gap: 3px 14px;
+                margin: 0; padding-top: 7px; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.5; }
+  #deployinfo dt { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+  #deployinfo dd { margin: 0; min-width: 0; color: var(--fg); overflow-wrap: anywhere; }
+  #deployinfo time { font-variant-numeric: tabular-nums; }
+  #deployinfo code { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .02em; padding: 0 6px;
+                     border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); }
+  #deployinfo .na { color: var(--muted); font-style: italic; }
   #inbox .empty { color: var(--muted); font-size: 13px; }
   #inbox .readerr { color: var(--down); font-size: 13px; }
   .brand img { width: 28px; height: 28px; flex: none; border-radius: 50%; box-shadow: 0 0 0 1px var(--line), 0 0 12px var(--bg-glow); }
@@ -319,7 +329,7 @@
 </style>
 </head>
 <body>
-<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions</a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: not read yet" title="Notifications: not read yet. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">?</span></button><button type="button" id="health" class="bad" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header>
+<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions</a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: not read yet" title="Notifications: not read yet. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">?</span></button><button type="button" id="health" class="bad" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a><dl id="deployinfo" aria-label="Running release"><dt>Deployed</dt><dd id="deployedat"><span class="na">Not read yet</span></dd><dt>Commit</dt><dd id="deploycommit"><span class="na">Not read yet</span></dd></dl></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header>
 <main id="log" hidden></main>
 <div class="latestdock"><button type="button" class="tolatest" id="tolatest" title="Scroll to the latest message" hidden><span aria-hidden="true">↓</span> click to latest</button></div>
 <main id="alog" aria-label="Assistant conversation"></main>
@@ -414,7 +424,8 @@
       const res = await fetch("/status");
       const s = res.ok ? await res.json() : null;
       renderHealth(s);
-      if (!s) return;
+      if (!s) { if (!deployShown) showDeployInfo(null); return; }
+      showDeployInfo(s);
       const box = document.getElementById("ports");
       box.replaceChildren(...s.ports.map((p) => {
         const el = document.createElement("span");
@@ -425,8 +436,85 @@
         el.title = c && typeof c.state === "string" ? `${p.detail}\nStartup check: ${c.state}${c.superseded ? " (newer real result shown above)" : ""}${c.reason ? `: ${c.reason}` : ""}` : p.detail;
         return el;
       }));
-    } catch { renderHealth(null); /* the next refresh tries again */ }
+    } catch { renderHealth(null); if (!deployShown) showDeployInfo(null); /* the next refresh tries again */ }
   }
+  // The deployment rows keep the last release ORBIT reported (like the pills) when a later read fails; before any read
+  // succeeds they say the status could not be read.
+  let deployShown = false;
+  function showDeployInfo(s) {
+    if (s) deployShown = true;
+    renderDeployInfo(document.getElementById("deployedat"), document.getElementById("deploycommit"), deployInfo(s, msgZone()), el);
+  }
+
+  // <deployinfo>
+  // The running release, in the expanded status line: when it was deployed and which commit it is. Both come from GET /status
+  // and nothing else (never the page's clock, a commit date, process start or a file time):
+  //   - Commit: `commit`, the ORBIT_COMMIT the running process was started with. deploy/pull-deploy.sh writes it to that
+  //     release's release.env, so it is the release being served, not the repository's HEAD.
+  //   - Deployed: `deploy.lastDeployed.at`, which pull-deploy.sh records in state/deploy.json once that commit is verified
+  //     serving (a rollback records the release it restored). It is shown only when that record names the running commit;
+  //     a record of any other commit, or a missing or malformed value, shows "Unavailable" with the reason on hover.
+  // The time is absolute, in the owner's configured zone (msgZone, as message times), with the zone's abbreviation; the
+  // weekday, seconds, zone name and UTC time are the secondary detail. The short commit is 7 characters; the full one is the
+  // hover text and part of its accessible name. Tests load this block with the msgtime block.
+  const DEPLOY_AT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
+  const DEPLOY_SHA = /^[0-9a-f]{7,64}$/;
+  // The instant (ms) of an ISO 8601 time with a zone, or null. Every field must be a real calendar value: an impossible date
+  // such as February 30 is refused, not rolled into March.
+  function deployInstant(at) {
+    const m = typeof at === "string" ? at.match(DEPLOY_AT) : null;
+    if (!m) return null;
+    const [y, mo, d, h, mi, sec] = [1, 2, 3, 4, 5, 6].map((i) => Number(m[i] ?? 0));
+    const wall = Date.UTC(y, mo - 1, d, h, mi, sec);
+    const back = new Date(wall);
+    if (!Number.isFinite(wall) || back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d || back.getUTCHours() !== h || back.getUTCMinutes() !== mi || back.getUTCSeconds() !== sec) return null;
+    const oh = Number(m[9] ?? 0), om = Number(m[10] ?? 0);
+    if (oh > 23 || om > 59) return null;
+    const ms = wall + Number(`0.${m[7] ?? 0}`) * 1000 - (m[8] === "-" ? -1 : 1) * (oh * 60 + om) * 60000;
+    return Number.isFinite(ms) ? Math.floor(ms) : null;
+  }
+  // { iso, label, full } for a valid deploy time, or null. label: "Nov 17, 2026, 2:04 PM PST".
+  function deployTime(at, zone) {
+    const ms = deployInstant(at);
+    if (ms === null || !msgZoneOk(zone)) return null;
+    const p = msgParts(ms, zone);
+    const iso = new Date(ms).toISOString();
+    return { iso, label: `${p.month.slice(0, 3)} ${p.day}, ${p.year}, ${p.hour}:${p.minute} ${p.dayPeriod} ${p.timeZoneName}`, full: `${p.weekday}, ${p.month} ${p.day}, ${p.year} at ${p.hour}:${p.minute}:${p.second} ${p.dayPeriod} ${p.timeZoneName} (${zone}) · ${iso.replace(/\.000Z$/, "Z")}` };
+  }
+  // { short, full } for a git commit id (7 to 64 hex characters, either case), or null for anything else ("unknown" included).
+  function deployCommit(c) {
+    if (typeof c !== "string" || !DEPLOY_SHA.test(c.toLowerCase())) return null;
+    const full = c.toLowerCase();
+    return { short: full.slice(0, 7), full };
+  }
+  // What the two rows say, from a /status answer (null: it could not be read). Each row is a value or { na: reason }.
+  function deployInfo(s, zone) {
+    if (!s || typeof s !== "object") {
+      const na = "ORBIT's status could not be read.";
+      return { deployed: { na }, commit: { na } };
+    }
+    const commit = deployCommit(s.commit);
+    if (!commit) return { commit: { na: "ORBIT is not running a recorded release, so its commit is not known." }, deployed: { na: "The running release's commit is not known, so no deploy can be matched to it." } };
+    const rec = s.deploy && typeof s.deploy === "object" ? s.deploy.lastDeployed : null;
+    if (!rec || typeof rec !== "object") return { commit, deployed: { na: "No deploy is recorded for the running release." } };
+    const recCommit = deployCommit(rec.commit);
+    if (!recCommit || recCommit.full !== commit.full) {
+      return { commit, deployed: { na: recCommit ? `The last recorded deploy is of ${recCommit.short}, not the running release, so its time is not shown.` : "The deploy record names no valid commit, so its time is not shown." } };
+    }
+    const deployed = deployTime(rec.at, zone);
+    return { commit, deployed: deployed || { na: "The deploy record has no valid time." } };
+  }
+  function renderDeployInfo(atBox, commitBox, info, mk) {
+    const na = (reason) => mk("span", { className: "na", title: reason, textContent: "Unavailable" });
+    const d = info.deployed;
+    atBox.replaceChildren(d.na ? na(d.na) : mk("time", { dateTime: d.iso, title: d.full, textContent: d.label }));
+    const c = info.commit;
+    // As the Jobs view's tool-commit badge: the full commit is the hover text and part of the accessible name.
+    const code = c.na ? null : mk("code", { title: c.full, textContent: c.short });
+    if (code) { code.setAttribute("role", "note"); code.setAttribute("aria-label", `${c.short} (full commit ${c.full})`); }
+    commitBox.replaceChildren(code || na(c.na));
+  }
+  // </deployinfo>
 
   // <status-dot>
   // The overall status from /status: green ("ok") only when there is at least one entry and every entry's state is exactly

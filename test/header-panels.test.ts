@@ -200,7 +200,7 @@ test("browser: a collapsed status line keeps updating, and the indicator keeps i
   assert.deepEqual(await page.$$eval("#ports .pill", (ps: HTMLElement[]) => ps.map((p) => `${p.className}|${p.textContent}`)), ["pill live|model: live", "pill degraded|memory: degraded"], "pills current while hidden");
   assert.match(await page.getAttribute("#health", "aria-label"), /Overall status: 1 not live\. Not all live\. memory: degraded\./);
   await page.click("#health");
-  assert.equal(await page.textContent("#statusline"), "model: livememory: degraded");
+  assert.equal(await page.textContent("#ports"), "model: livememory: degraded");
 });
 
 test("browser: the notification count is every undismissed note, not just the few listed, and follows arrivals and dismissals", { skip }, async () => {
