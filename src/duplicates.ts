@@ -1,3 +1,4 @@
+import { redactText } from "./job-inputs.ts";
 import type { ChatTool, Proposals } from "./agent.ts";
 import type { Job } from "./jobs.ts";
 import type { DuplicateJob } from "./threads.ts";
@@ -15,9 +16,10 @@ export const THRESHOLD = 0.7;
 export const MIN_WORDS = 8;
 export const WORDS_KEPT = 300;
 
+// The brief is redacted first (src/job-inputs.ts): these words are stored on the job, and a pasted credential must not be.
 export function briefWords(brief: string): string {
   const seen = new Set<string>();
-  for (const w of brief.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []) {
+  for (const w of redactText(brief).text.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []) {
     seen.add(w);
     if (seen.size >= WORDS_KEPT) break;
   }

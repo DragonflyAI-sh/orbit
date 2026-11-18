@@ -1845,7 +1845,7 @@
       el("label", { className: "sr", htmlFor: "jobsearch", textContent: "Search jobs" }), search,
       el("div", { className: "row" }, state.s, health.s, lane.s, kind.s, routine.s, el("label", { className: "chk" }, attention, " Needs attention"), clear));
     const proposals = el("div", { className: "jprops" });
-    const status = el("div", { className: "meta", role: "status", ariaLive: "polite" });
+    const status = el("div", { className: "meta jstatus", role: "status", ariaLive: "polite" });
     const results = el("ul", { className: "jlist", ariaLabel: "Jobs" });
     const prev = el("button", { type: "button", className: "mini", textContent: "← Newer" });
     const next = el("button", { type: "button", className: "mini", textContent: "Older →" });
@@ -1926,11 +1926,10 @@
   function buildDetailShell(id) {
     const overview = el("div", { className: "card jover" });
     const s = { links: section("links", "Links & artifacts"), inputs: section("inputs", "Inputs sent to Claude"), activity: section("activity", "Activity"), results: section("results", "Results & review") };
-    const older = el("div", { className: "jolder" });
     const root = el("article", { className: "jdetail", ariaLabel: `Job ${id}` },
       el("a", { className: "back", href: "/#jobs", textContent: "← All jobs" }),
       el("h2", { textContent: "Overview" }), overview, el("h2", { textContent: "Steer" }), steerBox(id), s.links.d, s.inputs.d, s.activity.d, s.results.d);
-    return { id, root, overview, s, older: [], olderNext: undefined, olderInit: false };
+    return { id, root, overview, s, known: new Map() };
   }
   const dl = (pairs) => el("dl", { className: "jdl" }, ...pairs.filter(Boolean).flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, ...(Array.isArray(v) ? v : [v]))]));
 
@@ -2052,10 +2051,13 @@
   function activityParts(d, view) {
     const t = d.timeline, page = t.events, id = d.id;
     const out = [el("h3", { textContent: "Key times" }), el("ul", { className: "times" }, ...t.keyTimes.map((k) => el("li", {}, when(k.at), el("span", { textContent: ` ${k.what}` }))))];
-    const seen = new Set(page.events.map((e) => e.seq));
-    const events = [...page.events, ...view.older.filter((e) => !seen.has(e.seq))].sort((a, b) => b.seq - a.seq);
-    const more = view.olderInit ? view.olderNext : page.next;
-    const left = events.length ? events[events.length - 1].seq - (page.dropped ?? 0) - 1 : 0;
+    // Every event this view has shown stays (by sequence number): newer pages add to it, Load older extends it back.
+    for (const e of page.events) view.known.set(e.seq, e);
+    const events = [...view.known.values()].sort((a, b) => b.seq - a.seq);
+    const firstRetained = (page.dropped ?? 0) + 1;
+    const oldest = events.length ? events[events.length - 1].seq : null;
+    const more = oldest !== null && oldest > firstRetained ? oldest : null;
+    const left = more ? more - firstRetained : 0;
     out.push(el("h3", { textContent: `Events (${page.retained} retained, newest first)` }));
     if (page.note) out.push(note(page.note, "meta warnline"));
     out.push(events.length ? el("div", { className: "card evs" }, ...events.map((e) => eventEl(e, id))) : note("No events yet."));
@@ -2067,14 +2069,14 @@
         try {
           const r = await fetch(`/jobs/${encodeURIComponent(id)}/events?before=${more}`);
           const p = await r.json();
-          if (r.ok && jv.detail === view) { view.older.push(...p.events); view.olderNext = p.next; view.olderInit = true; fillActivity(view); }
+          if (r.ok && jv.detail === view) { for (const e of p.events) view.known.set(e.seq, e); fillActivity(view); }
         } finally { b.disabled = false; }
       });
       out.push(b);
     } else if (events.length) out.push(note("This is the oldest retained event."));
     return out;
   }
-  function fillActivity(view) { patch(view.s.activity.body, [view.data.timeline, view.older.map((e) => e.seq), view.olderNext], () => activityParts(view.data, view)); }
+  function fillActivity(view) { patch(view.s.activity.body, [view.data.timeline, [...view.known.keys()]], () => activityParts(view.data, view)); }
 
   function resultParts(d) {
     const r = d.results, id = d.id, out = [];
@@ -2137,7 +2139,8 @@
     changed = patch(v.overview, d.overview, () => overviewParts(d)) || changed;
     changed = patch(v.s.links.body, d.links, () => linkParts(d)) || changed;
     changed = patch(v.s.inputs.body, d.inputs, () => inputParts(d)) || changed;
-    changed = patch(v.s.activity.body, [d.timeline, v.older.map((e) => e.seq), v.olderNext], () => activityParts(d, v)) || changed;
+    for (const e of d.timeline.events.events) v.known.set(e.seq, e);
+    changed = patch(v.s.activity.body, [d.timeline, [...v.known.keys()]], () => activityParts(d, v)) || changed;
     changed = patch(v.s.results.body, d.results, () => resultParts(d)) || changed;
     relabelJobTimes();
   }
