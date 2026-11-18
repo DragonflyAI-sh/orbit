@@ -5,6 +5,7 @@ import type { Identify } from "./identity.ts";
 import { withAvailability } from "./model-availability.ts";
 import { jobLauncher } from "./job-launch.ts";
 import { dispatchEvidence } from "./launch-evidence.ts";
+import { launchReconciliations, ReconcileError, reconFile, type LaunchReconciliations } from "./launch-reconciliation.ts";
 import { researchStore } from "./research.ts";
 import type { ResearchLane, ResearchStore, ResearchTool } from "./research.ts";
 import { researchTools, watchResearchVault, withLaneGuard } from "./research-tools.ts";
@@ -132,6 +133,8 @@ export type Deps = {
   assistantDir?: string;
   // Work sessions and run links (src/work-sessions.ts, docs/adr/0002-work-sessions.md). Absent means memory only, which a restart empties.
   workSessions?: WorkSessions;
+  // The owner's launch reconciliation log (src/launch-reconciliation.ts, <state>/launch-reconciliations.json). Absent means memory only.
+  reconciliations?: LaunchReconciliations;
   // Private photo attachments (src/attachments.ts, docs/photos.md), kept in <state>/attachments. Absent means memory only.
   attachments?: Attachments;
   // Saved photo observations (src/photo-observations.ts, docs/photo-recall.md), kept in <state>/photo-observations. Absent means memory only.
@@ -226,6 +229,7 @@ export function buildServer({
   threads = threadStore(undefined),
   assistantDir,
   workSessions: workArg,
+  reconciliations: reconArg,
   attachments = attachmentStore(undefined),
   photoObservations = observationStore(undefined),
   photoSemantic,
@@ -266,7 +270,16 @@ export function buildServer({
       detail: `${st.detail} ${ready ? `Launches through Routines: ${names.join(", ")}.` : `Cannot launch yet: ${control ? "" : "no orbit-work GitHub credential. "}${names.length ? "" : "no Routine configured."}`} ${researchStatus()}`.trim(),
     };
   };
-  const withHealth = (job: Job) => ({ ...job, toolCommit: job.toolCommit ?? "unknown", toolCommitStatus: toolCommitStatus(job.toolCommit, commit), health: jobs!.health(job), dispatch: dispatchEvidence(job) });
+  // The owner's launch reconciliation log: append-only, beside the job store; it never changes a job record.
+  const recon = reconArg ?? launchReconciliations(reconFile(undefined), now, { notify });
+  const reconView = (job: Job) => {
+    try {
+      return recon.view(job);
+    } catch (e) {
+      return { state: "unavailable" as const, detail: e instanceof Error ? e.message.slice(0, 200) : "unreadable" };
+    }
+  };
+  const withHealth = (job: Job) => ({ ...job, toolCommit: job.toolCommit ?? "unknown", toolCommitStatus: toolCommitStatus(job.toolCommit, commit), health: jobs!.health(job), dispatch: dispatchEvidence(job), reconciliation: reconView(job) });
   const launchable = () => ({
     routines: [...routines.keys()],
     problem: !jobs ? "jobs are not enabled" : !control ? "no orbit-work GitHub credential is installed" : routines.size ? undefined : "no Routine is configured",
@@ -393,6 +406,9 @@ export function buildServer({
   } catch (e) {
     console.log(JSON.stringify({ at: clock().toISOString(), event: "work_reconcile_failed", detail: e instanceof Error ? e.message.slice(0, 200) : "error" }));
   }
+  // Runner events that arrived after an owner reconciliation (while ORBIT was down, too) are logged and reported once. main.ts repeats this
+  // on its tick. Never changes a job.
+  if (jobs) for (const l of recon.observe(jobs)) console.log(JSON.stringify({ at: clock().toISOString(), event: "launch_reconciliation_late_runner", job: l.job, after: l.after, contradicts: l.contradicts }));
   const chunkView = (c: Chunk) => ({
     seq: c.seq,
     id: c.id,
@@ -1031,7 +1047,7 @@ export function buildServer({
         let plan;
         try {
           work.check();
-          plan = work.plan(input.attach, origin, jobsReader);
+          plan = work.plan(input.attach, origin, jobsReader, (j) => recon.view(j));
         } catch (e) {
           if (e instanceof WorkError) return send(res, e.code, { error: e.message });
           throw e;
@@ -1129,7 +1145,7 @@ export function buildServer({
       // The Jobs page's detail: sections, links, inputs and the newest page of events (src/job-detail.ts). Without `view` the raw record.
       if (url.searchParams.get("view") === "detail") {
         const openSteers = proposals.list().filter((p): p is typeof p & OpenSteerProposal => p.kind === "job_steer" && p.job === job.id);
-        return send(res, 200, jobDetail(job, jobs.health(job), { all: jobs.all(), routineRepo: job.launch ? research?.routineRepos?.get(job.launch.routine) : undefined, running: commit }, openSteers));
+        return send(res, 200, { ...jobDetail(job, jobs.health(job), { all: jobs.all(), routineRepo: job.launch ? research?.routineRepos?.get(job.launch.routine) : undefined, running: commit }, openSteers), reconciliation: reconView(job) });
       }
       return send(res, 200, withHealth(job));
     }
@@ -1142,6 +1158,37 @@ export function buildServer({
       const limit = Number(url.searchParams.get("limit") ?? EVENTS_DEFAULT);
       if (before !== null && !/^\d{1,9}$/.test(before)) return send(res, 400, { error: "before is an event sequence number." });
       return send(res, 200, eventsPage(job, before === null ? undefined : Number(before), Number.isInteger(limit) ? limit : EVENTS_DEFAULT));
+    }
+    // Owner reconciliation of an unresolved launch (src/launch-reconciliation.ts, docs/reviews/launch-reconciliation.md section 9).
+    // GET: the reading and the full history. POST without `confirm`: a preview (what the entry means and does not mean) and its digest;
+    // nothing is written. POST with `confirm: <digest>`: the entry is appended. Never changes the job record; never launches, retries,
+    // cancels or calls the provider. The model has no tool for this.
+    const reconMatch = url.pathname.match(/^\/jobs\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})\/reconcile$/);
+    if (jobs && reconMatch && (req.method === "GET" || req.method === "POST")) {
+      if (!(await owned("jobs", req.method === "GET" ? "get" : "reconcile"))) return;
+      const id = reconMatch[1];
+      const job = jobs.get(id);
+      try {
+        if (req.method === "GET") {
+          // A job that left the job store (it keeps the newest 200) still has its history here.
+          if (!job) {
+            const entries = recon.entries(id);
+            return entries.length ? send(res, 200, { job: id, inJobStore: false, entries }) : send(res, 404, { error: "No job with that id." });
+          }
+          return send(res, 200, { job: id, inJobStore: true, dispatch: dispatchEvidence(job), reconciliation: recon.view(job) });
+        }
+        if (!job) return send(res, 404, { error: "No job with that id. Nothing was recorded." });
+        const input = await body();
+        if (!input) return;
+        const { confirm, ...request } = input;
+        if (confirm === undefined) return send(res, 200, { preview: recon.preview(job, request), confirmWith: "POST the same body again with confirm set to preview.digest" });
+        const done = recon.confirm(job, request, confirm);
+        audit("jobs", `reconcile:${done.entry.kind}`, { allow: true, reason: `owner ${done.repeated ? "repeated" : "confirmed"} reconciliation entry ${done.entry.seq} for ${id} (digest ${done.entry.digest.slice(0, 12)})` });
+        return send(res, done.repeated ? 200 : 201, { entry: done.entry, repeated: done.repeated, reconciliation: recon.view(job) });
+      } catch (e) {
+        if (e instanceof ReconcileError) return send(res, e.code, { error: e.message });
+        throw e;
+      }
     }
     if (jobs && jobMatch && req.method === "POST" && jobMatch[2] === "/steer") {
       if (!(await owned("jobs", "steer"))) return;

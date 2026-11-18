@@ -275,3 +275,108 @@ condition, removed in passing). Note 5 (views using the wall clock) no longer ma
 Tests: `test/launch-outcome.test.ts` (restart interruption, in-process dispatch, unknown outcomes, explicit rejection, `failedAt` with
 runner events, late runner events, terminal runner evidence, alert transitions and deduplication, legacy alert records), all synthetic.
 
+
+## 9. Owner reconciliation workflow
+
+Recovery job `orbit-202611180449-2dwu` stopped at its duplicate-risk gate: ORBIT's record cannot say whether the 01:18Z fire created a
+session, and a cloud runner cannot read the provider's run history. Main had no way to write down what the owner finds there, so
+the launch could only stay `dispatch-unknown`. This section adds that path (job `orbit-202611180515-0gpb`). **It does not settle the historical
+launch.** Only the owner's look at the provider's record, recorded through this path on the deployed ORBIT, can do that.
+
+### What it is
+
+`src/launch-reconciliation.ts`: an append-only log, `<state>/launch-reconciliations.json`, kept beside the job store. It never changes
+the job record: the launch, events and `dispatch` reading stay exactly as they were, and each entry also copies what that record held
+when it was confirmed (`basedOn`: launch time, routine, brief commit, session id, dispatch state, outcome, event count).
+
+| Kind (owner) | Means | Needs | Reading | Retry through the work session |
+|---|---|---|---|---|
+| `provider-no-run` | The Routine's run history for a window covering the launch shows no run for this job | `source: routine-run-history`, `checkedAt`, `windowFrom` ≤ launch, `windowTo` ≥ launch + 60 s | `provider-confirmed-no-run` | allowed (own confirmation) |
+| `provider-session-ended` | The session was found and has ended | `source`, `checkedAt`, `sessionId`, `output: none \| pushed \| unknown` | `provider-confirmed-ended` | allowed only with `output: none` |
+| `provider-session-running` | The session was found and is running, or was not seen to end | `source`, `checkedAt`, `sessionId` | `provider-confirmed-running` | refused |
+| `abandon-tracking` | The owner stops tracking the launch without provider evidence | `reason` only; any evidence field is refused | `tracking-abandoned` | refused |
+
+Every kind needs a `reason` of 10 to 500 characters. ORBIT refuses control characters and anything shaped like a credential, so nothing
+is stored masked. There are no other fields: no logs, no transcripts, no paths, no tokens.
+
+**Gates.**
+
+* **Owner only.** `POST /jobs/<id>/reconcile` and `GET /jobs/<id>/reconcile` are owner routes (`decide("jobs", …)`, audited). The model has
+  no tool for this, so no model-only state change is possible.
+* **Two steps.** A POST without `confirm` returns a preview and writes nothing. The preview has the normalized entry, `basedOn`,
+  `meaning`, `doesNotMean`, `effect` and a `digest`. A POST of the same body with `confirm: <digest>` appends the entry. The digest binds
+  the entry, ORBIT's record as it was read and the number of earlier entries. So a confirmation is single use, and it goes stale (409) if
+  the request, the job record or the log changes in between. A repeat of the confirmation just recorded returns that entry and writes
+  nothing.
+* **Only unresolved launches.** A launch the record already settles (`runner-active`, `runner-ended` or `not-launched`) is refused, as is
+  one this process is still running (`in-flight`). `provider-no-run` is refused when the record shows the provider accepted the fire (a
+  session id, or a 2xx). A named session must match the recorded `launch.sessionId` when there is one. The checked window must cover
+  the launch, and `checkedAt` must be after the launch and not in the future.
+* **Provider evidence is reported, not verified.** The reading's caveat says so, and says the job record is unchanged.
+* **Abandoning is not evidence.** It never claims a cancellation, a non-launch or an ended session. The launch stays unresolved and a
+  retry stays refused. The refusal says that a replacement carrying that residual duplicate risk would need its own explicit owner
+  confirmation of the risk. **ORBIT does not offer one, and this change does not authorize one.**
+* **Late runner events win.** The runner may report after an entry, over the API or found in git. Its events are recorded as always,
+  and the reading becomes `runner-evidence-after-reconciliation`, with `contradicted: true` when the entry said no run or ended. ORBIT
+  appends its own `late-runner-evidence` entry once per owner entry, at start and on every 30-second tick (`observe`), and notifies the
+  owner. The notification is urgent when the runner contradicts the entry. Nothing is removed from the log. After that, the job's own
+  events decide: further owner entries are refused, and a retry is refused while the runner is active.
+* **Fail closed.** An unreadable or newer-version log is left as it is and makes the route answer 503. If the log cannot be read, the
+  retry gate refuses with 503. A failed write records nothing. A job's history holds at most 20 owner entries, and when it is full new
+  entries are refused (409); old ones are never dropped.
+* **Nothing external.** Nothing here launches, retries, cancels, steers or calls the provider. The retry gate
+  (`src/work-sessions.ts` `plan()`) only *allows* the owner's separately confirmed retry. Nothing relaunches automatically.
+
+The reading is served as `reconciliation` on `GET /jobs/<id>`, on `GET /jobs/<id>?view=detail`, and with the full history on
+`GET /jobs/<id>/reconcile`. That route still answers for a job that has left the job store, which keeps only the newest 200.
+`jobs_list` rows, `job_status` and the `dispatch` reading are unchanged.
+
+Tests: `test/launch-reconciliation.test.ts` (synthetic). It covers owner-only routes; preview, digest, stale and repeated
+confirmations; unresolved versus definitive, runner-reported and in-flight launches; provider-no-run against an accepted fire, and a
+session mismatch; abandonment without cancellation claims and with the job record unchanged byte for byte; late events with and without
+contradiction, logged and notified once; restart persistence; unreadable and newer files left untouched; a failed write; full history;
+bounded, secret-free input; and the retry gate for every kind, including a late event after `provider-no-run` and an unreadable log.
+
+### Owner steps for `orbit-202611180118-hcey`
+
+These steps are reads plus one owner-confirmed log entry. Do not resume, message or cancel any session. Do not relaunch from the old record,
+and do not edit `jobs-cloud.json` or `work-sessions.json`. Run the steps from a device on the tailnet signed in as the owner, after this
+change is deployed. `$ORBIT` is ORBIT's tailnet address.
+
+1. **Read the record.**
+   `curl -sS $ORBIT/jobs/orbit-202611180118-hcey/reconcile`
+   Note `dispatch.state` and whether `launch.sessionId` is set. `GET /jobs/orbit-202611180118-hcey` returns the record itself.
+   Expected: `dispatch-unknown`, no session id, `reconciliation.state: none`.
+2. **Look at the provider's record** (the owner checklist above, step 5). If there is a session id, open that session read-only.
+   If not, open the `orbit` Routine's run history and look for a run started from 2026-11-18T01:18Z to 01:19Z whose first message begins
+   `Job id: orbit-202611180118-hcey`. Do not copy the token line anywhere.
+3. **Write the body for what you found**, as `body.json`. Use your own times and wording; never paste logs or tokens.
+   * No run in the window:
+     `{"kind":"provider-no-run","source":"routine-run-history","checkedAt":"<now, UTC>","windowFrom":"2026-11-18T01:18:00Z","windowTo":"2026-11-18T01:20:00Z","reason":"<what you checked>"}`
+   * A session that has ended:
+     `{"kind":"provider-session-ended","source":"session-page","checkedAt":"<now, UTC>","sessionId":"<id as shown>","output":"none|pushed|unknown","reason":"<where it stopped, what it pushed>"}`
+   * A session still running, or not seen to end:
+     `{"kind":"provider-session-running","source":"session-page","checkedAt":"<now, UTC>","sessionId":"<id as shown>","reason":"…"}`
+   * Nothing can be read (run history gone), and you decide to stop tracking:
+     `{"kind":"abandon-tracking","reason":"<why>"}`. This leaves the launch unresolved, and a retry stays refused.
+4. **Preview:** `curl -sS -X POST $ORBIT/jobs/orbit-202611180118-hcey/reconcile -H 'content-type: application/json' -d @body.json`.
+   Read `meaning`, `doesNotMean` and `effect`. If anything is wrong, fix the body and preview again.
+5. **Confirm:** add `"confirm":"<preview.digest>"` to the same body and POST it again. Expect 201 and the new `reconciliation`.
+6. **Then, by result:**
+   * `provider-confirmed-no-run`, or `provider-confirmed-ended` with output `none`: the inventory work may be launched once, as a new,
+     separately confirmed launch whose brief states this result. The gates in `docs/reviews/host-inventory-handoff.md` still apply.
+   * `provider-confirmed-ended` with output `pushed` or `unknown`: recover and review what that session did before running anything
+     again.
+   * `provider-confirmed-running`: wait. The runner reports in if it can.
+   * `tracking-abandoned`: the duplicate-risk gate stays unresolved, and ORBIT has no path for a replacement that carries that risk. Any
+     such replacement needs an explicit owner decision made knowing a duplicate is possible, plus a separate design for confirming it.
+
+### Limitations
+
+* The provider evidence is the owner's report. ORBIT cannot check it, because no read-only provider interface is available to it or to a
+  runner, so the reading always says it is unverified.
+* The work-session link of the original confirmation keeps its recorded state (`ambiguous`). The reconciliation is shown beside it and
+  does not rewrite it.
+* The not-started alert, the work-session views and the Jobs page do not show a reconciliation yet. The JSON job routes and the retry gate do (the detail route carries it, but the page does not render it).
+* The shutdown handler still does not wait for launches in flight (F4), so new W3 cases remain possible. This change only gives them an
+  honest way to be closed.

@@ -37,6 +37,7 @@ import { attachmentStore } from "./attachments.ts";
 import { observationStore } from "./photo-observations.ts";
 import { embeddingBudget, embeddingsConfig, embeddingsStatus, openaiEmbedder } from "./embeddings.ts";
 import { workFile, workSessions } from "./work-sessions.ts";
+import { launchReconciliations, reconFile } from "./launch-reconciliation.ts";
 import { join } from "node:path";
 import { watcher } from "./watch.ts";
 import { githubRepoStatus, toolbox } from "./tools.ts";
@@ -150,7 +151,11 @@ if (ingressPort) {
 const runs = runner(jsonStore(stateDir, "runs", []), [memoryReport(memory), modelTask(model), toolCall(tools)], notify);
 runs.recover();
 const schedule = scheduler(jsonStore(stateDir, "jobs", []), notify, () => new Date(), (worker, input) => runs.submit(worker, input));
+// The owner's launch reconciliation log: <state>/launch-reconciliations.json (src/launch-reconciliation.ts).
+const reconciliations = launchReconciliations(reconFile(stateDir), () => new Date(), { notify });
 const watchTick = () => {
+  // Runner events that arrive after an owner reconciliation are logged once and reported. Never throws; never changes a job.
+  reconciliations.observe(jobs);
   try {
     watch.tick();
   } catch (err) {
@@ -239,6 +244,7 @@ buildServer({
   smoke,
   // Work sessions and run links: <state>/work-sessions.json (docs/adr/0002-work-sessions.md).
   workSessions: workSessions(workFile(stateDir)),
+  reconciliations,
   vaultEdits,
   configView: config,
   // Read-only PR inspection (owner-only chat tools): the repositories are the ones ORBIT_ROUTINE_REPOS names, the token is orbit.github-orbit-prs.
