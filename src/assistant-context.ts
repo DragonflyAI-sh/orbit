@@ -1,6 +1,7 @@
 import type { Item, Message } from "./model.ts";
 import { buildItems, buildMessages, callFacts, callOutcome, messageChars } from "./thread-context.ts";
 import type { Thread, ThreadMessage } from "./threads.ts";
+import { prChunkFact, prChunkFactOf, prChunkStreams } from "./pr-continuation.ts";
 import { MAX_MESSAGE_CHARS } from "./threads.ts";
 
 // The Assistant's bounded model context (docs/assistant.md). Pure functions: the store (src/assistant-store.ts) decides which
@@ -149,23 +150,30 @@ export function pageStreams(calls: readonly { name: string; arguments: string; o
 // When a turn's calls are omitted (form "calls-omitted", or the whole turn as a placeholder), each paging stream's newest state is
 // still named in the note with what it was reading, so a turn that read many pages (up to MAX_ROUNDS) can still be continued by the
 // next one, and a read it finished is said to be finished. Cursors are copied exactly as the tool returned them.
+// Chunked pull-request reads (pr_text, pr_diff, pr_check_log) are named the same way by their newest chunk: what they read, the head
+// and digest they are pinned to, and the exact arguments of the next chunk, or that the last chunk was read (src/pr-continuation.ts).
+// The chunks' own text is not in the note: a later turn that needs it reads those offsets again with the same pins.
 const pagingNote = (calls: readonly { name: string; arguments: string; output: string }[]): string =>
-  pageStreams(calls)
-    .map((p) => ("cursor" in p.state ? `${p.tool} (${p.identity}) nextCursor: "${p.state.cursor}"` : `${p.tool} (${p.identity}) complete: nextCursor null, no further page`))
-    .join("; ");
+  [
+    ...pageStreams(calls).map((p) => ("cursor" in p.state ? `${p.tool} (${p.identity}) nextCursor: "${p.state.cursor}"` : `${p.tool} (${p.identity}) complete: nextCursor null, no further page`)),
+    ...prChunkStreams(calls).map((s) => prChunkFact(s)),
+  ].join("; ");
 const PAGING_NOTE_INTRO = "Paging state at the end of this turn (newest page of each read; a cursor is kept whole so reading can continue from where it stopped, with the same id or query; a complete read has no cursor to continue from):";
 // Likewise a write or proposal's outcome facts (status, proposal id, commit; thread-context callFacts) are kept whole at the end of a
 // cut output, so a shortened history still says whether something was committed or only proposed, and under which id.
 const cutOutput = (name: string, output: string, seq: number): string => {
   if (output.length <= BOUNDED_OUTPUT_CHARS) return output;
   const page = pageState(name, output);
-  const facts = page ? "" : callFacts({ output });
-  if (!page && !facts) return cut(output, BOUNDED_OUTPUT_CHARS, `the output of ${name}`, seq);
+  const chunk = page ? undefined : prChunkFactOf(name, output, true);
+  const facts = page || chunk ? "" : callFacts({ output });
+  if (!page && !chunk && !facts) return cut(output, BOUNDED_OUTPUT_CHARS, `the output of ${name}`, seq);
   const keep = page
     ? "cursor" in page
       ? `[ORBIT: this page's nextCursor, kept whole so reading can continue from where it stopped] nextCursor: "${page.cursor}"`
       : `[ORBIT: this page's nextCursor, kept from its full result] nextCursor: null (this was the last page: the read is complete)`
-    : `[ORBIT: this call's outcome, kept whole from its full result] ${facts}`;
+    : chunk
+      ? `[ORBIT: this chunk's continuation, kept whole from its full result] ${chunk}`
+      : `[ORBIT: this call's outcome, kept whole from its full result] ${facts}`;
   const tail = `\n${marker(`the output of ${name}`, output.length, BOUNDED_OUTPUT_CHARS, seq)}\n${keep}`;
   return `${output.slice(0, Math.max(0, BOUNDED_OUTPUT_CHARS - tail.length))}${tail}`;
 };

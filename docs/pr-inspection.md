@@ -11,7 +11,7 @@ ORBIT can look at a pull request in detail without leaving chat: the diff, every
 
 ## The tools
 
-All take `repo` (`owner/name`), `pull` (number) and an optional `expectedHead` (a 40-character SHA). Unknown arguments, a non-integer or out-of-range number, a bad SHA or a repository outside the set are rejected before any request.
+All take `repo` (`owner/name`), `pull` (number) and an optional `expectedHead` (a 40-character SHA). Unknown arguments, a non-integer or out-of-range number, a bad SHA or a repository outside the set are rejected before any request. How to call them, and what each argument may be, is in "Calling convention" below.
 
 | Tool | What it returns |
 | --- | --- |
@@ -19,15 +19,38 @@ All take `repo` (`owner/name`), `pull` (number) and an optional `expectedHead` (
 | `pr_files` | Changed files, paged with `start`/`nextStart`: status, additions, deletions, rename source, blob SHA, and per file whether GitHub supplied a patch (`present`, `absent` with the reason, or `truncatedByGitHub`). |
 | `pr_diff` | One file's patch in chunks (`path`, `offset`/`nextOffset`). Chunks join back to the exact patch; `patchSha256` (pass it back as `expectedPatchSha256`) detects a change between chunks. |
 | `pr_checks` | Every check run (including superseded reruns, marked; see below) and commit status on the head: `passed`, `failed`, `queued`, `running`, `skipped`, `neutral`, `cancelled`, `timed_out`, `action_required` and status `error`/`pending` stay separate. Counts, completeness, and an explicit "no checks is not a pass". |
-| `pr_check_log` | A bounded excerpt of one check's failure: for Actions, the job log from 25 lines before the first `##[error]` (or the last 200 lines), redacted, paged by `offset` and capped at 20,000 characters; for other apps, the check's own output. Says if the log is unavailable. |
+| `pr_check_log` | A bounded excerpt of one check's failure: for Actions, the job log from 25 lines before the first `##[error]` (or the last 200 lines), redacted, paged by `offset` (pinned by `expectedExcerptSha256` after the first chunk) and capped at 20,000 characters; for other apps, the check's own output. Says if the log is unavailable. |
 | `pr_discussion` | Every review, conversation comment or inline code comment (`kind`), paged, as compact entries: author, time, commit id, relation to the current head, a preview, the end of the text and any verbatim `Verdict:` lines. |
 | `pr_text` | One body in full, in chunks: the description, a review, a conversation comment or an inline comment. `nextOffset` is `null` only when the whole text has been read. |
+
+## Calling convention
+
+**Schemas.** Each tool has one canonical schema (`parameters`): the arguments that name what is read are required (`repo`, `pull`, and `path`, `checkId` or `kind`), and everything else is optional and simply not in `required`. Every tool is marked `strict` (`ChatTool.strict`), so what a transport sends is:
+
+| Transport | Schema sent | How a model leaves an argument out |
+|---|---|---|
+| Responses API (ChatGPT token sharing, OpenAI API: `responsesTools` in `src/model.ts`) | `strict: true` and `strictSchema(...)`: every property in `required`, each optional one nullable (`["string","null"]`, `["integer","null"]`); the identity arguments stay non-null | `null` |
+| Canonical (OpenRouter fallback, Chat Completions: `parameters` unchanged) | the canonical schema, no `strict` flag | leave it out |
+
+The runtime reads left out and `null` the same everywhere, so the same call works on either transport.
+
+**A first call needs no SHA or digest.** `pr_inspect {repo, pull}` (other arguments null) returns `headSha`. `pr_text {repo, pull, kind, id}` at offset 0 (or null), `pr_diff {repo, pull, path}` and `pr_check_log {repo, pull, checkId}` return their first chunk with its real `textSha256` / `patchSha256` / `excerptSha256`. The description takes no `id` (null or left out; a number is refused, so a wrong kind is never read). Never make up a SHA or digest: a made-up head returns `stale` with no data, a made-up digest returns no chunk.
+
+**Continuing a chunked read.** Every chunk of `pr_text`, `pr_diff` and `pr_check_log` carries `continuation`: `read` (what it reads, with `expectedHead` and the digest), the chunk's `offset`/`end`/`totalChars`, and `next`: the exact `{tool, arguments}` of the next chunk, or `null` when this chunk ends the text. Call `next.arguments` as given. A chunk after the first (`offset > 0`) **must** pass both `expectedHead` and the digest; without them it is refused before any request, so two versions can never be joined by accident. Any offset of the same version can be re-read with the same pins. A text is fully read only when `next` is `null` (`nextOffset: null`); a preview, `wholeTextEnd` or a clipped summary is not the text.
+
+**When the pinned version is gone.** If the head is not `expectedHead` (or moved during the read) the result is `stale: true`; if the content's digest is not the one passed (the comment was edited on the same head, or the digest did not come from this text) the result has `inspection.contentChanged: true` and a `changed` reason that says it cannot tell which. Either way it carries **no chunk** and a `restart`: the `{tool, arguments}` of a fresh first chunk (offset 0, no digest, `expectedHead` the current head; for a non-chunked tool, the same call pinned to the current head). The current digest is not handed out, so a continuation cannot be glued onto a different version; restart from offset 0 and discard the old chunks. A malformed or wrong-typed argument is an error, not a restart.
+
+**Compatibility.** `""` for `expectedHead`, `expectedTextSha256`, `expectedPatchSha256` or `expectedExcerptSha256` is read as "not pinned", because before this contract a provider that requires every property made models fill pins they did not have with `""`. It is accepted only where no pin is needed (a first call); a continuation still needs real pins. Any other non-hex, wrong-length or non-string pin is refused before any request; hex in either case is the same pin. `offset`/`start` null is 0. `id: ""` is refused (it is an integer field).
+
+**Cut outputs keep the continuation.** When a chunk's output is cut, by this reply's tool-result budget (`keptFacts`, `src/tool-result-budget.ts`) or by the Assistant's bounded history (`cutOutput` and the calls-omitted / placeholder paging note, `src/assistant-context.ts`), ORBIT keeps the read's state whole beside the cut: what it reads, its pins, the chunk's span, and either the exact next arguments or "final chunk, nextOffset null"; a cut chunk also says how to read it again (its own offset, same pins). In a calls-omitted turn the note names the newest chunk of each read. Only ORBIT's own `continuation`/`restart` fields are read for this, and each value is checked against its exact form (ids, offsets, SHA, hex digest, a path of at most 300 characters without control characters), so no text from GitHub is lifted into a note (`src/pr-continuation.ts`). History budgets are unchanged.
+
+**Why this exists (root cause of "expectedHead must be a full 40-character commit SHA" for `expectedHead: ""`).** The pr_ tools were sent to the Responses API with optional properties and no `strict` flag. The provider's documented default for function tools is strict, and a strict schema requires every property, so models had to fill `expectedHead` and `expectedTextSha256` with something; the runtime accepted only a real SHA or digest, or absence, and refused `""`. The only way past was a made-up value: a zero SHA came back `stale` with the current head (a usable but wrong bootstrap), and a zero digest can never match, so `pr_text` refused every attempt and a long comment could not be read. The same mismatch was fixed for the photo tools earlier (`docs/photos.md`, "Tool contracts per provider"). What the provider did with the non-strict schema in production was reported from the Assistant, not re-observed here (no live call was made); the fix does not depend on it: the schema is now explicitly strict with nullable absence, and the runtime accepts every absence form a model can send. Tests: `test/pr-tool-contract.test.ts`.
 
 ## Staleness: the head is pinned
 
 Every result's `inspection` block has `repo`, `pull`, `url`, `baseSha`, `headSha`, `expectedHead`, `fetchedAt`, `headCheckedAt`/`headCheckedAfter`, `endpoints` (the GET paths used), `rateLimit` and `stale`.
 
-- The PR is read first. If `expectedHead` is given and the head differs, the result is `stale: true` with **no data**, after a single request.
+- The PR is read first. If `expectedHead` is given and the head differs, the result is `stale: true` with **no data** and a `restart`, after a single request.
 - The PR is read again after the data. If the head moved while reading (including across the pages of a scan), the result is `stale: true` and the data is withheld, never mixed.
 - Reviews and inline comments keep their `commit_id`; `commitRelation` is `head`, `older-commit` or `none`, and `stale` is true for an older commit. **Conversation comments and the description belong to no commit**: they say `commitRelation: "none"` and are never called current or stale.
 - - Superseded reviews are included, with `supersededByLaterReviewFromSameUser` and `supersededByReviewId`. Only a later **APPROVED, CHANGES_REQUESTED or DISMISSED** review by the same user supersedes an earlier review of theirs; a later `COMMENTED` review never does (on GitHub it does not replace a change request). `PENDING` reviews and reviews with no known author never supersede or get superseded. A `DISMISSED` review supersedes earlier ones as the rule is written here; the dismissed review itself is still listed with its own state.

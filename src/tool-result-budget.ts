@@ -1,5 +1,6 @@
 import { pageCursor } from "./assistant-context.ts";
 import { callFacts } from "./thread-context.ts";
+import { prChunkFactOf } from "./pr-continuation.ts";
 
 // The per-reply budget for current-turn tool exchanges (docs/assistant.md, "Tool-result budget"). Shared by every runChat caller:
 // chat threads, the Assistant and the legacy /chat route.
@@ -65,6 +66,9 @@ export function keptFacts(name: string, output: string): string {
   // skip rows the model never saw. So it says so, and says how to get the rest of this page (review of PR #123, finding 1).
   const cursor = pageCursor(name, output);
   if (cursor) parts.push(`nextCursor "${cursor}" (${CUT_CURSOR_NOTE})`);
+  // A chunked pull-request read keeps its continuation (pins and the exact next arguments) whole, and says how to see the cut chunk.
+  const chunk = prChunkFactOf(name, output, true);
+  if (chunk) parts.push(chunk);
   return parts.join(", ");
 }
 
