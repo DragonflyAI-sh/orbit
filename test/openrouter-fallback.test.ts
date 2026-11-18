@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { runChat } from "../src/agent.ts";
 import type { ChatTool } from "../src/agent.ts";
 import { ProviderError } from "../src/chatgpt.ts";
-import { FALLBACK_TOOLS, fallbackModel } from "../src/fallback.ts";
+import { fallbackModel } from "../src/fallback.ts";
 import { replySource } from "../src/model.ts";
 import type { Item, ModelPort, Step, ToolDef } from "../src/model.ts";
 import { openrouterClient, openrouterConfig, sanitize, toMessages } from "../src/openrouter.ts";
@@ -223,7 +223,7 @@ test("fallback answers carry explicit provenance: provider, model, reason, the p
   const st = w.model.status();
   assert.equal(st.state, "degraded");
   assert.match(st.detail, /resets at 2026-11-12T11:30:00.000Z/);
-  assert.match(st.detail, /OpenRouter vendor\/cheap-model \(fallback, paid, restricted tools\)/);
+  assert.match(st.detail, /OpenRouter vendor\/cheap-model \(fallback, paid; same tools and confirmations as ChatGPT; no photos\)/);
   assert.match(st.detail, /Local OpenRouter allowance/);
 });
 
@@ -292,32 +292,40 @@ test("a fallback provider failure is reported together with the original limit, 
 
 // ---- permissions ------------------------------------------------------------------------------------------------------
 
-test("restricted tools are enforced in code: unlisted tools are not offered, and a call to one is refused", async () => {
-  for (const banned of ["notify", "job_steer", "vault_write", "ops_propose_restart_orbit", "ops_propose_config_change", "ops_sys_cancel_reboot", "ops_propose_reboot_host"]) {
-    assert.equal(FALLBACK_TOOLS.has(banned), false, banned);
-  }
-  assert.ok(FALLBACK_TOOLS.has("job_launch") && FALLBACK_TOOLS.has("memory_read") && FALLBACK_TOOLS.has("pr_diff"));
+test("tool parity: the fallback is offered exactly the caller's tools, unchanged, and a call to any of them is returned to the loop", async () => {
+  // The tools the old allowlist withheld, among others: nothing is filtered because the fallback answers.
+  const defs = ["notify", "job_steer", "vault_create_note", "ops_propose_restart_orbit", "ops_propose_config_change", "ops_sys_cancel_reboot", "session_read", "photos_list", "jobs_list"].map(tool);
   const w = world({ script: [usageLimit()], replies: (n) => (n === 0 ? toolAnswer("notify", { text: "hi" }) : answer("x")) });
-  await assert.rejects(ask(w.model, [tool("notify"), tool("jobs_list")]), /does not allow\. Nothing was run/);
-  assert.deepEqual(w.or.requests[0].body.tools.map((t: any) => t.function.name), ["jobs_list"]);
+  const out = await ask(w.model, defs);
+  assert.deepEqual(w.or.requests[0].body.tools.map((t: any) => t.function), defs.map((d) => ({ name: d.name, description: d.description, parameters: d.parameters })));
+  assert.deepEqual(out.calls.map((c) => c.name), ["notify"], "the call goes back to runChat, which runs it under the tool's own checks");
+  assert.equal(out.fallback?.model, "vendor/cheap-model");
+  const system = w.or.requests[0].body.messages[0].content as string;
+  assert.match(system, /same ORBIT tools as the primary model/);
+  assert.match(system, /waits for Rai's confirmation/);
+  assert.doesNotMatch(system, /Withheld while the fallback answers|refused by ORBIT/);
 });
 
-test("through the chat loop: a refused fallback tool never runs, and an allowed read-only tool runs once", async () => {
+test("through the chat loop: a tool the fallback asks for runs once, as it would for the primary; a tool that was not offered runs nothing", async () => {
   let notified = 0;
   let listed = 0;
   const tools: ChatTool[] = [
     { name: "notify", description: "n", parameters: {}, run: async () => (notified++, { value: "sent", provenance: "live", source: "n" }) },
     { name: "jobs_list", description: "j", parameters: {}, run: async () => (listed++, { value: [], provenance: "live", source: "jobs" }) },
   ];
-  const w = world({ script: [usageLimit()], replies: (n) => (n === 0 ? toolAnswer("jobs_list", {}) : answer("no jobs")) });
+  const w = world({ script: [usageLimit()], replies: (n) => (n === 0 ? toolAnswer("jobs_list", {}) : n === 1 ? toolAnswer("notify", { text: "x" }) : answer("done")) });
   const out = await runChat({ model: w.model, messages: [{ role: "user", content: "jobs?" }], limits: [], tools, fallback: true });
-  assert.equal(out.text, "no jobs");
+  assert.equal(out.text, "done");
   assert.equal(listed, 1);
-  assert.equal(notified, 0);
+  assert.equal(notified, 1);
   assert.equal(out.fallback?.model, "vendor/cheap-model");
-  const w2 = world({ script: [usageLimit()], replies: [toolAnswer("notify", { text: "x" })] });
-  await assert.rejects(runChat({ model: w2.model, messages: [{ role: "user", content: "x" }], limits: [], tools, fallback: true }), /Nothing was run/);
-  assert.equal(notified, 0);
+  // A name that was not offered: the same refusal the primary would get, and nothing runs.
+  const w2 = world({ script: [usageLimit()], replies: (n) => (n === 0 ? toolAnswer("ops_sys_cancel_reboot", {}) : answer("refused")) });
+  const out2 = await runChat({ model: w2.model, messages: [{ role: "user", content: "x" }], limits: [], tools, fallback: true });
+  assert.equal(out2.text, "refused");
+  assert.equal(out2.calls[0]!.ok, false);
+  assert.match(out2.calls[0]!.summary, /No tool named ops_sys_cancel_reboot/);
+  assert.equal(notified, 1);
 });
 
 test("no tool side effect is replayed: a mid-reply limit continues from the recorded tool result and marks the mix", async () => {

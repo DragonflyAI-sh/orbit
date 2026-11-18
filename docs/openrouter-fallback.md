@@ -1,6 +1,6 @@
 # OpenRouter fallback
 
-ChatGPT token sharing stays ORBIT's model. While ChatGPT reports a **usage limit or rate limit**, ORBIT can answer through OpenRouter instead, clearly labeled, with restricted tools and a spend guard. It is **off** until Rai configures it. Nothing in this change activates it.
+ChatGPT token sharing stays ORBIT's model. While ChatGPT reports a **usage limit or rate limit**, ORBIT can answer through OpenRouter instead, clearly labeled, with the same tools and safeguards as ChatGPT and a spend guard. It is **off** until Rai configures it. Nothing in this change activates it.
 
 ## When it answers
 
@@ -10,14 +10,30 @@ ChatGPT token sharing stays ORBIT's model. While ChatGPT reports a **usage limit
 - After the reset/pause time the next call goes to ChatGPT. Only a **successful ChatGPT call** counts as recovered; status says "not confirmed recovered" until then. If it is limited again, the fallback resumes.
 - A model turn is atomic: the fallback is used only when the primary returned nothing, so no partial output is ever mixed or replayed. Mid-reply (after tool rounds) the fallback continues from the recorded tool results; tools are never re-run. Such a reply is marked as mixed.
 - Missing key, disabled, or invalid config: the limit error is thrown as before, with "The OpenRouter fallback did not answer: <reason>" appended, and the port is reported `down` with that reason.
+- **Model port state** (what the page's overall indicator reads, `docs/assistant.md`, "Overall status"): while the limit is in force the model port is `degraded` if a paid call can be admitted (the fallback answers) and `down` if none can (configuration missing, ledger not provisioned, failed or latched, or a spend cap used up), because then neither model can reply. After the reset and before a ChatGPT call succeeds it is `degraded` ("not confirmed recovered"); after one succeeds it is the primary's own state again. While a limit is recorded the port also carries an additive `fallback` object: `provider`, `model`, `reason`, `until`, `estimated` and `answering` (true only while the fallback can answer). A failed fallback call is shown in the detail ("Last fallback error") but does not by itself make the port `down`.
 
 ## Provenance
 
 Every fallback reply has `source` = `model/openrouter/<model> (FALLBACK, paid: ChatGPT usage limit, resets <time> | ORBIT's estimated pause until <time>[; earlier rounds ... came from <primary>])`, and a structured `fallback` object (`provider`, `model`, `reason`, `primaryLimit`, `costUsd`) on the `/chat` reply and on the persisted thread message. The page prefixes such replies with "⚠ Fallback model, not ChatGPT". `/status` for the model port shows the limit, its reset or estimate, which model answers, the local allowance, and (if available) the OpenRouter key balance, labeled separately as account side.
 
-## Permissions
+## Tools (capability parity)
 
-Server-enforced in `src/fallback.ts` (`FALLBACK_TOOLS`), not by prompt: the fallback is offered only read-only tools (memory, repo/PR/jobs/ops reads, `orbit_config_view`, `vault_policy`) plus `job_launch`, which only creates a proposal. If the fallback model names any other tool, the step is discarded and nothing runs. Not allowed: `notify`, `job_steer`, vault writes, every `ops_propose_*`, `ops_sys_cancel_reboot`. Owner/policy checks and confirmation cards are untouched; the fallback sits below them. **Rai must approve this tool scope before activation.**
+Which model answers does not change what ORBIT may do. Rai asked for this (2026-11-18): the fallback-only allowlist (`FALLBACK_TOOLS`) that offered the fallback only read-only tools plus `job_launch` is removed. While the fallback answers it is offered **exactly the tools the primary would be offered for the same request**, in the same order with the same schemas, and the instructions list the same tools. That includes proposing jobs (`job_launch`), steering, `notify`, every `ops_propose_*`, the policy-checked vault write tools, sessions, research and photo tools.
+
+**The policy boundary is model-independent and unchanged.** None of these safeguards lived in the allowlist, and none depends on which model asked:
+
+- **Owner check and tool set:** the caller decides what is offered (only the owner's chat gets tools; a non-owner gets none from either model), and `allowAgent` (owner check, policy port, audit log) runs on every call.
+- **Confirmation cards:** `job_launch`, every `ops_propose_*` and the vault write tools only create a proposal; nothing launches, runs on the server or is written until Rai confirms the card with its digest. `ops_admin_operations` alone says whether an operation was verified.
+- **Each tool's own checks:** vault policy checks and secret filters, PR inspection limits, session scoping, tool deadlines and the per-reply tool-round and tool-result budgets apply as before.
+- **Unknown tools run nothing:** a call to a tool that was not offered gets `No tool named …` from `runChat`, whichever model asked.
+
+**What stays different is only what the route really cannot do, or must not spend:**
+
+- **No photos.** The OpenRouter route is not given images in this build (see `docs/photos.md`). The photo tools are offered, but `images()` blocks any photo before a request, `photos_inspect` therefore supplies none and says why, and `photos_observe` refuses a step the fallback answered. The fallback is told it cannot see images.
+- **Spend.** Every paid call is admitted by the spend ledger and its daily, monthly and lifetime caps; background callers (thread compaction, the rolling note, scheduled runs) never spend the fallback. Unchanged.
+- **Attribution.** The fallback is told which model it is and why it answers; every reply it produces carries the FALLBACK source and the structured `fallback` object.
+
+Tests: `test/fallback-parity.test.ts` (same tools as the primary through the real server, confirmation and owner gates on both models, photo tools in the canonical form, model-port states), and the tool tests in `test/openrouter-fallback.test.ts` and `test/capability-claims.test.ts`.
 
 ## Privacy
 

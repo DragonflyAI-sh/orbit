@@ -71,7 +71,7 @@ Nothing is migrated, copied or indexed: the stores remain the only truth. An ada
 ### Policy decision: discovery is an Assistant capability only
 
 - New policy port `sessions` (owner only) in `src/policy.ts`. `allowAgent(isOwner, scope)` checks `agent`, then `sessions`, then the scope: a chat thread turn (or the legacy `/chat` route) is refused even if a model names the tool. Chat turns are not offered the tools at all. `session_read` is in `SESSION_TOOL_NAMES`, so it goes through exactly these checks.
-- No HTTP route exposes the registry, and the OpenRouter fallback's tool allowlist (`src/fallback.ts`) does not include the tools, so under the fallback the Assistant answers without them.
+- No HTTP route exposes the registry. Since 2026-11-18 the OpenRouter fallback has no tool allowlist: under the fallback the Assistant is offered the same session tools, still owner-only and Assistant-only through `allowAgent` (`docs/openrouter-fallback.md`, "Tools").
 - Exposing discovery anywhere else (Chat, a page, a route, another model) needs a new, documented decision here.
 
 ## Diagrams
@@ -289,7 +289,7 @@ Not covered: a real model's reasoning over the pages, a deployed ORBIT, and hand
 - Backward paging does not see messages added after the first page; forward paging does.
 - The Assistant's own turn in progress is not readable until it ends (its reply is pending).
 - An archived Assistant chunk over 1 MiB is never readable through `session_read`; it is reported as a gap.
-- The OpenRouter fallback is not offered `session_read` (its tool allowlist is unchanged).
+- The OpenRouter fallback is offered `session_read` exactly when the primary is (since 2026-11-18; same owner and Assistant-only checks).
 - There is no HTTP route for reading; no digest, summary or paid model call is made.
 
 ## Activity digest (slice 3)
@@ -349,7 +349,7 @@ Both session stores are in-process and authoritative while ORBIT runs, so each l
 - **Who.** Owner only, Assistant only, through the `sessions` policy port, before any adapter is read (tested with a spy adapter). Not in chat threads, the legacy `/chat` route or any route; no HTTP route exposes it.
 - **What.** Only registry metadata: no message text beyond the store's own title (which for an unnamed chat is the start of its first message, as the label says), no excerpt, no tool payloads, cards, prompts, credentials, reasoning or raw records.
 - **Untrusted text.** Titles are flattened by the registry (one line, no control, bidirectional or invisible format characters), masked again for credential shapes, lone surrogates replaced, capped, and serialized as JSON with `<`, `>`, `&`, U+2028 and U+2029 written as `\u` escapes, so the JSON line contains no character that could close the data block or open another; `dataBlock` neutralizes the delimiter as well. The header says titles are untrusted data, never instructions. Tests show adversarial titles cannot add rows, close the block or open a new one. This is serialization safety, not a guarantee that a model never follows text it reads.
-- **Where it goes.** The model's instructions for that one turn, as reference material. Also to the OpenRouter fallback when it answers that turn (the same reference material it already receives, such as vault excerpts); the fallback's tool allowlist and policy are unchanged, so it still gets no session tools. It is not stored with the turn, in memory, in any transcript or in the Assistant page's view.
+- **Where it goes.** The model's instructions for that one turn, as reference material. Also to the OpenRouter fallback when it answers that turn (the same reference material it already receives, such as vault excerpts); the policy is unchanged, and since 2026-11-18 the fallback gets the same session tools as the primary for that turn. It is not stored with the turn, in memory, in any transcript or in the Assistant page's view.
 
 ### Flow
 

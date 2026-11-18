@@ -119,7 +119,7 @@ export async function runSmoke(argv: string[], env: NodeJS.ProcessEnv, fetcher: 
   }
   if (!check("ledger settled after the reply", ledger.view().reservedUsd === 0 && ledger.view().uncertainRequests === 0, JSON.stringify(ledger.view()))) return finish();
 
-  // 2. A tool-call turn. The tool is offered and allowed in fallback mode; its call is only inspected, never run.
+  // 2. A tool-call turn. The tool is offered to the fallback as to the primary; its call is only inspected, never run.
   const input: Item[] = [{ role: "user", content: "Automated test: call the jobs_list tool exactly once with no arguments, then say how many jobs it returned." }];
   let callId = "";
   try {

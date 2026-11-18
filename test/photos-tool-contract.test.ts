@@ -8,7 +8,6 @@ import type { ChatTool } from "../src/agent.ts";
 import { attachmentStore } from "../src/attachments.ts";
 import { chatgptModel, tokenFile } from "../src/chatgpt.ts";
 import type { Tokens } from "../src/chatgpt.ts";
-import { FALLBACK_TOOLS } from "../src/fallback.ts";
 import { openaiModel, responsesTools, strictSchema } from "../src/model.ts";
 import type { ModelPort, Step, ToolDef } from "../src/model.ts";
 import { listArgs, PHOTO_LIST_LIMIT_DEFAULT, PHOTO_LIST_LIMIT_MAX, PHOTO_TOOL_NAMES, photoRef, photoTools } from "../src/photo-access.ts";
@@ -147,9 +146,7 @@ test("Responses API schema (strict): every property required, each optional one 
   assert.throws(() => strictSchema("bad", { type: "object", properties: {} }), /additionalProperties false/);
 });
 
-test("OpenRouter fallback: never offered the photo tools, so no third schema mode applies", () => {
-  for (const name of PHOTO_TOOL_NAMES) assert.equal(FALLBACK_TOOLS.has(name), false);
-});
+// The OpenRouter fallback is offered the photo tools too, in the canonical form: test/fallback-parity.test.ts drives the real client.
 
 // ---- through the real adapters and runChat: model-generated arguments under each schema mode -----------------------------------
 

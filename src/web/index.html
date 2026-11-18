@@ -75,7 +75,9 @@
   #ports { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
   .pill { border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; background: var(--card); }
   .pill::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; background: currentColor; vertical-align: middle; }
-  .live { color: var(--live); } .mock { color: var(--mock); } .degraded, .down { color: var(--down); }
+  /* States (status pills, reply tags): the state is also in the text ("model: degraded"). Degraded is amber like the overall
+     indicator (working, with a caveat); down is red. */
+  .live { color: var(--live); } .mock, .degraded { color: var(--mock); } .down { color: var(--down); }
   #inbox { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; max-height: 30dvh; overflow-y: auto; overscroll-behavior: contain; }
   .note { border-left: 3px solid var(--gold); padding: 4px 8px; background: var(--card); border-radius: 4px; overflow-wrap: anywhere; }
   .note .top { display: flex; gap: 6px; align-items: flex-start; }
@@ -201,15 +203,18 @@
   .gviewer button { position: absolute; top: 8px; right: 8px; min-width: 44px; min-height: 44px; }
   /* The session control, its picker and its status line belong to the Sessions page only. */
   body:not([data-tab="chat"]) #sesswrap, body:not([data-tab="chat"]) #sesspicker, body:not([data-tab="chat"]) #tstatus { display: none !important; }
-  /* Overall status: green only when every /status entry is exactly "live"; anything else, or no answer, is red. */
+  /* Overall status (aggregateStatus): green all live; amber degraded but working; red a core port down; grey unknown. The dot's shape
+     differs per level too (circle, diamond, square, ring), and the level is in the label and accessible name, never colour alone. */
   /* The header toggles (notifications, status): compact pill buttons, not navigation. aria-expanded shows which panel is open. */
   #health, .hbtn { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; background: var(--card); }
   #health[aria-expanded="true"], .hbtn[aria-expanded="true"] { border-color: var(--accent-2); color: var(--fg); }
   .hbtn .count { min-width: 1.5em; padding: 0 4px; border-radius: 999px; text-align: center; font-weight: 600; line-height: 1.4; }
   .hbtn.has .count { background: var(--gold); color: #1c1838; }
-  #health .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--red-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--red-dot) 25%, transparent); }
-  #health.ok .dot { background: var(--green-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--green-dot) 25%, transparent); }
-  :root { --green-dot: #1f9d55; --red-dot: #d23c3c; }
+  #health .dot { box-sizing: border-box; width: 10px; height: 10px; border-radius: 50%; flex: none; background: transparent; border: 2px solid var(--muted); }
+  #health.ok .dot { border: 0; background: var(--green-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--green-dot) 25%, transparent); }
+  #health.degraded .dot { border: 0; border-radius: 1px; transform: rotate(45deg) scale(.85); background: var(--amber-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber-dot) 25%, transparent); }
+  #health.down .dot { border: 0; border-radius: 2px; background: var(--red-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--red-dot) 25%, transparent); }
+  :root { --green-dot: #1f9d55; --amber-dot: #d99a00; --red-dot: #d23c3c; }
   #alog { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   #alog .older { align-self: center; padding: 4px 14px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
   .ctxline { align-self: stretch; font-size: 12px; color: var(--muted); border-top: 1px dashed var(--line); padding-top: 4px; overflow-wrap: anywhere; }
@@ -343,7 +348,7 @@
 </style>
 </head>
 <body>
-<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions</a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: not read yet" title="Notifications: not read yet. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">?</span></button><button type="button" id="health" class="bad" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a><dl id="deployinfo" aria-label="Running release"><dt>Deployed</dt><dd id="deployedat"><span class="na">Not read yet</span></dd><dt>Commit</dt><dd id="deploycommit"><span class="na">Not read yet</span></dd></dl></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header>
+<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions</a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: not read yet" title="Notifications: not read yet. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">?</span></button><button type="button" id="health" class="unknown" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a><dl id="deployinfo" aria-label="Running release"><dt>Deployed</dt><dd id="deployedat"><span class="na">Not read yet</span></dd><dt>Commit</dt><dd id="deploycommit"><span class="na">Not read yet</span></dd></dl></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header>
 <main id="log" hidden></main>
 <div class="latestdock"><button type="button" class="tolatest" id="tolatest" title="Scroll to the latest message" hidden><span aria-hidden="true">↓</span> click to latest</button></div>
 <main id="alog" aria-label="Assistant conversation"></main>
@@ -434,10 +439,11 @@
   }
 
   async function refreshStatus() {
+    let res;
+    try { res = await fetch("/status"); } catch { renderHealth(null, "network"); if (!deployShown) showDeployInfo(null); return; }
     try {
-      const res = await fetch("/status");
       const s = res.ok ? await res.json() : null;
-      renderHealth(s);
+      renderHealth(s, res.ok ? "bad-body" : res.status);
       if (!s) { if (!deployShown) showDeployInfo(null); return; }
       showDeployInfo(s);
       const box = document.getElementById("ports");
@@ -450,7 +456,7 @@
         el.title = c && typeof c.state === "string" ? `${p.detail}\nStartup check: ${c.state}${c.superseded ? " (newer real result shown above)" : ""}${c.reason ? `: ${c.reason}` : ""}` : p.detail;
         return el;
       }));
-    } catch { renderHealth(null); if (!deployShown) showDeployInfo(null); /* the next refresh tries again */ }
+    } catch { renderHealth(null, "bad-body"); if (!deployShown) showDeployInfo(null); /* the next refresh tries again */ }
   }
   // The deployment rows keep the last release ORBIT reported (like the pills) when a later read fails; before any read
   // succeeds they say the status could not be read.
@@ -531,24 +537,62 @@
   // </deployinfo>
 
   // <status-dot>
-  // The overall status from /status: green ("ok") only when there is at least one entry and every entry's state is exactly
-  // "live". Any other state, a missing or malformed answer, an error, or no answer yet is red, never green. Tests load this block.
-  function aggregateStatus(s) {
-    const ports = s && Array.isArray(s.ports) ? s.ports : null;
-    if (!ports || !ports.length) return { ok: false, label: "Status unknown", detail: "ORBIT's status could not be read, so it is not known to be all live." };
-    const bad = ports.filter((p) => !p || p.state !== "live");
-    if (!bad.length) return { ok: true, label: "All live", detail: `All ${ports.length} status entries are live.` };
-    const names = bad.map((p) => `${p && typeof p.port === "string" ? p.port : "unknown"}: ${p && typeof p.state === "string" ? p.state : "unknown"}`);
-    return { ok: false, label: `${bad.length} not live`, detail: `Not all live. ${names.join(", ")}.` };
+  // The overall status from /status, in four levels (docs/assistant.md, "Overall status"). Deterministic, from the port entries only:
+  //   down     (red)   a core port (model, policy, channel) is down or mock: ORBIT cannot answer for real. Wins over everything else,
+  //                    so a real core failure is never shown as a working fallback.
+  //   unknown  (grey)  no usable answer (not reachable, an HTTP error, an unreadable body, no entries), or the model port is missing or
+  //                    a core port's state is not one of the four known states: whether ORBIT can answer is not known.
+  //   degraded (amber) ORBIT still answers, but some entry is not live: the model on the paid fallback or not yet confirmed, or an
+  //                    optional port (memory, notify, jobs, watch, ...) degraded, down, mock or unreadable.
+  //   ok       (green) every entry's state is exactly "live".
+  // `ok` stays true only for green. Never green without an answer. Tests load this block.
+  const CORE_PORTS = ["model", "policy", "channel"];
+  const PORT_STATES = ["live", "degraded", "down", "mock"];
+  const STATUS_WORDS = { ok: "healthy, all live", degraded: "degraded but working", down: "down, core functionality unavailable", unknown: "unknown" };
+  function aggregateStatus(s, failure) {
+    const ports = s && typeof s === "object" && Array.isArray(s.ports) ? s.ports : null;
+    const unknown = (label, detail) => ({ level: "unknown", ok: false, label, detail });
+    if (!ports || !ports.length) {
+      if (failure === "network") return unknown("Disconnected", "ORBIT could not be reached, so its current status is not known. The status line keeps the last answer, which may be out of date.");
+      if (typeof failure === "number") return unknown("Status unknown", `ORBIT answered the status request with HTTP ${failure}, so its current status is not known.`);
+      return unknown("Status unknown", "ORBIT's status could not be read, so it is not known to be all live.");
+    }
+    const entries = ports.map((p) => ({
+      port: p && typeof p.port === "string" ? p.port : "unknown",
+      state: p && typeof p.state === "string" && PORT_STATES.includes(p.state) ? p.state : null,
+      raw: p && typeof p === "object" ? p : {},
+    }));
+    const core = (e) => CORE_PORTS.includes(e.port);
+    const named = (list) => list.map((e) => `${e.port}: ${e.state || "unreadable state"}`).join(", ");
+    const others = (list) => { const rest = entries.filter((e) => e.state !== "live" && !list.includes(e)); return rest.length ? ` Also not live: ${named(rest)}.` : ""; };
+    const failed = entries.filter((e) => core(e) && (e.state === "down" || e.state === "mock"));
+    if (failed.length) {
+      return { level: "down", ok: false, label: `Down: ${failed.map((e) => e.port).join(", ")}`, detail: `Core functionality is unavailable: ${named(failed)}.${failed.some((e) => e.port === "model") ? " No reply can come from ChatGPT or a fallback model." : ""}${others(failed)}` };
+    }
+    const model = entries.find((e) => e.port === "model");
+    const unclear = entries.filter((e) => core(e) && !e.state);
+    if (!model || unclear.length) {
+      return unknown("Status unknown", `${model ? `A core entry's state could not be read (${named(unclear)})` : "The model's status is not reported"}, so it is not known whether ORBIT can answer.${others(unclear)}`);
+    }
+    const bad = entries.filter((e) => e.state !== "live");
+    if (!bad.length) return { level: "ok", ok: true, label: "All live", detail: `All ${entries.length} status entries are live.` };
+    const fb = model.raw.fallback && typeof model.raw.fallback === "object" ? model.raw.fallback : null;
+    const onFallback = model.state === "degraded" && fb && fb.answering === true;
+    const route = onFallback
+      ? `Replies come from the fallback model ${String(fb.provider || "unknown provider")}/${String(fb.model || "unknown model")}, not ChatGPT: ChatGPT ${fb.reason === "rate_limit" ? "rate" : "usage"} limit until ${String(fb.until || "an unknown time")}${fb.estimated ? " (ORBIT's estimate)" : ""}. `
+      : "";
+    return { level: "degraded", ok: false, label: onFallback ? "Degraded: fallback model" : `Degraded: ${bad.length} not live`, detail: `Working, with degradation. ${route}Not live: ${named(bad)}.` };
   }
   // The indicator is the toggle for the status line (pills and the status page link); its own text never says "open the page".
-  function renderHealth(s) {
-    const a = aggregateStatus(s);
+  // The level is in the class (colour and dot shape), the visible label and the accessible name, never colour alone.
+  // `failure`: why there is no answer ("network", an HTTP status, "bad-body"), when there is none.
+  function renderHealth(s, failure) {
+    const a = aggregateStatus(s, failure);
     const button = document.getElementById("health");
-    button.className = a.ok ? "ok" : "bad";
+    button.className = a.level;
     button.querySelector(".label").textContent = a.label;
     button.title = `${a.detail} Show or hide the status line.`;
-    button.setAttribute("aria-label", `Overall status: ${a.ok ? "all live" : a.label}. ${a.detail}`);
+    button.setAttribute("aria-label", `Overall status: ${STATUS_WORDS[a.level]}. ${a.label}. ${a.detail}`);
   }
   // </status-dot>
 
