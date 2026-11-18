@@ -65,18 +65,50 @@ Characters are counted as chat threads count them (`messageChars`: message text 
 
 | Constant (`src/assistant-context.ts`) | Default | Meaning |
 |---|---|---|
-| `ASSISTANT_ACTIVE_BUDGET_CHARS` | 32,000 (~8k tokens) | rotation keeps the newest complete chunks whose bounded sizes add up to at most this |
+| `ASSISTANT_ACTIVE_BUDGET_CHARS` | 48,000 (~12k tokens) | the history ceiling: rotation keeps the newest complete chunks whose bounded sizes add up to at most this |
 | `ASSISTANT_CHUNK_MAX_CHARS` | 12,000 (~3k tokens) | the largest a single chunk is ever sent |
 | `MAX_MESSAGE_CHARS` (existing) | 20,000 | the largest new message the route accepts |
-| `ASSISTANT_CONTEXT_BUDGET_CHARS` | 52,000 (~13k tokens) | hard cap on the conversation part of one model input: history plus the new message (= 32,000 + 20,000, so the whole active window always fits beside the largest message) |
+| `ASSISTANT_CONTEXT_BUDGET_CHARS` | 68,000 (~17k tokens) | hard cap on the conversation part of one model input: history plus the new message (= 48,000 + 20,000, so the whole active window always fits beside the largest message) |
+| `ASSISTANT_MIN_TURNS` | 4 | the floor: the newest 4 complete turns (or all, when fewer exist) are always kept active and always sent, each in its bounded form |
 | `ASSISTANT_NOTES_MAX_CHARS` | 12,000 | vault excerpts and the device summary are cut to this, with a note saying so |
 | `ASSISTANT_CARD_LINES_MAX` | 20 | at most this many proposal-card lines (newest) are given as reference |
 | `DIGEST_TOTAL_MAX_CHARS` (`src/session-digest.ts`) | 6,000 | the session activity digest, wrapper included; added after the notes cap, so reference material is at most 12,000 + 6,000 plus the card lines |
 | `BOUNDED_OUTPUT_CHARS` / `BOUNDED_TEXT_CHARS` | 1,500 / 4,000 | inside a shortened chunk, each tool output / message text is cut to this |
 
-The chat thread budget is 48,000 characters of live messages; the Assistant's 52,000 conversation cap is of the same order, chosen so the existing model/context settings (the same models, the same 8,000-character tool output clip, the same 20,000-character message cap) need no change.
+Sizing: `docs/reviews/assistant-history-sizing-audit.md` (the approved "modest" option; raised from 32,000 / 52,000, whose implicit floor was 2 turns). The chat thread budget (48,000 characters of live messages, `src/thread-context.ts`) is separate and unchanged: chat compaction does not read any of these constants.
 
-Within one turn, the model's input also grows with that turn's own tool calls, exactly as in chat (`runChat`: at most 5 rounds, each tool output clipped to 8,000 characters unless the tool sets its own bound: `vault_policy` does, see "Tool rounds and capability claims"). That growth is the existing behaviour and is not counted in the 52,000.
+### Floor and precedence
+
+The floor is a consequence of the budgets, not an override of them. `assertBudgetInvariants` (run when `src/assistant-context.ts` loads, so a wrong edit fails at startup and in every test) requires `ASSISTANT_ACTIVE_BUDGET_CHARS >= ASSISTANT_MIN_TURNS x ASSISTANT_CHUNK_MAX_CHARS` (48,000 >= 4 x 12,000) and `ASSISTANT_CONTEXT_BUDGET_CHARS >= ASSISTANT_ACTIVE_BUDGET_CHARS + MAX_MESSAGE_CHARS`. Since a bounded turn is never larger than 12,000, the 4 newest complete turns always survive rotation and always fit beside the largest message. What wins, highest first:
+
+1. The newest user message: reserved first, cut only at 20,000 characters (the route refuses longer).
+2. The hard context budget (68,000): never exceeded, for any input.
+3. The floor of 4 newest complete turns. Fewer than 4 complete turns: all of them are sent. `planContext` reports `floor: { turns, available, met }`; with the module's budgets `met` is always true. A caller that passes a smaller budget gets `met: false` and the budget wins: nothing is sent over a budget to reach the floor.
+4. Older turns, newest first and contiguous, while they fit.
+
+A turn larger than 12,000 is sent in a shorter form (below); the stored chunk and the archive are never changed or deleted by planning or rotation. Rolling back to 32,000 is safe: the next rotation archives the extra turns, nothing is deleted; raising it never brings archived turns back.
+
+Within one turn, the model's input also grows with that turn's own tool calls, exactly as in chat (`runChat`: at most `MAX_ROUNDS` rounds, each tool output clipped to 8,000 characters unless the tool sets its own bound: `vault_policy` does, see "Tool rounds and capability claims"). That growth is not counted in the 68,000; it has its own per-reply bound, the tool-result budget below.
+
+### Tool-result budget (per reply, every runChat caller)
+
+`REPLY_TOOL_RESULT_BUDGET_BYTES` = 96,000 (`src/tool-result-budget.ts`) bounds the tool calls and results one reply adds to its own model input. Every request of a reply re-sends every earlier call and result of that reply, and before this bound nothing limited their sum: the audit measured ~103k characters by the last tool step of a heavy 5-round reply and ~490k at 20 rounds (synthetic). It applies to chat threads, the Assistant and the legacy `/chat` route alike (they share `runChat`).
+
+- **Unit: UTF-8 bytes** of the serialized items as they are added (`{"type":"function_call",…}` and `{"type":"function_call_output",…}`), so multi-byte text, astral characters and JSON escaping are counted as they travel. The ledger is exact: the bytes `runChat` counts equal the bytes of the items in the input (tested).
+- **Admission, per call, in order**: a call starts only if its call item plus `TOOL_RESULT_MIN_BYTES` (2,048) for its result still fit. Otherwise it is **not run**: nothing is done, it is recorded on the reply as a failed call with `notRun: "tool-result-budget"` (page: "not run: the reply's tool-result budget was spent") and a `{"ok":false,"outcome":"not_run",…}` output, and it is **not** added to the model input (neither the call nor a stub, so pairs stay valid and many parallel calls cannot grow the input through their stubs). Later calls of the same round are not run either.
+- **Fit, per result**: a result larger than what is left is cut for the model to fit exactly: its head, then `[ORBIT: the output of <tool> was cut from N bytes to fit this reply's tool-result budget … It is INCOMPLETE …]`, then `[ORBIT: kept whole from the full result] ok …, outcome …, provenance …, source …, <outcome facts: status, proposalId, commit, jobId, opId …>, error "…", nextCursor "…"`. A surrogate pair is never split. The call's record gets `budgetCut: { fromBytes, toBytes }`. **The full output (after the tool's own bound) is what the conversation stores**; only the model's view in this reply is cut. `onCall` receives both (`output`, and `sent` when they differ).
+- **Stop**: once a call was not run, an output was cut, or less than 2 x 2,048 bytes is left, the next step is the final one, sent with **no tools** and with `rounds.stop` set. Its instructions say "TOOL-RESULT BUDGET REACHED", that this is a size bound (not the round budget, not a missing tool), name the calls not run, and ask the model to say what is incomplete and not to present a partial result as complete. If the model answers with no text, ORBIT's own text says the budget ended the reply. The owner sees `RESULT_BUDGET_NOTE` beside the reply (in `incomplete`, never in the text); the outcome carries `resultBudget: { maxBytes, usedBytes, cut, notRun, stopped }`. `capped` still means only the round cap; both notes appear when both apply.
+- **Unchanged**: the round cap and its note, policy checks (`allow`), confirmations and proposals, tool deadlines and cancellation (a cancelled turn still ends with `TurnInterrupted`), media and gallery bounds, and spend accounting. The budget does not count or change any of them. There is no repeat-error guard on `main` (it belongs to the separate 20-round change, PR #120, not merged when this was built); the budget bounds a loop of repeated large errors on its own and never reports one as a success. If the 20-round change lands, it needs no change here: the bound is per reply, not per round.
+
+Why 96,000 (all figures SYNTHETIC, from `test/history-audit-fixture.ts`; tokens are ESTIMATES at 4 characters per token):
+
+- The audit's bound case (heavy history, maximum reference material, a 20,000-character message, 48,000 / 68,000) has a first request of 135,806 characters (ASCII, so bytes). The only hard request-size limit in the code is the paid fallback's 300,000 bytes (`MAX_REQUEST_BYTES`, `src/openrouter.ts`); 96,000 leaves ~68k of the remaining ~164k for what this budget does not count (tool schemas the audit could not wire, framing of other items, non-ASCII history).
+- It binds heavy replies already at today's 5 rounds (~103k without it) and leaves typical ones (~19k at 5 rounds) unchanged.
+- It holds the largest single tool output whole (`vault_policy`, 42,000 characters, ASCII) with room left for other calls.
+
+**This is not a whole-request admission controller.** It does not count the instructions (~9k characters), the tool schemas (~40k, a lower bound), the reference material (up to 12,000 + 6,000 + card lines), the history (up to 68,000 characters; non-ASCII history can be up to 3 bytes per character), the user's message, tool-supplied images (bounded separately: at most 10 images / 10 MiB per request and 3 image-supplying calls per reply) or the model's output and reasoning. ORBIT does not know the model's context window on its primary route, so no window figure is assumed. A request can still be refused by a provider as too large; that turn then ends as an error, as before.
+
+**Rollback**: set `REPLY_TOOL_RESULT_BUDGET_BYTES` back to a value no reply reaches (or revert the change); nothing is stored differently except the optional `notRun` and `budgetCut` fields on calls, which older code ignores.
 
 ## The context bound
 
@@ -89,11 +121,11 @@ Within one turn, the model's input also grows with that turn's own tool calls, e
 The bounded representation of a chunk (`boundChunk`), tried in order, never changing the stored chunk:
 
 - `full`: as stored, when it is at most 12,000 characters.
-- `clipped`: each tool output cut to 1,500 and each text to 4,000 characters; each cut ends with `[ORBIT: … cut from N to M characters for the model's context; the full text is stored in assistant chunk <seq>]`. A cut page of `session_read` or `sessions_list` keeps its `nextCursor` whole at the end, inside the same 1,500 characters, so a later turn can continue where a turn capped at 5 tool rounds stopped (`test/session-durability.test.ts`). Likewise a cut write or proposal result keeps its outcome facts (status, saved, proposal id, commit) whole at the end, and `calls-omitted` lists each omitted call with those facts (`test/capability-claims.test.ts`).
+- `clipped`: each tool output cut to 1,500 and each text to 4,000 characters; each cut ends with `[ORBIT: … cut from N to M characters for the model's context; the full text is stored in assistant chunk <seq>]`. A cut page of `session_read` or `sessions_list` keeps its `nextCursor` whole at the end, inside the same 1,500 characters, so a later turn can continue where a turn stopped by its round cap or its tool-result budget stopped (`test/session-durability.test.ts`). Likewise a cut write or proposal result keeps its outcome facts (status, saved, proposal id, commit) whole at the end, and `calls-omitted` lists each omitted call with those facts (`test/capability-claims.test.ts`).
 - `calls-omitted`: the turn's tool calls are removed as whole pairs (a call is never sent without its result, or a result without its call) and replaced by a one-line note listing them and their outcomes. Tool arguments are never cut, because a cut argument would no longer be valid JSON.
 - `placeholder`: one short note stands for the whole turn.
 
-So no message, tool result or argument size can push the conversation past 52,000 characters. The form used is recorded per chunk (`context.included`) and shown on the page ("In the model's context this turn is shortened…").
+So no message, tool result or argument size can push the conversation past 68,000 characters. The form used is recorded per chunk (`context.included`) and shown on the page ("In the model's context this turn is shortened…").
 
 An interrupted or failed reply keeps its tool calls (paired) and drops its text, as in chat. The open chunk of the turn in progress is never sent as history.
 
@@ -101,7 +133,7 @@ An interrupted or failed reply keeps its tool calls (paired) and drops its text,
 
 After every turn (and at startup), `rotate()`:
 
-1. Walks complete active chunks newest first, keeping those whose bounded sizes fit in 32,000 characters; it stops at the first that does not fit.
+1. Walks complete active chunks newest first, keeping those whose bounded sizes fit in 48,000 characters; it stops at the first that does not fit. Since a bounded chunk is at most 12,000, the 4 newest complete chunks always stay (the floor).
 2. Archives every older complete chunk, oldest first, each by a single `rename` from `active/` to `archive/`, then fsyncs both directories.
 3. Stops at a chunk still open (a turn in progress) and at a chunk with a proposal card that can still be confirmed (open, proposal present and not expired). That chunk and everything after it stay active until the card is decided or expires, so a pending confirmation is never moved out of view. The prompt bound still holds meanwhile (step 2 of the plan omits what does not fit).
 
@@ -300,8 +332,8 @@ On a deployed ORBIT, as the owner:
 ## Limits
 
 - The budget is in characters, not tokens; a text in a script with many tokens per character can use more tokens than the estimate.
-- A turn's own tool rounds can add up to the existing `runChat` limits on top of the 52,000-character conversation cap.
-- While a confirmable card is pending, the active window can exceed 32,000 characters for up to the proposal lifetime (30 minutes); the prompt bound still holds.
+- A turn's own tool calls and results can add up to 96,000 bytes (the tool-result budget) on top of the 68,000-character conversation cap; instructions, tool schemas, reference material and images are bounded separately or not at all (see "Tool-result budget").
+- While a confirmable card is pending, the active window can exceed 48,000 characters for up to the proposal lifetime (30 minutes); the prompt bound still holds.
 - Request ids are remembered for active chunks and for chunks archived since the process started; a repeat of a very old send after a restart is not recognized (the browser only repeats within one request).
 - Revision order between processes depends on `epoch.json` (or, without a state directory, the clock). If `epoch.json` is lost and the clock is also set back, or the state directory is restored from a backup with an older `epoch.json`, open tabs ignore the new process until they are reloaded.
 - Not verified in a real deployment or with a real model; see the acceptance steps above.

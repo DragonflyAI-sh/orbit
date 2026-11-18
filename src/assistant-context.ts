@@ -7,15 +7,22 @@ import { MAX_MESSAGE_CHARS } from "./threads.ts";
 // chunks are active; this module decides exactly what of them the model is sent, and guarantees a hard size bound.
 //
 // Unit: characters of conversation content, counted the way chat threads count them (messageChars: message text plus every tool
-// call's arguments and output). About 4 characters per token, so the defaults below are roughly 8k, 3k and 13k tokens.
+// call's arguments and output). About 4 characters per token, so the defaults below are roughly 12k, 3k and 17k tokens (estimates).
+// Sizing: docs/reviews/assistant-history-sizing-audit.md (approved "modest" option: 48,000 / 68,000, floor 4, per-turn cap 12,000).
 
-// Complete chunks kept active (not archived) when their bounded sizes, newest first, add up to at most this.
-export const ASSISTANT_ACTIVE_BUDGET_CHARS = 32_000;
+// Complete chunks kept active (not archived) when their bounded sizes, newest first, add up to at most this: the history ceiling.
+export const ASSISTANT_ACTIVE_BUDGET_CHARS = 48_000;
 // No single chunk (one turn: the user message, the reply and its tool calls with results) is sent larger than this.
 export const ASSISTANT_CHUNK_MAX_CHARS = 12_000;
 // The conversation part of one model input: active history plus the new user message. The new message is at most
-// MAX_MESSAGE_CHARS (20,000), so the whole active window (32,000) always fits beside it.
+// MAX_MESSAGE_CHARS (20,000), so the whole active window (48,000) always fits beside it: 68,000.
 export const ASSISTANT_CONTEXT_BUDGET_CHARS = ASSISTANT_ACTIVE_BUDGET_CHARS + MAX_MESSAGE_CHARS;
+// The floor: the newest this-many complete turns (when that many exist) are always kept active and always sent, each in its bounded
+// form (at most ASSISTANT_CHUNK_MAX_CHARS). It is a consequence of the budgets, not an override of them: the hard budgets always win,
+// and assertBudgetInvariants (run below, at module load) refuses any set of constants under which the floor would need more room
+// than the budgets give. Precedence, highest first: (1) the newest user message, reserved before any history and cut only at
+// MAX_MESSAGE_CHARS; (2) the hard context budget; (3) the floor; (4) further turns, newest first and contiguous, while they fit.
+export const ASSISTANT_MIN_TURNS = 4;
 // Reference material (vault excerpts, devices) given to an Assistant turn is cut to this many characters.
 export const ASSISTANT_NOTES_MAX_CHARS = 12_000;
 // At most this many proposal cards (newest) are described to the model as reference material.
@@ -24,6 +31,22 @@ export const ASSISTANT_CARD_LINES_MAX = 20;
 // Inside a bounded chunk: a tool output or a message text is cut to these sizes before anything is dropped.
 export const BOUNDED_OUTPUT_CHARS = 1_500;
 export const BOUNDED_TEXT_CHARS = 4_000;
+
+// The floor holds by construction when (a) the history ceiling holds ASSISTANT_MIN_TURNS bounded turns and (b) the context budget
+// holds the whole history ceiling beside the largest new message. Returns what is wrong, or [] when the constants are consistent.
+export function budgetProblems(b: { active: number; chunkMax: number; context: number; messageMax: number; minTurns: number }): string[] {
+  const out: string[] = [];
+  if (!(Number.isInteger(b.minTurns) && b.minTurns >= 1)) out.push(`the floor (${b.minTurns}) must be a whole number of turns, at least 1`);
+  if (b.active < b.minTurns * b.chunkMax) out.push(`the history ceiling ${b.active} is below the floor of ${b.minTurns} turns of at most ${b.chunkMax} characters (${b.minTurns * b.chunkMax})`);
+  if (b.context < b.active + b.messageMax) out.push(`the context budget ${b.context} cannot hold the history ceiling ${b.active} beside a ${b.messageMax}-character message`);
+  return out;
+}
+export function assertBudgetInvariants(): void {
+  const p = budgetProblems({ active: ASSISTANT_ACTIVE_BUDGET_CHARS, chunkMax: ASSISTANT_CHUNK_MAX_CHARS, context: ASSISTANT_CONTEXT_BUDGET_CHARS, messageMax: MAX_MESSAGE_CHARS, minTurns: ASSISTANT_MIN_TURNS });
+  if (p.length) throw new Error(`Assistant context budgets are inconsistent: ${p.join("; ")}.`);
+}
+// A wrong edit of the constants fails at startup (and in every test), never as a silently smaller history.
+assertBudgetInvariants();
 
 export type ChunkLike = { seq: number; id: string; createdAt: string; messages: ThreadMessage[] };
 
@@ -45,8 +68,8 @@ const cut = (s: string, keep: number, what: string, seq: number): string => {
 // A page of a paged session tool carries its nextCursor after the page's items, so cutting the output would drop it, and with it
 // the only way a later turn can continue where this one stopped (a turn is capped at MAX_ROUNDS pages). When such an output is cut,
 // its cursor is kept whole at the end, inside the same BOUNDED_OUTPUT_CHARS.
-const PAGED_TOOLS = new Set(["session_read", "sessions_list"]);
-const pageCursor = (name: string, output: string): string | undefined => {
+export const PAGED_TOOLS = new Set(["session_read", "sessions_list"]);
+export const pageCursor = (name: string, output: string): string | undefined => {
   if (!PAGED_TOOLS.has(name)) return undefined;
   try {
     const v = (JSON.parse(output) as { result?: { nextCursor?: unknown } } | null)?.result?.nextCursor;
@@ -113,6 +136,10 @@ export type ContextPlan = {
   historyChars: number;
   currentChars: number;
   budgetChars: number;
+  // The floor for this plan: `available` = min(ASSISTANT_MIN_TURNS, complete turns that exist); `met` when at least that many newest
+  // turns are sent. With the module's own budgets it is always met (budgetProblems); a caller passing a smaller budget can get `met:
+  // false`, and then the hard budget has won: nothing is ever sent over the budget to reach the floor.
+  floor: { turns: number; available: number; met: boolean };
   messages: ThreadMessage[];
 };
 
@@ -136,12 +163,14 @@ export function planContext(complete: ChunkLike[], current: ThreadMessage[] = []
   }
   const omitted = sorted.slice(i).map((c) => c.seq).sort((a, b) => a - b);
   const history = picked.flatMap((p) => p.b.messages);
+  const available = Math.min(ASSISTANT_MIN_TURNS, sorted.length);
   return {
     included: picked.map((p) => ({ seq: p.chunk.seq, form: p.b.form, chars: p.b.chars })),
     omitted,
     historyChars: total(history),
     currentChars,
     budgetChars: budget,
+    floor: { turns: ASSISTANT_MIN_TURNS, available, met: picked.length >= available },
     messages: [...history, ...now],
   };
 }

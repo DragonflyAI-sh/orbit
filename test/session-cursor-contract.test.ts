@@ -52,17 +52,20 @@ const copperFinch = (threads: ReturnType<typeof threadStore>) => {
 };
 
 // A model that makes the given tool calls, one per round, then answers. `next` sees the outputs so far, so a call can depend on
-// the previous page (its nextCursor), exactly as a model would copy it.
+// the previous page (its nextCursor), exactly as a model would copy it. An output ORBIT cut to fit the reply's tool-result budget
+// (src/tool-result-budget.ts) is incomplete: it is counted in `cut` and not used as a page, so the next reply asks for that page again.
 type Out = { ok: boolean; error?: string; result?: any; raw: string };
 const driver = (next: (outs: Out[]) => Record<string, unknown> | undefined) => {
   const outs: Out[] = [];
+  const cut: string[] = [];
   let n = 0;
   const model: ModelPort = {
     status: () => ({ port: "model", state: "live", impl: "fake/driver", detail: "test", verifiedAt: new Date().toISOString() }),
     reply: async () => ({ value: "x", provenance: "live", source: "model/fake" }),
     step: async (input: Item[]): Promise<Step> => {
       const last = input.at(-1) as any;
-      if (last?.type === "function_call_output") {
+      if (last?.type === "function_call_output" && /to fit this reply's tool-result budget/.test(last.output)) cut.push(last.output);
+      else if (last?.type === "function_call_output") {
         let parsed: any;
         try {
           parsed = JSON.parse(last.output);
@@ -76,13 +79,20 @@ const driver = (next: (outs: Out[]) => Record<string, unknown> | undefined) => {
       return { text: "", calls: [{ call_id: `c${n++}`, name: "session_read", arguments: JSON.stringify(args) }] };
     },
   };
-  return { model, outs };
+  return { model, outs, cut };
 };
 
+// One reply, or, when the reply's tool-result budget stops it before `next` is done, further replies that continue from the last whole
+// page ("continue"), as Rai would ask. `replies` counts them.
 const turn = async (tools: ReturnType<typeof sessionTools>, next: (outs: Out[]) => Record<string, unknown> | undefined, maxRounds = 40) => {
   const d = driver(next);
-  const r = await runChat({ model: d.model, messages: [{ role: "user", content: "read it" }], limits: [], tools, maxRounds });
-  return { ...d, outcome: r };
+  let r = await runChat({ model: d.model, messages: [{ role: "user", content: "read it" }], limits: [], tools, maxRounds });
+  let replies = 1;
+  while (r.resultBudget?.stopped && next(d.outs) !== undefined && replies < 20) {
+    r = await runChat({ model: d.model, messages: [{ role: "user", content: "continue" }], limits: [], tools, maxRounds });
+    replies += 1;
+  }
+  return { ...d, outcome: r, replies };
 };
 
 // ---- the model-facing schema and its transports ------------------------------------------------------------------------------
@@ -224,7 +234,11 @@ test("output size: every page fits the tool-output limit, so it is never clipped
   }
   const id = `chat:${t.id}`;
   for (const first of [{ id, from: "start" }, { id, from: "start", maxChars: 12000, limit: 30 }, { id, maxChars: 12000, limit: 30 }, { id }]) {
-    const { outs } = await turn(s.tools, (o) => (o.length === 0 ? first : o.at(-1)!.ok && o.at(-1)!.result.nextCursor ? { id, cursor: o.at(-1)!.result.nextCursor } : undefined), 200);
+    const { outs, replies, outcome } = await turn(s.tools, (o) => (o.length === 0 ? first : o.at(-1)!.ok && o.at(-1)!.result.nextCursor ? { id, cursor: o.at(-1)!.result.nextCursor } : undefined), 200);
+    // Each reply's tool results stay within the budget; a read longer than one budget continues in the next reply from the last whole
+    // page, and nothing is lost or repeated (checked below by reassembling every message).
+    assert.ok(!outcome.resultBudget || outcome.resultBudget.usedBytes <= outcome.resultBudget.maxBytes);
+    if (!first.maxChars) assert.ok(replies >= 2, `the long read needed more than one reply (${replies})`);
     for (const o of outs) {
       assert.ok(o.raw.length <= MAX_OUTPUT_CHARS, `output ${o.raw.length} > ${MAX_OUTPUT_CHARS}`);
       assert.doesNotMatch(o.raw, /… \(truncated\)$/);

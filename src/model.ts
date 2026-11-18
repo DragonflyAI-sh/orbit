@@ -55,7 +55,11 @@ export type Reply = Result<string> & { fallback?: FallbackInfo; accounting?: str
 // `rounds`: where a tool-using reply stands in its tool-round budget (runChat, src/agent.ts), so the instructions can say it. `round` is
 // this step's index (0-based); steps 0 .. max-1 may call tools; the step at `max` is the forced final answer, sent with no tools.
 // `offered`: the names of every tool runChat was given for this reply, so that final step can say they exist but are withheld.
-export type ToolRounds = { round: number; max: number; offered: string[] };
+// `stop`: set when the reply's tool-result budget (src/tool-result-budget.ts) is spent: this step is then final and sent with no tools
+// even though `round` < `max`. `notRun`: names of the calls the model asked for that were never started (in request order).
+export type ToolRounds = { round: number; max: number; offered: string[]; stop?: { reason: "tool-results"; budgetBytes: number; usedBytes: number; notRun: string[] } };
+// Whether this step is the forced final one (no tools): the round cap, or the tool-result budget.
+export const finalStep = (rounds: ToolRounds | undefined): boolean => Boolean(rounds && (rounds.round >= rounds.max || rounds.stop));
 export type ReplyOptions = { fallback?: boolean; signal?: AbortSignal; rounds?: ToolRounds };
 
 // Whether this model can be sent photos. `ok: false` says why in words the owner can act on.
@@ -93,9 +97,9 @@ const offers = (tooling: string[], n: string) => tooling.some((t) => toolName(t)
 
 export function recordCheckInstruction(tooling: string[], rounds?: ToolRounds): string {
   const available = RECORD_TOOLS.filter((n) => offers(tooling, n));
-  const withheld = rounds && rounds.round >= rounds.max ? RECORD_TOOLS.filter((n) => rounds.offered.includes(n)) : [];
+  const withheld = rounds && finalStep(rounds) ? RECORD_TOOLS.filter((n) => rounds.offered.includes(n)) : [];
   if (!available.length && withheld.length)
-    return `The record tools (${withheld.join(", ")}) are withheld in this final step because the tool-round budget ran out; they are not missing. Claim a job or action outcome only where a tool result above shows it; otherwise say it is unverified.`;
+    return `The record tools (${withheld.join(", ")}) are withheld in this final step because ${rounds!.round >= rounds!.max ? "the tool-round budget ran out" : "this reply's tool-result budget is spent"}; they are not missing. Claim a job or action outcome only where a tool result above shows it; otherwise say it is unverified.`;
   return available.length
     ? `Before you say that a job or an action did happen or did not happen (launched, steered, confirmed, restarted, finished, failed), check ORBIT's actual records in this turn with ${available.join(", ")}. What earlier messages, a thread summary, the recent-work note or a proposal card says is not proof: the records are. If the records disagree with something you said earlier, say so and correct it. If a check is not possible, say the outcome is unverified. Before proposing a new job, check whether the same work is already running or waiting for Rai's confirmation, and do not offer a proposal he already confirmed.`
     : "None of the tools that read ORBIT's job and operation records are available in this reply, so you cannot check whether a job or action happened: say its outcome is unverified instead of claiming it, and do not re-offer a proposal that earlier messages show was already confirmed.";
@@ -133,10 +137,18 @@ export function photoGuidance(tooling: string[]): string[] {
 // The tool-round lines (docs/assistant.md, "Tool rounds and capability claims"). Built from runChat's own counters and tool list.
 export function roundGuidance(rounds: ToolRounds | undefined, offeredNow: boolean): string[] {
   if (!rounds || rounds.max < 1) return [];
+  if (rounds.stop && rounds.round < rounds.max) {
+    const n = rounds.stop.notRun.length;
+    const names = rounds.stop.notRun.slice(0, 20).join(", ").slice(0, 600);
+    return [
+      "",
+      `TOOL-RESULT BUDGET REACHED: the tool calls and results of this reply have used ${rounds.stop.usedBytes} of the ${rounds.stop.budgetBytes} bytes ORBIT allows one reply, so ORBIT offers no tools in this final step. This is a size bound, not the tool-round budget and not a missing tool.${rounds.offered.length ? ` The tools offered earlier in this reply still exist and are only withheld for this step: ${rounds.offered.join(", ")}. Do not say that any of them is unavailable, missing or not connected.` : ""}${n ? ` ORBIT did NOT run ${n} tool call${n === 1 ? "" : "s"} you asked for (${names}${rounds.stop.notRun.length > 20 ? ", …" : ""}): ${n === 1 ? "it" : "they"} did nothing and returned nothing.` : ""} A tool output marked as cut to fit this budget is incomplete. Say that this reply's tool-result budget was reached. Report only what the tool results above show, say which requested actions or reads were not done or are incomplete, and do not present a partial result as complete. Rai can ask again (for example "continue") for a new reply with a fresh budget.`,
+    ];
+  }
   if (rounds.round >= rounds.max) {
     return [
       "",
-      `TOOL-ROUND BUDGET EXHAUSTED: this reply has used all ${rounds.max} steps that may call tools, so ORBIT offers no tools in this final step.${rounds.offered.length ? ` The tools offered earlier in this reply still exist and are only withheld for this step: ${rounds.offered.join(", ")}. Do not say that any of them is unavailable, missing or not connected.` : ""} Say that this reply's tool-round budget ran out. Report only what the tool results above show, and say plainly which requested actions were not done: a tool that was not called did nothing, and a proposal is not a completed action. Rai can ask again (for example "continue") for a new reply with a fresh budget.`,
+      `TOOL-ROUND BUDGET EXHAUSTED: this reply has used all ${rounds.max} steps that may call tools, so ORBIT offers no tools in this final step.${rounds.offered.length ? ` The tools offered earlier in this reply still exist and are only withheld for this step: ${rounds.offered.join(", ")}. Do not say that any of them is unavailable, missing or not connected.` : ""}${rounds.stop?.notRun.length ? ` This reply's tool-result budget was also reached: ORBIT did NOT run ${rounds.stop.notRun.length} tool call(s) you asked for (${rounds.stop.notRun.slice(0, 20).join(", ").slice(0, 600)}); they did nothing.` : ""} Say that this reply's tool-round budget ran out. Report only what the tool results above show, and say plainly which requested actions were not done: a tool that was not called did nothing, and a proposal is not a completed action. Rai can ask again (for example "continue") for a new reply with a fresh budget.`,
     ];
   }
   if (!offeredNow) return [];

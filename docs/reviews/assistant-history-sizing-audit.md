@@ -6,6 +6,8 @@
 - **Audited commit: `32bfcc7b7cc437d07fa4bfc5e120ddbbb64eebb2`** (`main`, "Web UI: collapsed "Details" footer for each message's
   metadata (Assistant and Chat) (#119)"). Every path and line below refers to that commit.
 - No private chat, credential, provider or external service was read or called. All workloads are invented.
+- **Implemented later** (job `orbit-202611180235-o1mu`): the approved modest option and a per-reply tool-result budget. Sections 1 to 16
+  are kept as audited at `32bfcc7`; section 17 records what changed, the before/after measurements and the review corrections.
 
 Terms used throughout:
 
@@ -186,7 +188,7 @@ Image token cost is provider-specific and not estimated here.
 
 ## 9. Synthetic measurements
 
-<!-- generated: node tools/history-audit/report.ts (audited commit 32bfcc7) -->
+<!-- generated: node tools/history-audit/report.ts (audited commit 32bfcc7). Historical: the report now prints section 17's tables. -->
 All figures below are SYNTHETIC measurements of ORBIT's own code on invented workloads; token figures are ESTIMATES (characters / 4).
 
 Fixed part measured offline (lower bound, 41 tools wired): instructions 9,048 chars at a tool step, 2,532 at the forced final step; tool schemas 39,774 chars (not sent at the forced final step).
@@ -376,3 +378,167 @@ Scope: one small PR, Assistant only.
 
 `tools/` is outside `tsconfig.json`'s `include`, so the report printer is kept to a few lines; all of its logic is in `test/` and is
 typechecked.
+
+## 17. Implementation (job `orbit-202611180235-o1mu`, on `main` at `4297487`)
+
+Approved scope: the modest history option with an explicit floor, plus a deterministic per-reply budget for current-turn tool results.
+PR #120 (20 rounds and a no-progress guard) was **not merged** when this was built: `MAX_ROUNDS` is still 5 and there is no repeat-error
+guard on `main`. Nothing here changes the round cap, approvals, policy checks or any production setting; 20-round figures below are
+synthetic runs with `maxRounds: 20` passed to `runChat`, as in section 6.
+
+### 17.1 What changed
+
+| Item | Before (`32bfcc7`) | After | Code |
+| --- | --- | --- | --- |
+| History ceiling `ASSISTANT_ACTIVE_BUDGET_CHARS` | 32,000 | **48,000** | `src/assistant-context.ts` |
+| Context budget `ASSISTANT_CONTEXT_BUDGET_CHARS` | 52,000 | **68,000** (48,000 + 20,000) | same |
+| Per-turn cap `ASSISTANT_CHUNK_MAX_CHARS` | 12,000 | 12,000 (unchanged) | same |
+| Floor | 2 (implicit) | **`ASSISTANT_MIN_TURNS` = 4, explicit**: invariants checked at module load (`budgetProblems`, `assertBudgetInvariants`); `planContext` reports `floor: { turns, available, met }` | same |
+| Current-turn tool results | unbounded in total | **`REPLY_TOOL_RESULT_BUDGET_BYTES` = 96,000 bytes per reply**, admission per call (`TOOL_RESULT_MIN_BYTES` = 2,048), byte-exact fit with kept facts, final no-tool step | `src/tool-result-budget.ts`, `runChat` in `src/agent.ts`, `roundGuidance` in `src/model.ts` |
+| Stored calls | | optional `notRun`, `budgetCut` (full output still stored) | `src/threads.ts`, `src/thread-service.ts`, page `callState` |
+
+Precedence, behaviour, residual costs and rollback are documented in `docs/assistant.md` ("Floor and precedence", "Tool-result budget").
+Characters remain the unit of the history budgets; the tool-result budget is in UTF-8 bytes of the serialized items so that non-ASCII
+text and JSON escaping are counted as sent. No model context window, tokenizer or 72,000 option was introduced; the harness no longer
+measures the larger option.
+
+**Cap choice (96,000 bytes), from this audit's reproducible fixtures and code limits, not from an assumed model capacity:** the bound
+case's first request is 135,806 characters (ASCII) at 48,000 / 68,000; the only hard request-size limit in the code is the fallback's
+300,000 bytes, so ~164k remains, of which the budget takes 96k and leaves ~68k for what it does not count (unwired tool schemas,
+framing, non-ASCII history). It binds a heavy reply already at 5 rounds (~103k before), leaves the typical 5-round load (~19k)
+untouched, and holds the largest single output (`vault_policy`, 42,000) whole.
+
+**Not a complete admission controller.** Instructions, tool schemas, reference material, history (characters, so up to ~3x in bytes
+for non-ASCII), the user's message, images and the model's output are not counted by it; a provider can still refuse an oversize
+request, and the turn then ends as an error, as before (section 10).
+
+### 17.2 Before and after (SYNTHETIC; tokens are ESTIMATES)
+
+Regenerate with `node tools/history-audit/report.ts`. "Before" runs today's code with the audited ceiling (32,000) and no result budget
+(`NO_RESULT_BUDGET`); "after" is the current code. The forced final step is costed with the round-cap final instructions (2,532 chars);
+the budget-stop final text is a few hundred characters longer, so final steps after a budget stop are slightly understated.
+
+<!-- generated: node tools/history-audit/report.ts (this change) -->
+All figures below are SYNTHETIC measurements of ORBIT's own code on invented workloads; token figures are ESTIMATES (characters / 4).
+
+Fixed part measured offline (lower bound, 41 tools wired): instructions 9,048 chars at a tool step, 2,532 at the forced final step; tool schemas 39,774 chars (not sent at the forced final step).
+
+### Turn shapes
+
+| turn | user | reply | tool calls | stored chars | est. tokens |
+| --- | ---: | ---: | --- | ---: | ---: |
+| small | 160 | 500 | none | 660 | 165 |
+| typical | 400 | 1,400 | 2,400 + 1,200 | 5,640 | 1,410 |
+| heavy | 1,200 | 3,000 | 8,000 + 8,000 + 4,000 + 2,000 | 27,000 | 6,750 |
+
+### History retention by option (current message 400 chars)
+
+| option | active / context budget | floor (turns) | history | turns sent (of 120) | forms | history chars | est. tokens |
+| --- | ---: | ---: | --- | ---: | --- | ---: | ---: |
+| Before (32bfcc7) | 32,000 / 52,000 | 2 | small | 48 | 48 full | 31,680 | 7,920 |
+| Before (32bfcc7) | 32,000 / 52,000 | 2 | typical | 6 | 5 full, 1 clipped | 29,230 | 7,308 |
+| Before (32bfcc7) | 32,000 / 52,000 | 2 | heavy | 2 | 2 clipped | 21,992 | 5,498 |
+| After (current code) | 48,000 / 68,000 | 4 | small | 72 | 72 full | 47,520 | 11,880 |
+| After (current code) | 48,000 / 68,000 | 4 | typical | 9 | 7 full, 2 clipped | 46,524 | 11,631 |
+| After (current code) | 48,000 / 68,000 | 4 | heavy | 4 | 4 clipped | 43,984 | 10,996 |
+
+### Current-turn tool rounds (real runChat loop, typical history of the current code)
+
+| load | max rounds | result budget | model requests | ended by | calls not run / cut | tool-result chars added by the last request | bytes added (serialized) | est. tokens added |
+| --- | ---: | --- | ---: | --- | --- | ---: | ---: | ---: |
+| light (600 per round) | 5 | none (before) | 6 | round cap | 0 / 0 | 4,635 | 4,635 | 1,159 |
+| light (600 per round) | 5 | 96,000 | 6 | round cap | 0 / 0 | 4,635 | 4,635 | 1,159 |
+| light (600 per round) | 20 | none (before) | 21 | round cap | 0 / 0 | 18,560 | 18,560 | 4,640 |
+| light (600 per round) | 20 | 96,000 | 21 | round cap | 0 / 0 | 18,560 | 18,560 | 4,640 |
+| typical (2,500 + 1,500 per round) | 5 | none (before) | 6 | round cap | 0 / 0 | 23,680 | 23,680 | 5,920 |
+| typical (2,500 + 1,500 per round) | 5 | 96,000 | 6 | round cap | 0 / 0 | 23,680 | 23,680 | 5,920 |
+| typical (2,500 + 1,500 per round) | 20 | none (before) | 21 | round cap | 0 / 0 | 94,760 | 94,760 | 23,690 |
+| typical (2,500 + 1,500 per round) | 20 | 96,000 | 21 | round cap (result budget also spent) | 0 / 0 | 94,760 | 94,760 | 23,690 |
+| heavy (12,000 + 8,000 + 8,000 per round) | 5 | none (before) | 6 | round cap | 0 / 0 | 128,845 | 128,875 | 32,212 |
+| heavy (12,000 + 8,000 + 8,000 per round) | 5 | 96,000 | 5 | result budget | 1 / 0 | 94,487 | 94,509 | 23,622 |
+| heavy (12,000 + 8,000 + 8,000 per round) | 20 | none (before) | 21 | round cap | 0 / 0 | 515,440 | 515,560 | 128,860 |
+| heavy (12,000 + 8,000 + 8,000 per round) | 20 | 96,000 | 5 | result budget | 1 / 0 | 94,487 | 94,509 | 23,622 |
+
+### Whole request: before and after (typical history, typical reference material, current message 400 chars)
+
+| state | load | max rounds | requests | history turns sent | first request chars (est. tokens) | peak request chars, step (est. tokens) | tool results at peak | cumulative input est. tokens | change vs before |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| before (32,000; no result budget) | typical | 5 | 6 | 6 | 87,952 (21,988) | 106,896, 4 (26,724) | 18,944 | 138,116 |  |
+| after (48,000; result budget 96,000 bytes) | typical | 5 | 6 | 9 | 105,246 (26,312) | 124,190, 4 (31,048) | 18,944 | 164,057 | +19% |
+| before (32,000; no result budget) | typical | 20 | 21 | 6 | 87,952 (21,988) | 177,972, 19 (44,493) | 90,020 | 698,871 |  |
+| after (48,000; result budget 96,000 bytes) | typical | 20 | 21 | 9 | 105,246 (26,312) | 195,266, 19 (48,817) | 90,020 | 789,664 | +13% |
+| before (32,000; no result budget) | heavy | 5 | 6 | 6 | 87,952 (21,988) | 191,028, 4 (47,757) | 103,076 | 216,990 |  |
+| after (48,000; result budget 96,000 bytes) | heavy | 5 | 5 | 9 | 105,246 (26,312) | 182,553, 3 (45,639) | 77,307 | 182,261 | -16% |
+| before (32,000; no result budget) | heavy | 20 | 21 | 6 | 87,952 (21,988) | 577,617, 19 (144,405) | 489,665 | 1,803,131 |  |
+| after (48,000; result budget 96,000 bytes) | heavy | 20 | 5 | 9 | 105,246 (26,312) | 182,553, 3 (45,639) | 77,307 | 182,261 | -90% |
+
+### Retained turns by history (current message 400 chars)
+
+| history | before (32,000; no result budget) | after (48,000; result budget 96,000 bytes) |
+| --- | ---: | ---: |
+| small | 48 | 72 |
+| typical | 6 | 9 |
+| heavy | 2 | 4 |
+
+### Bound case (heavy history, maximum reference material, 20,000-char message)
+
+| state | load | max rounds | first request chars | first est. tokens | peak request chars | peak est. tokens | over 300,000 (fallback request cap)? |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| before (32,000; no result budget) | typical | 5 | 113,814 | 28,454 | 132,758 | 33,190 | no |
+| before (32,000; no result budget) | heavy | 5 | 113,814 | 28,454 | 216,890 | 54,223 | no |
+| before (32,000; no result budget) | heavy | 20 | 113,814 | 28,454 | 603,479 | 150,870 | yes (approx.) |
+| after (48,000; result budget 96,000 bytes) | typical | 5 | 135,806 | 33,952 | 154,750 | 38,688 | no |
+| after (48,000; result budget 96,000 bytes) | heavy | 5 | 135,806 | 33,952 | 213,113 | 53,279 | no |
+| after (48,000; result budget 96,000 bytes) | heavy | 20 | 135,806 | 33,952 | 213,113 | 53,279 | no |
+
+### 17.3 Reading the results
+
+- **Retained turns:** small 48 to 72, typical 6 to 9, heavy 2 to 4 (the floor). First request in the typical case: 87,952 to 105,246
+  chars (+17,294, ~+4.3k tokens est., +20%).
+- **Growth cap:** a reply's own tool exchanges add at most 96,000 bytes (~24k tokens est.) to any request, whatever the round count.
+  The heavy synthetic load reaches it in its 4th round: before 128,875 bytes (5 rounds) and 515,560 bytes (20 rounds) added by the last
+  request; after 94,509 bytes in both, with one call not run and the final step without tools. Light and typical 5-round loads are
+  unchanged (identical request sizes, tested). The typical 20-round load ends at the round cap with the budget nearly spent.
+- **Cumulative input per reply (typical history and reference material):** typical 5 rounds 138,116 to 164,057 tokens est. (+19%,
+  the history change alone); heavy 5 rounds 216,990 to 182,261 (-16%: the budget more than offsets the larger history); heavy 20 rounds
+  (only if the round change lands) 1,803,131 to 182,261 (-90%).
+- **Peak request, bound case:** heavy 5 rounds 216,890 to 213,113 chars (~53.3k tokens est.); heavy 20 rounds 603,479 to 213,113, now
+  under the fallback's 300,000-byte cap with ~87k to spare (approx.: characters of the ASCII fixtures).
+- **Cost:** no rates are evidenced for the primary route, so none are claimed; billed input on the paid fallback scales with the input
+  tokens above.
+
+### 17.4 Review corrections (review of PR #121 by job `orbit-202611180141-omjx`)
+
+1. "Lower bound" applies to the tool schemas; the instructions figure includes ~0.8k characters of fixture-specific status lines, so
+   it is not guaranteed to be a lower bound. Impact under 2% of the fixed part; conclusions unchanged.
+2. `test/history-audit.test.ts` no longer pins `MAX_ROUNDS` (it reads it), so the separate round change does not fail it. It now pins
+   the new budget constants (48,000 / 68,000 / 4 / 96,000), deliberately.
+3. Section 4's "5 x 2,000": the 2,000 is `MAX_NOTE_CHARS`; the count of 5 hits is not evidenced at the cited lines. Harmless, the
+   total is cut to 12,000.
+4. and 5. (nits: a git warning on stderr from the vault fixture; temporary directories not removed) are unchanged and consistent with
+   other fixtures.
+
+### 17.5 Tests
+
+- `test/tool-result-budget.test.ts` (new, 24 tests): exact ceiling/floor edges and invariant edges; fewer than four turns; long newest
+  message; the 12,000 cap; a smaller caller budget winning over the floor; randomized floor check; rotation archives and never deletes,
+  planning never changes a stored chunk; cursor kept in clipped history; chat compaction constants unchanged; many parallel calls;
+  huge, multi-byte, astral, control-character and quote output; kept facts (outcome, proposal id, cursor, error); paging cursor in
+  current-turn results; 5- and 20-round heavy workloads bounded; repeated identical failing calls; round cap and budget together;
+  final-step instructions; cancellation; empty final text; the chat-thread path storing full outputs and not-run calls; adversarial call ids and tool names.
+- `test/history-audit.test.ts`: before/after options, the 48,000 / 68,000 / 4 / 96,000 constants, bounded 5/20-round growth, typical
+  loads unchanged, no stale five-round pin.
+- `test/session-cursor-contract.test.ts`: the long paged read now continues across replies when the budget stops one, and still
+  reassembles every message exactly once.
+
+### 17.6 Verification
+
+| Check | Command | Outcome |
+| --- | --- | --- |
+| Typecheck | `pnpm typecheck` (`tsc`) | exit 0, no output |
+| Tests | `node --test test/*.test.ts` (`pnpm test`) | exit 0: tests 1580, pass 1580, fail 0, cancelled 0, skipped 0, todo 0 (about 93 s) |
+| Report | `node tools/history-audit/report.ts` | the tables in 17.2, regenerated after the last code change |
+| Secret scan | `docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --redact -v --log-opts=HEAD` | **Not run**: no Docker daemon in this environment (`failed to connect to the docker API at unix:///var/run/docker.sock`). The diff was grepped for secret shapes (none); CI's gitleaks job remains the real check. |
+
+Not done: no production configuration change, no deploy, no live model or provider call; the budgets are not verified against a real
+deployment.

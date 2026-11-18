@@ -34,8 +34,8 @@ export const dataBlock = (name: string, body: string): string => `<orbit-data na
 // result are stored together and never separated, and call ids are made unique across the whole input.
 
 // How a stored call ended, in words: a call cut off by a deadline or a cancellation is never called "failed" (docs/tool-deadlines.md).
-export const callState = (c: Pick<StoredCall, "ok" | "interrupted" | "outcomeUnknown">): string =>
-  c.outcomeUnknown ? "outcome unknown (not retried)" : c.interrupted && !c.ok ? (c.interrupted === "timeout" ? "timed out, no result" : "cancelled, no result") : c.ok ? "ok" : "failed";
+export const callState = (c: Pick<StoredCall, "ok" | "interrupted" | "outcomeUnknown" | "notRun">): string =>
+  c.notRun ? "not run (the reply's tool-result budget was spent; nothing was done)" : c.outcomeUnknown ? "outcome unknown (not retried)" : c.interrupted && !c.ok ? (c.interrupted === "timeout" ? "timed out, no result" : "cancelled, no result") : c.ok ? "ok" : "failed";
 // The outcome facts of a stored call that must survive any shortening of history (docs/assistant.md, "Tool rounds and capability
 // claims"): whether a write was committed or only proposed, and the ids that point at the authoritative record (proposal, commit,
 // job, operation). Read from the call's own JSON output; only short id-shaped values, so no untrusted prose is lifted out of it.
@@ -57,7 +57,7 @@ export function callFacts(c: Pick<StoredCall, "output">): string {
   return out.join(", ");
 }
 // callState plus those facts, for every place a call is shown in shortened form.
-export const callOutcome = (c: Pick<StoredCall, "ok" | "interrupted" | "outcomeUnknown" | "output">): string => {
+export const callOutcome = (c: Pick<StoredCall, "ok" | "interrupted" | "outcomeUnknown" | "notRun" | "output">): string => {
   const f = c.ok ? callFacts(c) : "";
   return f ? `${callState(c)}: ${f}` : callState(c);
 };
