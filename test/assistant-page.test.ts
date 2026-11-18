@@ -227,11 +227,15 @@ test("browser: tool output and resource usage are collapsed panes; warnings and 
   ]);
   view.next = { included: [{ seq: 1, form: "clipped", chars: 900 }], omitted: [], historyChars: 900 };
   await open();
-  await page.waitForSelector("#alog details.toolpane");
+  await page.waitForSelector("#alog details.toolpane", { state: "attached" });
+  assert.equal(await page.isVisible("#alog details.toolpane"), false, "the panes are hidden inside the closed footer");
   const panes = await page.$$eval("#alog details", (ds: HTMLDetailsElement[]) => ds.map((d) => ({ cls: d.className, open: d.open, summary: d.querySelector("summary")!.textContent })));
-  assert.deepEqual(panes.map((p: any) => [p.cls, p.open]), [["toolpane", false], ["usagepane", false]], "both panes closed by default");
-  assert.match(panes[0].summary, /Tool output \(2 calls, 1 with unknown outcome\)/);
-  // Keyboard: a pane is a native disclosure, opened with Enter on its summary.
+  assert.deepEqual(panes.map((p: any) => [p.cls, p.open]), [["mfoot", false], ["toolpane", false], ["usagepane", false]], "the Details footer and both panes inside it closed by default");
+  assert.match(panes[1].summary, /Tool output \(2 calls, 1 with unknown outcome\)/);
+  // Keyboard: the footer and each pane are native disclosures, opened with Enter on their summary.
+  await page.focus("#alog details.mfoot > summary");
+  await page.keyboard.press("Enter");
+  assert.equal(await page.$eval("#alog details.mfoot", (d: HTMLDetailsElement) => d.open), true);
   await page.focus("#alog details.toolpane summary");
   await page.keyboard.press("Enter");
   assert.equal(await page.$eval("#alog details.toolpane", (d: HTMLDetailsElement) => d.open), true);

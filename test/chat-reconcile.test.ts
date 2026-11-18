@@ -113,11 +113,14 @@ test("a reply in progress updates only its own changed parts; completed messages
   mutations = [];
   const call = { name: "jobs_list", arguments: "{}", ok: true, provenance: "live", source: "jobs", summary: "3 jobs" };
   draw(log, meta, [...msgs(), { ...pending, calls: [call] }]);
-  assert.deepEqual(mutations, ["div>insert span.calls"], "a new tool call adds one part; the Working… body stays");
+  assert.deepEqual(mutations, ["div>insert details.mfoot"], "a new tool call adds the Details footer (holding the call); the Working… body stays");
   assert.equal(content(active)[0], body);
+  const foot = content(active)[1] as Node;
   mutations = [];
   draw(log, meta, [...msgs(), { ...pending, status: "done", text: "Finished.", provenance: "live", source: "model/x", calls: [call] }]);
-  assert.deepEqual(mutations, ["div>replace span.body", "div>insert span.tag live"], "finishing swaps the body and adds the tag, nothing else");
+  assert.deepEqual(mutations, ["div>replace span.body", "div>insert span.tag live"], "finishing swaps the body and adds the tag inside the footer, nothing else");
+  assert.equal(content(active)[1], foot, "the footer keeps its node (and the reader's open or closed choice)");
+  assert.equal((foot.childNodes[1] as Node).className, "mfootbody");
   assert.equal(log.childNodes[2], active, "the message node itself keeps its identity from pending to persisted");
   assert.ok(done.every((n) => log.all().includes(n)), "completed messages keep every node");
 });
@@ -127,16 +130,17 @@ test("cards reconcile by id and state: an unchanged card is kept, a changed one 
   const m = [...msgs(), { id: "p", role: "assistant", at: "t", text: "Proposal below.", status: "done", provenance: "live", source: "s", cards: ["c1", "c2"] }];
   const open = [{ id: "c1", state: "open" }, { id: "c2", state: "open" }];
   draw(log, meta, m, open);
-  const [, , card1, card2] = content(log.childNodes[2] as Node) as Node[];
+  const [, card1, card2] = content(log.childNodes[2] as Node) as Node[];
   mutations = [];
   draw(log, meta, m, open);
   assert.deepEqual(mutations, []);
   draw(log, meta, m, [{ id: "c1", state: "confirmed", live: { state: "running" } }, { id: "c2", state: "open" }]);
   assert.deepEqual(mutations, ["div>replace div.cardwrap open"]);
   const kids = content(log.childNodes[2] as Node) as Node[];
-  assert.notEqual(kids[2], card1);
-  assert.equal(kids[2]!.className, "cardwrap confirmed");
-  assert.equal(kids[3], card2, "the other, unchanged card keeps its node (and its focus and handlers)");
+  assert.notEqual(kids[1], card1);
+  assert.equal(kids[1]!.className, "cardwrap confirmed");
+  assert.equal(kids[2], card2, "the other, unchanged card keeps its node (and its focus and handlers)");
+  assert.equal(kids[3]!.className, "mfoot", "the Details footer comes after the cards, which are never inside it");
   assert.equal(kids.filter((k) => /cardwrap/.test(k.className)).length, 2, "no duplicate card");
 });
 
@@ -146,7 +150,7 @@ test("unknown children (optimistic bubbles, another thread's nodes) are removed 
   log.append(mk("div", { className: "msg user", textContent: "optimistic" }), mk("div", { className: "msg orbit", textContent: "Working…" }));
   draw(log, meta, [...msgs(), { id: "c", role: "user", at: "t", text: "optimistic" }, { id: "c", role: "user", at: "t", text: "optimistic" }]);
   assert.equal(log.childNodes.length, 3);
-  assert.deepEqual(log.childNodes.map((n) => contentText(n as Node)), ["first question", "An older answer with code.live · model/x", "optimistic"]);
+  assert.deepEqual(log.childNodes.map((n) => contentText(n as Node)), ["first question", "An older answer with code.Detailslive · model/x", "optimistic"]);
 });
 
 test("a real edit to an older message is reflected, in that message only", () => {

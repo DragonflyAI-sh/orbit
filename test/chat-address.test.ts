@@ -201,7 +201,7 @@ const settled = async (p: any, ms = 30) => {
 const view = (p: any = page) => p.evaluate(() => ({
   addr: location.pathname + location.hash,
   menu: document.getElementById("sessbtn")!.dataset.session,
-  log: [...document.querySelectorAll("#log .msg")].map((n) => [...n.children].filter((c) => !c.matches(".mavatar, .mhead")).map((c) => c.textContent).join("").slice(0, 24)),
+  log: [...document.querySelectorAll("#log .msg")].map((n) => [...n.children].filter((c) => !c.matches(".mavatar, .mhead")).map((c) => (c.matches(".mfoot") ? c.querySelector(".mfootbody")!.textContent : c.textContent)).join("").slice(0, 24)),
   canSend: !(document.getElementById("input") as HTMLTextAreaElement).disabled && !(document.getElementById("send") as HTMLButtonElement).disabled,
 }));
 // Follows a link within the page (as a reader clicking one would): the page switches views without reloading.
