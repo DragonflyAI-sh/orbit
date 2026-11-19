@@ -130,7 +130,10 @@ export function cardFor(op: HeldOp): { summary: string; display: Record<string, 
 
 export type WorkspaceService = ReturnType<typeof workspaceService>;
 
-export function workspaceService(d: { activation: Activation; sandbox?: Sandbox; stateDir?: string; proposals: Proposals; audit?: (e: WorkspaceAudit) => void; now?: () => Date; ledger?: OpLedger }) {
+// `active`: the owner's switch (src/workspace/activation.ts). With a valid host configuration but the switch off, the service exists
+// (status, recovery, validation and disable need it) yet offers no tool to the model and refuses every confirmation.
+export function workspaceService(d: { activation: Activation; sandbox?: Sandbox; stateDir?: string; proposals: Proposals; audit?: (e: WorkspaceAudit) => void; now?: () => Date; ledger?: OpLedger; active?: () => boolean }) {
+  const active = () => (d.active ? d.active() : true);
   const now = d.now ?? (() => new Date());
   const iso = () => now().toISOString();
   const config = d.activation.state === "enabled" ? d.activation.config : undefined;
@@ -444,6 +447,7 @@ export function workspaceService(d: { activation: Activation; sandbox?: Sandbox;
     const card = cardFor(held);
     if (canonical(card.display) !== canonical(p.display) || card.summary !== p.summary) return deny(409, "the card does not show the operation that would run.");
     if (!config) return deny(503, "workspace tools are not enabled.");
+    if (!active()) return deny(503, "workspace tools are switched off by the owner (configured, not enabled).");
     const w = config.workspaces.find((x) => x.id === held.workspace.id);
     if (!w || w.identity !== held.workspace.identity) return deny(409, "the workspace is no longer the one that was proposed (its configuration or identity changed).");
     // Short, non-secret-shaped ids (the page masks long opaque strings such as UUIDs).
@@ -530,6 +534,10 @@ export function workspaceService(d: { activation: Activation; sandbox?: Sandbox;
     try {
       // WS-R11/WS-R8: the sandbox implementation and policy are compared again at dequeue (not only at confirmation), and nothing
       // starts while an earlier run's cleanup is unverified.
+      if (!active()) {
+        finish(opId, { state: "cancelled", reason: "disabled: the workspace tools were switched off before this run started; it never ran" });
+        return;
+      }
       if (!sandboxMatches(op)) {
         finish(opId, { state: "failed", reason: "sandbox_changed: the sandbox is unavailable or its policy changed while the run was queued" });
         return;
@@ -667,9 +675,33 @@ export function workspaceService(d: { activation: Activation; sandbox?: Sandbox;
     return settled;
   }
 
+  // Disable: called right AFTER the owner switch was turned off (so nothing new can be confirmed). Withdraws every queued run and
+  // kills every running one; the caller then waits (bounded) for the exits to be OBSERVED. Nothing here claims a process is gone.
+  function drain(reason: string): { withdrawn: string[]; killRequested: string[] } {
+    const withdrawn = queue.splice(0).map((x) => x.opId);
+    for (const id of withdrawn) {
+      ledger.update(id, { state: "cancelled", reason: `cancelled before it started: ${reason}` }, { state: "cancelled", detail: "withdrawn from the queue; it never started" }, iso());
+      audit({ event: "cancellation", kind: "exec", workspace: ledger.get(id)?.workspace ?? "?", opId: id, detail: "queued run withdrawn (disable)" });
+    }
+    const killRequested = [...running.keys()];
+    for (const id of killRequested) {
+      ledger.update(id, {}, { state: "cancel_requested", detail: reason }, iso());
+      audit({ event: "cancellation", kind: "exec", workspace: ledger.get(id)?.workspace ?? "?", opId: id, detail: "kill requested (disable)" });
+      running.get(id)?.kill("cancel");
+    }
+    settleIdle();
+    return { withdrawn, killRequested };
+  }
+
   return {
     enabled: Boolean(config),
-    tools: config ? tools : [],
+    get active() {
+      return Boolean(config) && active();
+    },
+    get tools() {
+      return config && active() ? tools : [];
+    },
+    drain,
     names: tools.map((t) => t.name),
     confirm,
     cancelled(proposalId: string) {
@@ -687,7 +719,7 @@ export function workspaceService(d: { activation: Activation; sandbox?: Sandbox;
     describe() {
       if (!config) return { state: d.activation.state, reason: d.activation.state === "enabled" ? "" : d.activation.reason };
       const sb = d.sandbox?.status();
-      return { state: "enabled", workspaces: config.workspaces.map((w) => ({ id: w.id, exec: w.exec })), sandbox: sb ?? { state: "unsupported", reasons: ["no sandbox configured"] }, running: running.size, queued: queue.length };
+      return { state: "enabled", owner: active() ? "enabled" : "off", workspaces: config.workspaces.map((w) => ({ id: w.id, exec: w.exec })), sandbox: sb ?? { state: "unsupported", reasons: ["no sandbox configured"] }, running: running.size, queued: queue.length, cleanupUnverified: quarantined() };
     },
   };
 }

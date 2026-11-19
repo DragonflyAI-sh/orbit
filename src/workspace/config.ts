@@ -7,13 +7,16 @@ import { dirname, isAbsolute, normalize } from "node:path";
 // the sandbox gets, and every limit. The model only ever passes a workspace id; it cannot nominate a root, a mount, an environment
 // variable, an identity or a sandbox policy.
 //
-// OFF BY DEFAULT, twice over: ORBIT_WORKSPACE_TOOLS must be exactly "enabled", AND the file named by ORBIT_WORKSPACES_FILE must carry
-// `preActivationChecklist` equal to PRE_ACTIVATION_CHECKLIST, which an operator writes only after the independent security review and
-// the live-host isolation checks in docs/workspace-tools.md have passed. Merging or deploying this code activates nothing.
+// OFF BY DEFAULT, three times over. This file decides only whether the HOST PERMITS the tools: ORBIT_WORKSPACE_TOOLS must be exactly
+// "enabled", AND the file named by ORBIT_WORKSPACES_FILE must carry `preActivationChecklist` equal to PRE_ACTIVATION_CHECKLIST (written
+// by the owner-confirmed host setup, src/ops/ws-*.ts, or by an operator following docs/workspace-tools.md). Even then the model sees
+// no workspace tool until a bounded validation passed under the production sandbox AND Rai confirmed "enable" on a card
+// (src/workspace/activation.ts, src/workspace/admin.ts). Merging or deploying this code activates nothing.
 
 export const WORKSPACE_FLAG = "ORBIT_WORKSPACE_TOOLS";
 export const WORKSPACE_FILE_ENV = "ORBIT_WORKSPACES_FILE";
-export const PRE_ACTIVATION_CHECKLIST = "workspace-tools-preactivation-v1";
+// v2: the host was prepared for the on-host, owner-approved activation path (setup, validation, enable). It does not mean "enabled".
+export const PRE_ACTIVATION_CHECKLIST = "workspace-tools-host-setup-v2";
 
 export const ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 // The only host trees the sandbox may see (read-only). Anything else (/etc, /home, /var, /run, /opt, ORBIT's state, credentials) is
@@ -252,7 +255,7 @@ export function loadActivation(env: Record<string, string | undefined>, host: Ho
   try {
     const raw = JSON.parse(text) as { preActivationChecklist?: unknown };
     if (raw?.preActivationChecklist !== PRE_ACTIVATION_CHECKLIST) {
-      return { state: "not_activated", reason: `The pre-activation checklist has not been acknowledged (preActivationChecklist must be "${PRE_ACTIVATION_CHECKLIST}" after the security review and live-host isolation checks in docs/workspace-tools.md).` };
+      return { state: "not_activated", reason: `The host setup has not been acknowledged (preActivationChecklist must be "${PRE_ACTIVATION_CHECKLIST}"; see docs/workspace-tools.md, "Activation").` };
     }
   } catch {
     return { state: "invalid", reason: "The workspaces file is not valid JSON." };
