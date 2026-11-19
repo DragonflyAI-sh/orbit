@@ -328,3 +328,12 @@ test("every mutating tool, called directly as any model or fallback dispatch pat
   assert.equal(r.svc.ledger.list().length, 0);
   for (const t of r.svc.tools) assert.equal(t.readOnly === true, ["workspace_list", "fs_list", "fs_stat", "fs_read", "fs_search", "exec_status"].includes(t.name), t.name);
 });
+
+test("the largest write the tool accepts fits its card in full (no write is refused for card size)", async () => {
+  const r = wsRig();
+  const path = `${"d".repeat(200)}.txt`;
+  const res = await r.call("fs_write", { workspace: "alpha", path, content: "x".repeat(20_000), createOnly: true });
+  assert.equal(res.value.status, "pending-confirmation");
+  assert.equal(r.proposal(res.value.proposalId).display.content.length, 20_000);
+  await assert.rejects(r.call("fs_write", { workspace: "alpha", path: "y.txt", content: "x".repeat(20_001), createOnly: true }), /too_large/);
+});

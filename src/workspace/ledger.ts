@@ -39,6 +39,8 @@ export type OpEntry = {
 };
 
 export const LEDGER_MAX = 200;
+// A ledger that cannot be trusted stops the workspace tools (fail closed), never ORBIT itself (src/workspace/select.ts).
+export class LedgerError extends Error {}
 export const ACTIVE: OpState[] = ["accepted", "queued", "running"];
 
 export function opLedger(dir: string | undefined) {
@@ -48,8 +50,16 @@ export function opLedger(dir: string | undefined) {
   const outDir = dir ? join(dir, "output") : undefined;
   if (dir) mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (file && existsSync(file)) {
-    const raw = JSON.parse(readFileSync(file, "utf8")) as { entries?: OpEntry[] };
-    for (const e of raw.entries ?? []) entries.set(e.opId, e);
+    let raw: { entries?: unknown };
+    try {
+      raw = JSON.parse(readFileSync(file, "utf8")) as { entries?: unknown };
+    } catch {
+      throw new LedgerError("The workspace ledger (ledger.json) cannot be read or is not valid JSON; it was left untouched.");
+    }
+    if (!Array.isArray(raw?.entries) || raw.entries.some((e) => !e || typeof e !== "object" || typeof (e as OpEntry).opId !== "string" || typeof (e as OpEntry).state !== "string")) {
+      throw new LedgerError("The workspace ledger (ledger.json) has an unexpected shape; it was left untouched.");
+    }
+    for (const e of raw.entries as OpEntry[]) entries.set(e.opId, e);
   }
   const persist = () => {
     while (entries.size > LEDGER_MAX) {

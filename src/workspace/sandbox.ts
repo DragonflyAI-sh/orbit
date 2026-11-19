@@ -204,8 +204,15 @@ export function bwrapSandbox(d: { config: SandboxConfig; stateDir: string; uid?:
     }
   }
 
+  // The public entry point: refuses unless the probe has COMPLETED with a "supported" verdict.
   function start(spec: RunSpec): RunHandle {
-    if (state.state !== "supported") {
+    return launch(spec, false);
+  }
+
+  // `probing`: the self-test's own run, the only launch allowed before a verdict exists. It never reads or changes `state`, so the
+  // sandbox is never reported supported (and no other run can start) while its self-test is still running.
+  function launch(spec: RunSpec, probing: boolean): RunHandle {
+    if (!probing && state.state !== "supported") {
       return { pid: undefined, kill: () => {}, done: Promise.resolve({ code: null, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: { stdout: false, stderr: false }, startError: `The sandbox is not available: ${state.reasons.join("; ")}` }) };
     }
     if (uid() === 0) {
@@ -269,6 +276,8 @@ export function bwrapSandbox(d: { config: SandboxConfig; stateDir: string; uid?:
     status: () => state,
     policyId: () => `bwrap:${state.bwrapVersion ?? "unknown"}:${REQUIRED_FLAGS.length}`,
     async probe() {
+      // Until this probe's verdict is in, the sandbox is not supported: nothing but the self-test itself can launch.
+      state = { state: "unknown", reasons: ["the sandbox self-test is running"] };
       const reasons: string[] = [];
       let version: string | undefined;
       if (uid() === 0) reasons.push("ORBIT is running as root; the sandbox never runs as root");
@@ -300,9 +309,8 @@ export function bwrapSandbox(d: { config: SandboxConfig; stateDir: string; uid?:
         rmSync(probeWs, { recursive: true, force: true });
         mkdirSync(probeWs, { recursive: true, mode: 0o700 });
         const canaries = [d.stateDir, ...(d.canaries ?? []), "/etc/shadow", "/home", "/root", "/var", "/run/systemd", "/opt"];
-        state = { state: "supported", reasons: [] };
         const limits = { timeoutSec: 20, cpuSec: 10, memoryBytes: 512 * 1024 * 1024, processes: 32, fileSizeBytes: 1024 * 1024, openFiles: 64, outputBytes: 64 * 1024, tmpBytes: 4 * 1024 * 1024, workspaceBytes: 0 };
-        const h2 = start({ runId: `probe-${Date.now().toString(36)}`, workspace: { id: "probe", root: probeWs, exec: true, dev: 0, ino: 0, identity: "probe" }, cwd: [], argv: [cfg.shell, SCRIPT_PATH], script: PROBE_SCRIPT(canaries), limits });
+        const h2 = launch({ runId: `probe-${Date.now().toString(36)}`, workspace: { id: "probe", root: probeWs, exec: true, dev: 0, ino: 0, identity: "probe" }, cwd: [], argv: [cfg.shell, SCRIPT_PATH], script: PROBE_SCRIPT(canaries), limits }, true);
         const r = await h2.done;
         if (r.startError || r.code !== 0) reasons.push(`the sandbox self-test did not run (${r.startError ?? `exit ${r.code}`}: ${r.stderr.toString("utf8").slice(0, 200)})`);
         else reasons.push(...judgeProbe(r.stdout.toString("utf8"), canaries));

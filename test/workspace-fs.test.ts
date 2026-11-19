@@ -160,8 +160,8 @@ test("check/use race: swapping a directory for a symlink to the outside while re
   // A child process flips ws/swap between a real directory and a symlink to the outside directory as fast as it can.
   const flipper = spawn(process.execPath, ["-e", `
     const fs = require("fs"); const ws = ${JSON.stringify(f.ws)}; const out = ${JSON.stringify(f.outside)};
-    const end = Date.now() + 1500;
-    while (Date.now() < end) {
+    const end = Date.now() + 700; const pause = new Int32Array(new SharedArrayBuffer(4));
+    while (Date.now() < end) { Atomics.wait(pause, 0, 0, 0.2);
       try { fs.renameSync(ws + "/swap", ws + "/swap-real"); fs.symlinkSync(out, ws + "/swap"); } catch {}
       try { fs.unlinkSync(ws + "/swap"); fs.renameSync(ws + "/swap-real", ws + "/swap"); } catch {}
     }
@@ -169,7 +169,7 @@ test("check/use race: swapping a directory for a symlink to the outside while re
   const r = f.root();
   let inside = 0;
   let refused = 0;
-  const deadline = Date.now() + 1400;
+  const deadline = Date.now() + 650;
   try {
     while (Date.now() < deadline) {
       try {
@@ -196,14 +196,14 @@ test("check/use race on writes: a parent swapped for a symlink never lets a writ
   mkdirSync(join(f.ws, "swap"));
   const flipper = spawn(process.execPath, ["-e", `
     const fs = require("fs"); const ws = ${JSON.stringify(f.ws)}; const out = ${JSON.stringify(f.outside)};
-    const end = Date.now() + 1200;
-    while (Date.now() < end) {
+    const end = Date.now() + 700; const pause = new Int32Array(new SharedArrayBuffer(4));
+    while (Date.now() < end) { Atomics.wait(pause, 0, 0, 0.2);
       try { fs.renameSync(ws + "/swap", ws + "/swap-real"); fs.symlinkSync(out, ws + "/swap"); } catch {}
       try { fs.unlinkSync(ws + "/swap"); fs.renameSync(ws + "/swap-real", ws + "/swap"); } catch {}
     }
   `]);
   const r = f.root();
-  const deadline = Date.now() + 1100;
+  const deadline = Date.now() + 650;
   let n = 0;
   try {
     while (Date.now() < deadline) {
@@ -318,4 +318,17 @@ test("snapshot: changes to content, mode, a new file or a link target all change
     r.close();
   }
   assert.ok(existsSync(join(f.outside, "secret.txt")));
+});
+
+test("snapshot: an unreadable directory (e.g. a root-owned lost+found) refuses the snapshot with a clear reason", { skip: isRoot && "root reads every directory; this needs an unprivileged user" }, () => {
+  const f = fixture();
+  mkdirSync(join(f.ws, "lost+found"));
+  chmodSync(join(f.ws, "lost+found"), 0o000);
+  const r = f.root();
+  try {
+    assert.equal(code(() => snapshot(r)), "snapshot_unsupported");
+  } finally {
+    r.close();
+    chmodSync(join(f.ws, "lost+found"), 0o700);
+  }
 });

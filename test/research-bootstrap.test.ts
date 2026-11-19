@@ -560,14 +560,16 @@ test("orbit-research: a GET retries a reset connection (bounded) and reports cur
     const token = r.research(id);
     resets = 1;
     const start = await run(["start", "--job", id, "--api", base], { ORBIT_RESEARCH_TOKEN: token });
-    assert.match(start, /GET \/v1\/jobs\/research-tool-retry\/brief attempt 1 failed \(curl exit (52|56), HTTP 000\); retrying in 2s/);
+    // A reset that lands while curl is still completing its connect is reported as exit 7 instead of 52/56 (seen under parallel load); it
+    // is the same reset, and it is retried the same way.
+    assert.match(start, /GET \/v1\/jobs\/research-tool-retry\/brief attempt 1 failed \(curl exit (7|52|56), HTTP 000\); retrying in 2s/);
     assert.match(start, /ok api=sent \(started\)/);
     assert.deepEqual(r.sleeps(), ["2"]);
     assert.ok(!start.includes(token));
     // Every read reset: 3 attempts, then a FAILED line that names curl's exit code.
     resets = 1000;
     const steers = await run(["steers"]);
-    assert.match(steers, /FAILED: could not read steers \(network error \(curl exit (52|56) after 3 attempt\(s\)\): curl: \((52|56)\) /);
+    assert.match(steers, /FAILED: could not read steers \(network error \(curl exit (7|52|56) after 3 attempt\(s\)\): curl: \((7|52|56)\) /);
     assert.deepEqual(r.sleeps(), ["2", "2", "4"]);
     // A POST is never retried: one attempt, reported as failed.
     const ci = await run(["checkin", "x"]);

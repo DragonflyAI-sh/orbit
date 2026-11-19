@@ -30,7 +30,9 @@ export const READ_PAGE_DEFAULT = 8 * 1024;
 export const READ_PAGE_MAX = 16 * 1024;
 export const LIST_PAGE_DEFAULT = 100;
 export const LIST_PAGE_MAX = 200;
-export const WRITE_MAX_BYTES = 24_000;
+// Below the 24,000-character card budget (src/workspace/service.ts CARD_MAX_CHARS) with room for the path and the fixed card fields,
+// so every write the tool accepts can be shown in full.
+export const WRITE_MAX_BYTES = 20_000;
 export const PATCH_EDITS_MAX = 8;
 export const SEARCH_LIMITS = { files: 2000, bytesPerFile: 1024 * 1024, totalBytes: 16 * 1024 * 1024, depth: 16, matchesDefault: 50, matchesMax: 100, lineChars: 200, queryMax: 200 };
 
@@ -495,22 +497,38 @@ export function snapshot(root: RootHandle, limits = SNAPSHOT_LIMITS): Snapshot {
   let bytes = 0;
   const visit = (dirFd: number, rel: string, depth: number) => {
     if (depth > limits.depth) fail("snapshot_too_large", `The workspace is deeper than ${limits.depth} levels.`);
-    const names = (readdirSync(via(dirFd), { encoding: "buffer" }) as Buffer[]).sort(Buffer.compare);
+    let names: Buffer[];
+    try {
+      names = (readdirSync(via(dirFd), { encoding: "buffer" }) as Buffer[]).sort(Buffer.compare);
+    } catch (e) {
+      // An unreadable directory (for example a root-owned lost+found left by mkfs) cannot be part of a reviewed snapshot.
+      return fail("snapshot_unsupported", `${rel || "the workspace root"} cannot be read (${errno(e) ?? "error"}), so the workspace cannot be snapshotted; remove it or make it readable by ORBIT.`);
+    }
     for (const b of names) {
       if (++entries > limits.entries) fail("snapshot_too_large", `The workspace has more than ${limits.entries} entries.`);
       const name = b.toString("utf8");
       if (!Buffer.from(name, "utf8").equals(b)) fail("snapshot_unsupported", "A file name is not valid UTF-8; the workspace cannot be snapshotted.");
-      const fd = openSync(via(dirFd, name), O_PATH | O_NOFOLLOW);
+      const childRel = rel ? `${rel}/${name}` : name;
+      let fd: number;
+      try {
+        fd = openSync(via(dirFd, name), O_PATH | O_NOFOLLOW);
+      } catch (e) {
+        return fail("snapshot_unsupported", `${childRel} cannot be opened (${errno(e) ?? "error"}), so the workspace cannot be snapshotted.`);
+      }
       try {
         const st = fstatSync(fd);
-        const childRel = rel ? `${rel}/${name}` : name;
         if (st.dev !== root.dev) fail("mount_refused", "The workspace contains a mount point.");
         const type = typeOf(st);
         let extra = "";
         if (type === "file") {
           bytes += st.size;
           if (bytes > limits.bytes) fail("snapshot_too_large", `The workspace holds more than ${limits.bytes} bytes.`);
-          extra = sha256(readPinned(fd, st, limits.bytes));
+          try {
+            extra = sha256(readPinned(fd, st, limits.bytes));
+          } catch (e) {
+            if (e instanceof WorkspaceFsError) throw e;
+            fail("snapshot_unsupported", `${childRel} cannot be read (${errno(e) ?? "error"}), so the workspace cannot be snapshotted.`);
+          }
         } else if (type === "symlink") {
           extra = sha256(readlinkSync(via(dirFd, name), { encoding: "buffer" }));
         }

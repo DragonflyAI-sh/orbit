@@ -125,13 +125,14 @@ The model's argv appears only after `--`, as the command to run inside the sandb
     than `workspaceBytes`, mounted `nosuid,nodev`.
   * Concurrency: `maxConcurrentRuns` (1 to 4, default 1) runs at once overall, and one per workspace through its lock.
 * **Cleanup.** On exit, timeout or cancel, ORBIT sends `SIGKILL` to bubblewrap. Its init dies, and the kernel kills every process in
-  the PID namespace. ORBIT then writes `cgroup.kill` and waits until `cgroup.procs` is empty before it removes the cgroup.
-  `treeGone` records that evidence. If ORBIT itself dies, `--die-with-parent` tears the namespace down, and recovery at the next start
+  the PID namespace. ORBIT then writes `cgroup.kill`, waits up to about one second for `cgroup.procs` to empty, and removes the cgroup.
+  `treeGone` records whether it was empty (evidence, not an assumption). If ORBIT itself dies, `--die-with-parent` tears the namespace down, and recovery at the next start
   kills whatever is left in the cgroups of runs that were in flight.
 * **No fallback.** At startup ORBIT probes:
   * bubblewrap must offer every required option;
   * `prlimit` must be present;
   * the delegated cgroup must enable `memory pids cpu` for its children and must be writable;
+  * while the probe runs, the sandbox state is `unknown` and nothing but the self-test itself can launch;
   * a live self-test must run a command in the sandbox. That command checks its uid, network interfaces, PID namespace, environment,
     that host paths (ORBIT state, credentials, `/etc/shadow`, `/home`, `/root`, `/var`, `/opt`) are hidden, and that the runtime is
     read-only.
@@ -154,7 +155,7 @@ operator-configured id matching `^[a-z0-9][a-z0-9-]{0,31}$`.
 | `fs_stat` | `workspace`, `path` | `type` (file, dir, symlink, fifo, socket, char-device, block-device), `size`, `mode`, `nlink`, `modifiedAt`, `version` or `versionUnavailable` |
 | `fs_read` | `workspace`, `path`, `offset?`, `length?` (default 8 KiB, max 16 KiB) | `text` (masked) or `binary: true`, `version` (whole file), `size`, `offset`, `bytes`, `nextOffset`, `truncated`, `masked?`, `untrusted: true` |
 | `fs_search` | `workspace`, `query` (literal, 1-200 characters, one line), `path?`, `maxResults?` (max 100) | `matches[{path, line, text}]` (masked), `filesSearched`, `bytesSearched`, `complete`, `stoppedBecause?`, `skipped{...}`, `untrusted: true` |
-| `fs_write` | `workspace`, `path`, `content` (at most 24,000 bytes of text), exactly one of `expectedVersion` or `createOnly: true` | `status: "pending-confirmation"`, `executed: false`, `proposalId`, `digest`, `expiresAt`, `warnings` |
+| `fs_write` | `workspace`, `path`, `content` (at most 20,000 bytes of text, so the whole card fits its 24,000-character budget), exactly one of `expectedVersion` or `createOnly: true` | `status: "pending-confirmation"`, `executed: false`, `proposalId`, `digest`, `expiresAt`, `warnings` |
 | `fs_patch` | `workspace`, `path`, `expectedVersion`, `edits[{find, replace}]` (1-8) | the same proposal fields |
 | `exec_start` | `workspace`, `argv` (1-64 strings, each at most 4096 characters), `script?` (at most 16,000 bytes, at `/run/orbit/script`), `cwd?` | the same proposal fields |
 | `exec_status` | `runId?`, `stream?` (stdout or stderr), `offset?`, `length?` (max 16 KiB) | without `runId`: `proposals[{state: "proposal", ...}]` and the last 10 `operations`. With it: `operation{state, reason, exitCode, signal, killedBy, processTreeGone, output{...}, events[]}` and an `output` page (masked, `untrusted: true`) |
@@ -269,7 +270,9 @@ Nothing below has been done. It must not be done until **every** checklist item 
 * Install bubblewrap (root-owned, not setuid, offering every option in `REQUIRED_FLAGS`; the probe refuses an older one) and util-linux
   `prlimit`.
 * Make one dedicated filesystem per exec workspace, mounted `nosuid,nodev`, no larger than `workspaceBytes`. For example, a tmpfs
-  or a loop-mounted ext4 under `/srv/orbit-workspaces/<id>`. Make the root directory owned by the ORBIT user, mode `0700`. Read-only
+  or a loop-mounted ext4 under `/srv/orbit-workspaces/<id>`. Make the root directory owned by the ORBIT user, mode `0700`. Remove the
+  root-owned `lost+found` that `mkfs.ext4` creates (or give it to the ORBIT user): an unreadable directory makes the workspace
+  impossible to snapshot, so every command there is refused with `snapshot_unsupported`. Read-only
   workspaces (exec off) only need the directory.
 * Delegate a cgroup v2 subtree to ORBIT: an `orbit.service` drop-in with `Delegate=memory pids cpu` and `DelegateSubgroup=main`
   (systemd ≥ 254), and a child directory with `+memory +pids +cpu` in its `cgroup.subtree_control`. Name that directory as
@@ -319,6 +322,8 @@ on disk.
   quota itself.
 * **Reads during a run** may see a workspace in flux. They stay inside the boundary, and versions make any later write fail
   deterministically.
+* **A corrupt ledger** (`ledger.json`) turns the workspace tools off with `invalid` and the reason; ORBIT still starts, and the file is
+  left untouched for inspection.
 * **Held proposals live in memory.** A restart loses them (`410`), like vault proposals.
 * **Mount and option checks** read `/proc/self/mountinfo` from ORBIT's namespace, so they cover what ORBIT sees.
 * The card is the review surface. A 24,000-character card is long, and Rai must read it.

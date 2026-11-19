@@ -5,6 +5,7 @@ import type { Activation } from "./config.ts";
 import { checkPlatform } from "./fsops.ts";
 import { bwrapSandbox } from "./sandbox.ts";
 import type { Sandbox } from "./sandbox.ts";
+import { LedgerError } from "./ledger.ts";
 import { workspaceService } from "./service.ts";
 import type { WorkspaceAudit } from "./service.ts";
 
@@ -24,7 +25,16 @@ export function selectWorkspace(env: Record<string, string | undefined>, d: { st
   if (activation.state === "enabled" && dir && activation.config.workspaces.some((w) => w.exec)) {
     sandbox = bwrapSandbox({ config: activation.config.sandbox, stateDir: dir, uid, canaries: d.protectedPaths.filter(Boolean) });
   }
-  const service = workspaceService({ activation, sandbox, stateDir: activation.state === "enabled" ? dir : undefined, proposals: d.proposals, audit: d.audit });
+  let service: ReturnType<typeof workspaceService>;
+  try {
+    service = workspaceService({ activation, sandbox, stateDir: activation.state === "enabled" ? dir : undefined, proposals: d.proposals, audit: d.audit });
+  } catch (e) {
+    // The ledger could not be loaded: the tools stay off (and say why) rather than run without their records, and ORBIT still starts.
+    if (!(e instanceof LedgerError)) throw e;
+    activation = { state: "invalid", reason: e.message };
+    sandbox = undefined;
+    service = workspaceService({ activation, proposals: d.proposals, audit: d.audit });
+  }
   if (service.enabled) {
     service.recover();
     // The self-test runs in the background; until it passes, exec_start refuses (sandbox state "unknown"/"unsupported").

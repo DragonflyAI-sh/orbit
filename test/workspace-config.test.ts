@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { copyFileSync, chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, chmodSync, chownSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { proposals as newProposals } from "../src/agent.ts";
 import { loadActivation, mountOptions, parseConfig, PRE_ACTIVATION_CHECKLIST, WORKSPACE_FILE_ENV, WORKSPACE_FLAG } from "../src/workspace/config.ts";
-import { bwrapArgs, CGROUP_WRAPPER, cgroupFiles, CLEAN_ENV, judgeProbe, NPROC_MARGIN, prlimitArgs, SANDBOX_UID } from "../src/workspace/sandbox.ts";
+import { bwrapArgs, bwrapSandbox, CGROUP_WRAPPER, cgroupFiles, CLEAN_ENV, judgeProbe, NPROC_MARGIN, prlimitArgs, REQUIRED_FLAGS, SANDBOX_UID } from "../src/workspace/sandbox.ts";
 import { selectWorkspace } from "../src/workspace/select.ts";
 import { DEFAULT_LIMITS } from "../src/workspace/config.ts";
 
@@ -132,4 +132,52 @@ test("exec workspace mounts must be nosuid,nodev: the per-mount options are read
   assert.ok(!mountOptions("/srv/ws/b", info)!.includes("nosuid"));
   assert.deepEqual(mountOptions("/srv/ws/with space", info), ["rw", "nosuid"]);
   assert.equal(mountOptions("/srv/ws/none", info), undefined);
+});
+
+test("probe: while the self-test runs the sandbox is never 'supported' and nothing else can launch; a failed self-test ends unsupported", async () => {
+  const { base } = root();
+  const bin = join(base, "bin");
+  mkdirSync(bin);
+  // Stub bwrap: advertises every required option, and its self-test run takes a while and then fails.
+  writeFileSync(join(bin, "bwrap"), `#!/bin/sh\ncase "$1" in --version) echo "bubblewrap 0.11.0";; --help) echo "${REQUIRED_FLAGS.join(" ")}";; *) sleep 0.4; exit 1;; esac\n`, { mode: 0o755 });
+  // Stub prlimit: drops its options and runs the rest.
+  writeFileSync(join(bin, "prlimit"), `#!/bin/sh\n[ "$1" = --version ] && { echo prlimit; exit 0; }\nwhile [ "$1" != "--" ]; do shift; done; shift; exec "$@"\n`, { mode: 0o755 });
+  const cg = join(base, "cg");
+  mkdirSync(cg);
+  writeFileSync(join(cg, "cgroup.controllers"), "cpu memory pids\n");
+  writeFileSync(join(cg, "cgroup.subtree_control"), "cpu memory pids\n");
+  const state = join(base, "state");
+  mkdirSync(state, { mode: 0o700 });
+  const sb = bwrapSandbox({ config: { bwrap: join(bin, "bwrap"), prlimit: join(bin, "prlimit"), shell: "/bin/sh", runtime: ["/usr"], cgroupParent: cg, limits: DEFAULT_LIMITS, maxConcurrentRuns: 1 }, stateDir: state, uid: () => 1000 });
+  const seen = new Set<string>();
+  const watch = setInterval(() => seen.add(sb.status().state), 5);
+  const pending = sb.probe();
+  try {
+    assert.equal(sb.status().state, "unknown");
+    const h = sb.start({ runId: "early", workspace: { id: "w", root: base, exec: true, dev: 0, ino: 0, identity: "w" }, cwd: [], argv: ["true"], limits: DEFAULT_LIMITS });
+    assert.equal(h.pid, undefined, "no run can start while the probe is pending");
+    assert.match(String((await h.done).startError), /not available/);
+    const verdict = await pending;
+    assert.equal(verdict.state, "unsupported");
+    assert.match(verdict.reasons.join(" "), /self-test did not run/);
+  } finally {
+    clearInterval(watch);
+  }
+  assert.ok(!seen.has("supported"), "the state was never 'supported' at any point");
+});
+
+test("a corrupt ledger turns the workspace tools off with a reason; ORBIT still starts and the file is left as it was", () => {
+  const { base, r } = root();
+  const fake = me() === 0 ? 1000 : me();
+  if (me() === 0) chownSync(r, fake, fake);
+  const file = join(base, "workspaces.json");
+  writeFileSync(file, cfg({ workspaces: [{ id: "scratch", root: r }] }));
+  const state = join(base, "state");
+  mkdirSync(join(state, "workspace"), { recursive: true });
+  writeFileSync(join(state, "workspace", "ledger.json"), "{not json");
+  const w = selectWorkspace({ [WORKSPACE_FLAG]: "enabled", [WORKSPACE_FILE_ENV]: file }, { stateDir: state, proposals: newProposals(), protectedPaths: [], uid: () => fake });
+  assert.equal(w.service.enabled, false);
+  assert.equal(w.activation.state, "invalid");
+  assert.match(w.activation.state === "invalid" ? w.activation.reason : "", /ledger/);
+  assert.equal(readFileSync(join(state, "workspace", "ledger.json"), "utf8"), "{not json");
 });
