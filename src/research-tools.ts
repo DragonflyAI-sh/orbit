@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import type { ChatTool, Proposals } from "./agent.ts";
 import { CURSOR_PARAM, PAGING_CONTRACT, PageError, pageArgs, pageId, textPage } from "./text-pages.ts";
+import { alertRecordView, jobProgress } from "./job-progress.ts";
+import type { AlertDelivery } from "./job-progress.ts";
 import type { Job, Jobs, ResearchVaultAttempt } from "./jobs.ts";
 import { RESEARCH_BUDGET, RESEARCH_LIMITS, researchNote, researchVaultPath } from "./research.ts";
 import type { ResearchLane, ResearchStore } from "./research.ts";
@@ -42,6 +44,8 @@ export type ResearchToolDeps = {
   store: ResearchStore;
   vault?: VaultEdits;
   now?: () => Date;
+  // The live delivery outcome of a job's first-callback alert (the server reads it from the notification store). Optional.
+  alertDelivery?: (job: Job) => AlertDelivery | undefined;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -171,11 +175,15 @@ export function researchTools(d: ResearchToolDeps): ChatTool[] {
         const card = vaultState?.state === "pending-confirmation" && vaultState.proposalId && d.vault ? d.vault.state(vaultState.proposalId) : undefined;
         const stored = d.store.read(job.id);
         const text = stored?.text ?? (job.summary?.state === "complete" ? job.summary.text : undefined);
+        const health = d.jobs.health(job);
         return {
           value: {
             id: job.id,
             state: job.state,
-            health: d.jobs.health(job),
+            health,
+            // The shared progress reading (src/job-progress.ts): the same phase and milestones as jobs_list, job_status and the Jobs page.
+            progress: jobProgress(job, health),
+            ...(job.callbackAlert ? { firstCallbackAlert: { record: alertRecordView(job.callbackAlert), delivery: d.alertDelivery?.(job) ?? null } } : {}),
             routine: job.launch?.routine ?? null,
             sessionUrl: job.launch?.sessionUrl ?? null,
             report: job.research?.report ?? null,

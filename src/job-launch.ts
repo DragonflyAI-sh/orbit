@@ -1,4 +1,5 @@
 import type { Job, Jobs } from "./jobs.ts";
+import { jobProgress } from "./job-progress.ts";
 import { processLaunches } from "./launch-evidence.ts";
 import type { LaunchTracker } from "./launch-evidence.ts";
 import { fireFailureOf } from "./launcher.ts";
@@ -43,7 +44,10 @@ export function jobLauncher(deps: { jobs?: Jobs; control?: ControlRepo; routines
   const commit = toolCommit(deps.commit);
   const routines = deps.routines ?? new Map<string, Routine>();
   const researchRoutines = deps.research?.routines ?? new Map<string, Routine>();
-  const withHealth = (job: Job) => ({ ...job, health: jobs!.health(job) });
+  const withHealth = (job: Job) => {
+    const health = jobs!.health(job);
+    return { ...job, health, progress: jobProgress(job, health) };
+  };
   return async (routineName, briefText, review, work, lane) => {
     if (!jobs) return { code: 503, body: { error: "Jobs are not enabled." } };
     // A name in both lanes is refused outright (src/research.ts refuses that configuration too): never guess which lane was meant.

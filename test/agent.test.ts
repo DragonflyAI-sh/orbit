@@ -264,7 +264,8 @@ test("jobs_list gives the model the true total and short rows, even with many jo
     const id = `many-${String(i).padStart(2, "0")}`;
     jobs.register(id);
     jobs.setLaunch(id, { routine: "orbit", at: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(), sessionUrl: `https://claude.ai/code/session_${i}` });
-    for (let k = 0; k < 30; k++) jobs.record(id, { type: "checkin", text: "x".repeat(300) });
+    // 270-character check-ins: 20 of them plus job_status's facts (including its progress reading) stay inside the 8000-character clip.
+    for (let k = 0; k < 30; k++) jobs.record(id, { type: "checkin", text: "x".repeat(270) });
   }
   const total = jobs.list().length;
   const m = scripted([{ text: "", calls: [call("jobs_list", {})] }, { text: "counted", calls: [] }]);

@@ -1,4 +1,5 @@
 import type { Job } from "./jobs.ts";
+import { alertRecordView, jobProgress, progressBrief, progressForModel } from "./job-progress.ts";
 import { dispatchEvidence } from "./launch-evidence.ts";
 
 // How a job's reported tool commit compares with the commit ORBIT is running (the ORBIT_COMMIT /status reports).
@@ -17,12 +18,18 @@ const toolCommitFields = (job: Job, running: string | undefined) => ({ toolCommi
 export const DETAIL_EVENTS = 20;
 type Health = string;
 
+// `launchedAt` is when ORBIT launched (dispatch time), never runner activity; `lastEvent` and progress.lastRunnerActivityAt are the runner's.
+// progress is the shared reading of src/job-progress.ts, the same one job_status, research_result and the Jobs page give.
 export function compactJob(job: Job, health: Health) {
   const last = job.events.at(-1);
   return {
     id: job.id,
     state: job.state,
     health,
+    // Before the runner's first event: the last milestone ORBIT's record proves (src/job-progress.ts: provider-accepted, tool-served, …),
+    // so "awaiting first check-in" says how far it got. One short value, and only then, so the list stays inside the tool clip; once the
+    // runner has reported, lastEvent is the evidence.
+    ...(job.events.length ? {} : { lastVerified: jobProgress(job, health).lastVerified.key }),
     routine: job.launch?.routine,
     launchedAt: job.launch?.at,
     lastEvent: last ? { at: last.at, type: last.type, status: last.status ?? null } : null,
@@ -51,9 +58,11 @@ export function detailJob(job: Job, health: Health, running?: string) {
   // The dispatch snapshot holds the whole brief; the model gets its shape (the Jobs page shows the text).
   const launch = { ...rest0, ...(snap ? { dispatch: { v: snap.v, at: snap.at, lane: snap.lane, origin: snap.origin, briefChars: snap.brief.chars, briefSha256: snap.brief.sha256 } } : {}) };
   // The full summary is stored on the job and shown on the Jobs page; the model gets its size and state, not 200,000 characters.
-  const { summary, id, ...rest } = job;
-  // The summary's facts come first (after the id), so they survive when a long event list is cut at the tool-output limit.
-  return { id, ...(summary ? { summary: { chars: summary.chars, state: summary.state, via: summary.via, at: summary.at, readWith: { tool: "job_summary_read", arguments: { id } } } } : {}), ...rest, ...(job.launch ? { launch } : {}), ...toolCommitFields(job, running), health, dispatch: dispatchView(job), events, eventsOmitted: omitted, eventsNote: omitted ? `${omitted} earlier events left out; ${events.length} of ${job.events.length} shown.` : undefined };
+  const { summary, id, callbackAlert, ...rest } = job;
+  // The summary's facts and the progress reading come first (after the id), so they survive when a long event list is cut at the
+  // tool-output limit.
+  const alert = alertRecordView(callbackAlert);
+  return { id, ...(summary ? { summary: { chars: summary.chars, state: summary.state, via: summary.via, at: summary.at, readWith: { tool: "job_summary_read", arguments: { id } } } } : {}), health, progress: progressForModel(jobProgress(job, health)), ...(alert ? { firstCallbackAlert: alert } : {}), ...rest, ...(job.launch ? { launch } : {}), ...toolCommitFields(job, running), dispatch: dispatchView(job), events, eventsOmitted: omitted, eventsNote: omitted ? `${omitted} earlier events left out; ${events.length} of ${job.events.length} shown.` : undefined };
 }
 
 // One row for the jobs page: no events or steers, and the latest check-in line with how it arrived.
@@ -65,6 +74,7 @@ export function jobRow(job: Job, health: Health, running?: string) {
     health,
     routine: job.launch?.routine,
     launchedAt: job.launch?.at,
+    progress: progressBrief(jobProgress(job, health)),
     launchError: job.launch?.error,
     sessionUrl: job.launch?.sessionUrl,
     dispatch: dispatchEvidence(job).state,

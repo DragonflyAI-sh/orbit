@@ -1,4 +1,5 @@
-import type { Job } from "./jobs.ts";
+import { jobProgress } from "./job-progress.ts";
+import type { CallbackAlert, Job } from "./jobs.ts";
 import { dispatchEvidence } from "./launch-evidence.ts";
 import type { DispatchState, EvidenceContext } from "./launch-evidence.ts";
 import type { Notifier } from "./notify.ts";
@@ -17,7 +18,11 @@ export type Alerted = { since: string; state: PortState };
 // upgraded silently to the current state, so a deploy never re-sends every old alert.
 export type JobsTold = Record<string, string>;
 export type WatchState = { ports: Record<string, Alerted>; jobs?: JobsTold };
-export type JobSource = { all(): Job[]; health(job: Job): string };
+// setCallbackAlert: where the watch records the first-callback alert on the job itself (src/jobs.ts CallbackAlert), so every job view can
+// show it and a restart with a lost watch store still does not repeat it. Optional: a source without it still gets the alerts.
+export type JobSource = { all(): Job[]; health(job: Job): string; setCallbackAlert?(id: string, alert: CallbackAlert): void };
+// Storing a first-callback notice is tried at most this many times (one per tick) when it throws, then given up and recorded as such.
+export const MAX_ALERT_ATTEMPTS = 3;
 export type WatchOptions = { inFlight?: EvidenceContext["inFlight"] };
 
 const isBad = (s: PortStatus) => s.state === "degraded" || s.state === "down";
@@ -81,15 +86,47 @@ export function watcher(store: Store<WatchState>, notify: Notifier, now: () => D
 
   // A job that never started or went quiet is reported once. A not-started job is reported again only when what ORBIT's record proves about
   // its dispatch changes (for example "in-flight" in this process, then "dispatch-unknown" after a restart cut the fire off): one message
-  // per material change, never one per tick. Finished jobs never alert.
+  // per material change, never one per tick. Finished jobs never alert. The alert works from ORBIT's own stored times, so it needs nothing
+  // from the runner: a runner that was stopped (or refused) before it could send any failure report is still noticed.
+  // Deduplication has two records: the watch's own store (`told`) and the alert kept on the job (job.callbackAlert), so a restart, a lost
+  // watch store or a page refresh never repeats an alert. A runner event after an alert supersedes it: the job record says so, and if the
+  // job is still running Rai gets one short note that the earlier alert no longer applies (a finished job has its completion notice).
   function watchJobs(state: WatchState): WatchState {
     if (!jobs) return state;
     const told = { ...state.jobs };
     const all = jobs.all();
+    const setAlert = (id: string, a: CallbackAlert): boolean => {
+      try {
+        jobs.setCallbackAlert?.(id, a);
+        return Boolean(jobs.setCallbackAlert);
+      } catch (err) {
+        console.error(JSON.stringify({ at: now().toISOString(), watch: `could not record the callback alert on job ${id}: ${String(err)}` }));
+        return false;
+      }
+    };
     for (const job of all) {
       const health = jobs.health(job);
       if (health !== "not-started" && health !== "quiet") {
+        const was = told[job.id];
         delete told[job.id];
+        const a = job.callbackAlert;
+        // The superseded mark is what stops the note below from repeating, so the note goes out only once the mark is stored.
+        let superseded = false;
+        if (a && !a.resolvedAt && job.events.length) {
+          const finished = health === "finished";
+          const first = job.events.find((e) => e.at >= a.at) ?? job.events[0]!;
+          superseded = setAlert(job.id, { ...a, resolvedAt: first.at, resolution: finished ? "finished" : "runner-callback" });
+        }
+        const alerted = (superseded && a!.notificationId) || (!a && toldDispatch(was) !== undefined);
+        if (alerted && job.events.length && health !== "finished") {
+          const first = job.events[0]!;
+          const late = job.launch ? ` (${duration(new Date(first.at).getTime() - new Date(job.launch.at).getTime())} after launch)` : "";
+          try {
+            notify.send(`Job ${job.id} checked in at ${first.at}${late}, after ORBIT's not-started alert: that alert no longer applies. Runner-reported (${first.type} via ${first.via === "git" ? "git" : "the API"}).`);
+          } catch (err) {
+            console.error(JSON.stringify({ at: now().toISOString(), watch: `could not queue the late check-in note for job ${job.id}: ${String(err)}` }));
+          }
+        }
         continue;
       }
       const link = job.launch?.sessionUrl ?? "no session link";
@@ -104,16 +141,36 @@ export function watcher(store: Store<WatchState>, notify: Notifier, now: () => D
       // A job with no runner event says what ORBIT's record shows about the dispatch, so "not started" is never read as "no session".
       const dispatch = dispatchEvidence(job, { inFlight: opts.inFlight });
       const key = `${NOT_STARTED}:${dispatch.state}`;
-      const before = toldDispatch(told[job.id]);
-      if (before === dispatch.state) continue;
+      const prev = job.callbackAlert && !job.callbackAlert.resolvedAt ? job.callbackAlert : undefined;
+      let before = toldDispatch(told[job.id]);
+      // The job's own record deduplicates too (it survives a lost or unpersisted watch store).
+      if (before === undefined && prev && (prev.notificationId || prev.gaveUp)) before = prev.dispatch as DispatchState;
+      if (before === dispatch.state) {
+        told[job.id] = key;
+        continue;
+      }
       if (before === "legacy") {
         told[job.id] = key;
         continue;
       }
+      const stage = jobProgress(job, health).lastVerified;
+      const stageLine = `Last verified stage: ${stage.label}${stage.at ? ` at ${stage.at}` : ""}${stage.detail ? ` (${stage.detail})` : ""}.`;
       const caveat = dispatch.caveat ? ` ${dispatch.caveat}` : "";
-      if (before === undefined) notify.send(`Job ${job.id} is not started (no runner event 10 minutes after launch: not checked in, which is not proof that it failed or never launched). Session: ${link}. no check-in yet Dispatch: ${dispatch.state} (${dispatch.basis}).${caveat}`);
-      else notify.send(`Job ${job.id} is still not started; its dispatch evidence changed from ${before} to ${dispatch.state} (${dispatch.basis}). Session: ${link}.${caveat}`);
-      told[job.id] = key;
+      const text = before === undefined
+        ? `Job ${job.id} is not started (no runner event 10 minutes after launch: not checked in, which is not proof that it failed or never launched, and not a cause). Session: ${link}. no check-in yet. ${stageLine} Dispatch: ${dispatch.state} (${dispatch.basis}).${caveat} Nothing was retried or relaunched.`
+        : `Job ${job.id} is still not started; its dispatch evidence changed from ${before} to ${dispatch.state} (${dispatch.basis}). Session: ${link}. ${stageLine}${caveat}`;
+      const at = now().toISOString();
+      try {
+        const n = notify.send(text);
+        told[job.id] = key;
+        setAlert(job.id, { firstAt: prev?.firstAt ?? n.createdAt, at: n.createdAt, count: (prev?.count ?? 0) + 1, dispatch: dispatch.state, stage: stage.key, notificationId: n.id });
+      } catch (err) {
+        const attempts = (prev?.queueError ? (prev.attempts ?? 0) : 0) + 1;
+        const gaveUp = attempts >= MAX_ALERT_ATTEMPTS;
+        if (gaveUp) told[job.id] = key;
+        setAlert(job.id, { firstAt: prev?.firstAt ?? at, at, count: prev?.count ?? 0, dispatch: dispatch.state, stage: stage.key, queueError: String(err instanceof Error ? err.message : err).slice(0, 200), attempts, ...(gaveUp ? { gaveUp: true } : {}) });
+        console.error(JSON.stringify({ at, watch: `could not queue the not-started alert for job ${job.id} (attempt ${attempts} of ${MAX_ALERT_ATTEMPTS}): ${String(err)}` }));
+      }
     }
     const ids = new Set(all.map((j) => j.id));
     for (const id of Object.keys(told)) if (!ids.has(id)) delete told[id];

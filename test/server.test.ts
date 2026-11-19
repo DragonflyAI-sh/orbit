@@ -262,7 +262,10 @@ test("the owner launches a job: brief written, Routine fired with the job token,
   const job = await res.json();
   assert.match(job.id, /^orbit-\d{12}-[a-z0-9]+$/);
   assert.deepEqual([job.launch.branch, job.launch.briefCommit, job.launch.sessionUrl], [`orbit/${job.id}`, "c0ffee", "https://claude.ai/code/cse_9"]);
-  assert.equal(job.health, "ok");
+  // Accepted by the provider, no runner event yet: awaiting the first check-in, not "ok".
+  assert.equal(job.health, "awaiting-first-checkin");
+  assert.equal(job.progress.phase, "awaiting-first-checkin");
+  assert.equal(job.progress.executionVerified, false);
   const token = fireText.match(/^Token: (.+)$/m)![1];
   assert.equal(JSON.stringify(job).includes(token), false, "the token is never returned");
   assert.equal(JSON.stringify(await (await fetch(`${base}/jobs/${job.id}`)).json()).includes(token), false);

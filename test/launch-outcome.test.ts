@@ -280,11 +280,16 @@ test("alert transitions: in-flight at ten minutes, one update when a restart mak
   // A second restart with the same evidence says nothing.
   watcher(store, notes, r.now, r.jobs, { inFlight: launchTracker() }).tick();
   assert.equal(alerts().length, 2);
-  // The runner reports late: the not-started record is cleared, and a later quiet spell is its own alert.
+  // The runner reports late: the not-started record is cleared, the job's alert record says it was superseded, and Rai gets one note that
+  // the earlier alert no longer applies (a later quiet spell is its own alert).
   r.jobs.record(job.id, { type: "started", toolCommit: COMMIT });
   after.tick();
   assert.equal(store.read().jobs?.[job.id], undefined);
-  assert.equal(alerts().length, 2);
+  assert.equal(alerts().length, 3);
+  assert.match(alerts()[2], /^Job orbit-alert checked in at .*after ORBIT's not-started alert: that alert no longer applies/);
+  assert.equal(r.jobs.get(job.id)!.callbackAlert?.resolution, "runner-callback");
+  after.tick();
+  assert.equal(alerts().length, 3, "the late check-in note is sent once");
 });
 
 test("alert after a restart: the first not-started alert says dispatch-unknown, never in-flight", () => {

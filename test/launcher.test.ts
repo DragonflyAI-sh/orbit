@@ -58,7 +58,8 @@ test("jobs that do not start, or go quiet, are flagged", () => {
   const registry = jobRegistry(jsonStore<Job[]>(undefined, "j", []), Buffer.alloc(32, 3), notify, () => clock);
   registry.register("j1");
   registry.setLaunch("j1", { routine: "orbit", at: clock.toISOString() });
-  assert.equal(registry.health(registry.get("j1")!), "ok");
+  // Launched, no runner event yet: awaiting the first check-in, never "ok" (nothing proves the runner executed anything).
+  assert.equal(registry.health(registry.get("j1")!), "awaiting-first-checkin");
   clock = new Date("2026-11-06T10:11:00Z");
   assert.equal(registry.health(registry.get("j1")!), "not-started");
   registry.record("j1", { type: "started" });

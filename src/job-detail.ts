@@ -1,3 +1,5 @@
+import { alertRecordView, jobProgress } from "./job-progress.ts";
+import type { AlertDelivery } from "./job-progress.ts";
 import { jobRow } from "./job-view.ts";
 import { DISPATCH_BRIEF_CHARS, redactText } from "./job-inputs.ts";
 import { JOB_ID, KEEP_EVENTS, KEEP_JOBS, MAX_STEER_CHARS } from "./jobs.ts";
@@ -77,7 +79,10 @@ export function jobTitle(job: Job): { text: string; source: TitleSource } {
 }
 
 export const laneOf = (job: Job): "build" | "research" => (job.kind === "research" ? "research" : "build");
+// The latest time anything happened to the job, runner or ORBIT (kept for older pages and links). It falls back to dispatch times, so it is
+// NOT runner activity: activityBasis says which it is, and runnerActivityAt is set only from a runner event.
 export const activityAt = (job: Job): string => job.lastEventAt ?? job.launch?.firedAt ?? job.launch?.fireStartedAt ?? job.launch?.at ?? job.createdAt;
+export const activityBasis = (job: Job): "runner" | "provider" | "dispatch" | "registered" => (job.lastEventAt ? "runner" : job.launch?.firedAt ? "provider" : job.launch ? "dispatch" : "registered");
 const sortKey = (job: Job) => job.launch?.at ?? job.createdAt;
 
 // ---- the list ----
@@ -150,6 +155,8 @@ export function listRows(all: Job[], health: (j: Job) => string, running: string
       lane: laneOf(job),
       createdAt: job.createdAt,
       activityAt: activityAt(job),
+      activityBasis: activityBasis(job),
+      runnerActivityAt: job.lastEventAt ?? null,
       summaryStatus: job.state === "done" || job.state === "blocked" || job.state === "failed" ? job.state : undefined,
     })),
     total: all.length,
@@ -204,7 +211,8 @@ export function eventsPage(job: Job, before?: number, limit = EVENTS_DEFAULT) {
 
 // ---- links ----
 
-export type DetailContext = { all: Job[]; routineRepo?: string; running?: string };
+// alertDelivery: the live delivery outcome of the job's first-callback alert, read from the notification store by the server.
+export type DetailContext = { all: Job[]; routineRepo?: string; running?: string; alertDelivery?: (job: Job) => AlertDelivery | undefined };
 
 export function jobLinks(job: Job, ctx: DetailContext): JobLink[] {
   const out: JobLink[] = [];
@@ -321,12 +329,12 @@ function launchStages(job: Job): Stage[] {
   const accepted = d.state === "provider-accepted" || d.state === "runner-reported" ? (l.sessionId ? "done" : d.state === "runner-reported" ? "unknown" : "done") : d.state === "provider-rejected" ? "failed" : d.state === "in-flight" ? "pending" : d.state === "never-dispatched" ? "n/a" : "unknown";
   stages.push({ key: "accepted", label: "Accepted by the provider", status: accepted, ...(l.firedAt ? { at: l.firedAt } : l.failedAt && l.fireFailure ? { at: l.failedAt } : {}), evidence: l.sessionId ? `Session ${l.sessionId}.` : d.basis });
   if (research) {
-    const s = job.research?.briefServed;
-    stages.push({ key: "received", label: "Brief fetched by the runner", status: s ? "done" : job.events.length ? "unknown" : "pending", ...(s ? { at: s.firstAt } : {}), evidence: s ? `Served ${s.count} time(s) by the job API (payload sha256 ${s.sha256.slice(0, 12)}…).` : job.events.length ? "The runner reported, but this record predates brief-fetch tracking." : "The job API has not served the brief." });
-  }
-  if (research) {
     const t = job.research?.toolServed;
     stages.push({ key: "tool", label: "Runner tool sent by the job API", status: t ? "done" : job.events.length ? "unknown" : "pending", ...(t ? { at: t.firstAt } : {}), evidence: t ? `Sent ${t.count} time(s) (sha256 ${t.sha256.slice(0, 12)}…). This proves ORBIT answered the download, not that the runner received it intact or ran it.` : job.events.length ? "The runner reported, but this record has no tool-download evidence (it predates it, or the download was not needed)." : "ORBIT has not sent the runner tool. A download that failed on the way (a reset, a timeout, a TLS failure) never reaches ORBIT and leaves no record here." });
+  }
+  if (research) {
+    const s = job.research?.briefServed;
+    stages.push({ key: "received", label: "Brief fetched by the runner", status: s ? "done" : job.events.length ? "unknown" : "pending", ...(s ? { at: s.firstAt } : {}), evidence: s ? `Served ${s.count} time(s) by the job API (payload sha256 ${s.sha256.slice(0, 12)}…). The runner tool asks for it at start, before its first check-in; it is not a check-in.` : job.events.length ? "The runner reported, but this record predates brief-fetch tracking." : "The job API has not served the brief." });
   }
   const first = job.events[0];
   const boot = research ? job.events.find((e) => e.type === "bootstrap") : undefined;
@@ -334,7 +342,13 @@ function launchStages(job: Job): Stage[] {
     stages.push({ key: "started", label: "Runner started", status: "failed", at: boot.at, evidence: `The runner reported a bootstrap failure before its tool ran (${boot.bootstrap?.category ?? boot.status ?? "unknown"}, ${boot.bootstrap?.attempts ?? "?"} attempt(s)). Runner-reported, unverified.` });
     return stages;
   }
-  stages.push({ key: "started", label: "Runner started", status: first ? "done" : "pending", ...(first ? { at: first.at } : {}), evidence: first ? `First event: ${first.type} via ${first.via === "git" ? "git" : "the API"}.${research ? "" : " A started runner has checked out the control branch holding the brief."}` : "No runner event yet. That is not evidence that no session exists." });
+  stages.push({ key: "started", label: "Runner started", status: first ? "done" : "pending", ...(first ? { at: first.at } : {}), evidence: first ? `First runner check-in (its first authenticated callback): ${first.type} via ${first.via === "git" ? "git" : "the API"}. Runner-reported.${research ? "" : " A started runner has checked out the control branch holding the brief."}` : `No runner check-in yet: execution unverified${research && job.research?.toolServed ? " (a tool download does not prove the tool ran)" : ""}. That is not evidence that no session exists.` });
+  if (research && first) {
+    const r = job.research?.report;
+    const sum = job.summary;
+    stages.push({ key: "report", label: "Report received", status: r || sum ? "done" : job.state === "running" || job.state === "registered" ? "pending" : "unknown", ...(r?.storedAt ? { at: r.storedAt } : sum ? { at: sum.at } : {}), evidence: r ? `${r.chars} characters, status ${r.status}.` : sum ? "A summary arrived, but ORBIT recorded no report check for it." : "No report yet." });
+    if (r) stages.push({ key: "validated", label: "Report checked by ORBIT", status: r.valid ? "done" : "failed", ...(r.storedAt ? { at: r.storedAt } : {}), evidence: r.valid ? "Passed ORBIT's shape and bounds checks. That is not a check of its claims." : `Did not pass ORBIT's checks${r.problems.length ? `: ${clip(r.problems.join("; "), 300)}` : ""}.` });
+  }
   return stages;
 }
 
@@ -415,7 +429,16 @@ function keyTimes(job: Job) {
     if (l.firedAt) t.push({ at: l.firedAt, what: "Provider accepted the fire" });
     if (l.failedAt) t.push({ at: l.failedAt, what: `Launch failed: ${clip(redactText(l.error ?? "").text, 200)}` });
   }
+  const toolServed = job.kind === "research" ? job.research?.toolServed : undefined;
+  if (toolServed) t.push({ at: toolServed.firstAt, what: "Runner tool sent by the job API (not proof that it ran)" });
+  const briefServed = job.kind === "research" ? job.research?.briefServed : undefined;
+  if (briefServed) t.push({ at: briefServed.firstAt, what: "Brief served by the job API" });
   if (job.events[0]) t.push({ at: job.events[0].at, what: "First runner event retained" });
+  const a = job.callbackAlert;
+  if (a) {
+    t.push({ at: a.firstAt, what: a.notificationId || a.count ? "Not-started alert queued (first check-in overdue)" : "Not-started alert could not be queued" });
+    if (a.resolvedAt) t.push({ at: a.resolvedAt, what: a.resolution === "finished" ? "Not-started alert superseded: the job finished" : "Not-started alert superseded: the runner checked in" });
+  }
   for (const s of job.steers) {
     t.push({ at: s.at, what: `Steer ${s.n} queued` });
     if (s.deliveredAt) t.push({ at: s.deliveredAt, what: `Steer ${s.n} acknowledged by the runner` });
@@ -456,6 +479,10 @@ export function jobDetail(job: Job, health: string, ctx: DetailContext, openStee
       createdAt: job.createdAt,
       expiresAt: job.expiresAt,
       activityAt: activityAt(job),
+      activityBasis: activityBasis(job),
+      runnerActivityAt: job.lastEventAt ?? null,
+      progress: jobProgress(job, health),
+      firstCallbackAlert: job.callbackAlert ? { record: alertRecordView(job.callbackAlert), delivery: ctx.alertDelivery?.(job) ?? null } : null,
       launch: l ? { routine: l.routine, at: l.at, ...(l.fireStartedAt ? { fireStartedAt: l.fireStartedAt } : {}), ...(l.firedAt ? { firedAt: l.firedAt } : {}), ...(l.failedAt ? { failedAt: l.failedAt, error: redactText(l.error ?? "").text } : {}), ...(l.fireFailure ? { fireFailure: l.fireFailure } : {}) } : null,
       dispatch: dispatchEvidence(job),
       legacyContext: l?.context ? { paths: l.context.paths, note: "Legacy: this job was launched when ORBIT still copied vault notes into the job; that export has since been removed." } : undefined,
