@@ -317,6 +317,8 @@ test("parsePlan: steps need ids and states; the plan key is 24 hex", () => {
   assert.throws(() => parsePlan({ plan: { steps: [{ title: "x" }], planKey: "0".repeat(24) } }), /malformed step/);
   assert.throws(() => parsePlan({ plan: { steps: [], planKey: "0".repeat(64) } }), /malformed/);
   assert.equal(parsePlan({ plan: { steps: [], planKey: "a".repeat(24), blockers: ["needs x"] } }).blockers[0]!.detail, "needs x");
+  // The helper's real shape: blockers beside the plan.
+  assert.equal(parsePlan({ plan: { steps: [], planKey: "a".repeat(24) }, blockers: [{ id: "apparmor_userns", detail: "restricted" }] }).blockers[0]!.id, "apparmor_userns");
 });
 
 // ---- preflight and model paths ------------------------------------------------------------------------------------------------------

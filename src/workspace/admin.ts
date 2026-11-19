@@ -81,7 +81,9 @@ export function parsePlan(data: Record<string, unknown>): HostPlan {
     if (typeof x.id !== "string" || typeof x.state !== "string") throw new Error("The host helper's plan has a malformed step; no proposal was made.");
     return { id: x.id, title: String(x.title ?? x.id), state: x.state, ...(typeof x.action === "string" ? { action: x.action } : {}), ...(typeof x.detail === "string" ? { detail: x.detail } : {}) };
   });
-  const blockers = Array.isArray(raw.blockers) ? raw.blockers.map((b) => (typeof b === "string" ? { detail: b } : (b as { id?: string; title?: string; detail?: string }))) : [];
+  // orbit-ops-ws answers {plan: {steps, planKey}, blockers: [...]} (blockers beside the plan); a plan carrying its own is accepted too.
+  const rawBlockers = Array.isArray(data.blockers) ? data.blockers : raw.blockers;
+  const blockers = Array.isArray(rawBlockers) ? rawBlockers.map((b) => (typeof b === "string" ? { detail: b } : (b as { id?: string; title?: string; detail?: string }))) : [];
   return { steps, blockers, planKey: raw.planKey };
 }
 

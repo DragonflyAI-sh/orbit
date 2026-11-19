@@ -1036,3 +1036,16 @@ test("no secret-shaped literals in the orbit-ops-ws sources, units, scripts or d
     for (const re of shapes) assert.ok(!re.test(text), `${f} matches ${re.source.slice(0, 30)}`);
   }
 });
+
+// Contract with ORBIT's side (src/workspace/admin.ts): the card is built from exactly this answer, so its shape must parse there, keep
+// every todo step's exact action, and carry the host-wide blockers.
+test("contract: a real ws_status answer parses in ORBIT's admin module with every todo action verbatim and the blockers", async () => {
+  const { parsePlan } = await import("../src/workspace/admin.ts");
+  const w = world({ sysctl: { "/proc/sys/kernel/apparmor_restrict_unprivileged_userns": "1" } });
+  const s = await status(w);
+  const plan = parsePlan(s as unknown as Record<string, unknown>);
+  assert.equal(plan.planKey, s.plan.planKey);
+  assert.deepEqual(plan.steps.filter((x) => x.state === "todo").map((x) => x.action), s.plan.steps.filter((x: PlanStep) => x.state === "todo").map((x: PlanStep) => x.action));
+  assert.ok(plan.steps.some((x) => x.id === "service_dropin" && x.state === "todo"));
+  assert.ok(plan.blockers.some((b) => b.id === "apparmor_userns"), JSON.stringify(plan.blockers));
+});

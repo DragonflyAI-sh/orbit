@@ -140,8 +140,9 @@ test("through the server: an activation card (ws_validate) is owner-only, digest
   let svc: ReturnType<typeof workspaceService> | undefined;
   const script: { steps: ReturnType<typeof say>[] } = { steps: [say("ok")] };
   let i = 0;
+  const model = scripted(() => script.steps[Math.min(i++, script.steps.length - 1)]!);
   const h = rig({
-    model: scripted(() => script.steps[Math.min(i++, script.steps.length - 1)]!),
+    model,
     extra: ({ proposals }) => {
       svc = workspaceService({ activation: { state: "enabled", config }, sandbox, stateDir: join(base, "state"), proposals, active: () => owner.mode() === "enabled" });
       admin = workspaceAdmin({ env: {}, activation: { state: "enabled", config }, service: svc, sandbox, owner, stateDir: join(base, "state"), proposals, smoke: async () => ({ passed: true, workspaceIdentity: val.identity, checks: SMOKE_STEPS.map((s) => ({ id: s.id, title: s.title, required: s.required, result: "pass" as const, detail: "scripted" })) }) });
@@ -152,8 +153,8 @@ test("through the server: an activation card (ws_validate) is owner-only, digest
   script.steps = [{ text: "", calls: [call("workspace_admin_propose", { action: "validate" })] }, say("proposed")];
   i = 0;
   await h.send(t.id, "please");
-  assert.ok(!h.model.seen[0]!.tools.includes("fs_write"), "the owner switch is off: no workspace tool is offered");
-  assert.ok(h.model.seen[0]!.tools.includes("workspace_preflight"));
+  assert.ok(!model.seen[0]!.tools.includes("fs_write"), "the owner switch is off: no workspace tool is offered");
+  assert.ok(model.seen[0]!.tools.includes("workspace_preflight"));
   const card = (await cardsOf(h as never, t.id))[0];
   assert.equal(card.kind, "workspace_op");
   assert.equal(card.action, "ws_validate");
