@@ -82,7 +82,8 @@ export function fakeSummarize(prompt: string, opts: { tag?: string } = {}): stri
           const m = /^(GOAL|RESEARCH ONLY|IN SCOPE|CORRECTION|APPROVED|PENDING|DONE|NEXT): ([^\n]*?)\s*$/.exec(part.trim());
           if (!m) continue;
           const [, k, v] = m as unknown as [string, string, string];
-          const val = v.replace(/\s+x+$/, "").trim();
+          // Test messages are padded with one repeated character to force rolls; the padding is not part of what Rai said.
+          const val = v.replace(/\s+(\S)\1{19,}.*$/, "").trim();
           if (k === "GOAL") s.goal = `${val} (${ref})`;
           if (k === "RESEARCH ONLY") s.out.push(`${val} (${ref})`);
           if (k === "IN SCOPE") s.in.push(`${val} (${ref})`);
