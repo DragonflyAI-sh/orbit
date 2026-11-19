@@ -44,6 +44,7 @@ import { watcher } from "./watch.ts";
 import { githubRepoStatus, toolbox } from "./tools.ts";
 import { processIdentity, smokeRunner } from "./smoke.ts";
 import { orbitSmokeChecks } from "./smoke-checks.ts";
+import { selectWorkspace } from "./workspace/select.ts";
 
 const port = Number(process.env.PORT ?? 8790);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -101,6 +102,16 @@ const proposals = newProposals();
 const admin = adminOps({ client: adminClient(), store: jsonStore(stateDir, "ops-admin", []), notify, proposals });
 const owner = process.env.ORBIT_OWNER || undefined;
 const vaultEdits = vault ? newVaultEdits({ clone: vault, memory, proposals }) : undefined;
+// Workspace filesystem and sandboxed exec tools (docs/workspace-tools.md): off unless ORBIT_WORKSPACE_TOOLS=enabled and the operator's
+// workspaces file acknowledges the pre-activation checklist. Every proposal, confirmation, denial, invocation, result and cancellation
+// is an audit line (metadata only: ids, digests, states; never file contents or command output).
+const workspace = selectWorkspace(process.env, {
+  stateDir,
+  proposals,
+  protectedPaths: [stateDir ?? "", process.env.CREDENTIALS_DIRECTORY ?? "", process.env.ORBIT_VAULT ?? "/opt/orbit/vault", "/opt/orbit", "/etc/credstore"],
+  audit: (e) => console.log(JSON.stringify(e)),
+});
+console.log(`workspace-tools: ${workspace.activation.state}${workspace.activation.state === "enabled" ? "" : ` (${workspace.activation.reason})`}`);
 const config = configView({ env: process.env, ops, commit, vaultPolicy: vault ? () => vault.policyCheck() : undefined, photos: () => model.images?.() });
 // Startup: sync the vault clone once now (the tick's refresh shares this run) so the vault AGENTS.md is hashed and compared with the
 // baseline the coded rules were written against; drift or an unavailable AGENTS.md is logged here and shown in the config view.
@@ -253,6 +264,7 @@ buildServer({
   // Read-only PR inspection (owner-only chat tools): the repositories are the ones ORBIT_ROUTINE_REPOS names, the token is orbit.github-orbit-prs.
   // Off unless ORBIT_HOST_INVENTORY=enabled; the helper also refuses until the host is activated (docs/host-inventory.md).
   hostInventory: hostInventoryEnabled(process.env) ? [hostInventoryTool({ ops })] : undefined,
+  workspace: workspace.service,
   prInspect: selectPrInspect(process.env, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), () => jobs.all()),
   // The rolling note is the vault file Memory/recent-context.md when the clone exists (written through the vault tools, with the
   // same policy, secret refusal, log line and git pipeline); otherwise it stays in ORBIT's state directory.
