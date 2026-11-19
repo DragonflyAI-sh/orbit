@@ -1,0 +1,65 @@
+[Unit]
+Description=ORBIT workspace host-setup operation %i (ws_setup or ws_revoke)
+
+[Service]
+# One accepted operation, started by orbit-ops-ws@.service. A separate unit, so it keeps running while orbit.service restarts.
+# This is necessarily a broadly privileged unit: ws_setup creates a system user (useradd writes /etc/passwd, group, shadow, gshadow),
+# writes /etc/systemd/system (mount units, the orbit.service drop-in) and /etc/orbit, creates and formats NEW images under
+# /var/lib/orbit-workspaces, chowns the mounted workspace roots under /srv/orbit-workspaces, and asks systemd to reload, mount and
+# restart orbit.service. What limits it is what it runs: ws-run.ts executes only the fixed plan in ws-core.ts, recomputed and compared
+# with the confirmed plan key first, and never deletes an image, workspace data, a package, the user or a file it did not write.
+# Package installation is NOT done here: it runs in orbit-ops-ws-pkg@.service, the only unit with general network access.
+Type=oneshot
+# "run" mode re-runs itself under flock on /opt/orbit/state/deploy.lock (as tier 2 does), because it restarts orbit.service.
+ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/ws-run.ts %i run
+# Lock wait (300 s) + package unit (up to 1800 s) + mkfs/mount + restart + 60 s health check, with room to spare.
+TimeoutStartSec=2700
+# A small, bounded process.
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=128
+# Records live here (shared with the front).
+StateDirectory=orbit-ops-ws
+StateDirectoryMode=0700
+# /usr and /boot are read-only: nothing here installs software (the package unit does). /etc, /var and /srv stay writable because
+# useradd, the unit files, the workspaces file, the images and the workspace roots live there. ProtectSystem=strict is not used:
+# useradd replaces /etc/passwd by rename (so /etc itself must be writable) and /var/lib/orbit-workspaces must be creatable.
+ProtectSystem=yes
+# ORBIT's release tree is read-only to it (it reads orbit.env for HOST/PORT and current/COMMIT); only the deploy lock's directory is writable.
+ReadOnlyPaths=/opt/orbit
+ReadWritePaths=/opt/orbit/state
+# Home directories are hidden; /tmp is private.
+ProtectHome=yes
+PrivateTmp=yes
+# mkfs.ext4 and fallocate work on a regular file; the loop device is set up by systemd (PID 1) when it starts the mount unit.
+PrivateDevices=yes
+# Nothing it runs can gain privileges (no setuid helpers are needed).
+NoNewPrivileges=yes
+# Only what the fixed steps need: chown/chmod of root-owned and orbit-owned paths, writing root-owned files whatever their mode,
+# reading inside orbit-owned 0700 roots, and the audit record useradd writes. No CAP_SYS_ADMIN (it mounts nothing itself),
+# no CAP_SETUID/SETGID, no CAP_NET_*.
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_AUDIT_WRITE
+# No ambient capabilities for anything it executes.
+AmbientCapabilities=
+# Kernel tunables, cgroups and /proc/sys stay readable (the plan reads them) but not writable.
+ProtectKernelTunables=yes
+# No kernel module loading, no kernel log access, no clock changes.
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+# Network only to probe ORBIT's /status on this host (HOST:PORT from orbit.env: localhost or the tailnet address). AF_NETLINK is for
+# useradd's audit message; it is local to the kernel. If HOST is a LAN address outside these ranges, add it to IPAddressAllow=.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+IPAddressDeny=any
+IPAddressAllow=localhost 100.64.0.0/10 fd7a:115c:a1e0::/48
+# No new namespaces or realtime scheduling; it never creates setuid or setgid files.
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# No personality changes; native system calls only, from the usual service set.
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# Every file it writes gets an explicit mode; anything else is created private.
+UMask=0077

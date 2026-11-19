@@ -1,0 +1,56 @@
+[Unit]
+Description=ORBIT workspace host-setup helper front (inspect, validate, record and dispatch one request)
+
+[Service]
+# Inspects the host READ-ONLY (ws_status, and the plan check for ws_setup), validates one request, writes a durable operation record
+# and starts a separate runner unit. It performs no change on the host itself.
+# Code is installed by install-ws.sh under /usr/local/lib/orbit/ops, not taken from /opt/orbit releases.
+ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/ws-helper.ts
+# The request arrives on stdin and the answer leaves on stdout (the accepted connection); audit lines go to the journal.
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+# A request never takes long; systemd stops a stuck front.
+RuntimeMaxSec=40
+# A small, bounded process.
+MemoryMax=192M
+TasksMax=32
+LimitNOFILE=64
+# The only writable path is its own state directory (/var/lib/orbit-ops-ws): operation records and the one-at-a-time slot.
+StateDirectory=orbit-ops-ws
+StateDirectoryMode=0700
+# Everything else is read-only: the host inspection only reads.
+ProtectSystem=strict
+# Home directories are hidden; /tmp is private.
+ProtectHome=yes
+PrivateTmp=yes
+# No device nodes beyond the basic pseudo-devices.
+PrivateDevices=yes
+# No network at all: it talks to systemd and nss-systemd over AF_UNIX only.
+PrivateNetwork=yes
+# Nothing it runs can gain privileges.
+NoNewPrivileges=yes
+# One capability, read-only: CAP_DAC_READ_SEARCH lets it look inside the workspace roots (owned by user orbit, mode 0700) to see
+# whether lost+found is still there, so the plan it shows matches what the runner will see. It grants no write access anywhere.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+# No ambient capabilities for anything it executes (systemctl, getent).
+AmbientCapabilities=
+# Kernel tunables, cgroups and /proc/sys stay readable (the plan reads them) but not writable.
+ProtectKernelTunables=yes
+# No kernel module loading, no kernel log access, no clock changes.
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+# Only local sockets (systemd, nss-systemd).
+RestrictAddressFamilies=AF_UNIX
+# No new namespaces, realtime scheduling or setuid/setgid files.
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# No personality changes; native system calls only, from the usual service set.
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# Records are root-only.
+UMask=0077
