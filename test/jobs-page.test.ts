@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 const html = readFileSync(new URL("../src/web/index.html", import.meta.url), "utf8");
 const block = html.match(/\/\/ <poller>([\s\S]*?)\/\/ <\/poller>/)?.[1] ?? "";
-type Poller = { poll(): Promise<void>; start(): void };
+type Poller = { poll(): Promise<void>; start(): void; open(ready: () => boolean): Promise<void> };
 const makePoller = new Function(`${block}; return makePoller;`)() as (r: () => Promise<void>, s: () => boolean, sch: (f: () => void, ms: number) => void, ms: number) => Poller;
 
 // A fake clock: schedule() records the callback and `advance` fires it every `ms`.
@@ -47,6 +47,32 @@ test("none while the page is hidden, and none after returning to Chat", async ()
   r.page.tab = "chat";
   await r.seconds(120);
   assert.equal(r.page.requests, 2);
+});
+
+test("opening a page draws it once even while hidden (a background tab), then polls only while visible", async () => {
+  const r = rig();
+  r.page.tab = "jobs";
+  r.page.visible = false;
+  await r.poller.open(() => r.page.tab === "jobs");
+  assert.equal(r.page.requests, 1, "the one draw on open does not wait for the tab to be shown");
+  await r.seconds(120);
+  assert.equal(r.page.requests, 1, "no polling while hidden");
+  await r.poller.open(() => false);
+  assert.equal(r.page.requests, 1, "open keeps its own condition (another page showing)");
+  r.page.visible = true;
+  await r.seconds(15);
+  assert.equal(r.page.requests, 2);
+});
+
+test("opening a page while a refresh is out does not overlap it", async () => {
+  const r = rig();
+  r.page.tab = "jobs";
+  r.page.pending = () => {};
+  const first = r.poller.poll();
+  await r.poller.open(() => true);
+  assert.equal(r.page.requests, 1);
+  r.page.pending!();
+  await first;
 });
 
 test("a slow request is not overlapped by the next tick", async () => {

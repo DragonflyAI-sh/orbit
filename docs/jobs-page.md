@@ -2,7 +2,7 @@
 
 The owner's Jobs page (`/#jobs`, one job at `/#jobs/<job id>`) is where Rai finds a job, follows its GitHub and Claude artifacts, and reads every input and result ORBIT retained for it. Owner only: every route below is checked by `decide("jobs", …)` like the rest of the jobs API, and nothing here launches, retries, posts, merges or decides readiness.
 
-Code: `src/job-detail.ts` (list, detail, links, input states, event paging), `src/job-inputs.ts` (dispatch snapshot and redaction), the `Jobs page` block of `src/web/index.html`. Tests: `test/jobs-detail.test.ts`, `test/jobs-page-browser.test.ts`.
+Code: `src/job-detail.ts` (list, detail, links, input states, event paging), `src/job-inputs.ts` (dispatch snapshot and redaction), the `Jobs page` block of `src/web/index.html`. Tests: `test/jobs-detail.test.ts`, `test/jobs-page-browser.test.ts`, and `test/page-links-browser.test.ts` (the page links opened in a new or background tab, direct entry, reload, legacy addresses, Back/Forward, and a cold start with slow answers).
 
 ## List
 
@@ -42,4 +42,4 @@ Secret-shaped values (credential assignments, private keys, bearer tokens, provi
 
 ## Page behaviour
 
-The list toolbar (search, filters, attention) and every detail section are built once and patched only when their data changes, so a refresh (every 15 seconds while the Jobs page is visible) keeps the search text and focus, folded sections, expanded text, loaded older events, the steer draft, and scroll positions. Long text starts folded with *Expand full text* and is never cut. All runner and user text goes in as text nodes or through `linkify` (https only); external links are only `https://github.com/…` and `https://claude.ai/…` addresses that pass a strict shape check on the server and again in the page.
+The list toolbar (search, filters, attention) and every detail section are built once and patched only when their data changes, so a refresh (every 15 seconds while the Jobs page is visible; the page is also drawn once when it opens, even in a hidden background tab, so a Jobs link opened in a new tab is not blank when shown) keeps the search text and focus, folded sections, expanded text, loaded older events, the steer draft, and scroll positions. Long text starts folded with *Expand full text* and is never cut. All runner and user text goes in as text nodes or through `linkify` (https only); external links are only `https://github.com/…` and `https://claude.ai/…` addresses that pass a strict shape check on the server and again in the page.
