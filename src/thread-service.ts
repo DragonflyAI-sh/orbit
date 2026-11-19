@@ -34,7 +34,7 @@ export type TurnPrep = {
   attachments?: AttachmentRef[];
 };
 
-export type Live = { source: "jobs" | "ops-admin" | "ops-sys"; found: boolean; state?: string; health?: string; detail?: string; url?: string; delivered?: boolean };
+export type Live = { source: "jobs" | "ops-admin" | "ops-sys" | "workspace"; found: boolean; state?: string; health?: string; detail?: string; url?: string; delivered?: boolean };
 export type CardView = Card & { live?: Live };
 // `galleries`: the message's stored galleries resolved for the page now (docs/photo-recall.md); the stored refs themselves are not sent.
 export type MessageView = Omit<ThreadMessage, "calls" | "gallery"> & { calls?: (Omit<StoredCall, "output"> & { outputChars: number })[]; galleries?: GalleryView[] };
@@ -60,6 +60,8 @@ export function threadService(d: {
   jobs?: Jobs;
   admin?: AdminOps;
   sys?: SysOps;
+  // The workspace operations ledger (src/workspace/ledger.ts): where a confirmed workspace card's result is looked up.
+  workspace?: { ledger: { list(): { opId: string; proposalId: string; state: string; reason?: string }[] } };
   recent?: RecentContextRefresher;
   now?: () => Date;
   // Characters of live context before compaction starts. Tests lower it; production uses the documented default.
@@ -124,6 +126,10 @@ export function threadService(d: {
         ? { source, found: true, state: e.state, detail: e.result ?? e.error, health: e.verification && "healthy" in e.verification && e.verification.healthy !== undefined ? (e.verification.healthy ? "verified healthy" : "not healthy") : undefined }
         : { source, found: false, detail: "ORBIT's operations ledger has no record for this confirmation." };
     }
+    if (c.kind === "workspace_op") {
+      const e = d.workspace?.ledger.list().find((x) => x.proposalId === c.id);
+      return e ? { source: "workspace", found: true, state: e.state, detail: e.reason } : { source: "workspace", found: false, detail: "ORBIT's workspace ledger has no record for this confirmation." };
+    }
     return undefined;
   }
 
@@ -147,7 +153,7 @@ export function threadService(d: {
   function cardLines(t: Thread): string[] {
     return t.cards.map((c) => {
       const live = liveOf(c);
-      const what = c.kind === "job_launch" ? `${c.lane === "research" ? "research " : ""}launch on routine ${c.routine}` : c.kind === "job_steer" ? `steer of job ${c.job}` : c.kind === "vault_edit" ? `vault edit ${c.summary ?? c.action}` : `server operation ${c.action}`;
+      const what = c.kind === "job_launch" ? `${c.lane === "research" ? "research " : ""}launch on routine ${c.routine}` : c.kind === "job_steer" ? `steer of job ${c.job}` : c.kind === "vault_edit" ? `vault edit ${c.summary ?? c.action}` : c.kind === "workspace_op" ? `workspace ${c.action} ${c.summary ?? ""}`.trim() : `server operation ${c.action}`;
       const rec = c.state !== "confirmed" ? "" : live ? (live.found ? `; record now: ${live.state}${live.health ? ` (${live.health})` : ""}` : "; the record could not be found") : c.outcome?.error ? `; confirmation problem: ${c.outcome.error}` : "; no result recorded yet";
       const id = c.outcome?.jobId ?? c.outcome?.opId ?? (c.outcome?.commit ? `commit ${c.outcome.commit.slice(0, 7)} (pushed, remote verified)` : undefined);
       return `- proposal ${c.id.slice(0, 8)} (${what}): ${c.state}${id ? `, id ${id}` : ""}${rec}${c.duplicates?.length ? `; was flagged as similar to ${c.duplicates.map((x) => x.job).join(", ")}` : ""}`;
@@ -163,6 +169,8 @@ export function threadService(d: {
     if (p.kind === "job_steer") return { ...base, kind: p.kind, job: p.job, text: maskContent(p.text) };
     // A vault edit card shows exactly what will run (cardDisplay refuses text the vault filter would mask), so it is masked by the
     // same filter and a note name or path is not turned into "[redacted]"; every other card keeps the global masking.
+    // A workspace card shows exactly what will run (the service refuses an operation the content filter would mask), masked by value.
+    if (p.kind === "workspace_op") return { ...base, kind: p.kind, action: p.action, summary: maskVaultText(p.summary), display: Object.fromEntries(Object.entries(p.display).map(([k, v]) => [k, maskVaultText(v)])), warnings: p.warnings.map(maskVaultText), digest: p.digest };
     if (p.kind === "vault_edit") return { ...base, kind: p.kind, action: p.action, summary: maskVaultText(p.summary), display: Object.fromEntries(Object.entries(p.display).map(([k, v]) => [k, typeof v === "string" ? maskVaultText(v) : v])) as typeof p.display, digest: p.digest };
     return { ...base, kind: p.kind, action: p.action, summary: maskText(p.summary), display: maskDeep(p.display), digest: p.digest, ...(p.kind === "ops_sys" ? { warnings: p.warnings.map(maskText) } : {}) };
   };
@@ -363,7 +371,8 @@ export function threadService(d: {
       // A confirmation that failed is "refused" when nothing was started: no job or operation id, or the ledger says the helper never took it.
       const entry = opId ? [...(admin?.list() ?? []), ...(sys?.list() ?? [])].find((e) => e.opId === opId) : undefined;
       const commit = typeof b.commit === "string" ? b.commit : undefined;
-      const produced = Boolean(jobId || steerN || commit || (opId && entry?.state !== "not_dispatched"));
+      const wsEntry = opId ? d.workspace?.ledger.list().find((e) => e.opId === opId) : undefined;
+      const produced = Boolean(jobId || steerN || commit || (opId && !wsEntry && entry?.state !== "not_dispatched") || (wsEntry && wsEntry.state !== "failed"));
       const state: CardState = result.code < 300 || produced ? "confirmed" : "refused";
       threads.recordOutcome(proposalId, { ...(jobId ? { jobId } : {}), ...(opId ? { opId } : {}), ...(commit ? { commit } : {}), ...(steerN ? { steerN } : {}), httpStatus: result.code, ...(error ? { error: error.slice(0, 300) } : {}) }, state);
     },

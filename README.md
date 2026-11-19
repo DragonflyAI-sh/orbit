@@ -45,6 +45,8 @@ Keyword search over the vault, owner only: ORBIT asks tailscaled who sent each r
 
 **Vault writes and the config view (general tools, part 1).** Six owner-only chat tools (`vault_policy`, `vault_create_note`, `vault_append_section`, `vault_replace_text`, `vault_set_frontmatter`, `vault_archive_note`) edit the vault under its own `AGENTS.md`: direct writes only where it allows them, a proposal card for anything it protects, secret-shaped text refused, one commit per write (author ORBIT) with a Log line in the same commit, pushed without force and verified on the remote. `orbit_config_view` is a read-only view of how ORBIT is configured. Architecture, policy, authentication, failure behaviour and what must happen before it is switched on: `docs/vault-writes.md`.
 
+**Workspace tools (implemented, off, not activated).** Owner-only file tools (`fs_list`, `fs_stat`, `fs_read`, `fs_search`) confined at operation time to operator-configured workspaces, and proposal-only `fs_write`, `fs_patch` and `exec_start` that run only after Rai confirms a digest-bound card; commands run in an unprivileged, network-less bubblewrap sandbox with cgroup limits. Off unless the operator activates it after an independent security review and live-host isolation checks: `docs/workspace-tools.md`.
+
 ## Notify and schedule
 
 Owner only. `POST /notifications {text, urgent}` queues a message; `POST /schedule` takes `{text, at}`, `{text, everyMinutes}` (5 or more) or `{text, dailyAt: "HH:MM"}` (Pacific). Jobs are checked every 30 seconds and persist in the service's state directory.
