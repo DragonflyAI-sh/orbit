@@ -234,12 +234,15 @@ All of these use synthetic temporary directories. No production data or host is 
 | `test/workspace-approvals.test.ts` | 18: owner-only port; disabled refusal; propose then confirm then replay; tampering (digest, card, workspace, identity); stale file; patch; tool confinement and unknown arguments; secret refusal and masking; exec card disclosure and single run; changed script or mode means stale; concurrency (busy, queue, cross-workspace); cancel queued and running; timeout and no-pid; no unsandboxed fallback; restart recovery; status and paging; ledger persistence; no effect from direct calls | yes (supervision through a labelled test double; **not** isolation evidence) |
 | `test/workspace-config.test.ts` | 8: default off and checklist gate; production wiring off; root rules; exec requirements (dedicated mount, trusted binaries, runtime allowlist, cgroup); identity binding; fixed bubblewrap argv; probe verdicts; `nosuid,nodev` | yes |
 | `test/workspace-server.test.ts` | 4: through the real server, model call, card, non-owner and wrong digest refused, owner confirm once, result on the card; exec end to end; expiry and cancel; disabled and non-owner offering | yes |
-| `test/workspace-sandbox.test.ts` | 7 **real sandbox** tests: probe; uid, capabilities, no_new_privs, nested userns; network and host loopback; host filesystem invisibility and read-only runtime; environment; process-tree cleanup on exit, timeout and cancel; fork bomb, memory, output, `/tmp` and file-size limits | **SKIPPED.** This runner runs as root, has no bubblewrap, and has no cgroup v2 controllers. **OS isolation is unverified** |
+| `test/workspace-review.test.ts` | 18, from the independent review (`docs/reviews/workspace-tools-security-review.md`): 9 startup-race regression tests through the production launcher with stub binaries (gating only, **not** isolation evidence), 8 `todo` reproducers of open review findings, 1 precondition check | yes (todo tests fail by design until their findings are fixed) |
+| `test/workspace-sandbox.test.ts` | 7 **real sandbox** tests (plus 4 added by the review and a requirement gate): probe; uid, capabilities, no_new_privs, nested userns; network and host loopback; host filesystem invisibility and read-only runtime; environment; process-tree cleanup on exit, timeout and cancel; fork bomb, memory, output, `/tmp` and file-size limits | **SKIPPED.** This runner runs as root, has no bubblewrap, and has no cgroup v2 controllers. **OS isolation is unverified** |
 
 To run the real sandbox suite, use an isolated Linux VM, never production. It needs a bubblewrap at `/usr/bin/bwrap` that offers every
 option in `REQUIRED_FLAGS` (`src/workspace/sandbox.ts`, including `--size` and `--disable-userns`; a recent release is expected), and a
 non-root user that owns a cgroup v2 directory with `memory pids cpu` in its `cgroup.subtree_control`. Then run
-`ORBIT_SANDBOX_TEST_CGROUP=<dir> node --test test/workspace-sandbox.test.ts`. All 7 tests must pass, not skip.
+`ORBIT_SANDBOX_TEST_REQUIRED=1 ORBIT_SANDBOX_TEST_CGROUP=<dir> node --test test/workspace-sandbox.test.ts` (with `REQUIRED=1` an
+unsuitable runner fails instead of skipping). Every test must pass, not skip. The runbook, with expected results, is section 7 of
+`docs/reviews/workspace-tools-security-review.md`; `tools/workspace-sandbox-preflight/preflight.sh` lists unmet requirements first.
 
 ## 9. Operator setup, disable, and the pre-activation checklist
 
@@ -248,7 +251,8 @@ Nothing below has been done. It must not be done until **every** checklist item 
 **Pre-activation checklist** (all required, in order):
 
 1. **Independent security review** of `src/workspace/*`, the `workspace_op` confirm route and card, and this document. The reviewer
-   must not be the author. Record the reviewer, date and findings, and resolve the findings.
+   must not be the author. Record the reviewer, date and findings, and resolve the findings. A first independent review is recorded in
+   `docs/reviews/workspace-tools-security-review.md` (2026-11-19): its findings are **open**, and OS isolation is still unverified.
 2. **Real sandbox suite** (`test/workspace-sandbox.test.ts`): all 7 pass, not skip, in an isolated Linux VM with the same
    distribution, kernel series and bubblewrap version as the host. Record the output.
 3. **Live-host isolation checks** with throwaway workspaces, run after deploy but **before** the checklist line is written:

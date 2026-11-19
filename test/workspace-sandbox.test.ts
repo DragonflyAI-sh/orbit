@@ -21,30 +21,42 @@ import type { RunExit } from "../src/workspace/sandbox.ts";
 // Never run them on the production host: they include adversarial commands (fork bomb, memory exhaustion).
 
 const CG = process.env.ORBIT_SANDBOX_TEST_CGROUP ?? "";
-function why(): string | false {
-  if (process.platform !== "linux") return "not Linux";
-  if ((process.getuid?.() ?? 0) === 0) return "running as root: the sandbox never runs as root; run these as an unprivileged user";
-  if (!existsSync("/usr/bin/bwrap")) return "bubblewrap (/usr/bin/bwrap) is not installed in this runner";
-  if (!existsSync("/usr/bin/prlimit")) return "prlimit is not installed in this runner";
-  if (!CG) return "ORBIT_SANDBOX_TEST_CGROUP (a delegated cgroup v2 directory) is not set";
-  try {
-    const sub = readFileSync(join(CG, "cgroup.subtree_control"), "utf8");
-    const lack = CGROUP_CONTROLLERS.filter((c) => !sub.split(/\s+/).includes(c));
-    if (lack.length) return `the test cgroup does not enable ${lack.join(", ")} for children`;
-  } catch {
-    return "the test cgroup is not readable";
+// Every unmet requirement, not only the first, so an environment report says exactly what is missing.
+function unmetSandboxRequirements(): string[] {
+  const out: string[] = [];
+  if (process.platform !== "linux") return ["not Linux"];
+  if ((process.getuid?.() ?? 0) === 0) out.push("running as root: the sandbox never runs as root; run these as an unprivileged user");
+  if (!existsSync("/usr/bin/bwrap")) out.push("bubblewrap (/usr/bin/bwrap) is not installed in this runner");
+  if (!existsSync("/usr/bin/prlimit")) out.push("prlimit is not installed in this runner");
+  if (!CG) out.push("ORBIT_SANDBOX_TEST_CGROUP (a delegated cgroup v2 directory) is not set");
+  else {
+    try {
+      const sub = readFileSync(join(CG, "cgroup.subtree_control"), "utf8");
+      const lack = CGROUP_CONTROLLERS.filter((c) => !sub.split(/\s+/).includes(c));
+      if (lack.length) out.push(`the test cgroup does not enable ${lack.join(", ")} for children`);
+    } catch {
+      out.push("the test cgroup is not readable");
+    }
   }
-  return false;
+  return out;
 }
-const skip = why();
-if (skip) console.log(`# workspace sandbox integration tests SKIPPED: ${skip}. OS isolation is UNVERIFIED in this run.`);
+const unmet = unmetSandboxRequirements();
+// ORBIT_SANDBOX_TEST_REQUIRED=1 (the isolated-VM runbook sets it): an environment that cannot run these tests FAILS instead of
+// skipping, so a skipped suite can never be mistaken for a passing one.
+const REQUIRED = process.env.ORBIT_SANDBOX_TEST_REQUIRED === "1";
+const skip: string | false = unmet.length && !REQUIRED ? unmet.join("; ") : false;
+if (unmet.length) console.log(`# workspace sandbox integration tests ${REQUIRED ? "CANNOT RUN (required)" : "SKIPPED"}: ${unmet.join("; ")}. OS isolation is UNVERIFIED in this run.`);
+test("environment: the real-sandbox requirements are met (only checked when ORBIT_SANDBOX_TEST_REQUIRED=1)", { skip: REQUIRED ? false : "not required in this run" }, () => {
+  assert.deepEqual(unmet, [], "unmet sandbox test requirements");
+});
 
-const base = skip ? "" : mkdtempSync(join(tmpdir(), "orbit-sbx-"));
-const outsideCanary = skip ? "" : join(base, "outside-canary.txt");
+const base = unmet.length ? "" : mkdtempSync(join(tmpdir(), "orbit-sbx-"));
+const outsideCanary = unmet.length ? "" : join(base, "outside-canary.txt");
 const runtime = ["/usr", "/bin", "/sbin", "/lib", "/lib64"].filter((p) => existsSync(p));
 const config = (limits: Partial<Limits> = {}): SandboxConfig => ({ bwrap: "/usr/bin/bwrap", prlimit: "/usr/bin/prlimit", shell: "/bin/sh", runtime, cgroupParent: CG, limits: { ...DEFAULT_LIMITS, timeoutSec: 30, ...limits }, maxConcurrentRuns: 1 });
 let n = 0;
 async function sandbox(limits: Partial<Limits> = {}) {
+  if (unmet.length) throw new Error(`the real-sandbox requirements are not met: ${unmet.join("; ")}`);
   const state = join(base, `state-${++n}`);
   mkdirSync(state, { mode: 0o700 });
   const sb = bwrapSandbox({ config: config(limits), stateDir: state, canaries: [outsideCanary] });
@@ -71,7 +83,7 @@ const sleepers = () =>
       }
     }).length;
 
-if (!skip) writeFileSync(outsideCanary, "outside");
+if (!unmet.length) writeFileSync(outsideCanary, "outside");
 
 test("probe: the live self-test passes (unprivileged, private network/PID namespaces, hidden host paths, clean env, read-only runtime)", { skip }, async () => {
   await sandbox();
@@ -159,4 +171,67 @@ test("limits: process count, memory, output, /tmp size and file size are enforce
   assert.match(text(tmp), /tmp_bounded/);
   const fsz = await s.out("(head -c 3000000 /dev/zero > /workspace/big) 2>/dev/null && echo fsize_unbounded || echo fsize_bounded", { fileSizeBytes: 1024 * 1024 });
   assert.match(text(fsz), /fsize_bounded/);
+});
+
+// ---- Added by the independent review (docs/reviews/workspace-tools-security-review.md). NOT YET EXECUTED on a qualifying runner when
+// they were written: the first isolated-VM run must report them, and a reviewer must check any failure before it is "fixed".
+
+test("network (review): host abstract unix sockets and the IPv6 loopback are unreachable", { skip }, async () => {
+  const name = `orbit-review-abstract-${process.pid}`;
+  const server = createServer((c) => c.end("host-abstract")).listen({ path: `\0${name}` });
+  await new Promise((r) => server.once("listening", r));
+  try {
+    const s = await sandbox();
+    const r = await s.out(`if command -v python3 >/dev/null; then python3 -c "import socket
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+  s.connect('\\0${name}'); print('abstract_reachable')
+except Exception: print('abstract_unreachable')
+try:
+  socket.create_connection(('::1', 22), 1); print('v6_connected')
+except Exception: print('v6_no')"; else echo no_python; fi`);
+    const o = text(r);
+    assert.ok(!o.includes("abstract_reachable"), "a host abstract unix socket is reachable from the sandbox");
+    assert.ok(!o.includes("v6_connected"));
+    if (o.includes("no_python")) console.log("# abstract-socket check needs python3 in the runtime; it did not run");
+  } finally {
+    server.close();
+  }
+});
+
+test("processes (review): host processes are invisible and cannot be signalled", { skip }, async () => {
+  const s = await sandbox();
+  const host = process.pid;
+  const r = await s.out(`ls /proc | grep -c '^[0-9]'; kill -0 ${host} 2>/dev/null && echo host_pid_signalable; test -e /proc/${host}/environ && echo host_environ_visible; true`);
+  const o = text(r);
+  assert.ok(Number(o.split("\n")[0]) <= 4, `the PID namespace shows ${o.split("\n")[0]} processes`);
+  if (host > 16) {
+    assert.ok(!o.includes("host_pid_signalable"));
+    assert.ok(!o.includes("host_environ_visible"));
+  }
+});
+
+test("mounts (review): no /sys or cgroupfs, /proc/sys is read-only, and mounting or remounting is refused", { skip }, async () => {
+  const s = await sandbox();
+  const r = await s.out("test -e /sys/fs/cgroup && echo cgroupfs_visible; (echo x > /proc/sys/kernel/hostname) 2>/dev/null && echo procsys_writable; mount -t tmpfs none /mnt 2>/dev/null && echo mount_ok; mount -o remount,rw / 2>/dev/null && echo remount_ok; mount -o remount,rw /usr 2>/dev/null && echo remount_usr_ok; true");
+  const o = text(r);
+  for (const bad of ["cgroupfs_visible", "procsys_writable", "mount_ok", "remount_ok", "remount_usr_ok"]) assert.ok(!o.includes(bad), bad);
+});
+
+test("cgroup (review): a run lives in its own child cgroup with the configured limits, and the cgroup is removed afterwards", { skip }, async () => {
+  const s = await sandbox();
+  const before = new Set(readdirSync(CG).filter((d) => d.startsWith("orbit-run-")));
+  const h = s.run("sleep 2", { memoryBytes: 96 * 1024 * 1024, processes: 12 });
+  let seen: string | undefined;
+  for (let i = 0; i < 40 && !seen; i++) {
+    await new Promise((r) => setTimeout(r, 50));
+    seen = readdirSync(CG).find((d) => d.startsWith("orbit-run-") && !before.has(d));
+  }
+  assert.ok(seen, "the run's cgroup exists while it runs");
+  assert.equal(readFileSync(join(CG, seen!, "memory.max"), "utf8").trim(), String(96 * 1024 * 1024));
+  assert.equal(readFileSync(join(CG, seen!, "pids.max"), "utf8").trim(), "12");
+  assert.ok(readFileSync(join(CG, seen!, "cgroup.procs"), "utf8").trim().length > 0, "the run's processes are inside it");
+  const r = await h.done;
+  assert.equal(r.treeGone, true);
+  assert.ok(!existsSync(join(CG, seen!)), "the run's cgroup was removed");
 });
