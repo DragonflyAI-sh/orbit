@@ -1536,8 +1536,9 @@
     chatForm.hidden = next !== "chat";
     jobsBox.hidden = next !== "jobs";
     document.getElementById("alog").hidden = document.getElementById("aform").hidden = document.getElementById("astatus").hidden = next !== "assistant";
-    if (next === "jobs") jobsPoller.poll();
-    if (next === "assistant" && assistantPoller) assistantPoller.poll();
+    // The page that opens is drawn once now, even in a hidden tab; the pollers then refresh it only while it is visible.
+    if (next === "jobs") jobsPoller.open(() => tab === "jobs");
+    if (next === "assistant" && assistantPoller) assistantPoller.open(() => tab === "assistant" && !asending);
   }
   // Assistant, Sessions and Jobs are views of this one page, so they are real links: they can be opened with the keyboard,
   // bookmarked, and the back button moves between them. The Assistant is / (or /#assistant), Jobs is /#jobs, and Sessions is
@@ -2806,12 +2807,16 @@
   // Runs `refresh` when `shouldRun()` says so, never two at once. Tests load this block on its own.
   function makePoller(refresh, shouldRun, schedule, ms) {
     let busy = false;
-    const poll = async () => {
-      if (busy || !shouldRun()) return;
+    const run = async (ok) => {
+      if (busy || !ok()) return;
       busy = true;
       try { await refresh(); } finally { busy = false; }
     };
-    return { poll, start: () => schedule(poll, ms) };
+    const poll = () => run(shouldRun);
+    // `open` is the one draw when a page opens. It keeps the no-overlap guard but takes its own condition, without the
+    // visibility test: a page opened in a background tab (a Command/Ctrl-click or middle-click on a page link) is hidden while
+    // it loads, and must already be drawn when it is shown, since nothing refreshes on a visibility change.
+    return { poll, start: () => schedule(poll, ms), open: (ready) => run(ready) };
   }
   // </poller>
 
@@ -2826,8 +2831,9 @@
       }
     } catch { /* the next refresh tries again */ }
   }
-  // The Jobs tab refreshes once when it opens and every 15 seconds while it is showing and the page is visible.
-  // The Chat tab and a hidden page make no jobs requests.
+  // The Jobs tab refreshes once when it opens (even in a hidden tab, so a page opened in the background is drawn when shown) and
+  // every 15 seconds while it is showing and the page is visible. The Chat tab, and a hidden page after that first draw, make no
+  // jobs requests.
   const jobsPoller = makePoller(refreshJobs, () => tab === "jobs" && document.visibilityState === "visible", setInterval, 15000);
   jobsPoller.start();
 
