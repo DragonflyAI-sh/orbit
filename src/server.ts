@@ -10,6 +10,7 @@ import { researchStore } from "./research.ts";
 import type { ResearchLane, ResearchStore, ResearchTool } from "./research.ts";
 import { researchTools, watchResearchVault, withLaneGuard } from "./research-tools.ts";
 import { hasLegacyContext, LEGACY_CONTEXT_ERROR, refuseLegacyContext } from "./job-context.ts";
+import { alertDelivery, jobProgress } from "./job-progress.ts";
 import { toolCommitStatus } from "./job-view.ts";
 import { EVENTS_DEFAULT, eventsPage, jobDetail, listRows, parseRowQuery } from "./job-detail.ts";
 import type { OpenSteerProposal } from "./job-detail.ts";
@@ -284,7 +285,12 @@ export function buildServer({
       return { state: "unavailable" as const, detail: e instanceof Error ? e.message.slice(0, 200) : "unreadable" };
     }
   };
-  const withHealth = (job: Job) => ({ ...job, toolCommit: job.toolCommit ?? "unknown", toolCommitStatus: toolCommitStatus(job.toolCommit, commit), health: jobs!.health(job), dispatch: dispatchEvidence(job), reconciliation: reconView(job) });
+  const withHealth = (job: Job) => {
+    const health = jobs!.health(job);
+    return { ...job, toolCommit: job.toolCommit ?? "unknown", toolCommitStatus: toolCommitStatus(job.toolCommit, commit), health, progress: jobProgress(job, health), dispatch: dispatchEvidence(job), reconciliation: reconView(job) };
+  };
+  // The live delivery outcome of a job's first-callback alert (src/job-progress.ts), from ORBIT's own notification store.
+  const callbackAlertDelivery = (job: Job) => alertDelivery(job.callbackAlert, job.callbackAlert?.notificationId ? notify.get(job.callbackAlert.notificationId) : undefined, notify.status().impl.includes("discord"), (now ?? (() => new Date()))());
   const launchable = () => ({
     routines: [...routines.keys()],
     problem: !jobs ? "jobs are not enabled" : !control ? "no orbit-work GitHub credential is installed" : routines.size ? undefined : "no Routine is configured",
@@ -306,7 +312,7 @@ export function buildServer({
   // The lane tools (src/research-tools.ts): discover both lanes, propose research, read and save results. Owner only, like job_launch.
   // A research report's vault save that needed a card: its outcome is written to the research job the moment the card settles.
   if (jobs && vaultEdits) watchResearchVault(jobs, vaultEdits);
-  const laneTools = () => (jobs ? researchTools({ jobs, proposals, lane: researchLane, build: launchable, routineRepos: research?.routineRepos ?? new Map(), store: research?.store ?? researchStore(undefined), vault: vaultEdits, now }) : []);
+  const laneTools = () => (jobs ? researchTools({ jobs, proposals, lane: researchLane, build: launchable, routineRepos: research?.routineRepos ?? new Map(), store: research?.store ?? researchStore(undefined), vault: vaultEdits, now, alertDelivery: callbackAlertDelivery }) : []);
 
   // Threads: the store, the rolling recent-context note, and the service that runs a turn against a thread.
   const recent = recentContext({ port: recentPort, threads, model, now, cardLines: (t) => svc.cardLines(t) });
@@ -1150,7 +1156,7 @@ export function buildServer({
       // The Jobs page's detail: sections, links, inputs and the newest page of events (src/job-detail.ts). Without `view` the raw record.
       if (url.searchParams.get("view") === "detail") {
         const openSteers = proposals.list().filter((p): p is typeof p & OpenSteerProposal => p.kind === "job_steer" && p.job === job.id);
-        return send(res, 200, { ...jobDetail(job, jobs.health(job), { all: jobs.all(), routineRepo: job.launch ? research?.routineRepos?.get(job.launch.routine) : undefined, running: commit }, openSteers), reconciliation: reconView(job) });
+        return send(res, 200, { ...jobDetail(job, jobs.health(job), { all: jobs.all(), routineRepo: job.launch ? research?.routineRepos?.get(job.launch.routine) : undefined, running: commit, alertDelivery: callbackAlertDelivery }, openSteers), reconciliation: reconView(job) });
       }
       return send(res, 200, withHealth(job));
     }

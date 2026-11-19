@@ -91,6 +91,14 @@ export type ResearchRecord = {
   // this field existed), which includes a request that never reached ORBIT (a reset or TLS failure on the way).
   toolServed?: { firstAt: string; lastAt: string; count: number; sha256: string };
 };
+// The first-callback alert the watch raised for this job (src/watch.ts), kept on the job so every view that reads the job (job_status, the
+// Jobs page, research_result) can say whether one was queued, and whether a later callback superseded it. Written only by ORBIT.
+// firstAt/at: when the first and latest alert were queued; count: how many were queued (a second only when the dispatch evidence changed);
+// dispatch: the dispatch state the latest alert named; stage: the last verified milestone it named (src/job-progress.ts); notificationId:
+// the stored notification (its delivery receipts live there). queueError/attempts/gaveUp: storing the notice failed (bounded retries).
+// resolvedAt/resolution: a runner event (or the job finishing) arrived after the alert, so it no longer applies. Absent: never alerted, or
+// alerted before this field existed (the watch's own record still deduplicates those).
+export type CallbackAlert = { firstAt: string; at: string; count: number; dispatch: string; stage: string; notificationId?: string; queueError?: string; attempts?: number; gaveUp?: boolean; resolvedAt?: string; resolution?: "runner-callback" | "finished" };
 export type ResearchVaultAttempt = { at: string; path: string; state: "committed" | "pending-confirmation" | "failed" | "cancelled" | "expired"; commit?: string; proposalId?: string; expiresAt?: string; settledAt?: string; error?: string };
 export type Job = {
   id: string;
@@ -118,12 +126,16 @@ export type Job = {
   // How many of the oldest events were dropped to keep the last KEEP_EVENTS. Absent on records from before it was counted (unknown).
   eventsDropped?: number;
   steers: Steer[];
+  callbackAlert?: CallbackAlert;
 };
 
 // A reported tool commit is a full lowercase hex commit id; "unknown", missing and anything else are not recorded.
 export function normalizeToolCommit(value: unknown): string | undefined {
   return typeof value === "string" && /^[0-9a-f]{40}$/.test(value) ? value : undefined;
 }
+
+// "awaiting-first-checkin" was added for a launched job with no runner event before the deadline; older ORBITs called it "ok".
+export type JobHealth = "ok" | "awaiting-first-checkin" | "not-started" | "quiet" | "finished" | "launch-failed";
 
 export const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -324,13 +336,20 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
     // Flags a job that has not started within 10 minutes of launch, or has gone quiet for 15 minutes.
     // A recorded launch failure is shown only while the runner has said nothing: a fire whose answer was lost (a transport error after the
     // provider accepted it) can still start a runner, and once it reports, its own events are the evidence, not the lost answer.
-    // "not-started" means no runner event yet. It never says whether a cloud session exists: see src/launch-evidence.ts for that.
-    health(job: Job): "ok" | "not-started" | "quiet" | "finished" | "launch-failed" {
+    // "awaiting-first-checkin": no runner event yet and the deadline has not passed. A dispatch, a provider session or a tool download is
+    // not evidence that the runner executed anything, so this is never "ok" (src/job-progress.ts). "not-started": the same after the
+    // deadline. Neither says whether a cloud session exists: see src/launch-evidence.ts for that. "ok" needs a runner event.
+    health(job: Job): JobHealth {
       if (job.launch?.failedAt && !job.events.length) return "launch-failed";
       if (job.state === "done" || job.state === "blocked" || job.state === "failed") return "finished";
       const t = now().getTime();
-      if (!job.events.length) return job.launch && t - new Date(job.launch.at).getTime() > NOT_STARTED_AFTER_MS ? "not-started" : "ok";
+      if (!job.events.length) return job.launch && t - new Date(job.launch.at).getTime() > NOT_STARTED_AFTER_MS ? "not-started" : "awaiting-first-checkin";
       return job.lastEventAt && t - new Date(job.lastEventAt).getTime() > QUIET_AFTER_MS ? "quiet" : "ok";
+    },
+
+    // The watch's record of the first-callback alert for this job (src/watch.ts). Never touched by runner input.
+    setCallbackAlert(id: string, alert: CallbackAlert): void {
+      update(id, (j) => ({ ...j, callbackAlert: alert }));
     },
 
     get: find,

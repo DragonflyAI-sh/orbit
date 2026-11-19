@@ -95,7 +95,8 @@ export function jobStateOf(jobs: Jobs | undefined, now: () => Date = () => new D
       const { outcome } = launchOutcome(j, opts);
       if (outcome === "not-launched") continue;
       if (new Date(j.expiresAt) <= now()) continue; // an expired registration cannot report any more
-      // health is "launch-failed" for an unresolved failure with no runner event, so it lands in uncertain.
+      // health is "launch-failed" for an unresolved failure with no runner event, so it lands in uncertain; so does a job awaiting its
+      // first check-in (nothing proves its runner is working yet, and nothing proves it is not).
       (jobs.health(j) === "ok" ? active : uncertain).push(j.id);
     }
     const parts = [`${active.length} active`, `${uncertain.length} quiet or not started (possibly still working)`];

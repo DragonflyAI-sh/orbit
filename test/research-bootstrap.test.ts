@@ -496,7 +496,7 @@ test("bootstrap reports: research jobs only, own token, fixed fields, only befor
 
 // ---- the callback deadline ----------------------------------------------------------------------------------------------------------------
 
-test("no callback: ok before the documented deadline, not-started after it (an honest alert), cleared by a late callback, same after a restart", async () => {
+test("no callback: awaiting first check-in before the documented deadline, not-started after it (an honest alert), cleared by a late callback, same after a restart", async () => {
   const r = await rig();
   try {
     const id = "research-boot-silent";
@@ -504,7 +504,7 @@ test("no callback: ok before the documented deadline, not-started after it (an h
     const ws = jsonStore<WatchState>(join(r.dir, "state"), "watch", { ports: {} });
     const watch = watcher(ws, r.notify, r.now, r.jobs, { inFlight: launchTracker() });
     r.advance(NOT_STARTED_AFTER_MS - 60_000);
-    assert.equal(r.jobs.health(r.jobs.get(id)!), "ok");
+    assert.equal(r.jobs.health(r.jobs.get(id)!), "awaiting-first-checkin");
     watch.tick();
     r.advance(2 * 60_000);
     assert.equal(r.jobs.health(r.jobs.get(id)!), "not-started");

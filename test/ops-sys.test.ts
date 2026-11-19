@@ -245,8 +245,9 @@ test("job state: active, quiet/stale and unknown are distinguished (and an unper
   jobs.setLaunch("unknown-failure", { routine: "orbit", at: r.now().toISOString(), briefCommit: "b2", failedAt: r.now().toISOString(), error: "x" });
   const ok = jobStateOf(jobs, r.now)();
   assert.equal(ok.known, true);
-  assert.deepEqual(ok.active, ["fresh"]);
-  assert.deepEqual(ok.uncertain, ["old", "unknown-failure"], "launched an hour ago and never started, or a fire whose outcome is unknown: possibly dead, possibly working");
+  // "fresh" has no runner event yet: awaiting its first check-in, so possibly working, never counted as known active.
+  assert.equal(ok.active.length, 0);
+  assert.deepEqual(ok.uncertain, ["fresh", "old", "unknown-failure"], "awaiting a first check-in, launched an hour ago and never started, or a fire whose outcome is unknown: possibly dead, possibly working");
   for (const id of ["stopped-before-brief", "failed-launch", "refused-launch"]) assert.ok(!ok.active.includes(id) && !ok.uncertain.includes(id), `${id} provably reached no runner`);
   r.advance(48 * 3600_000);
   const later = jobStateOf(jobs, r.now)();

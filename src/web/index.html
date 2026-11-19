@@ -260,6 +260,7 @@
   .health-not-started, .health-quiet { color: var(--mock); font-weight: 600; }
   .health-launch-failed { color: var(--down); font-weight: 600; }
   .health-ok { color: var(--live); }
+  .health-awaiting-first-checkin { color: var(--muted); font-weight: 600; }
   .ev { font-size: 13px; padding: 4px 0; border-top: 1px solid var(--line); white-space: pre-wrap; }
   .ev:first-child { border-top: 0; }
   #jobs textarea { width: 100%; }
@@ -284,6 +285,7 @@
   #jobs .badge.state-failed, #jobs .badge.state-blocked { color: var(--down); border-color: var(--down); }
   #jobs .badge.health-not-started, #jobs .badge.health-quiet { color: var(--mock); border-color: var(--mock); }
   #jobs .badge.health-launch-failed { color: var(--down); border-color: var(--down); }
+  #jobs .badge.health-awaiting-first-checkin { color: var(--muted); border-style: dashed; }
   #jobs .badge.basis-recorded { color: var(--live); }
   #jobs .badge.basis-unavailable, #jobs .badge.steer-queued, #jobs .badge.steer-proposed { color: var(--mock); }
   #jobs .badge.steer-delivered, #jobs .badge.steer-replied { color: var(--live); }
@@ -1780,6 +1782,13 @@
   // The first line worth showing in a one-line preview: Markdown headings (a summary's "## PR title") are skipped when there is more.
   const firstLineOf = (t) => { const lines = String(t ?? "").split("\n").map((l) => l.trim()).filter(Boolean); return lines.find((l) => !l.startsWith("#")) ?? lines[0] ?? ""; };
 
+  // Health words for people (the value itself stays the API's). Before the runner's first check-in nothing proves it executed, so that is
+  // never shown as healthy; "first check-in overdue" is not a failure and not a cause (src/job-progress.ts).
+  const HEALTH_TEXT = { ok: "checked in", "awaiting-first-checkin": "awaiting first check-in", "not-started": "first check-in overdue", quiet: "quiet", finished: "finished", "launch-failed": "launch failed" };
+  const healthText = (h) => HEALTH_TEXT[h] ?? h;
+  // Dispatch time and runner activity are different facts: the runner's last event when there is one, otherwise say none arrived yet.
+  const runnerActivity = (r, prefix) => r.runnerActivityAt ? when(r.runnerActivityAt, `${prefix}last runner activity`) : el("span", { className: "meta", textContent: `${prefix}no runner activity yet` });
+
   // ---- the list ----
   function jobRowEl(r) {
     const bad = r.health === "launch-failed", warn = r.health === "not-started" || r.health === "quiet";
@@ -1791,7 +1800,7 @@
       chip(`${r.lane === "research" ? "research" : "build"} · ${r.routine || "no routine"}`),
       chip(r.kind === "review" ? `review of ${r.reviewOf}` : r.kind || "work"),
       el("span", { className: `badge state state-${r.state}`, textContent: `state: ${r.state}` }),
-      el("span", { className: `badge health health-${r.health}`, textContent: `health: ${r.health}` }));
+      el("span", { className: `badge health health-${r.health}`, textContent: `health: ${healthText(r.health)}`, title: r.health }));
     if (r.toolCommitStatus === "mismatch") chips.append(toolCommitBadge(r));
     li.append(chips);
     const latest = r.latest?.text ? firstLineOf(r.latest.text) : r.latest ? `${r.latest.type}${r.latest.status ? ": " + r.latest.status : ""}` : "No report yet";
@@ -1804,7 +1813,7 @@
     if (r.reviewDelivery && r.reviewDelivery.posted < r.reviewDelivery.total) problems.push(`Review comments: ${r.reviewDelivery.posted} of ${r.reviewDelivery.total} parts posted`);
     if (r.summaryState === "partial" || r.summaryState === "oversize") problems.push(r.summaryState === "partial" ? "Summary: only the start reached ORBIT over the API; waiting for the full text from git" : `Summary: ${r.summaryChars} characters, over ORBIT's limit; only git has the full text`);
     for (const p of problems) li.append(el("div", { className: "latest one health-launch-failed", textContent: p }));
-    const meta = el("div", { className: "row meta" }, when(r.launchedAt || r.createdAt, r.launchedAt ? "launched" : "registered"), when(r.activityAt, "· last activity"));
+    const meta = el("div", { className: "row meta" }, when(r.launchedAt || r.createdAt, r.launchedAt ? "launched" : "registered"), runnerActivity(r, "· "));
     if (r.latest) meta.append(el("span", { textContent: `via ${r.latest.via === "git" ? "git" : "the API"}` }));
     if (r.pendingSteers) meta.append(el("span", { className: "health-quiet", textContent: `${r.pendingSteers} steer(s) not yet received` }));
     const pr = safeLink(r.prUrl, "pull request");
@@ -1844,7 +1853,7 @@
       return { s, fill };
     };
     const state = select("state", "State", ["registered", "running", "done", "blocked", "failed"]);
-    const health = select("health", "Health", ["ok", "not-started", "quiet", "launch-failed", "finished"]);
+    const health = select("health", "Health", ["ok", "awaiting-first-checkin", "not-started", "quiet", "launch-failed", "finished"]);
     const lane = select("lane", "Lane", ["build", "research"]);
     const kind = select("kind", "Kind", ["work", "review", "research"]);
     const routine = select("routine", "Routine", []);
@@ -1950,13 +1959,28 @@
   }
   const dl = (pairs) => el("dl", { className: "jdl" }, ...pairs.filter(Boolean).flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", {}, ...(Array.isArray(v) ? v : [v]))]));
 
+  const PHASE_TEXT = { "awaiting-first-checkin": "awaiting first check-in", "first-checkin-overdue": "first check-in overdue", "launch-failed": "launch failed", running: "checked in", quiet: "quiet", finished: "finished" };
+  // The first-callback alert: what the job record says (queued, or superseded by a later check-in) and what the notification store says
+  // about delivery. Queued is not delivered, and a receipt is not proof that it was read.
+  function alertParts(a) {
+    const r = a.record || {};
+    const out = [el("span", { textContent: r.state || "unknown" })];
+    if (r.at) out.push(el("span", { className: "meta", textContent: ` · latest ${new Date(r.at).toLocaleString()}${r.count > 1 ? ` (${r.count} sent)` : ""}` }));
+    if (r.lastVerified) out.push(el("span", { className: "meta", textContent: ` · named last verified stage: ${r.lastVerified}` }));
+    if (r.queueError) out.push(el("div", { className: "health-launch-failed", textContent: `Could not queue (${r.attempts} attempt(s)): ${r.queueError}` }));
+    const deliv = a.delivery;
+    if (deliv) out.push(el("div", { className: "meta", textContent: `Web page: ${deliv.web}. Discord: ${deliv.discord}. ${deliv.note}` }));
+    else if (r.notificationId) out.push(el("div", { className: "meta", textContent: r.note || "" }));
+    return out;
+  }
+
   function overviewParts(d) {
     const o = d.overview;
     const head = el("div", { className: "jtitlebig", textContent: o.title.text });
     const src = note(`Title: ${TITLE_SOURCE_TEXT[o.title.source] ?? o.title.source}`);
     const chips = el("div", { className: "row chips" }, el("span", { className: "id", textContent: o.id }), copyButton(() => o.id, "job id", "id"),
       chip(`${o.lane} · ${o.routine || "no routine"}`), chip(o.kind === "review" ? `review of ${o.reviewOf}` : o.kind),
-      el("span", { className: `badge state state-${o.state}`, textContent: `state: ${o.state}` }), el("span", { className: `badge health health-${o.health}`, textContent: `health: ${o.health}` }), toolCommitBadge(o));
+      el("span", { className: `badge state state-${o.state}`, textContent: `state: ${o.state}` }), el("span", { className: `badge health health-${o.health}`, textContent: `health: ${healthText(o.health)}`, title: o.health }), toolCommitBadge(o));
     const session = safeLink(o.sessionUrl, "Claude session"), pr = safeLink(o.prUrl, "pull request");
     if (session) chips.append(session);
     if (pr) chips.append(pr);
@@ -1967,7 +1991,9 @@
       o.launch?.fireStartedAt && ["Fire sent", when(o.launch.fireStartedAt)],
       o.launch?.firedAt && ["Accepted", when(o.launch.firedAt)],
       o.launch?.failedAt && ["Launch failed", [when(o.launch.failedAt), el("span", { className: "health-launch-failed", textContent: ` ${o.launch.error}` })]],
-      ["Last activity", o.latest ? [when(o.activityAt), el("span", { className: "meta", textContent: ` (${o.latest.type} via ${o.latest.via === "git" ? "git" : "the API"})` })] : when(o.activityAt)],
+      ["Last runner activity", o.runnerActivityAt ? [when(o.runnerActivityAt), ...(o.latest ? [el("span", { className: "meta", textContent: ` (${o.latest.type} via ${o.latest.via === "git" ? "git" : "the API"})` })] : [])] : el("span", { className: "meta", textContent: "none yet: the times above are ORBIT's dispatch, not runner activity" })],
+      o.progress && ["Progress", [el("span", { className: `badge health-${o.health}`, textContent: PHASE_TEXT[o.progress.phase] ?? o.progress.phase }), el("span", { className: "meta", textContent: ` ${o.progress.summary}` })]],
+      o.firstCallbackAlert && ["Not-started alert", alertParts(o.firstCallbackAlert)],
       ["Token expires", when(o.expiresAt)],
       ["Dispatch", [el("span", { className: "badge", textContent: disp.state }), el("span", { className: "meta", textContent: ` ${disp.basis}` })]],
       disp.caveat && ["Caveat", el("span", { className: "meta", textContent: disp.caveat })],
