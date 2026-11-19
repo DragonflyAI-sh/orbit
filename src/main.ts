@@ -17,6 +17,7 @@ import { adminOps } from "./ops-admin.ts";
 import { adminClient } from "./ops-admin-client.ts";
 import { jobStateOf, sysOps } from "./ops-sys.ts";
 import { sysClient } from "./ops-sys-client.ts";
+import { hostInventoryEnabled, hostInventoryTool } from "./host-inventory.ts";
 import { opsClient } from "./ops-client.ts";
 import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
 import { selectPrInspect } from "./pr-inspect.ts";
@@ -248,6 +249,8 @@ buildServer({
   vaultEdits,
   configView: config,
   // Read-only PR inspection (owner-only chat tools): the repositories are the ones ORBIT_ROUTINE_REPOS names, the token is orbit.github-orbit-prs.
+  // Off unless ORBIT_HOST_INVENTORY=enabled; the helper also refuses until the host is activated (docs/host-inventory.md).
+  hostInventory: hostInventoryEnabled(process.env) ? [hostInventoryTool({ ops })] : undefined,
   prInspect: selectPrInspect(process.env, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), () => jobs.all()),
   // The rolling note is the vault file Memory/recent-context.md when the clone exists (written through the vault tools, with the
   // same policy, secret refusal, log line and git pipeline); otherwise it stays in ORBIT's state directory.

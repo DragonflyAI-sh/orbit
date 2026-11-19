@@ -427,12 +427,13 @@ test("the client speaks the helper's line protocol, validates before sending, an
 
 // ---------------------------------------------------------------- tier 1 is unchanged; the new units are as narrow as designed
 
+// helper.ts and protocol.ts re-pinned for the host inventory's one gated, argument-free action (docs/host-inventory.md).
 test("tier 1 is untouched: its unit, socket, helper, protocol and the ORBIT service unit are byte-identical to the shipped ones", () => {
   assert.equal(sha("deploy/systemd/orbit-ops@.service"), "088be396050509047680bb157b625b19e11a6e25f0042e1753a4045765a86c63");
   assert.equal(sha("deploy/systemd/orbit-ops.socket"), "9f2516a3337a99551b220d198c63b8b5dc100a0d0465fc6947d62add4d31c27e");
   assert.equal(sha("deploy/systemd/orbit.service"), "1516761d0bda57cd699cf76e77108f079ac82185c267ea1920f3ab9b1b40d48e");
-  assert.equal(sha("src/ops/helper.ts"), "47e6384d82720177166f876ce9dd5bc7d56a9efa3ba01b208c6b96a8078fad5a");
-  assert.equal(sha("src/ops/protocol.ts"), "3a1dea9c7c865639387531b173c5f6e93d3ba346f789a1b482db2d7cb338b1f1");
+  assert.equal(sha("src/ops/helper.ts"), "0e1b9ea5499ea3626265d9b0ad75dd203096c695d9a6876e2e7dcc846522c714");
+  assert.equal(sha("src/ops/protocol.ts"), "a23d17f22fbe0f44499595358a7c00e6cd9dd9e14b7edfa9504d060e033ad1b5");
   const u = read("deploy/systemd/orbit-ops@.service");
   for (const re of [/^ProtectSystem=strict$/m, /^PrivateNetwork=yes$/m, /^CapabilityBoundingSet=CAP_DAC_READ_SEARCH$/m]) assert.match(u, re);
   assert.ok(!/^ReadWritePaths=/m.test(u));

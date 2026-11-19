@@ -9,8 +9,15 @@ export const LOG_LINES_DEFAULT = 50;
 export const LOG_LINE_CHARS = 200;
 export const LOG_TOTAL_CHARS = 7000;
 
-export const ACTIONS = ["orbit_status", "orbit_logs", "deploy_state", "host_health", "tailscale_status", "vault_sync", "credentials"] as const;
+export const ACTIONS = ["orbit_status", "orbit_logs", "deploy_state", "host_health", "tailscale_status", "vault_sync", "credentials", "host_inventory"] as const;
 export type Action = (typeof ACTIONS)[number];
+
+// host_inventory (docs/host-inventory.md) is off unless the host has been activated separately: the module it runs (inventory.ts) is
+// not copied by install.sh, and the helper answers only while this root-owned marker exists. Neither is created by any deploy or
+// installer in this repository. The helper never reads the marker's contents.
+export const INVENTORY_MARKER = "/etc/orbit-ops/host-inventory.enabled";
+export const INVENTORY_DISABLED_MESSAGE = "Host inventory is not activated on this host (no valid activation marker).";
+export const INVENTORY_UNSUPPORTED_MESSAGE = "Host inventory is not installed in this helper (the inventory module is missing or unsafe).";
 
 export type OpsRequest = { action: Action; lines?: number };
 export type OpsError = { code: string; message: string };
