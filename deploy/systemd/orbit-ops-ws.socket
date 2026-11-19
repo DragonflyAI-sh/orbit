@@ -1,0 +1,20 @@
+[Unit]
+Description=ORBIT workspace host-setup helper socket (orbit-ops-ws; docs/orbit-ops-ws.md)
+
+[Socket]
+# Authorization is the kernel's, exactly as for tiers 1-3: only root and members of the system group orbit-ops can connect.
+# The ORBIT service already joins that group (SupplementaryGroups=orbit-vault orbit-ops), so orbit.service needs no change for this.
+# ORBIT only sends ws_setup/ws_revoke for an operation the owner confirmed on a card; the socket itself cannot know that.
+ListenStream=/run/orbit-ops-ws.sock
+# The socket node: root:orbit-ops, mode 0660 (no access for anyone else).
+SocketUser=root
+SocketGroup=orbit-ops
+SocketMode=0660
+# One short-lived front instance per connection (orbit-ops-ws@.service), at most four at a time.
+Accept=yes
+MaxConnections=4
+# The front does not need the peer's credentials; group membership above is the whole check.
+PassCredentials=no
+
+[Install]
+WantedBy=sockets.target
