@@ -324,7 +324,16 @@ function launchStages(job: Job): Stage[] {
     const s = job.research?.briefServed;
     stages.push({ key: "received", label: "Brief fetched by the runner", status: s ? "done" : job.events.length ? "unknown" : "pending", ...(s ? { at: s.firstAt } : {}), evidence: s ? `Served ${s.count} time(s) by the job API (payload sha256 ${s.sha256.slice(0, 12)}…).` : job.events.length ? "The runner reported, but this record predates brief-fetch tracking." : "The job API has not served the brief." });
   }
+  if (research) {
+    const t = job.research?.toolServed;
+    stages.push({ key: "tool", label: "Runner tool sent by the job API", status: t ? "done" : job.events.length ? "unknown" : "pending", ...(t ? { at: t.firstAt } : {}), evidence: t ? `Sent ${t.count} time(s) (sha256 ${t.sha256.slice(0, 12)}…). This proves ORBIT answered the download, not that the runner received it intact or ran it.` : job.events.length ? "The runner reported, but this record has no tool-download evidence (it predates it, or the download was not needed)." : "ORBIT has not sent the runner tool. A download that failed on the way (a reset, a timeout, a TLS failure) never reaches ORBIT and leaves no record here." });
+  }
   const first = job.events[0];
+  const boot = research ? job.events.find((e) => e.type === "bootstrap") : undefined;
+  if (boot && !job.events.some((e) => e.type === "started")) {
+    stages.push({ key: "started", label: "Runner started", status: "failed", at: boot.at, evidence: `The runner reported a bootstrap failure before its tool ran (${boot.bootstrap?.category ?? boot.status ?? "unknown"}, ${boot.bootstrap?.attempts ?? "?"} attempt(s)). Runner-reported, unverified.` });
+    return stages;
+  }
   stages.push({ key: "started", label: "Runner started", status: first ? "done" : "pending", ...(first ? { at: first.at } : {}), evidence: first ? `First event: ${first.type} via ${first.via === "git" ? "git" : "the API"}.${research ? "" : " A started runner has checked out the control branch holding the brief."}` : "No runner event yet. That is not evidence that no session exists." });
   return stages;
 }

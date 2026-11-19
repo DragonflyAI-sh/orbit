@@ -34,26 +34,49 @@ load() {
   TOKEN=$(cat "$DIR/token")
 }
 
-# call METHOD PATH [BODY-FILE]: prints the response body, returns 0 on 2xx, 22 on an HTTP error (body still printed), other on network failure.
+# call METHOD PATH [BODY-FILE]: prints the response body, returns 0 on 2xx, 22 on an HTTP error (body still printed), 7 on network failure
+# (curl's exit code and message are kept in $DIR/last-error, which never holds the token).
 # The token never appears in a process's arguments (where `ps` would show it): the Authorization header is written by the shell's
 # printf builtin to a fresh mode-0600 file in the job's 0700 directory, curl reads it with `-H @file`, and the file is removed after.
+# A GET (brief, steers) is retried on a transport failure (no answer: DNS, connect, timeout, TLS handshake broken off, connection reset)
+# or a 429/5xx answer: at most 3 attempts, 2 s then 4 s apart. Never an authentication denial (401/403), any other 4xx, a certificate
+# failure, or a POST (an event might have been recorded already). Each attempt has a 10 s connection and a 30 s total limit.
 call() {
-  local method=$1 path=$2 data=${3:-} out code hdr rc=0
-  rm -f "$DIR/last-http"
+  local method=$1 path=$2 data=${3:-} out code hdr rc attempt=0 delay=2
+  rm -f "$DIR/last-http" "$DIR/last-error"
   out=$(mktemp)
   hdr=$(umask 077; mktemp "$DIR/auth.XXXXXX") || { rm -f "$out"; return 7; }
   printf 'Authorization: Bearer %s\n' "$TOKEN" >"$hdr"
-  if [ -n "$data" ]; then
-    code=$(curl -sS -m 30 -o "$out" -w '%{http_code}' -X "$method" -H "@$hdr" -H "content-type: application/json" --data-binary "@$data" "$API$path" 2>"$DIR/api.err") || rc=7
-  else
-    code=$(curl -sS -m 30 -o "$out" -w '%{http_code}' -X "$method" -H "@$hdr" "$API$path" 2>"$DIR/api.err") || rc=7
-  fi
+  while :; do
+    attempt=$((attempt + 1)); rc=0
+    if [ -n "$data" ]; then
+      code=$(curl -sS --connect-timeout 10 -m 30 -o "$out" -w '%{http_code}' -X "$method" -H "@$hdr" -H "content-type: application/json" --data-binary "@$data" "$API$path" 2>"$DIR/api.err") || rc=$?
+    else
+      code=$(curl -sS --connect-timeout 10 -m 30 -o "$out" -w '%{http_code}' -X "$method" -H "@$hdr" "$API$path" 2>"$DIR/api.err") || rc=$?
+    fi
+    [ "$method" = GET ] && [ "$attempt" -lt 3 ] || break
+    case "$rc:$code" in
+      5:*|6:*|7:*|18:*|28:*|35:*|52:*|55:*|56:*|92:*|0:429|0:5[0-9][0-9]) ;;
+      *) break ;;
+    esac
+    echo "orbit-research: $method $path attempt $attempt failed (curl exit $rc, HTTP ${code:-000}); retrying in ${delay}s" >&2
+    sleep "$delay"; delay=$((delay * 2))
+  done
   rm -f "$hdr"
-  [ "$rc" = 0 ] || { rm -f "$out"; return 7; }
+  if [ "$rc" != 0 ]; then
+    rm -f "$out"
+    printf 'network error (curl exit %s after %s attempt(s)): %s\n' "$rc" "$attempt" "$(head -c 200 "$DIR/api.err" | tr -d '\r' | tr '\n' ' ')" >"$DIR/last-error"
+    return 7
+  fi
   cat "$out"; rm -f "$out"
   [[ $code == 2* ]] && return 0
   echo "$code" >"$DIR/last-http"
   return 22
+}
+
+# Why the last call failed: the HTTP status ORBIT answered with, or the network error (curl's exit code and message).
+why() {
+  if [ -f "$DIR/last-http" ]; then cat "$DIR/last-http"; elif [ -f "$DIR/last-error" ]; then tr -d '\n' <"$DIR/last-error"; else printf 'network error'; fi
 }
 
 # event TYPE [--status S] [--n N] [--file F | --text T]: builds the JSON body in Python (correct escaping of any text).
@@ -152,7 +175,7 @@ cmd_start() {
   load
   local brief
   if ! brief=$(call GET "/v1/jobs/$JOB/brief"); then
-    say "FAILED: could not read the brief from ORBIT ($(cat "$DIR/last-http" 2>/dev/null || echo network error)). Stop and say so; there is no other copy."
+    say "FAILED: could not read the brief from ORBIT ($(why)). Stop and say so; there is no other copy."
     exit 1
   fi
   printf '%s' "$brief" | python3 -c '
@@ -189,7 +212,7 @@ cmd_steers() {
   if resp=$(call GET "/v1/jobs/$JOB/steers"); then
     printf '%s' "$resp" | write_steers >/dev/null
   else
-    say "FAILED: could not read steers"
+    say "FAILED: could not read steers ($(why))"
   fi
   show_steers || true
   ls "$DIR"/steer/*.md >/dev/null 2>&1 || say "no steers"
@@ -225,7 +248,7 @@ cmd_report() {
     if [ "$code" = 422 ]; then
       say "REFUSED by ORBIT (nothing was recorded). Fix these and run the same command again:"; problems; exit 2
     fi
-    say "FAILED api=failed (HTTP $code). The report was NOT delivered; retry, and if it keeps failing say so in your final message."; problems; exit 1
+    say "FAILED api=failed (HTTP $code$([ -f "$DIR/last-error" ] && printf '; %s' "$(cat "$DIR/last-error")")). The report was NOT delivered; retry, and if it keeps failing say so in your final message."; problems; exit 1
   fi
 }
 

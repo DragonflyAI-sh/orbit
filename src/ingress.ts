@@ -4,6 +4,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { normalizeToolCommit } from "./jobs.ts";
 import type { JobEvent, Jobs } from "./jobs.ts";
 import { checkResearchSummary, researchBriefPayload } from "./research.ts";
+import { parseBootstrapReport } from "./research-bootstrap.ts";
 import type { ResearchTool } from "./research.ts";
 
 // The only listener meant to face the internet. It knows the job registry and nothing else:
@@ -13,7 +14,7 @@ import type { ResearchTool } from "./research.ts";
 // Anything larger is refused, not cut: the runner then falls back to git, which holds the whole file.
 const MAX_BODY_BYTES = 640 * 1024;
 const RATE_PER_MINUTE = 60;
-const TYPES = new Set(["started", "checkin", "reply", "summary"]);
+const TYPES = new Set(["started", "checkin", "reply", "summary", "bootstrap"]);
 
 function send(res: ServerResponse, code: number, body: unknown) {
   res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" });
@@ -69,6 +70,8 @@ export function buildIngress(jobs: Jobs, now: () => number = Date.now, opts: { r
         return send(res, 200, payload);
       }
       if (!opts.researchTool) return send(res, 503, { error: "The research tool is not available on this ORBIT." });
+      // Evidence that the runner's request reached ORBIT and was answered with the tool (not that it arrived intact or ran).
+      jobs.toolServed(id, opts.researchTool.sha256);
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-orbit-sha256": opts.researchTool.sha256 });
       return res.end(opts.researchTool.text);
     }
@@ -80,7 +83,16 @@ export function buildIngress(jobs: Jobs, now: () => number = Date.now, opts: { r
       } catch {
         return send(res, 400, { error: "Body must be JSON under 640 KB." });
       }
-      if (typeof body.type !== "string" || !TYPES.has(body.type)) return send(res, 400, { error: "type must be started, checkin, reply or summary" });
+      if (typeof body.type !== "string" || !TYPES.has(body.type)) return send(res, 400, { error: "type must be started, checkin, reply, summary or bootstrap" });
+      if (body.type === "bootstrap") {
+        // A research runner whose bootstrap failed before its tool ran (src/research-bootstrap.ts). Fixed fields only; ORBIT writes the text.
+        if (!research) return send(res, 404, { error: "Not found" });
+        if (jobs.get(id)!.events.some((e) => e.type === "started")) return send(res, 409, { error: "This job's runner has already started; a bootstrap failure report no longer applies." });
+        const parsed = parseBootstrapReport(body);
+        if (!parsed.ok) return send(res, 400, { error: "Bootstrap report refused; nothing was recorded.", problems: [parsed.problem] });
+        jobs.record(id, { type: "bootstrap", status: parsed.report.category, text: parsed.text, bootstrap: parsed.report });
+        return send(res, 200, { ok: true, recorded: "bootstrap" });
+      }
       if (research && body.type === "summary") {
         // A research report has no git copy to complete it from: it must arrive whole.
         if (body.textComplete === false || typeof body.text !== "string") return send(res, 422, { error: "A research summary must be sent whole, as text.", problems: ["send the whole report in one summary event"] });
