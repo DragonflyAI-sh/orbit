@@ -237,6 +237,8 @@ buildServer({
   proposals,
   threads: threadStore(stateDir ? join(stateDir, "threads") : undefined),
   assistantDir: stateDir ? join(stateDir, "assistant") : undefined,
+  // The Assistant's rolling summary (docs/rolling-summaries.md) is on by default; ORBIT_ROLLING_SUMMARIES=0 turns it off (rollback switch).
+  rollingSummaries: process.env.ORBIT_ROLLING_SUMMARIES !== "0",
   // Private photo attachments: <state>/attachments (docs/photos.md). Without a state directory they are kept in memory only.
   attachments: attachmentStore(stateDir ? join(stateDir, "attachments") : undefined),
   // Saved photo observations: <state>/photo-observations (docs/photo-recall.md). Without a state directory they are kept in memory only.

@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
@@ -47,6 +48,7 @@ import type { Threads } from "./threads.ts";
 import { jsonStore } from "./store.ts";
 import { ASSISTANT_ACTIVE_BUDGET_CHARS, ASSISTANT_CARD_LINES_MAX, ASSISTANT_CHUNK_MAX_CHARS, ASSISTANT_CONTEXT_BUDGET_CHARS, ASSISTANT_NOTES_MAX_CHARS, boundNotes, planItems, planMessages } from "./assistant-context.ts";
 import { ASSISTANT_ID, assistantStore } from "./assistant-store.ts";
+import { assistantSummaries } from "./assistant-summary.ts";
 import { assistantAdapter, assistantSessionId, chatAdapter, chatSessionId, SESSION_TOOL_NAMES, sessionRegistry, sessionTools, workAdapter } from "./sessions.ts";
 import { isOriginId, workFile, WorkError, workSessions as newWorkSessions } from "./work-sessions.ts";
 import type { Origin, RunLink, WorkSessions } from "./work-sessions.ts";
@@ -136,6 +138,10 @@ export type Deps = {
   recentContext?: RecentContextPort;
   // Where the Assistant's rolling conversation is stored (<state>/assistant). Absent means memory only, which a restart empties.
   assistantDir?: string;
+  // The Assistant's cumulative rolling summary (src/assistant-summary.ts, docs/rolling-summaries.md). On unless false (ORBIT_ROLLING_SUMMARIES=0
+  // in main.ts): off, no summary is made or given, exactly as before; stored versions are kept. `timeoutMs` bounds one summarizer request.
+  rollingSummaries?: boolean;
+  rollingSummaryTimeoutMs?: number;
   // Work sessions and run links (src/work-sessions.ts, docs/adr/0002-work-sessions.md). Absent means memory only, which a restart empties.
   workSessions?: WorkSessions;
   // The owner's launch reconciliation log (src/launch-reconciliation.ts, <state>/launch-reconciliations.json). Absent means memory only.
@@ -234,6 +240,8 @@ export function buildServer({
   watch,
   threads = threadStore(undefined),
   assistantDir,
+  rollingSummaries = true,
+  rollingSummaryTimeoutMs,
   workSessions: workArg,
   reconciliations: reconArg,
   attachments = attachmentStore(undefined),
@@ -325,9 +333,14 @@ export function buildServer({
   // chat threads but with a bounded context and no compaction. It does not feed or read the chat threads' rolling note.
   const clock = now ?? (() => new Date());
   const assistant = assistantStore(assistantDir, { now, held: (card) => Boolean(proposals.peek(card.id)) && new Date(card.expiresAt) > clock() });
+  // The rolling summary of the Assistant (docs/rolling-summaries.md): a new immutable version at each page roll (chunks archived), given
+  // with every later model call of the conversation. It lives beside the chunks and never reads chat threads.
+  const summaries = assistantSummaries(assistantDir ? join(assistantDir, "summaries") : undefined, { store: assistant, model, now, enabled: rollingSummaries, timeoutMs: rollingSummaryTimeoutMs });
+  // The summary block of the turn in progress, built from the same plan the model input is built from, and recorded with it.
+  let turnSummary: ReturnType<typeof summaries.block>;
   const planTurn = () => {
     const plan = assistant.plan(assistant.currentTurn());
-    assistant.recordContext(plan);
+    assistant.recordContext(plan, turnSummary?.use);
     return plan;
   };
   const asvc = threadService({
@@ -341,6 +354,11 @@ export function buildServer({
     toolDeadlineMs,
     abortGraceMs,
     compact: false,
+    beforeTurn: () => summaries.roll(),
+    summaryNote: () => {
+      turnSummary = summaries.block(assistant.plan(assistant.currentTurn()));
+      return turnSummary?.text;
+    },
     maxCardLines: ASSISTANT_CARD_LINES_MAX,
     origin: () => assistantSessionId(),
     context: { items: () => planItems(planTurn()), messages: () => planMessages(planTurn()) },
@@ -449,6 +467,8 @@ export function buildServer({
       chunks: assistant.active().map(chunkView),
       // What the model would be sent as history with the next message (the new message itself comes on top).
       next: { included: plan.included, omitted: plan.omitted, historyChars: plan.historyChars },
+      // The rolling summary: version, coverage, method, gaps and any deferral (docs/rolling-summaries.md, "Diagnostics"). Owner only.
+      summary: summaries.view(),
       budgets: { unit: "characters", activeChars: ASSISTANT_ACTIVE_BUDGET_CHARS, chunkMaxChars: ASSISTANT_CHUNK_MAX_CHARS, contextChars: ASSISTANT_CONTEXT_BUDGET_CHARS, notesMaxChars: ASSISTANT_NOTES_MAX_CHARS },
     };
   };
@@ -877,9 +897,13 @@ export function buildServer({
         const photos = photosOf(input, "assistant");
         if (!photos) return;
         assistantPhotos = photos;
-        // Set immediately before the turn: nothing is awaited between here and the turn's first write, which takes it.
+        // Set immediately before the turn, which takes the conversation at once; the only await before its first write (the rolling-summary
+        // roll) runs while the turn holds it, so no other send can start a turn or take this id meanwhile.
         assistant.expectRequest(requestId);
         const out = await asvc.turn(ASSISTANT_ID, text, { notes: [boundNotes(prep.notes), prep.digest].filter(Boolean).join("\n\n") || undefined, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner, "assistant"), isOwner: callerIsOwner, ...(photos.refs.length ? { attachments: photos.refs } : {}) });
+        // The turn's end may have rolled the page (archived chunks): summarize them now, in the background, so the next turn rarely waits.
+        // The next turn's own roll waits for this one (rolls are serialized). Failures are reported in the summary block, never thrown.
+        void summaries.roll().catch(() => undefined);
         return send(res, out.error ? 502 : 200, { assistant: assistantView(), limits: prep.current, ...(out.error ? { error: out.error } : {}) });
       } catch (err) {
         assistant.expectRequest(undefined);

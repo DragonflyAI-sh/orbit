@@ -22,9 +22,9 @@ Read from the code, not from descriptions:
 |---|---|---|
 | Conversations | many, client picks by id | exactly one, named by the server (`assistant`); no route takes an id or path |
 | Storage | one file per thread, rewritten on every change | one small file per turn ("chunk"), in an active/archive split |
-| Context | whole thread after a model-written summary | the newest active chunks that fit a hard character budget; no summary |
-| Older content | summarized into the prompt | archived: kept in full, never sent automatically |
-| Model-written summaries | yes (compaction) | none; no background model calls at all |
+| Context | whole thread after a model-written summary | the newest active chunks that fit a hard character budget, plus the cumulative rolling summary of the archived chunks (`docs/rolling-summaries.md`) |
+| Older content | summarized into the prompt | archived: kept in full, never sent verbatim automatically; covered by the rolling summary |
+| Model-written summaries | yes (compaction; structured rolling summary since `docs/rolling-summaries.md`) | yes: one tool-free summarizer request per page roll (chunks archived), stored as immutable versions; `ORBIT_ROLLING_SUMMARIES=0` turns it off |
 | Rolling recent-work note | read and refreshed | neither read nor refreshed (it is built from chat threads, so it would mix sessions) |
 | Page | thread picker, New, Rename, Archive | none of those; Load earlier messages |
 
@@ -42,6 +42,8 @@ Every owner Assistant turn also gets a small, metadata-only **session activity d
   epoch.json                   { schema, epoch }   the revision epoch, raised at every start (see "Revisions across restarts")
   active/<seq>.json            chunks that may be sent to the model
   archive/<seq>.json           older chunks: kept, never deleted, not sent automatically
+  summaries/baseline.json      { schema, legacyThrough, at }   chunks archived before rolling summaries existed (written once)
+  summaries/<version>.json     one immutable rolling-summary version with the chunk boundary it covers (docs/rolling-summaries.md)
 ```
 
 `<seq>` is a 12-digit zero-padded sequence number (`000000000001.json`), so names sort in conversation order. Directories are created with mode 0700 and files with 0600. Without `STATE_DIRECTORY` the Assistant lives in memory and the page says a restart empties it (`persisted: false`). Nothing is migrated from chat threads and nothing in `<state>/threads/` is read or written.
@@ -74,6 +76,7 @@ Characters are counted as chat threads count them (`messageChars`: message text 
 | `ASSISTANT_CARD_LINES_MAX` | 20 | at most this many proposal-card lines (newest) are given as reference |
 | `DIGEST_TOTAL_MAX_CHARS` (`src/session-digest.ts`) | 6,000 | the session activity digest, wrapper included; added after the notes cap, so reference material is at most 12,000 + 6,000 plus the card lines |
 | `BOUNDED_OUTPUT_CHARS` / `BOUNDED_TEXT_CHARS` | 1,500 / 4,000 | inside a shortened chunk, each tool output / message text is cut to this |
+| `ROLLING_BLOCK_MAX_CHARS` (`src/rolling-summary.ts`) | 8,000 | the rolling summary block given with every model call of a turn; outside the 68,000 and the notes cap, so the window never drops it (`docs/rolling-summaries.md`) |
 
 Sizing: `docs/reviews/assistant-history-sizing-audit.md` (the approved "modest" option; raised from 32,000 / 52,000, whose implicit floor was 2 turns). The chat thread budget (48,000 characters of live messages, `src/thread-context.ts`) is separate and unchanged: chat compaction does not read any of these constants.
 
@@ -139,7 +142,7 @@ After every turn (and at startup), `rotate()`:
 
 Rotation is deterministic: the same chunks and cards always give the same split. Archived chunks are never deleted or rewritten except to update a card's state or outcome (a confirmation that settles after its chunk moved, or an open card shown as expired once its proposal is gone).
 
-The archive is never put in the model's context. The page loads it on request, 10 chunks at a time, newest first (`GET /assistant/history?before=<seq>&limit=<1-20>`); only that page's files are read. In memory the server keeps the active chunks and only the sequence numbers of archived ones.
+The archive is never put in the model's context verbatim. Since `docs/rolling-summaries.md`, each rotation is a page roll: the archived chunks not yet covered are summarized (with the previous summary) into a new rolling-summary version, and that summary is given with every later model call. The page loads it on request, 10 chunks at a time, newest first (`GET /assistant/history?before=<seq>&limit=<1-20>`); only that page's files are read. In memory the server keeps the active chunks and only the sequence numbers of archived ones.
 
 ## Concurrency, crashes and replays
 
@@ -168,7 +171,7 @@ All are refused with 403 for anyone but the owner (`decide("assistant", …)`), 
 
 | Route | Does |
 |---|---|
-| `GET /assistant` | The active chunks (tool outputs summarized by size), cards with live state, `busy`, `rev` (never lower than any earlier answer, across restarts), `epoch`, `archivedChunks`, what the next turn would be sent (`next`), budgets, `persisted`, `problems` |
+| `GET /assistant` | The active chunks (tool outputs summarized by size), cards with live state, `busy`, `rev` (never lower than any earlier answer, across restarts), `epoch`, `archivedChunks`, what the next turn would be sent (`next`), the rolling summary's state (`summary`: version, coverage, method, gaps, uncovered chunks, last failure), budgets, `persisted`, `problems` |
 | `GET /assistant/history?before=&limit=` | A page of archived chunks, oldest first, and `more` |
 | `POST /assistant/messages {text, requestId?, attachments?}` | Runs one turn; returns the view (502 with the view if the model failed; 409 if busy or a duplicate). `attachments`: up to 10 photo ids of the Assistant; `text` may then be empty (docs/photos.md) |
 | `POST /assistant/attachments`, `GET /assistant/attachments/:aid` | Upload a processed JPEG; read one of the Assistant's photos (docs/photos.md) |
@@ -239,6 +242,7 @@ Limits:
 - `test/header-panels.test.ts`: the header panels' pure helpers (default collapsed, unreadable storage, count label) and markup (page links in the bar, no Status link, toggles with `aria-expanded`/`aria-controls`, the status indicator saying "has not been read yet" before the first request); in Chromium against a fake server that keeps its notes like ORBIT (a read consumes nothing; nothing is re-queued): link placement and no sideways scroll at 900 and 360 px, the status toggle and its new-tab `/status` link, keyboard use, a collapsed line that keeps updating, a count over the listed limit that follows arrivals and dismissals (no duplicates on repeated refreshes), no receipt while collapsed and receipts for the listed notes only when opened, toggling that never dismisses, independent toggles across refreshes, page switches and a reload, refreshes that leave the message box focused, note text kept as text, light and dark themes.
 - `test/notifications-real-server.test.ts`: against the real server (real notifier and runner on a temp state directory). API, always run: `current` versus `inbox`/`recent`, held notes, idempotent acks (retry, second tab, old receipt not upgraded, 404, bad JSON), owner-only routes with no receipt on a refusal, run delivery only on a receipt, notes and receipts across a restart. In Chromium: collapsed arrivals with no receipt and the run still reviewed, then a reload and a restart with the notes still there; opening the panel acks only the listed subset; "show all" acks the newly listed notes and delivers the run; a hidden tab (emulated by overriding `document.visibilityState` and firing `visibilitychange`) sends nothing until visible; a failed ack retried, no repeats, a second tab keeping the first receipt; dismissal per browser, collapsing not dismissing, the unlisted remainder left unshown; the initial status wording.
 - `test/session-durability.test.ts`: durability and pagination acceptance with a synthetic long chat (see `docs/adr/0001-session-registry.md`, "Durability and pagination acceptance").
+- `test/rolling-summary.test.ts`, `test/rolling-summary-integration.test.ts`: the rolling summary (`docs/rolling-summaries.md`, "Tests").
 - `test/session-digest.test.ts`: the session activity digest (selection, bounds, runs, failing sources, visibility, adversarial titles, Assistant integration, restart, fallback).
 - Existing tests: the nav tests now expect the Assistant link first; the Chat browser tests open `/#chat` explicitly. Nothing else in them changed.
 

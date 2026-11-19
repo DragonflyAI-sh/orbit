@@ -72,8 +72,13 @@ export function threadService(d: {
   // How the model input is built from the stored conversation. Absent: the whole thread after its summary (chat threads).
   // The Assistant passes its bounded chunk context (src/assistant-context.ts) and turns compaction off.
   context?: { items(t: Thread): Item[]; messages(t: Thread): Message[] };
-  // false: never summarize older messages (the Assistant keeps a bounded window instead). Default true.
+  // false: never compact older messages in the thread store (the Assistant keeps a bounded window and its own rolling summary). Default true.
   compact?: boolean;
+  // Runs before the turn's context is built: the Assistant's rolling-summary roll (src/assistant-summary.ts), which summarizes archived
+  // chunks not yet covered. Its failure never blocks the reply (it reports its own degraded state in the summary block).
+  beforeTurn?: (threadId: string) => Promise<unknown>;
+  // The rolling-summary block for this turn's reference material. Absent: the thread's own stored summary (chat threads, summaryNote).
+  summaryNote?: (t: Thread) => string | undefined;
   // At most this many proposal cards (the newest) are described to the model. Absent: all of them (chat threads).
   maxCardLines?: number;
   // The session id of a thread of this store (`chat:<uuid>`, or `assistant:assistant` for the Assistant). When set, a proposal made in
@@ -200,10 +205,11 @@ export function threadService(d: {
     // Older context is summarized first, so the model call below is within budget. A failure here never blocks the reply.
     // Only a chat thread store compacts (the Assistant passes compact: false and never reaches this with its own store).
     if (d.compact !== false) await compactThread({ threads: threads as Threads, model, id, now, budget: d.budget }).catch(() => {});
+    if (d.beforeTurn) await d.beforeTurn(id).catch(() => {});
     const userMessage = threads.appendUser(id, text, prep.attachments).id;
     const mid = threads.beginAssistant(id);
     const t = threads.get(id)!;
-    const notes = [prep.notes, await recent?.note(), summaryNote(t), t.cards.length ? dataBlock("proposal-cards", `Proposal cards in this thread, from ORBIT's records:\n${(d.maxCardLines ? cardLines(t).slice(-d.maxCardLines) : cardLines(t)).join("\n")}`) : undefined].filter(Boolean).join("\n\n") || undefined;
+    const notes = [prep.notes, await recent?.note(), d.summaryNote ? d.summaryNote(t) : summaryNote(t), t.cards.length ? dataBlock("proposal-cards", `Proposal cards in this thread, from ORBIT's records:\n${(d.maxCardLines ? cardLines(t).slice(-d.maxCardLines) : cardLines(t)).join("\n")}`) : undefined].filter(Boolean).join("\n\n") || undefined;
     // Photos (docs/photos.md): load the bounded set this request may carry, and refuse rather than drop photos the model cannot take.
     const photoNotes: string[] = [];
     // Set once photos passed ORBIT's own check and go out with the request: a failure after that is the provider's, not a local block.

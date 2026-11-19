@@ -30,6 +30,9 @@ export type ContextUse = {
   currentChars: number;
   included: { seq: number; form: ChunkForm; chars: number }[];
   omitted: number[];
+  // The rolling summary given with this turn (src/assistant-summary.ts): its version, the last chunk it covers, its size in the
+  // instructions, and archived chunks that were neither covered nor sent (`uncovered`, first and last). Absent: no summary block was given.
+  summary?: { version: number; through: number; chars: number; method: "model" | "mechanical" | "none"; degraded: boolean; uncovered?: [number, number] };
 };
 
 export type Chunk = {
@@ -573,10 +576,37 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
       return planContext(sortedActive().filter((c) => c.state === "complete"), current);
     },
     // Records on the turn's chunk what the model was sent. Owner-visible; never sent to the model.
-    recordContext(plan: ContextPlan): void {
+    recordContext(plan: ContextPlan, summary?: ContextUse["summary"]): void {
       const open = openChunk();
       if (!open) return;
-      mutateActive(open.seq, (c) => void (c.context = { budgetChars: plan.budgetChars, historyChars: plan.historyChars, currentChars: plan.currentChars, included: plan.included, omitted: plan.omitted }));
+      mutateActive(open.seq, (c) => void (c.context = { budgetChars: plan.budgetChars, historyChars: plan.historyChars, currentChars: plan.currentChars, included: plan.included, omitted: plan.omitted, ...(summary ? { summary } : {}) }));
+    },
+    // Archived sequence numbers, oldest first (memory only; no file is read). The rolling summary covers a contiguous run of them.
+    archivedSeqs: (): number[] => [...archived],
+    // One archived chunk, read in full for the rolling summarizer (src/assistant-summary.ts), or why not. A file over `maxBytes` is not
+    // read. Read-only: nothing is written, indexed or counted as a change.
+    archivedChunk(seq: number, maxBytes: number): { ok: true; chunk: Chunk } | { ok: false; reason: "missing" | "unreadable" | "too-large" } {
+      if (!archived.includes(seq)) return { ok: false, reason: "missing" };
+      if (!dir) {
+        const c = memArchive.get(seq);
+        return c ? { ok: true, chunk: structuredClone(c) } : { ok: false, reason: "missing" };
+      }
+      let fd: number;
+      try {
+        fd = openSync(fileOf(seq, "archive"), "r");
+      } catch {
+        return { ok: false, reason: "missing" };
+      }
+      try {
+        if (fstatSync(fd).size > maxBytes) return { ok: false, reason: "too-large" };
+        const c = JSON.parse(readFileSync(fd, "utf8")) as Chunk;
+        if (c.seq !== seq || !Array.isArray(c.messages)) return { ok: false, reason: "unreadable" };
+        return { ok: true, chunk: c };
+      } catch {
+        return { ok: false, reason: "unreadable" };
+      } finally {
+        closeSync(fd);
+      }
     },
     // The user message of the turn in progress (for the context plan).
     currentTurn: (): ThreadMessage[] => structuredClone(openChunk()?.messages ?? []),

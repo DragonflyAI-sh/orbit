@@ -7,6 +7,7 @@ import type { FallbackInfo } from "./model.ts";
 import type { AttachmentRef } from "./attachments.ts";
 import { safeGalleries } from "./photo-ref.ts";
 import type { StoredGallery } from "./photo-ref.ts";
+import type { Gap, Sections } from "./rolling-summary.ts";
 
 // Server-owned chat threads. One JSON file per thread in <state>/threads/, written atomically; the in-memory copy is
 // the single source while ORBIT runs. docs/threads.md describes the schema, concurrency and migration.
@@ -145,6 +146,21 @@ export type Summary = {
   method: "model" | "extractive";
   // Set when the model summarizer failed and a mechanical digest was used instead.
   degraded?: string;
+  // ---- rolling summaries (docs/rolling-summaries.md); absent on a summary stored before them, which is then plain `text` ----
+  // Monotonic per thread, from 1. Every new version is compare-and-swap on the version and boundary it was made from.
+  version?: number;
+  // The structured sections (src/rolling-summary.ts). On a mechanical version, the previous valid sections carried unchanged.
+  sections?: Sections;
+  // A lossy mechanical digest of pages the model could not summarize, until a model version folds it in.
+  mechanical?: string[];
+  mechanicalDropped?: number;
+  // A free-text summary from before rolling summaries, carried (bounded) until a model version folds it in.
+  carried?: string;
+  // Ranges not covered by a model summary (not seen, mechanical only), newest kept; `olderGaps` counts the rest.
+  gaps?: Gap[];
+  olderGaps?: number;
+  // The page this version was made from: messages [from, covers) and a digest of exactly what was read.
+  source?: { from: number; digest: string };
 };
 
 export type Thread = {
@@ -161,8 +177,11 @@ export type Thread = {
   messages: ThreadMessage[];
   cards: Card[];
   summary?: Summary;
+  // The previous summary versions (newest last, at most SUMMARY_HISTORY_MAX), so a replaced valid state is never lost.
+  summaryHistory?: Summary[];
   compaction?: { lastError?: { at: string; detail: string } };
 };
+export const SUMMARY_HISTORY_MAX = 4;
 
 export type ThreadMeta = {
   id: string;
@@ -512,11 +531,20 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
 
     // ---- compaction ----
     // `error` records that the model summarizer failed and a mechanical digest was stored instead (summary.degraded says the same).
-    setSummary(id: string, summary: Summary, error?: string): void {
+    // `expect`: compare-and-swap. The summary is stored only if the thread's current usable summary has that version (0: none) and covers
+    // that many messages, and `check` (the source the new version was made from is unchanged) passes; otherwise 409 and nothing changes.
+    setSummary(id: string, summary: Summary, error?: string, expect?: { version: number; covers: number; check?: (t: Thread) => boolean }): void {
       // Never replace messages with nothing: an empty (or only-invisible) summary is refused here, whatever the caller did.
       const text = maskContent(summary.text);
       if (!hasContent(text)) throw new ThreadError(500, "Refusing to store an empty summary: the messages it would replace stay as they are.");
+      const current = threads.get(id);
+      if (expect && current) {
+        const cur = current.summary && hasContent(current.summary.text) ? current.summary : undefined;
+        if ((cur?.version ?? 0) !== expect.version || (cur?.covers ?? 0) !== expect.covers || (expect.check && !expect.check(current)))
+          throw new ThreadError(409, "This summary was made from an older state of the thread; it was not stored.");
+      }
       mutate(id, (t) => {
+        if (t.summary) t.summaryHistory = [...(t.summaryHistory ?? []), (({ ...x }) => x)(t.summary)].slice(-SUMMARY_HISTORY_MAX);
         t.summary = { ...summary, text };
         t.compaction = error ? { lastError: { at: now().toISOString(), detail: maskText(error).slice(0, 300) } } : {};
       });
