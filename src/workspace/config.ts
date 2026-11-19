@@ -19,7 +19,8 @@ export const ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 // The only host trees the sandbox may see (read-only). Anything else (/etc, /home, /var, /run, /opt, ORBIT's state, credentials) is
 // refused at load. A merged-/usr symlink (/bin -> usr/bin) is recreated inside the sandbox as the same symlink.
 export const RUNTIME_ALLOWED = ["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"] as const;
-// Roots that may never be (or contain) a workspace.
+// Roots that may never be a workspace. Trees no workspace may be inside (WS-R7: a prefix check, not only equality).
+const FORBIDDEN_TREES = ["/proc", "/sys", "/dev", "/etc", "/run", "/boot", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/root"];
 const FORBIDDEN_ROOTS = ["/", "/etc", "/proc", "/sys", "/dev", "/run", "/boot", "/root", "/home", "/var", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/tmp", "/srv", "/mnt", "/media"];
 
 export type Limits = {
@@ -114,11 +115,18 @@ function trustedBinary(path: string, what: string) {
   if (rs.uid !== 0) bad(`${what} (${path}) is not owned by root.`);
   if (rs.mode & 0o022) bad(`${what} (${path}) is writable by group or others.`);
   if (rs.mode & 0o6000) bad(`${what} (${path}) is setuid or setgid; the sandbox runs without privileged setup.`);
+  // WS-R9: the binary is later executed by path, so no directory on its (resolved) path may be replaceable by anyone but root.
+  for (let dir = dirname(real); ; dir = dirname(dir)) {
+    const ds = statSync(dir);
+    if (ds.uid !== 0 || ds.mode & 0o022) bad(`${what} (${path}): the directory ${dir} on its path is not root-owned or is writable by group or others.`);
+    if (dir === "/") break;
+  }
   return path;
 }
 
 function checkRoot(id: string, root: string, exec: boolean, limits: Limits, host: HostChecks): { dev: number; ino: number } {
   for (const f of FORBIDDEN_ROOTS) if (root === f) bad(`Workspace ${id}: ${root} cannot be a workspace root.`);
+  for (const t of FORBIDDEN_TREES) if (under(root, t)) bad(`Workspace ${id}: ${root} cannot be a workspace root (nothing under ${t} is allowed).`);
   for (const p of host.protectedPaths) if (under(p, root) || under(root, p)) bad(`Workspace ${id}: the root overlaps a protected ORBIT path.`);
   const st = lstatSync(root, { throwIfNoEntry: false });
   if (!st) bad(`Workspace ${id}: ${root} does not exist.`);

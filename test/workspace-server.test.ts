@@ -50,7 +50,7 @@ test("through the server: fs_write -> open card -> non-owner and wrong digest re
   const card = cards[0];
   assert.equal(card.kind, "workspace_op");
   assert.equal(card.state, "open");
-  assert.equal(card.display.content, "from the model\n");
+  assert.equal(card.display.content, "┌ begin (2 lines, 15 bytes)\n│ from the model\n│ \n└ end");
   assert.throws(() => readFileSync(join(h.ws.root, "out.txt")), "nothing written before confirmation");
 
   h.caller.who = "someone@example.com";

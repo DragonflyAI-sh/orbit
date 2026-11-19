@@ -4,7 +4,7 @@ import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, r
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { applyPatch, atomicWrite, checkPlatform, currentVersion, listDir, openRoot, parseRelPath, readPage, READ_PAGE_MAX, search, snapshot, statPath, versionOf, WorkspaceFsError } from "../src/workspace/fsops.ts";
+import { applyPatch, atomicWrite, checkPlatform, currentVersion, listDir, openRoot, parseRelPath, readPage, READ_PAGE_MAX, search, snapshot, statPath, versionOf, WorkspaceFsError , SNAPSHOT_LIMITS } from "../src/workspace/fsops.ts";
 
 // Operation-time filesystem confinement (docs/workspace-tools.md, "Filesystem confinement"). Synthetic fixtures in temporary directories
 // only. Each test builds a workspace next to an "outside" directory holding a canary; every escape attempt must be refused and the
@@ -313,7 +313,7 @@ test("snapshot: changes to content, mode, a new file or a link target all change
     assert.notEqual(s3, s2);
     execFileSync("ln", ["-sfn", "dir", join(f.ws, "l")]);
     assert.notEqual(snapshot(r).digest, s3);
-    assert.equal(code(() => snapshot(r, { entries: 2, bytes: 1e9, depth: 10 })), "snapshot_too_large");
+    assert.equal(code(() => snapshot(r, { ...SNAPSHOT_LIMITS, entries: 2, bytes: 1e9, depth: 10 })), "snapshot_too_large");
   } finally {
     r.close();
   }

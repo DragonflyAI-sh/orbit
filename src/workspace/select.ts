@@ -12,7 +12,8 @@ import type { WorkspaceAudit } from "./service.ts";
 // Production wiring for the workspace tools (docs/workspace-tools.md). OFF unless ORBIT_WORKSPACE_TOOLS=enabled AND the operator's
 // workspaces file acknowledges the pre-activation checklist. When off, the service exists only to say why: it offers no tools and
 // refuses every confirmation. Exec additionally needs the bubblewrap sandbox to pass its live self-test; there is no other launcher.
-export function selectWorkspace(env: Record<string, string | undefined>, d: { stateDir?: string; proposals: Proposals; protectedPaths: string[]; audit?: (e: WorkspaceAudit) => void; uid?: () => number }) {
+export function selectWorkspace(env: Record<string, string | undefined>, d: { stateDir?: string; proposals: Proposals; protectedPaths: string[]; audit?: (e: WorkspaceAudit) => void; uid?: () => number; log?: (line: string) => void }) {
+  const log = d.log ?? ((line: string) => console.log(line));
   const uid = d.uid ?? (() => process.getuid?.() ?? 0);
   let activation: Activation = loadActivation(env, { uid, protectedPaths: d.protectedPaths.filter(Boolean) });
   if (activation.state === "enabled") {
@@ -35,10 +36,22 @@ export function selectWorkspace(env: Record<string, string | undefined>, d: { st
     sandbox = undefined;
     service = workspaceService({ activation, proposals: d.proposals, audit: d.audit });
   }
+  let ready: Promise<void> = Promise.resolve();
   if (service.enabled) {
-    service.recover();
-    // The self-test runs in the background; until it passes, exec_start refuses (sandbox state "unknown"/"unsupported").
-    void sandbox?.probe().catch(() => undefined);
+    // Recovery first (it reaps leftovers of runs that were in flight and re-checks unverified cleanups), then the self-test. Both run in
+    // the background; until the self-test passes, exec_start refuses (sandbox state "unknown"/"unsupported"). The verdict is logged
+    // (WS-R2): an operator can always see why exec is unavailable.
+    const svc = service;
+    ready = (async () => {
+      try {
+        await svc.recover();
+      } catch (e) {
+        log(`workspace-recovery: failed (${e instanceof Error ? e.message.slice(0, 200) : "error"})`);
+      }
+      if (!sandbox) return;
+      const v = await sandbox.probe();
+      log(`workspace-sandbox: ${v.state}${v.reasons.length ? ` (${v.reasons.join("; ").slice(0, 600)})` : ""}`);
+    })();
   }
-  return { service, activation, sandbox };
+  return { service, activation, sandbox, ready };
 }

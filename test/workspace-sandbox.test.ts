@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -66,7 +67,7 @@ async function sandbox(limits: Partial<Limits> = {}) {
   mkdirSync(ws, { mode: 0o700 });
   const st = statSync(ws);
   const run = (script: string, extra: Partial<Limits> = {}): { done: Promise<RunExit>; kill(r: "cancel"): void } => {
-    const h = sb.start({ runId: `t${n}-${Math.random().toString(36).slice(2, 8)}`, workspace: { id: "t", root: ws, exec: true, dev: st.dev, ino: st.ino, identity: "t" }, cwd: [], argv: ["/bin/sh", SCRIPT_PATH], script, limits: { ...config(limits).limits, ...extra } });
+    const h = sb.start({ runId: `ws-${randomBytes(8).toString("hex")}`, workspace: { id: "t", root: ws, exec: true, dev: st.dev, ino: st.ino, identity: "t" }, cwd: [], argv: ["/bin/sh", SCRIPT_PATH], script, limits: { ...config(limits).limits, ...extra } });
     return { done: h.done, kill: (r) => h.kill(r) };
   };
   return { sb, ws, run, out: async (script: string, extra: Partial<Limits> = {}) => run(script, extra).done };
