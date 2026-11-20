@@ -952,8 +952,9 @@ export function buildServer({
         if (action === "archive") {
           const archived = input.archived !== false;
           threads.archive(id, archived);
-          // Archiving a notable thread is a moment to refresh the rolling note.
-          if (archived) recent.consider(id, { force: true, isOwner: callerIsOwner });
+          // Archiving a notable thread is a moment to refresh the rolling note. A task's session never feeds it: what a task did reaches
+          // other conversations only through the supervisor's own tools (docs/adr/0003-supervised-tasks.md, "Isolation").
+          if (archived && !taskOfThread(id)) recent.consider(id, { force: true, isOwner: callerIsOwner });
           return send(res, 200, { thread: svc.view(id) });
         }
         const text = typeof input.text === "string" ? input.text.trim() : "";

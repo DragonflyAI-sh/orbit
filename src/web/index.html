@@ -1081,6 +1081,7 @@
     const cardSpec = (id) => { const c = byId.get(id); return c ? { sig: JSON.stringify(c), build: () => renderCard(c, view.id) } : null; };
     const specs = [];
     if (pendingNotice) { const n = pendingNotice; specs.push({ key: "notice", sig: JSON.stringify(n), build: () => noticeBanner(n) }); }
+    if (view.task) { const t = view.task; specs.push({ key: "task", sig: JSON.stringify(t), build: () => taskBanner(t, view.id) }); }
     const compact = () => ({ key: "compact", sig: JSON.stringify([view.summary, Boolean(view.summaryUnusable)]), build: () => compactionNode(view, el) });
     if (view.summary && view.summaryUnusable) specs.push(compact());
     view.messages.forEach((m, i) => {
@@ -1096,6 +1097,35 @@
     // the reader's own send goes to the newest message.
     if (switched || !keepScroll || (atBottom && !selectingInLog())) log.scrollTop = log.scrollHeight;
     renderBar();
+  }
+
+  // A task's session (docs/adr/0003-supervised-tasks.md): one banner, in the existing banner style, with what ORBIT's task record says
+  // and Rai's own controls. Every action sends the rev shown, so a change based on an old view is refused by the server.
+  function taskBanner(t, threadId) {
+    const waiting = t.requestsWaiting.length, unseen = t.instructions.notSeenByTaskYet;
+    const lines = [
+      `Task: ${t.title} · ${t.lifecycle}${t.turnRunning ? " · a turn is running" : ""}${t.completion.ready ? " · evidence complete, ready for your review" : ""}`,
+      t.nextAction ? `Next: ${t.nextAction.text}` : "Next: not set",
+      t.blocker ? `Blocked: ${t.blocker.text}` : "",
+      waiting ? `${waiting} request${waiting === 1 ? "" : "s"} waiting for the Assistant` : "",
+      unseen ? `${unseen} instruction${unseen === 1 ? "" : "s"} not seen by the task yet` : "",
+      t.lastTurn ? `Last turn ${t.lastTurn.n}: ${t.lastTurn.state}` : "No turn has run yet",
+      t.vault ? `Vault note ${t.vault.note}: ${t.vault.sync.state}${t.vault.sync.lastError ? ` (${t.vault.sync.lastError})` : ""}` : "",
+    ].filter(Boolean);
+    const act = async (action) => {
+      const r = await tapi(`/tasks/${encodeURIComponent(t.id)}/${action}`, "POST", { rev: t.rev });
+      navError = r.ok ? "" : `Task ${action} was not done: ${r.data.error || `HTTP ${r.status}`}`;
+      await loadThread(threadId, true);
+      renderBar();
+    };
+    const button = (text, action, disabled) => el("button", { type: "button", textContent: text, disabled: Boolean(disabled), onclick: () => act(action) });
+    const open = t.lifecycle === "active" || t.lifecycle === "paused";
+    const buttons = [
+      ...(t.lifecycle === "active" ? [button("Run one turn", "turn", t.turnRunning), button("Pause", "pause")] : []),
+      ...(t.lifecycle === "paused" ? [button("Resume", "resume")] : []),
+      ...(open && t.completion.ready ? [button("Mark done", "complete", t.turnRunning)] : []),
+    ];
+    return el("div", { className: "banner task", role: "note" }, ...lines.map((l) => el("div", { textContent: l })), ...buttons);
   }
 
   let pendingNotice = null;
@@ -2713,12 +2743,14 @@
     // A reply keeps the time it started at, in progress or finished (its "Working…" body says which), so this never changes.
     return { iso: t.iso, label: t.label, full: `${role === "user" ? "Sent" : "Reply started"} ${t.full}` };
   }
-  function msgSender(role, owner) {
+  // `author`: a user-role message ORBIT's task supervisor wrote (it starts a supervised task turn); it is never shown as Rai's.
+  function msgSender(role, owner, author) {
+    if (role === "user" && author === "orbit-supervisor") return { name: "ORBIT task supervisor", initial: "" };
     return role === "user" ? { name: owner ? "Rai" : "You", initial: owner ? "R" : "Y" } : { name: "ORBIT", initial: "" };
   }
   // The icon: ORBIT's own avatar image, or the reader's initial. Decorative: the name beside it says who it is.
-  function msgAvatar(role, owner, mk) {
-    const s = msgSender(role, owner);
+  function msgAvatar(role, owner, mk, author) {
+    const s = msgSender(role, owner, author);
     return s.initial ? mk("span", { className: "mavatar", ariaHidden: "true", textContent: s.initial }) : mk("img", { className: "mavatar", src: "/avatar.png", alt: "", ariaHidden: "true" });
   }
   // Fills a time control from a stamp: the visible label (a <time> element for a stored time), the tip, and the button's name.
@@ -2729,19 +2761,19 @@
     b.className = `mtime${s.provisional ? " provisional" : ""}`;
     b.ariaLabel = `${s.label}. ${s.full}`;
   }
-  function msgHead(role, owner, state, at, mk) {
+  function msgHead(role, owner, state, at, mk, author) {
     const b = mk("button", { type: "button", ariaExpanded: "false", onclick: () => { b.ariaExpanded = b.ariaExpanded === "true" ? "false" : "true"; }, onblur: () => { b.ariaExpanded = "false"; } });
     if (b.dataset) Object.assign(b.dataset, { state, at: typeof at === "string" ? at : "", role });
     fillStamp(b, msgStamp(state, at, role, Date.now(), msgZone()), mk);
-    return mk("div", { className: "mhead" }, mk("span", { className: "mname", textContent: msgSender(role, owner).name }), b);
+    return mk("div", { className: "mhead" }, mk("span", { className: "mname", textContent: msgSender(role, owner, author).name }), b);
   }
   // The icon and the name line of a stored message, as keyed parts (see messageParts). Neither depends on anything that
   // changes while a reply runs, so a reply in progress never rebuilds them (the label itself follows the clock: refreshMsgTimes).
   function headParts(m, mk) {
     const role = m.role === "user" ? "user" : "assistant";
     return [
-      { key: "avatar", sig: role, build: () => msgAvatar(role, true, mk) },
-      { key: "head", sig: JSON.stringify([role, m.at ?? null]), build: () => msgHead(role, true, "stored", m.at, mk) },
+      { key: "avatar", sig: `${role}${m.author ? `:${m.author}` : ""}`, build: () => msgAvatar(role, true, mk, m.author) },
+      { key: "head", sig: JSON.stringify([role, m.at ?? null, m.author ?? null]), build: () => msgHead(role, true, "stored", m.at, mk, m.author) },
     ];
   }
   // A row the page draws before (or without) ORBIT storing it: same layout, its state where the time goes.

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
+import { createRequire } from "node:module";
 import type { Item, ModelPort, Step } from "../src/model.ts";
 import { taskFile, taskStore } from "../src/tasks.ts";
 import type { Tasks } from "../src/tasks.ts";
@@ -405,4 +406,48 @@ test("restart: tasks, their session links and instructions survive; a turn cut o
   assert.equal(two.d.seen.filter((x) => x.taskTurn).length, 0, "nothing was re-run");
   const thread = (await two.api(`/threads/${t.session.link.slice(10)}`)).data.thread;
   assert.equal(thread.task.id, t.id);
+});
+
+// ---- the page (real server, real index.html, Playwright's Chromium; skipped where Playwright cannot be loaded) ------------------
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+let playwright: any;
+try {
+  playwright = createRequire(import.meta.url)("playwright");
+} catch {
+  /* skipped below */
+}
+const skipBrowser = playwright ? false : "Playwright is not installed here; the task session page check is skipped";
+let browser: any;
+after(async () => {
+  await browser?.close();
+});
+
+test("page: a task's session shows the task banner with Rai's controls, and the supervisor's prompt is labeled as the supervisor's, not Rai's", { skip: skipBrowser }, async () => {
+  browser ??= await playwright.chromium.launch();
+  const x = stack();
+  const t = (await x.assistantTool("task_create", CREATE)).result.task;
+  x.d.ctl.taskSteps.push({ calls: [call("task_set_next_action", { text: "Draft the exporter" }, "p1")], reply: "Drafted a plan." });
+  await x.api(`/tasks/${t.id}/turn`, "POST", { rev: t.rev });
+  await x.settled(t.id);
+  const base = await x.api("/status").then(() => `http://127.0.0.1:${(x.server.address() as { port: number }).port}`);
+  const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await page.goto(`${base}${t.session.link}`);
+    await page.waitForFunction(() => document.querySelector("#log .banner.task")?.textContent?.includes("Task: Garden sensor CSV"));
+    const banner = await page.evaluate(() => document.querySelector("#log .banner.task")!.textContent);
+    assert.match(banner, /active/);
+    assert.match(banner, /Next: Draft the exporter/);
+    assert.match(banner, /Last turn 1: done/);
+    const names = await page.evaluate(() => [...document.querySelectorAll("#log .msg .mname")].map((n) => n.textContent));
+    assert.deepEqual(names.slice(0, 2), ["ORBIT task supervisor", "ORBIT"]);
+    // Pause from the banner: the server records it (with the rev shown), and the banner offers Resume.
+    await page.click("#log .banner.task button:has-text('Pause')");
+    await page.waitForFunction(() => document.querySelector("#log .banner.task")?.textContent?.includes("paused"));
+    assert.equal(x.tasks.get(t.id)!.lifecycle, "paused");
+    assert.deepEqual(x.tasks.get(t.id)!.lifecycleHistory.at(-1)!.by, { actor: "human", via: "task-panel" });
+    assert.ok(await page.$("#log .banner.task button:has-text('Resume')"));
+  } finally {
+    await page.close();
+  }
 });
