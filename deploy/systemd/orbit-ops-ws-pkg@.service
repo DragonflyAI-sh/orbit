@@ -11,6 +11,9 @@ Type=oneshot
 ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/ws-run.ts %i pkg
 # Lock wait (120 s) + download + install, bounded. When this limit hits, systemd (not ORBIT) stops the unit with SIGTERM only.
 TimeoutStartSec=1800
+# How long systemd waits after that SIGTERM before it gives up on the unit (never SIGKILL, below): 1800 + 90 s fits the runner's
+# 1900 s wait for this unit.
+TimeoutStopSec=90
 # Never SIGKILL apt/dpkg: a hard-killed dpkg leaves a half-configured system.
 SendSIGKILL=no
 # Bounded, but large enough for dpkg and maintainer scripts.

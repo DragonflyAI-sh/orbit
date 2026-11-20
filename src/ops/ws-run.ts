@@ -25,23 +25,30 @@ import {
   SANDBOX,
   WS_CONFIG,
   addStep,
+  T,
+  clearImageMarker,
   computePlan,
   currentCommit,
   describeOp,
   gatherFacts,
   loadRecord,
+  mountPoint,
+  opWorstMs,
   orbitOutOfDate,
-  releaseSlot,
+  parseMountinfo,
   saveRecord,
+  setupWorstMs,
   statusAddress,
   systemWsEnv,
+  workspaceOfImage,
+  writeImageMarker,
   type Op,
   type WsConfig,
   type WsEnv,
 } from "./ws-core.ts";
 
 type Audit = (line: object) => void;
-type Ctx = { env: WsEnv; c: WsConfig; rec: WsRecord; audit: Audit; created: Set<string>; expected?: string; address?: { host: string; port: number } };
+type Ctx = { env: WsEnv; c: WsConfig; rec: WsRecord; audit: Audit; created: Set<string>; expected?: string; address?: { host: string; port: number }; deadline?: number };
 
 const step = (x: Ctx, name: string, detail: string) => addStep(x.c, x.rec, x.env, name, detail, x.audit);
 const lastLines = (text: string, n = 2) => text.split("\n").map((l) => l.trim()).filter(Boolean).slice(-n).map((l) => cap(l, 120)).join(" | ");
@@ -81,7 +88,7 @@ type OpResult = { ok: boolean; detail: string };
 
 async function resolveGid(x: Ctx, group: "root" | "orbit"): Promise<number | undefined> {
   if (group === "root") return 0;
-  const r = await x.env.exec(BIN.getent, ["group", ORBIT_USER], 10_000, { env: { ...NSS_ENV } });
+  const r = await x.env.exec(BIN.getent, ["group", ORBIT_USER], T.short, { env: { ...NSS_ENV } });
   const f = r.code === 0 ? r.stdout.split("\n")[0]!.split(":") : [];
   return f[0] === ORBIT_USER && /^[0-9]{1,10}$/.test(f[2] ?? "") ? Number(f[2]) : undefined;
 }
@@ -99,13 +106,18 @@ async function runOp(x: Ctx, op: Op): Promise<OpResult> {
       if (op.file === BIN.mkfs && !x.created.has(op.args.at(-1)!)) return { ok: false, detail: "refused: mkfs.ext4 is only run on an image this operation created" };
       const r = await env.exec(op.file, op.args, op.timeoutMs, op.env ? { env: op.env } : undefined);
       const ok = r.code === 0 && !r.timedOut;
+      // The image is formatted: it is no longer a partial leftover (finding 5). Until this point a crash leaves the marker behind.
+      if (ok && op.file === BIN.mkfs) {
+        const id = workspaceOfImage(op.args.at(-1)!);
+        if (id) clearImageMarker(c, id);
+      }
       return { ok, detail: `${short(op)}: ${r.timedOut ? "timed out" : `exit ${r.code}`}${ok ? "" : ` ${lastLines(r.stderr || r.stdout)}`}` };
     }
     case "pkg": {
       x.rec.pkgRequested = true;
       saveRecord(c, x.rec, env);
       const unit = `${c.units.pkg}${x.rec.opId}.service`;
-      const r = await env.exec(BIN.systemctl, ["start", unit], 1_900_000);
+      const r = await env.exec(BIN.systemctl, ["start", unit], T.pkg);
       // The package unit wrote its own steps into the record: take them over before writing again.
       const fresh = loadRecord(c, x.rec.opId);
       if (fresh) Object.assign(x.rec, fresh);
@@ -122,14 +134,32 @@ async function runOp(x: Ctx, op: Op): Promise<OpResult> {
     case "ensure_dir":
       env.fs.ensureDir(op.path, op.mode);
       return { ok: true, detail: `directory ${op.path} present, mode 0${op.mode.toString(8)}` };
-    case "create_image":
+    case "create_image": {
       try {
         env.fs.createExclusive(op.path, 0o600);
       } catch (err) {
         return { ok: false, detail: `${op.path} could not be created exclusively (${(err as NodeJS.ErrnoException).code ?? "error"}); an existing file is never formatted` };
       }
       x.created.add(op.path);
-      return { ok: true, detail: `created empty ${op.path} (0600)` };
+      // Durable evidence that THIS helper created this exact file and has not formatted it yet: if the runner is killed before mkfs
+      // succeeds, the next setup recognises the leftover by inode and replaces only it (finding 5 of the PR #147 review).
+      const st = env.fs.lstat(op.path);
+      const id = workspaceOfImage(op.path);
+      if (!st || st.dev === undefined || st.ino === undefined || !id) return { ok: false, detail: `${op.path} was created but could not be identified; stopped before formatting it` };
+      writeImageMarker(c, id, { path: op.path, dev: st.dev, ino: st.ino, opId: x.rec.opId, at: env.now().toISOString() });
+      return { ok: true, detail: `created empty ${op.path} (0600; recorded as unformatted until mkfs succeeds)` };
+    }
+    case "discard_partial_image": {
+      const mounted = parseMountinfo(env.fs.readText("/proc/self/mountinfo", 4 * 1024 * 1024) ?? "").some((m) => m.point === mountPoint(op.workspace));
+      if (mounted) return { ok: false, detail: `refused: something is mounted at ${mountPoint(op.workspace)}; ${op.path} was not removed` };
+      try {
+        env.fs.removeExact(op.path, { dev: op.dev, ino: op.ino });
+      } catch (err) {
+        return { ok: false, detail: `refused: ${cap(err instanceof Error ? err.message : "error", 120)}` };
+      }
+      clearImageMarker(c, op.workspace);
+      return { ok: true, detail: `removed the partial image ${op.path} (inode ${op.ino}) left by an interrupted earlier setup` };
+    }
     case "write": {
       const gid = await resolveGid(x, op.group);
       if (gid === undefined) return { ok: false, detail: `group ${op.group} could not be resolved; ${op.path} was not written` };
@@ -144,14 +174,14 @@ async function runOp(x: Ctx, op: Op): Promise<OpResult> {
     case "tidy_lost_found": {
       const lf = `${op.root}/lost+found`;
       if (!env.fs.lstat(lf)) return { ok: true, detail: `no ${lf}` };
-      return runOp(x, { k: "exec", file: BIN.rmdir, args: [lf], timeoutMs: 10_000 });
+      return runOp(x, { k: "exec", file: BIN.rmdir, args: [lf], timeoutMs: T.short });
     }
     case "restart_and_health": {
-      const reload = await env.exec(BIN.systemctl, ["daemon-reload"], 120_000);
+      const reload = await env.exec(BIN.systemctl, ["daemon-reload"], T.reload);
       step(x, "daemon-reload", reload.timedOut ? "timed out" : `exit ${reload.code}`);
       if (reload.code !== 0 || reload.timedOut) return { ok: false, detail: "systemctl daemon-reload failed; ORBIT was not restarted" };
       step(x, "restart", `restarting ${ORBIT_UNIT}; expecting /status to serve ${x.expected?.slice(0, 12)}`);
-      const r = await env.exec(BIN.systemctl, ["restart", ORBIT_UNIT], 120_000);
+      const r = await env.exec(BIN.systemctl, ["restart", ORBIT_UNIT], T.restart);
       step(x, "restart-command", r.timedOut ? "timed out" : `exit ${r.code}`);
       const h = await waitHealthy(x);
       return { ok: h.healthy, detail: h.detail };
@@ -164,7 +194,7 @@ const blockerNote = (ids: string[]) => (ids.length ? ` Host blockers remain (${i
 // ---- ws_setup ----
 
 async function setup(x: Ctx): Promise<void> {
-  const plan = await computePlan(x.env);
+  const plan = await computePlan(x.env, x.c);
   const blockers = plan.blockers.map((b) => b.id);
   x.rec.blockers = blockers;
   const blocked = plan.steps.filter((s) => s.state === "blocked").map((s) => s.id);
@@ -174,6 +204,10 @@ async function setup(x: Ctx): Promise<void> {
   }
   const todo = plan.planned.filter((s) => s.state === "todo");
   if (!todo.length) return finish(x, "no_change", `The host is already set up; nothing was changed.${blockerNote(blockers)}`, { checked: false, detail: "Nothing to do." });
+  // Time bounds (finding 5): the plan's worst case must fit the runner's budget, which the unit's TimeoutStartSec covers. A plan that
+  // does not fit is refused before any change, so systemd never has to kill the runner in the middle of a step.
+  const worst = setupWorstMs(todo, x.c.healthWindowMs, x.c.healthIntervalMs);
+  if (worst > x.c.runBudgetMs) return finish(x, "failed", `Nothing was changed: the plan could take up to ${Math.ceil(worst / 1000)} s, more than the runner's budget of ${Math.round(x.c.runBudgetMs / 1000)} s.`, { checked: false, detail: "Refused before any change." }, { failedStep: "plan", code: "over_budget" });
   x.expected = currentCommit(x.env, x.c);
   x.address = statusAddress(x.env, x.c);
   if (!x.expected || !x.address) return finish(x, "failed", "Nothing was changed: the deployed commit or ORBIT's HOST/PORT could not be read, so the result could not be verified.", { checked: false, detail: "Refused before any change." }, { failedStep: "plan", code: "unverifiable" });
@@ -183,14 +217,19 @@ async function setup(x: Ctx): Promise<void> {
     step(x, s.id, `starting: ${s.title}`);
     for (const op of s.ops) {
       let r: OpResult;
-      try {
-        r = await runOp(x, op);
-      } catch (err) {
-        r = { ok: false, detail: `${short(op)}: ${cap(err instanceof Error ? err.message : "error", 100)}` };
+      // Never start a step that could outlive the budget (a safety net: the up-front check above already bounds the plan).
+      if (x.deadline !== undefined && x.env.now().getTime() + opWorstMs(op, x.c.healthWindowMs, x.c.healthIntervalMs) > x.deadline) {
+        r = { ok: false, detail: `not started: ${short(op)} could not finish within the runner's time budget` };
+      } else {
+        try {
+          r = await runOp(x, op);
+        } catch (err) {
+          r = { ok: false, detail: `${short(op)}: ${cap(err instanceof Error ? err.message : "error", 100)}` };
+        }
       }
       step(x, s.id, r.detail);
       if (!r.ok) {
-        const left = [...x.created].length ? ` The new image file(s) ${[...x.created].join(", ")} were left in place (possibly empty or unformatted); this helper never deletes an image.` : "";
+        const left = [...x.created].length ? ` The new image file(s) ${[...x.created].join(", ")} were left in place (possibly empty or unformatted) and recorded as unformatted: the next setup replaces exactly such a file and nothing else. This helper never deletes any other image.` : "";
         return finish(
           x,
           "failed",
@@ -206,7 +245,7 @@ async function setup(x: Ctx): Promise<void> {
   // Verification from observation only.
   const h = await waitHealthy(x);
   step(x, "verify-status", h.detail);
-  const after = await computePlan(x.env);
+  const after = await computePlan(x.env, x.c);
   const open = after.steps.filter((s) => s.state !== "done").map((s) => `${s.id} (${s.state})`);
   step(x, "verify-plan", open.length ? `still not done: ${open.join(", ")}` : "every step is done");
   const ver = { checked: true, healthy: h.healthy, planComplete: !open.length, expectedCommit: x.expected, ...(h.served ? { servedCommit: h.served } : {}) };
@@ -249,7 +288,7 @@ async function revoke(x: Ctx): Promise<void> {
 export async function runOperation(opId: string, env: WsEnv, c: WsConfig, audit: Audit): Promise<WsRecord | undefined> {
   const rec = loadRecord(c, opId);
   if (!rec) return undefined;
-  const x: Ctx = { env, c, rec, audit, created: new Set() };
+  const x: Ctx = { env, c, rec, audit, created: new Set(), deadline: env.now().getTime() + c.runBudgetMs };
   if (rec.state !== "accepted") {
     audit({ at: env.now().toISOString(), opId: opId.slice(0, 12), action: rec.action, step: "refused", detail: `already ${rec.state}; not run again` });
     return rec;
@@ -267,7 +306,6 @@ export async function runOperation(opId: string, env: WsEnv, c: WsConfig, audit:
     rec.finishedAt = env.now().toISOString();
     delete rec.pkgRequested;
     saveRecord(c, rec, env);
-    releaseSlot(c, opId);
     audit({ at: env.now().toISOString(), opId: opId.slice(0, 12), action: rec.action, step: "result", detail: `${rec.state}: ${rec.summary ?? ""}`.slice(0, 300) });
   }
   return rec;
@@ -297,7 +335,13 @@ export async function runPackage(opId: string, env: WsEnv, c: WsConfig, audit: A
 }
 
 // The runner holds the deploy lock (/opt/orbit/state/deploy.lock, the one deploys, rollbacks and tier 2 restarts use) for its whole run,
-// because it restarts orbit.service. It re-runs itself under flock, as tier 2 does. The package unit does not take it.
+// because it restarts orbit.service. It re-runs itself under flock, as tier 2 does. The package unit does not take it. These are the
+// only two commands the runner issues outside the WsEnv interface (finding 8 of the PR #147 review); the allowlist test covers them:
+// /usr/bin/flock, and node itself (process.execPath, i.e. the unit's /usr/local/bin/node) running this same file.
+export function lockedRerun(c: WsConfig, opId: string, node: string, self: string): [string, string[]] {
+  if (!OP_ID.test(opId)) throw new Error("bad operation id");
+  return ["/usr/bin/flock", ["-w", String(c.lockWaitSeconds), `${c.orbitRoot}/state/deploy.lock`, node, "--max-old-space-size=64", self, opId, "run"]];
+}
 async function main(): Promise<void> {
   const [opId, mode] = process.argv.slice(2);
   if (!opId || !OP_ID.test(opId) || (mode !== "run" && mode !== "pkg")) {
@@ -308,9 +352,9 @@ async function main(): Promise<void> {
   if (mode === "pkg") process.exit(await runPackage(opId, systemWsEnv, WS_CONFIG, audit));
   const rec = loadRecord(WS_CONFIG, opId);
   if (rec?.state === "accepted" && process.env.ORBIT_WS_LOCKED !== "1") {
-    const lock = `${WS_CONFIG.orbitRoot}/state/deploy.lock`;
+    const [file, args] = lockedRerun(WS_CONFIG, opId, process.execPath, fileURLToPath(import.meta.url));
     const code = await new Promise<number>((resolve) => {
-      const child = execFile("/usr/bin/flock", ["-w", String(WS_CONFIG.lockWaitSeconds), lock, process.execPath, "--max-old-space-size=64", fileURLToPath(import.meta.url), opId, mode], { env: { ...process.env, ORBIT_WS_LOCKED: "1" } }, (err) => {
+      const child = execFile(file, args, { env: { ...process.env, ORBIT_WS_LOCKED: "1" } }, (err) => {
         resolve(err ? (typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : 1) : 0);
       });
       child.stdout?.pipe(process.stdout);
@@ -323,7 +367,6 @@ async function main(): Promise<void> {
       after.finishedAt = new Date().toISOString();
       after.verification = { checked: false, detail: "Nothing ran." };
       saveRecord(WS_CONFIG, after, systemWsEnv);
-      releaseSlot(WS_CONFIG, opId);
       audit({ at: new Date().toISOString(), opId: opId.slice(0, 12), action: after.action, step: "result", detail: `failed: ${after.summary}` });
     }
     process.exit(0);
