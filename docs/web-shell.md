@@ -71,6 +71,9 @@ work (PRs #107–#118) is described in the CSS comments, and this change keeps t
 
 All defined on `:root` near the top of the stylesheet. Colours stay the existing theme variables.
 
+> **Superseded:** the full and current token set (type scale, semantic colours, motion, the reading column, button
+> variants) is in [design-system.md](design-system.md). The table below is the set #148 introduced, kept for context.
+
 | Group | Tokens |
 |---|---|
 | Spacing | `--space-1..5`: 4, 8, 12, 16, 24px; `--gutter` (16px, 12px at 480px or less) |

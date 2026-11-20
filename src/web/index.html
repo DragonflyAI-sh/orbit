@@ -371,7 +371,7 @@
      the same to assistive technology. Other tabs tint on hover. */
   nav { display: flex; flex-wrap: wrap; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--surface-2); border: var(--border); }
   nav a { padding: 3px 12px; border-radius: calc(var(--radius-md) - 3px); color: var(--fg); border: 1px solid transparent; text-decoration: none; font-weight: 500; }
-  nav a[aria-current="page"] { background: linear-gradient(90deg, var(--accent), var(--accent-2)) bottom 2px center / calc(100% - 20px) 2px no-repeat, var(--card);
+  nav a[aria-current="page"] { background: linear-gradient(90deg, var(--accent), var(--accent-2)) bottom 2px center / calc(100% - 20px) 2px no-repeat, color-mix(in srgb, var(--accent) 8%, var(--card));
                                border-color: var(--line); font-weight: 650; box-shadow: 0 1px 2px var(--header-shadow); }
   nav a:not([aria-current="page"]):hover { background: var(--surface-hover); }
   nav a:active { transform: translateY(1px); }
@@ -399,8 +399,8 @@
   /* Jobs list and detail (docs/jobs-page.md). */
   #jobs .jlistview, #jobs .jdetail { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
   #jobs .jtools { display: flex; flex-direction: column; gap: 6px; }
-  #jobs .jtools input[type=search] { font: inherit; padding: 6px 10px; border-radius: var(--radius-md); border: 1px solid var(--line); background: var(--card); color: var(--fg); width: 100%; box-sizing: border-box; }
-  #jobs select { font: inherit; font-size: var(--text-sm); padding: 4px 6px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--card); color: var(--fg); max-width: 100%; }
+  #jobs .jtools input[type=search] { font: inherit; min-height: var(--btn-h); padding: 6px 12px; border-radius: var(--radius-md); border: 1px solid var(--line); background: var(--card); color: var(--fg); width: 100%; box-sizing: border-box; }
+  #jobs select { font: inherit; font-size: var(--text-sm); min-height: var(--btn-h); padding: 4px 8px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--card); color: var(--fg); max-width: 100%; }
   #jobs .chk { font-size: var(--text-sm); display: inline-flex; align-items: center; gap: 4px; }
   #jobs button.mini { font-size: var(--text-xs); padding: 3px 10px; min-height: 26px; border-radius: var(--radius-sm); }
   #jobs .jlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -465,6 +465,8 @@
      medium radius, and while focused the accent border with a soft halo plus the shared focus ring. */
   textarea { flex: 1; resize: none; font: inherit; padding: 8px; border-radius: var(--radius-md); border: var(--border);
              background: var(--card); color: var(--fg); }
+  #jobs input[type=search]:focus, #jobs select:focus { outline: var(--focus-ring); outline-offset: 1px; border-color: var(--accent-2); box-shadow: var(--field-halo); }
+  #jobs input[type=search]:focus:not(:focus-visible), #jobs select:focus:not(:focus-visible) { outline: none; }
   textarea, #jobs input[type=search], #jobs select { transition: border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease); }
   textarea:hover, #jobs input[type=search]:hover, #jobs select:hover { border-color: color-mix(in srgb, var(--accent-2) 35%, var(--line)); }
   textarea:focus { outline: var(--focus-ring); outline-offset: 1px; border-color: var(--accent-2); box-shadow: var(--field-halo); }
