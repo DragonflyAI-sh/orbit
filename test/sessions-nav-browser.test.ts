@@ -120,7 +120,7 @@ for (const size of SIZES) {
       assert.ok(geo.btn.right <= geo.notes.left, "the long title never runs under the toggles");
       assert.equal(await noSideways(page), true, "no horizontal scroll on Sessions");
       // Keyboard: the links in order, then the session control, then the toggles.
-      assert.deepEqual(await tabStops(page), ["assistanttab", "jobstab", "sessionstab", "sessbtn", "notesbtn", "health"]);
+      assert.deepEqual(await tabStops(page), ["assistanttab", "jobstab", "sessionstab", "sessbtn", "themebtn", "notesbtn", "health"]);
       await shot(page, `${size.name}-nav-sessions`);
       const sessionsHeader = geo.header;
 
@@ -132,7 +132,7 @@ for (const size of SIZES) {
         assert.equal(await page.getAttribute(link, "aria-current"), "page");
         assert.equal(await page.getAttribute("#sessionstab", "aria-current"), null);
         // Keyboard: straight from the links to the toggles; the session control is not a stop.
-        assert.deepEqual(await tabStops(page), ["assistanttab", "jobstab", "sessionstab", "notesbtn", "health"], `${tab}: tab order`);
+        assert.deepEqual(await tabStops(page), ["assistanttab", "jobstab", "sessionstab", "themebtn", "notesbtn", "health"], `${tab}: tab order`);
         const h = await page.evaluate(() => document.querySelector("header")!.getBoundingClientRect().height);
         assert.ok(h <= sessionsHeader, `${tab}: the header is no taller than on Sessions (${h} > ${sessionsHeader})`);
         assert.equal(await noSideways(page), true, `${tab}: no horizontal scroll`);

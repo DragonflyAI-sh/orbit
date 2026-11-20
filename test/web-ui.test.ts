@@ -291,7 +291,9 @@ test("the header's downward shadow paints above the scrolling content", () => {
   assert.match(header, /box-shadow:\s*var\(--elev-1\)/);
   assert.match(css, /--elev-1:\s*0 4px 14px -4px var\(--header-shadow\)/);
   const alphas = [...css.matchAll(/--header-shadow:\s*rgba\([^)]*,\s*(0?\.\d+)\)/g)].map((m) => Number(m[1]));
-  assert.equal(alphas.length, 2, "a light and a dark shadow colour");
+  // Light, then dark twice: once for a dark device (System) and once for an explicit Dark choice (docs/design-system.md).
+  assert.equal(alphas.length, 3, "a light and a dark shadow colour");
+  assert.equal(alphas[1], alphas[2], "both dark routes use the same shadow");
   assert.ok(alphas.every((a) => a >= 0.2), `the shadow is strong enough to see (${alphas})`);
   // Overlays still stack above the header: the picker lives inside it, the photo viewer above it, and the time tip
   // (inside the conversation) stays under it.

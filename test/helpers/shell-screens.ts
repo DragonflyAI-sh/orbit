@@ -42,6 +42,11 @@ const designShots: Shot[] = [
   { name: "1280-dark-sessions", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true, pending: true }, dark: true },
   { name: "390-assistant", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true } },
   { name: "390-session-picker", width: 390, height: 844, route: "/sessions", data: { exchanges: 8 }, act: picker },
+  // The theme menu does not exist before this change; the "before" side shows the same page without it.
+  { name: "1280-theme-menu", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true },
+    act: async (p) => { if (await p.$("#themebtn")) await p.click("#themebtn"); } },
+  { name: "1280-dark-assistant", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true }, dark: true },
+  { name: "390-dark-assistant", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true }, dark: true },
 ];
 if (process.env.SHELL_SCREENS_SET === "design") shots.splice(0, shots.length, ...designShots);
 

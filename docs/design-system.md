@@ -14,11 +14,40 @@ Looked at on `main` (after #148) with synthetic content at 1280, 1440 and 390px.
 | Personality | A calm, technical assistant that acts for Rai, cautious and exact about what it has or has not done. The avatar (deep space, violet and blue ribbons, gold) carries it. | Keep it quiet and precise. Use colour to say what something means, not to decorate. Gold is kept for "waiting on Rai". |
 | Hierarchy (laptop) | Header items read as one row of equal buttons. The current page tab looked like the primary action button. Messages ran across the whole 1280px window (lines of 150+ characters). The composer spanned the window, away from the text. | Group the header: brand, divider, page tabs, session switcher, then the toggles on the right. Show page tabs as navigation (a segmented control) and not as buttons. Put the conversation and the composer in one centred reading column. |
 | Wordmark | Gradient, wide tracking, 16px. Distinctive. | Kept, with its tracking as a token (`--tracking-wordmark`) and a heavier weight. |
-| Palette | The avatar colours plus status colours named for the status vocabulary (`--live`, `--mock`, `--down`). Components used them directly, so "warning" and "degraded" were the same variable by accident. | Palette kept (AA contrast was fixed in #148). Semantic names (`--info`, `--ok`, `--warn`, `--danger`, `--attention`) map onto it, each with a soft tint. Components use the semantic names. |
+| Palette | The avatar colours plus status colours named for the status vocabulary (`--live`, `--mock`, `--down`). Components used them directly, so "warning" and "degraded" were the same variable by accident. Dark mode was available only through the OS setting. The light gold (`#c9921f`) measured 2.7:1 on cards: too faint for the sign-in code text and for the gold card edges. | Palette kept, with deliberate per-theme values. Semantic names (`--info`, `--ok`, `--warn`, `--danger`, `--attention`) map onto it, each with a soft tint. Light gold becomes `#b07d12` (3.5:1 as an edge), and the sign-in code is ink text on a gold tint. A Light/Dark/System choice was added. |
 | Typography | `system-ui` at 15px, with about ten one-off sizes (11, 12, 12.5, 13, 14 and 17px) and three different monospace stacks. | System fonts only, and one scale (below). One monospace stack. |
 | Iconography | Inline SVG, 2px stroke, round caps (bell, plus, send, external link, chevron). Consistent. | Kept. No icon font or icon library. |
 | Buttons | Almost every button was the gradient (primary) style. Cancel, Rename and Archive were near-identical one-offs, and destructive actions looked like neutral ones. A request in flight only disabled the button. | Primary, secondary and destructive variants, one height, plus a loading state (below). |
 | Microcopy | Truthful and specific ("Nothing has launched yet.", "This is NOT verified yet"). | Not changed. The confirmation card shows its first sentence as the card's title, with the same words. |
+
+## Themes: Light, Dark and System
+
+- **Both themes are designed on their own, not inverted.**
+  - Light: a soft lavender page (`#f4f2fb`), cards that are barely off-white (`#fdfcff`, so no surface glares), deep
+    ink text, and a restrained violet and blue accent.
+  - Dark: deep space (`#080a1a`), raised navy cards (`#11142b`), text just below white (`#e4e1fa`) for long reading,
+    and lighter accents and status colours that keep AA contrast.
+  - Both: the background glow is soft, and saturated colour appears only on primary buttons, the current-tab
+    underline and status marks.
+- **The choice:** a theme button in the header (left of Notifications) shows the current choice as its icon (monitor,
+  sun or moon) and in its accessible name ("Theme: System (dark now)"). It opens a small menu of native radio buttons:
+  System ("Follows this device"), Light and Dark.
+  - A choice applies at once.
+  - Arrow keys move the choice.
+  - Escape closes the menu and returns focus. A click outside or focus leaving also closes it.
+- **Storage and compatibility:** System is the default and stores nothing. It is exactly the previous behaviour, which
+  followed the OS through `prefers-color-scheme`, and there was no earlier stored preference to migrate. Light or Dark
+  is stored in this browser as `orbit.theme` and applies in other open tabs at once (`storage` event). In System mode a
+  change of the OS theme applies live.
+- **No wrong-theme flash:** a few lines of script in `<head>`, before the stylesheet, set `data-theme` on `<html>`
+  before the body is parsed. If storage is blocked, the page uses System.
+- **Native parts:**
+  - `color-scheme` is set per theme, so scrollbars, checkboxes, radios and selects match.
+  - `theme-color` (the browser's toolbar colour) follows the chosen theme.
+- **CSS:** the light values are on `:root`. The dark values are written twice: once under
+  `prefers-color-scheme: dark` for `:root:not([data-theme="light"])`, and once for `:root[data-theme="dark"]`. A test
+  checks that the two copies are identical. Every component reads semantic tokens, so nothing else has
+  theme-specific rules.
 
 ## Fonts
 
@@ -31,8 +60,9 @@ Looked at on `main` (after #148) with synthetic content at 1280, 1440 and 390px.
 
 ## Tokens
 
-All tokens are on `:root`. Media queries change only a few of them: `--gutter`, `--text-lg`, `--ctl-sm`, `--btn-h`
-and `--safe-b`.
+All tokens are on `:root`. The theme (dark media query or `data-theme`) changes only the palette, `--header-shadow` and
+`color-scheme`, and every derived token follows. Size media queries change only `--gutter`, `--text-lg`, `--ctl-sm`,
+`--btn-h` and `--safe-b`.
 
 | Group | Tokens |
 |---|---|
@@ -63,6 +93,8 @@ and `--safe-b`.
   under 100px.
 - **Page tabs:** a segmented control. The current page is a raised segment in bold with ORBIT's gradient as a 2px
   underline, plus `aria-current="page"`. Other tabs tint on hover.
+- **Theme menu:** see Themes above. It is laid out like the session picker: a card at `--elev-2`, kept on screen. The
+  current option has the info tint and bold text.
 - **Session picker (the header's menu):** placed under its button by the script and kept inside the visible area. It
   closes on Escape, on an outside click or when focus leaves, and returns focus to the button. Rename is secondary.
   Archive is destructive. Restore is secondary.
@@ -106,6 +138,19 @@ Chromium (Playwright) with synthetic content only. `test/desktop-design-browser.
   is held, Confirm is disabled and busy with a spinner, and Cancel is disabled. The result replaces the buttons.
 - **Motion and focus:** reduced motion stops the spinner. The page tabs and toggles show the focus ring on keyboard
   focus.
+- **Themes** (`test/themes-browser.test.ts`):
+  - System follows the emulated device, live, and stores nothing.
+  - Light chosen on a dark device, and Dark on a light one: the choice wins and persists. It is already set when
+    `<body>` starts parsing (no flash), other open tabs follow, and the browser colour matches. Going back to System
+    clears the stored choice.
+  - The menu works by keyboard (Enter opens it, focus lands on the current choice, arrows choose, Escape returns focus)
+    and closes on an outside click or focus leaving. It is checked at 1280, 640, 390 and 320px, on screen and above the
+    page.
+  - Contrast is checked for 26 colour pairs in four setups (light device, dark device, Light chosen, Dark chosen). The
+    browser resolves each colour, including `color-mix` tints. Text must reach 4.5:1: body and secondary text on page,
+    card and inset; links; ok, warning and danger (including danger on its tint); text on the selection and gold
+    tints; text on the primary gradient's ends; the current tab; the inverted time tip. Focus ring, checked radio and
+    meaningful card edges must reach 3:1. The placeholder is drawn opaque in `--muted`.
 - **No overflow:** checked at 1440, 1280, 1024, 820 (tablet), 640, 390 and 320px, in light and dark, on both pages. No
   page or conversation overflows sideways, code and table regions stay inside the conversation, the composer is on the
   bottom edge and the header is within its cap.
@@ -120,6 +165,8 @@ on purpose:
 
 **Not verified:**
 
+- Visual judgement: "easy on the eyes" was judged from the screenshots. The contrast is measured, but comfort over a
+  long session was not tested with people.
 - WebKit: Playwright's WebKit is not installed here, so its check was skipped. Desktop WebKit is not iOS Safari anyway.
 - Real devices: no real iPhone, Android phone or Mac was used. Phone results are Chromium emulation (`isMobile`,
   touch).
@@ -135,6 +182,8 @@ Before (main) on the left, after on the right, Chromium, synthetic content, in `
 - `1280-session-picker.jpg`: the header menu.
 - `1280-dark-sessions.jpg`: dark theme, with a streaming reply.
 - `390-assistant.jpg` and `390-session-picker.jpg`: phone.
+- `1280-theme-menu.jpg`: the theme menu. There is none on the before side.
+- `1280-dark-assistant.jpg` and `390-dark-assistant.jpg`: dark theme at laptop and phone widths.
 
 To regenerate:
 
@@ -156,8 +205,12 @@ SHELL_SCREENS_SET=design SHELL_SCREENS_SMALL=1 node test/helpers/shell-screens.t
 5. **Confirmation card.** On a real proposal, Confirm is the strong button and Cancel the quiet one. Pressing one shows
    a spinner until the answer appears.
 6. **Keyboard.** Tab through the header and the composer. Every control shows the blue focus ring.
-7. **Zoom.** At 200% browser zoom, nothing scrolls sideways and the menu still fits.
-8. **Phone.** The #148 checklist in web-shell.md still passes. The tabs are a segmented row, and Send stays visible
+7. **Theme.** Click the theme button (left of Notifications) and choose Dark, then Light. The page changes at once, with
+   no flash on reload. Choose System and switch the OS between light and dark: the page follows. Open two tabs, change
+   the theme in one, and the other follows. Read a long conversation in each theme for a few minutes: nothing glares
+   and secondary text stays readable.
+8. **Zoom.** At 200% browser zoom, nothing scrolls sideways and the menu still fits.
+9. **Phone.** The #148 checklist in web-shell.md still passes. The tabs are a segmented row, and Send stays visible
    with the keyboard open.
 
 ## Follow-ups (prioritized)
@@ -167,6 +220,7 @@ SHELL_SCREENS_SET=design SHELL_SCREENS_SMALL=1 node test/helpers/shell-screens.t
    distinction in the script.
 3. **Jobs filters as a compact toolbar at laptop width** (search beside the filters, Clear as a secondary button
    aligned to the right).
-4. **A contrast check for the soft tints** (`--danger-soft` and the others are `color-mix` values that the current
-   hex-only contrast test cannot read).
+4. **Visible borders on text fields and secondary buttons.** These use `--line`, which is decorative (under 3:1). The
+   controls are identified by their text, placeholder and position, but a stronger field border would help people with
+   low vision.
 5. **Moving the remaining one-off spacing values (3px, 6px, 10px) onto the spacing scale.**
