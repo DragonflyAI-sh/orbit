@@ -75,7 +75,15 @@ for (const size of SIZES) {
       assert.ok(box.btn.right <= box.notesLeft, `the title never runs under the notifications toggle (${box.btn.right} > ${box.notesLeft})`);
       assert.ok(box.btn.left >= box.bar.left, "the title stays in the bar");
       assert.ok(Math.abs(box.btn.top - box.healthTop) < 12, "on the same row as the toggles");
-      assert.ok(box.btn.h >= (size.phone ? 40 : 32), `the title button is a usable target (${box.btn.h}px)`);
+      // A usable target: 32px with a mouse; on a touch screen 36px to look at with a 44px hit area (docs/web-shell.md).
+      assert.ok(box.btn.h >= (size.phone ? 36 : 32), `the title button is a usable target (${box.btn.h}px)`);
+      if (size.phone) {
+        const hit = await page.evaluate(() => {
+          const e = document.getElementById("sessbtn")!, r = e.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+          return [y - 21, y + 21].every((yy) => { const t = document.elementFromPoint(x, yy); return Boolean(t && (t === e || e.contains(t))); });
+        });
+        assert.equal(hit, true, "the title button's hit area is 44px tall");
+      }
       // Header height: the session control adds no row. One row on desktop; the logo row plus the page links on a phone.
       assert.ok(box.header <= (size.phone ? 100 : 56), `the header stays compact (${box.header}px)`);
       assert.equal(await page.getAttribute("#sessbtn", "title"), LONG);
