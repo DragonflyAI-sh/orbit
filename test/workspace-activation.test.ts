@@ -6,7 +6,7 @@ import { test } from "node:test";
 import type { Proposal } from "../src/agent.ts";
 import { enableBlockers, ownerActivation, VALIDATION_MAX_AGE_MS } from "../src/workspace/activation.ts";
 import type { ValidationRecord } from "../src/workspace/activation.ts";
-import { hostOpIdFor, parsePlan, workspaceAdmin } from "../src/workspace/admin.ts";
+import { DISPATCH_GRACE_MS, hostOpIdFor, parsePlan, workspaceAdmin } from "../src/workspace/admin.ts";
 import type { WsHostClient, WsReply } from "../src/workspace/admin.ts";
 import { ensureRunParent, ownCgroup } from "../src/workspace/cgroup.ts";
 import { makeWorkspace, tick, wsRig, fakeSandbox } from "./workspace-fixture.ts";
@@ -22,14 +22,17 @@ import { workspaceService } from "../src/workspace/service.ts";
 
 const T0 = new Date("2026-11-19T10:00:00.000Z");
 
-function rig(opts: { sandboxState?: "supported" | "unsupported"; host?: WsHostClient; disableWaitMs?: number; smokePass?: boolean } = {}) {
+function rig(opts: { sandboxState?: "supported" | "unsupported"; host?: WsHostClient; disableWaitMs?: number; smokePass?: boolean; smokeGate?: Promise<void> } = {}) {
   const sb = fakeSandbox({ state: opts.sandboxState ?? "supported" });
   const r = wsRig({ sandbox: sb });
   // Add the validation workspace to the configuration (the host setup creates it).
   const v = makeWorkspace(r.base, VALIDATION_WORKSPACE);
   r.config.workspaces.push(v);
   const stateDir = mkdtempSync(join(tmpdir(), "orbit-wsact-"));
-  const owner = ownerActivation(stateDir);
+  // What ORBIT runs with now (select.ts builds the same from the live configuration and sandbox); tests may change it.
+  const cur = { policyHash: r.config.policyHash, validationIdentity: v.identity as string | undefined, permitted: true };
+  const current = () => (cur.permitted ? { policyHash: cur.policyHash, sandboxPolicy: sb.policyId(), sandboxState: sb.status().state, validationIdentity: cur.validationIdentity } : undefined);
+  const owner = ownerActivation(stateDir, current);
   let clock = T0;
   const notes: string[] = [];
   const audits: Record<string, unknown>[] = [];
@@ -50,6 +53,7 @@ function rig(opts: { sandboxState?: "supported" | "unsupported"; host?: WsHostCl
     disableWaitMs: opts.disableWaitMs ?? 200,
     smoke: async () => {
       smokeCalls++;
+      await opts.smokeGate;
       const pass = opts.smokePass ?? true;
       return { passed: pass, workspaceIdentity: v.identity, checks: SMOKE_STEPS.map((s) => ({ id: s.id, title: s.title, required: s.required, result: pass || s.id !== "network_isolated" ? ("pass" as const) : ("fail" as const), detail: "scripted" })) };
     },
@@ -63,7 +67,7 @@ function rig(opts: { sandboxState?: "supported" | "unsupported"; host?: WsHostCl
     await admin.validating();
     return c;
   };
-  return { ...r, sb, v, owner, svc, admin, stateDir, notes, audits, take, tool, propose, validate, smokeCalls: () => smokeCalls, setClock: (d: Date) => (clock = d) };
+  return { ...r, sb, v, owner, svc, admin, stateDir, notes, audits, take, tool, propose, validate, cur, current, smokeCalls: () => smokeCalls, setClock: (d: Date) => (clock = d) };
 }
 
 // ---- the owner switch ----------------------------------------------------------------------------------------------------------
@@ -77,8 +81,19 @@ test("owner switch: default off; a corrupt or foreign record is off; enabled per
   assert.equal(ownerActivation(dir).mode(), "off");
   writeFileSync(join(dir, "activation.json"), JSON.stringify({ schema: 2, mode: "enabled" }));
   assert.equal(ownerActivation(dir).mode(), "off");
-  ownerActivation(dir).set("enabled", { at: T0.toISOString(), proposalId: "p1" });
-  assert.equal(ownerActivation(dir).mode(), "enabled");
+  // Enabled needs a binding to a passed validation of exactly what runs now (finding 1 of the PR #147 review).
+  assert.throws(() => ownerActivation(dir).set("enabled", { at: T0.toISOString(), proposalId: "p1" }), /binding/);
+  const binding = { validationId: "val-a", validatedAt: T0.toISOString(), policyHash: "P", sandboxPolicy: "S", validationIdentity: "W" };
+  const now = () => ({ policyHash: "P", sandboxPolicy: "S", sandboxState: "supported", validationIdentity: "W" });
+  ownerActivation(dir).saveValidation({ id: "val-a", state: "passed", startedAt: T0.toISOString(), finishedAt: T0.toISOString(), proposalId: "p", policyHash: "P", sandboxPolicy: "S", workspaceIdentity: "W", checks: [] });
+  ownerActivation(dir).set("enabled", { at: T0.toISOString(), proposalId: "p1", binding });
+  assert.equal(ownerActivation(dir, now).mode(), "enabled", "persists across a restart while the binding holds");
+  assert.equal(ownerActivation(dir).mode(), "off", "nothing to compare with: off (and not reset)");
+  assert.equal(ownerActivation(dir, now).mode(), "enabled");
+  // A hand-written "enabled" without a binding is off, and is reset.
+  writeFileSync(join(dir, "activation.json"), JSON.stringify({ schema: 1, mode: "enabled" }));
+  assert.equal(ownerActivation(dir, now).mode(), "off");
+  assert.equal(ownerActivation(dir, now).record().mode, "off");
   assert.equal(ownerActivation(undefined).mode(), "off", "no state directory: nothing can be switched on");
 });
 
@@ -348,7 +363,7 @@ test("model paths: the admin tools only propose; unknown actions and extra argum
 // ---- the smoke harness (driven by a SCRIPTED launcher: logic only, no isolation claimed) ---------------------------------------------
 
 // A launcher double that behaves like a correctly isolated sandbox for the fixed smoke commands, or like a leaky one.
-function scriptedLauncher(o: { leaky?: boolean; state?: "supported" | "unsupported" } = {}): Sandbox & { started: RunSpec[] } {
+function scriptedLauncher(o: { leaky?: boolean; state?: "supported" | "unsupported"; cleanupTreeGone?: boolean; timeoutTreeGone?: boolean; reapGone?: boolean } = {}): Sandbox & { started: RunSpec[] } {
   const started: RunSpec[] = [];
   const exit = (x: Partial<RunExit>): RunExit => ({ code: 0, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: { stdout: false, stderr: false }, treeGone: true, ...x });
   const transcript = (leaky: boolean) =>
@@ -368,7 +383,7 @@ function scriptedLauncher(o: { leaky?: boolean; state?: "supported" | "unsupport
     probe: async () => ({ state: o.state ?? "supported", reasons: [] }),
     status: () => ({ state: o.state ?? "supported", reasons: o.state === "unsupported" ? ["scripted"] : [] }),
     policyId: () => "bwrap:scripted",
-    reap: async (ids) => Object.fromEntries(ids.map((id) => [id, { leftover: 0, killed: false, gone: true }])),
+    reap: async (ids) => Object.fromEntries(ids.map((id) => [id, { leftover: o.reapGone === false ? 1 : 0, killed: false, gone: o.reapGone !== false }])),
     start(spec: RunSpec): RunHandle {
       started.push(spec);
       const cmd = spec.argv.join(" ");
@@ -379,7 +394,7 @@ function scriptedLauncher(o: { leaky?: boolean; state?: "supported" | "unsupport
         writeFileSync(join(root, m[1]!), "smoke-exec\n");
         return { pid: 1, kill: () => {}, done: Promise.resolve(exit({ stdout: Buffer.from("1000\n") })) };
       }
-      if (cmd === "sleep 30" && spec.limits.timeoutSec === 3) return { pid: 1, kill: () => {}, done: Promise.resolve(exit({ code: null, signal: "SIGKILL", killedBy: "timeout" })) };
+      if (cmd === "sleep 30" && spec.limits.timeoutSec === 3) return { pid: 1, kill: () => {}, done: Promise.resolve(exit({ code: null, signal: "SIGKILL", killedBy: "timeout", treeGone: o.timeoutTreeGone !== false })) };
       if (cmd === "sleep 60") {
         let resolve!: (r: RunExit) => void;
         const done = new Promise<RunExit>((r) => (resolve = r));
@@ -387,7 +402,7 @@ function scriptedLauncher(o: { leaky?: boolean; state?: "supported" | "unsupport
       }
       const rm = /^\/bin\/sh -c rm -f (smoke-[0-9a-f]+)-\*$/.exec(cmd);
       if (rm) for (const f of readdirSync(root)) if (f.startsWith(`${rm[1]}-`)) rmSync(join(root, f));
-      return { pid: 1, kill: () => {}, done: Promise.resolve(exit({})) };
+      return { pid: 1, kill: () => {}, done: Promise.resolve(exit(rm ? { treeGone: o.cleanupTreeGone !== false } : {})) };
     },
   };
 }
@@ -396,7 +411,7 @@ function smokeRig(launcher: Sandbox, withValidationWs = true) {
   const r = wsRig();
   if (withValidationWs) r.config.workspaces.push(makeWorkspace(r.base, VALIDATION_WORKSPACE));
   const stateDir = mkdtempSync(join(tmpdir(), "orbit-wssmoke-"));
-  return { r, stateDir, run: () => runSmoke({ config: r.config, sandbox: launcher, stateDir, timeouts: { runMs: 2000, startMs: 2000 } }) };
+  return { r, stateDir, run: (outside?: () => string[]) => runSmoke({ config: r.config, sandbox: launcher, stateDir, timeouts: { runMs: 2000, startMs: 2000, recheckMs: 10 }, ...(outside ? { outsideQuarantine: outside } : {}) }) };
 }
 
 test("smoke: against a launcher that behaves like the isolated sandbox, every required check passes, nothing is left behind, and nothing outside the validation workspace is touched", async () => {
@@ -472,4 +487,313 @@ test("owner switch turned off without a drain (e.g. by hand): a queued run never
   assert.equal(svc.ledger.get(String(c2.body.opId))!.state, "cancelled");
   assert.match(String(svc.ledger.get(String(c2.body.opId))!.reason), /^disabled/);
   assert.equal(r.sandbox.runs.length, 1);
+});
+
+// ---- PR #147 review, finding 1: the switch is bound to the validated evidence ------------------------------------------------------
+
+test("binding: a policy change while enabled turns the switch off durably (reverting the change does not bring it back)", async () => {
+  const r = await enabled();
+  assert.equal(r.owner.mode(), "enabled");
+  const exec = r.svc.tools.find((t) => t.name === "fs_list")!;
+  r.cur.policyHash = "sha256:" + "cd".repeat(32);
+  assert.equal(r.owner.mode(), "off");
+  assert.deepEqual(r.svc.tools, [], "no tool is offered");
+  // A tool object handed out before the change is refused at dispatch.
+  await assert.rejects(exec.run({ workspace: "alpha" }), /switched off/);
+  assert.match(String(r.owner.record().reason), /sandbox policy changed/);
+  r.cur.policyHash = r.config.policyHash;
+  assert.equal(r.owner.mode(), "off", "the reset is durable");
+  assert.equal(ownerActivation(r.stateDir, r.current).mode(), "off", "and survives a restart");
+});
+
+test("binding: a changed sandbox implementation or validation workspace turns it off; an unfinished startup self-test only holds it off", async () => {
+  const a = await enabled();
+  const orig = a.sb.policyId;
+  a.sb.set("unknown");
+  assert.equal(a.owner.mode(), "off", "self-test not finished: off for now");
+  assert.equal(a.owner.record().mode, "enabled", "but not reset");
+  a.sb.set("supported");
+  assert.equal(a.owner.mode(), "enabled", "the same implementation after the self-test: on again");
+  (a.sb as { policyId: () => string }).policyId = () => "bwrap:0.12.0:fake";
+  assert.equal(a.owner.mode(), "off");
+  (a.sb as { policyId: () => string }).policyId = orig;
+  assert.equal(a.owner.mode(), "off", "durable");
+  const b = await enabled();
+  b.cur.validationIdentity = "sha256:" + "0".repeat(64);
+  assert.equal(b.owner.mode(), "off");
+  assert.match(String(b.owner.record().reason), /validation workspace changed/);
+});
+
+test("binding: a missing, replaced, failed or invalidated validation turns it off", async () => {
+  const gone = await enabled();
+  rmSync(join(gone.stateDir, "validation.json"));
+  assert.equal(gone.owner.mode(), "off");
+  const replaced = await enabled();
+  replaced.owner.saveValidation({ ...replaced.owner.validation()!, id: "val-0000000000000001" });
+  assert.equal(replaced.owner.mode(), "off");
+  const failed = await enabled();
+  failed.owner.saveValidation({ ...failed.owner.validation()!, state: "failed" });
+  assert.equal(failed.owner.mode(), "off");
+  const inval = await enabled();
+  inval.owner.invalidateValidation(T0.toISOString(), "test");
+  assert.equal(inval.owner.mode(), "off");
+});
+
+test("binding: across restarts it stays on while everything holds, and its age alone never switches it off (24 h applies at enable)", async () => {
+  const r = await enabled();
+  r.setClock(new Date(T0.getTime() + 3 * VALIDATION_MAX_AGE_MS));
+  assert.equal(ownerActivation(r.stateDir, r.current).mode(), "enabled");
+  // ...but a validation that old is not evidence for a NEW enable.
+  const p = await r.propose("disable");
+  await r.admin.confirm(r.take(p.proposalId));
+  await assert.rejects(r.propose("enable"), /older than 24 hours/);
+});
+
+test("revoke then setup: revoke turns the switch off at once and invalidates the validation; a later setup leaves the tools OFF", async () => {
+  const { host } = fakeHost(PLAN);
+  const r = await enabled({ host });
+  const p = await r.propose("revoke");
+  const out = await r.admin.confirm(r.take(p.proposalId));
+  assert.equal(out.code, 202);
+  assert.equal(r.owner.mode(), "off");
+  assert.ok(r.owner.validation()!.invalidatedAt);
+  // ORBIT restarts without the host permission (the helper removed it).
+  r.cur.permitted = false;
+  assert.equal(ownerActivation(r.stateDir, r.current).mode(), "off");
+  // The host is set up again (same configuration): the switch stays off and enable needs a NEW validation.
+  r.cur.permitted = true;
+  const s = await r.propose("setup");
+  assert.equal((await r.admin.confirm(r.take(s.proposalId))).code, 202);
+  assert.equal(ownerActivation(r.stateDir, r.current).mode(), "off");
+  await assert.rejects(r.propose("enable"), /invalidated/);
+  await r.validate();
+  const e = await r.propose("enable");
+  assert.equal((await r.admin.confirm(r.take(e.proposalId))).code, 200);
+});
+
+test("revoke done by hand (host permission absent at a start): the recorded switch is reset and the validation invalidated", async () => {
+  const r = await enabled();
+  // The production wiring at a start with the host permission removed (ORBIT_WORKSPACE_TOOLS unset).
+  const parent = mkdtempSync(join(tmpdir(), "orbit-wsact-sel-"));
+  mkdirSync(join(parent, "workspace"));
+  for (const f of ["activation.json", "validation.json"]) writeFileSync(join(parent, "workspace", f), readFileSync(join(r.stateDir, f)));
+  const { selectWorkspace } = await import("../src/workspace/select.ts");
+  const lines: string[] = [];
+  const w = selectWorkspace({}, { stateDir: parent, proposals: r.proposals, protectedPaths: [], log: (l) => lines.push(l) });
+  assert.equal(w.activation.state, "off");
+  const after = ownerActivation(join(parent, "workspace"), r.current);
+  assert.equal(after.record().mode, "off");
+  assert.match(String(after.record().reason), /host does not permit/);
+  assert.ok(after.validation()!.invalidatedAt);
+  assert.equal(after.mode(), "off", "even with the same policy back");
+  assert.ok(lines.some((l) => /workspace-owner: reset to off/.test(l)));
+});
+
+test("enable races: a validation started after the card, a setup confirmed after it, or a second enable card are all refused", async () => {
+  const a = rig();
+  await a.validate();
+  const p = await a.propose("enable");
+  await a.validate(); // a newer validation replaces the one the card showed
+  assert.equal((await a.admin.confirm(a.take(p.proposalId))).code, 409);
+  assert.equal(a.owner.mode(), "off");
+
+  const { host } = fakeHost(PLAN);
+  const b = rig({ host });
+  await b.validate();
+  const e = await b.propose("enable");
+  const s = await b.propose("setup");
+  await b.admin.confirm(b.take(s.proposalId));
+  const out = await b.admin.confirm(b.take(e.proposalId));
+  assert.equal(out.code, 409);
+  assert.match(String(out.body.error), /invalidated/);
+  assert.equal(b.owner.mode(), "off");
+
+  const c = rig();
+  await c.validate();
+  const e1 = await c.propose("enable");
+  const e2 = await c.propose("enable");
+  assert.equal((await c.admin.confirm(c.take(e1.proposalId))).code, 200);
+  const second = await c.admin.confirm(c.take(e2.proposalId));
+  assert.equal(second.code, 200, "a second enable of the same validation is idempotent: still exactly bound to it");
+  assert.equal(c.owner.record().binding!.validationId, c.owner.validation()!.id);
+});
+
+test("setup confirmed while the tools are on: the switch goes off first and queued commands are withdrawn", async () => {
+  const { host } = fakeHost(PLAN);
+  const r = await enabled({ host });
+  const exec = r.svc.tools.find((t) => t.name === "exec_start")!;
+  const p1 = ((await exec.run({ workspace: "alpha", argv: ["sleep", "1"] })) as { value: { proposalId: string } }).value;
+  const s = await r.propose("setup");
+  // The command card is confirmed only after the setup card: it is refused (switched off).
+  await r.admin.confirm(r.take(s.proposalId));
+  assert.equal(r.owner.mode(), "off");
+  assert.equal((await r.svc.confirm(r.take(p1.proposalId))).code, 503);
+  assert.equal(r.sb.runs.length, 0);
+});
+
+test("a validation that finishes after a host change keeps its invalidation", async () => {
+  const { host } = fakeHost(PLAN);
+  let release!: () => void;
+  const r = rig({ host, smokeGate: new Promise<void>((res) => (release = res)) });
+  const p = await r.propose("validate");
+  assert.equal((await r.admin.confirm(r.take(p.proposalId))).code, 202);
+  assert.equal(r.owner.validation()!.state, "running");
+  const s = await r.propose("setup");
+  await r.admin.confirm(r.take(s.proposalId));
+  release();
+  await r.admin.validating();
+  assert.equal(r.owner.validation()!.state, "passed");
+  assert.ok(r.owner.validation()!.invalidatedAt, "the validation's own final write kept the invalidation");
+  await assert.rejects(r.propose("enable"), /invalidated/);
+});
+
+// ---- PR #147 review, finding 4: dispatch races with refresh ------------------------------------------------------------------------
+
+test("setup dispatch: a refresh while the dispatch is pending neither judges it nor hides its result; the result is reported exactly once", async () => {
+  let recorded = false;
+  let releaseDispatch!: () => void;
+  const dispatchGate = new Promise<void>((res) => (releaseDispatch = res));
+  const host: WsHostClient = {
+    status: async () => ({ ok: true, data: { plan: PLAN } }),
+    call: async (action) => {
+      if (action === "op_status") return recorded ? { ok: true, data: { operation: { state: "verified", summary: "verified by observation", finishedAt: T0.toISOString() } } } : { ok: false, code: "not_found", message: "No operation with that id." };
+      await dispatchGate;
+      recorded = true;
+      return { ok: true, data: { operation: { state: "accepted" } } };
+    },
+  };
+  const r = rig({ host });
+  const p = await r.propose("setup");
+  const confirming = r.admin.confirm(r.take(p.proposalId));
+  await tick();
+  // The 30-second tick runs while the helper has not recorded the operation yet.
+  await r.admin.refresh();
+  assert.equal(r.admin.status().hostOperations[0]!.state, "dispatching");
+  assert.equal(r.notes.filter((n) => /host setup/.test(n)).length, 0, "nothing reported, and certainly not 'nothing was done'");
+  releaseDispatch();
+  assert.equal((await confirming).code, 202);
+  await r.admin.refresh();
+  await r.admin.refresh();
+  assert.equal(r.admin.status().hostOperations[0]!.state, "verified");
+  assert.equal(r.notes.filter((n) => /host setup verified/.test(n)).length, 1);
+});
+
+test("setup dispatch across a restart: 'not found' within the dispatch window waits; after it, 'not dispatched' is reported once", async () => {
+  const entries = [{ opId: "a".repeat(40), proposalId: "p-1", action: "ws_setup" as const, confirmedAt: T0.toISOString(), state: "dispatching" }];
+  let mem: unknown[] = entries;
+  const store = { read: () => mem as never, write: (v: unknown[]) => void (mem = v) };
+  const host: WsHostClient = { status: async () => ({ ok: true, data: { plan: PLAN } }), call: async () => ({ ok: false, code: "not_found", message: "No operation with that id." }) };
+  const r = rig({ host });
+  let clock = new Date(T0.getTime() + 10_000);
+  const notes: string[] = [];
+  const admin = workspaceAdmin({ env: {}, activation: { state: "enabled", config: r.config }, service: r.svc, sandbox: r.sb, owner: r.owner, proposals: r.proposals, host, hostStore: store, notify: (t) => notes.push(t), now: () => clock });
+  await admin.refresh();
+  assert.equal(admin.status().hostOperations[0]!.state, "dispatching");
+  assert.equal(notes.length, 0);
+  clock = new Date(T0.getTime() + DISPATCH_GRACE_MS + 1);
+  await admin.refresh();
+  await admin.refresh();
+  assert.equal(admin.status().hostOperations[0]!.state, "not_dispatched");
+  assert.equal(notes.length, 1);
+});
+
+test("host operation records: unfinished or unreported entries are never pruned", async () => {
+  const many = Array.from({ length: 80 }, (_, i) => ({ opId: i.toString(16).padStart(40, "0"), proposalId: `p-${i}`, action: "ws_setup" as const, confirmedAt: T0.toISOString(), state: i === 0 ? "running" : "verified", ...(i === 0 ? {} : { reportedAt: T0.toISOString() }) }));
+  let mem: unknown[] = many;
+  const store = { read: () => mem as never, write: (v: unknown[]) => void (mem = v) };
+  const { host } = fakeHost(PLAN);
+  const r = rig({ host });
+  const admin = workspaceAdmin({ env: {}, activation: { state: "enabled", config: r.config }, service: r.svc, sandbox: r.sb, owner: r.owner, proposals: r.proposals, host, hostStore: store, now: () => T0 });
+  const p = await admin.propose("setup");
+  await admin.confirm(r.take(p.proposalId));
+  const kept = (mem as { opId: string; state: string }[]);
+  assert.ok(kept.some((e) => e.opId === many[0]!.opId), "the running entry is kept");
+  assert.ok(kept.length <= 52);
+});
+
+// ---- PR #147 review, finding 7: every validation run's cleanup is covered, and the evidence is shared -----------------------------
+
+const check = (out: { checks: { id: string; result: string; detail: string }[] }, id: string) => out.checks.find((c) => c.id === id)!;
+
+test("smoke: an unverified cleanup of the FINAL cleanup run fails the validation, and the main service sees it (exec paused, enable blocked)", async () => {
+  const l = scriptedLauncher({ cleanupTreeGone: false, reapGone: false });
+  const s = smokeRig(l);
+  const out = await s.run();
+  assert.equal(out.passed, false);
+  assert.equal(check(out, "no_cleanup_quarantine").result, "fail");
+  const { ledgerQuarantine } = await import("../src/workspace/ledger.ts");
+  const seen = ledgerQuarantine(join(s.stateDir, "validation-runs"));
+  assert.equal(seen.length, 1, "the main service's view of the validation ledger names the run");
+  const main = workspaceService({ activation: { state: "enabled", config: s.r.config }, sandbox: l, stateDir: mkdtempSync(join(tmpdir(), "orbit-wsmain-")), proposals: s.r.proposals, foreignQuarantine: () => ledgerQuarantine(join(s.stateDir, "validation-runs")) });
+  assert.deepEqual(main.quarantined(), seen);
+  await assert.rejects(main.tools.find((t) => t.name === "exec_start")!.run({ workspace: "alpha", argv: ["true"] }), /paused/);
+  assert.match(enableBlockers({ configured: true, sandboxState: "supported", sandboxPolicy: "S", policyHash: "P", validationIdentity: "W", quarantined: main.quarantined(), validation: passed(), now: T0 }).join(), /not confirmed gone/);
+});
+
+test("smoke: the launcher's direct wall-clock run is recorded; an unverified cleanup of it fails the validation and is shared", async () => {
+  const l = scriptedLauncher({ timeoutTreeGone: false, reapGone: false });
+  const s = smokeRig(l);
+  const out = await s.run();
+  assert.equal(check(out, "timeout_enforced").result, "fail");
+  assert.equal(check(out, "no_cleanup_quarantine").result, "fail");
+  const { ledgerQuarantine } = await import("../src/workspace/ledger.ts");
+  assert.equal(ledgerQuarantine(join(s.stateDir, "validation-runs")).length, 1);
+});
+
+test("smoke: a later reap that finds the tree gone lifts it (positive evidence only)", async () => {
+  const l = scriptedLauncher({ cleanupTreeGone: false, reapGone: true });
+  const s = smokeRig(l);
+  const out = await s.run();
+  assert.equal(check(out, "no_cleanup_quarantine").result, "pass", check(out, "no_cleanup_quarantine").detail);
+  assert.equal(out.passed, true);
+});
+
+test("smoke: an unverified cleanup in ORBIT's main ledger pauses the validation's commands and fails it", async () => {
+  const s = smokeRig(scriptedLauncher());
+  const out = await s.run(() => ["ws-00000000000000aa"]);
+  assert.equal(out.passed, false);
+  assert.equal(check(out, "exec_confirmed").result, "fail");
+  assert.match(check(out, "no_cleanup_quarantine").detail, /ws-00000000000000aa/);
+});
+
+test("validate: refused (no proposal) while any cleanup is unverified", async () => {
+  const q = rig();
+  q.svc.ledger.put({ opId: "ws-00000000000000f2", proposalId: "x", kind: "exec", workspace: "alpha", digest: "d", state: "completed", createdAt: "t", updatedAt: "t", events: [{ at: "t", state: "running" }], summary: "s", treeGone: false });
+  await assert.rejects(q.propose("validate"), /not confirmed gone/);
+});
+
+test("a validation interrupted by a restart: its in-flight runs count as unverified until the startup recovery verifies them", async () => {
+  const { ledgerQuarantine, opLedger } = await import("../src/workspace/ledger.ts");
+  const dir = mkdtempSync(join(tmpdir(), "orbit-wsvr-"));
+  const led = opLedger(dir);
+  led.put({ opId: "ws-00000000000000b1", proposalId: "v", kind: "exec", workspace: VALIDATION_WORKSPACE, digest: "-", state: "running", createdAt: "t", updatedAt: "t", events: [{ at: "t", state: "accepted" }, { at: "t", state: "running" }], summary: "s" });
+  assert.deepEqual(ledgerQuarantine(dir, { inFlight: false }), [], "while a validation runs in this process, its live runs are its own business");
+  assert.deepEqual(ledgerQuarantine(dir, { inFlight: true }), ["ws-00000000000000b1"]);
+  const r = wsRig();
+  r.config.workspaces.push(makeWorkspace(r.base, VALIDATION_WORKSPACE));
+  const rec = workspaceService({ activation: { state: "enabled", config: r.config }, sandbox: scriptedLauncher(), stateDir: dir, proposals: r.proposals, active: () => false });
+  await rec.recover();
+  assert.deepEqual(ledgerQuarantine(dir, { inFlight: true }), [], "recovery reaped it and recorded the evidence");
+  writeFileSync(join(dir, "ledger.json"), "{broken");
+  assert.deepEqual(ledgerQuarantine(dir), ["validation-ledger-unreadable"], "an unreadable ledger is never 'clean'");
+});
+
+// ---- PR #147 review, finding 6: model-controlled display fields are escaped consistently --------------------------------------
+
+test("exec card: the working directory is escaped like argv (bidi, C1, U+2028/2029), while the run gets the exact text", async () => {
+  const r = wsRig();
+  const nasty = "d\u202Eir\u0085x\u2028y\u2029z\u2066";
+  const cwd = JSON.parse(`"${nasty}"`) as string;
+  mkdirSync(join(r.a.root, cwd));
+  const p = await r.call("exec_start", { workspace: "alpha", argv: ["pwd"], cwd });
+  const card = r.proposal(p.value.proposalId);
+  const shown = card.display["working directory"]!;
+  assert.equal(shown, "/workspace/d⟨U+202E⟩ir⟨U+0085⟩x⟨U+2028⟩y⟨U+2029⟩z⟨U+2066⟩");
+  assert.doesNotMatch(Object.values(card.display).join("\n") + card.summary, /[\u0080-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/);
+  const out = await r.svc.confirm(r.proposals.take(p.value.proposalId) as never);
+  assert.equal(out.code, 202);
+  await tick();
+  assert.deepEqual(r.sandbox.runs[0]!.spec.cwd, [cwd], "execution gets the exact directory name, not its display form");
+  r.sandbox.runs[0]!.finish(0);
+  await r.svc.idle();
 });

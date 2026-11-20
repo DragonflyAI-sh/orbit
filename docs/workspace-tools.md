@@ -51,9 +51,29 @@ Rai: POST /chat/proposals/<id>/confirm {digest} ── owner (workspace.confirm)
      `"preActivationChecklist": "workspace-tools-host-setup-v2"` (both written by the host setup, section 9). ORBIT must also not be
      running as root, the platform must be Linux with `/proc/self/fd`, and ORBIT must have a state directory.
   2. **Validation:** a bounded synthetic validation passed under the production sandbox for the **current** policy hash, sandbox
-     implementation and validation workspace, within the last 24 hours (`smoke.ts`).
-  3. **Owner switch:** Rai confirmed `enable` on a card; `$STATE_DIRECTORY/workspace/activation.json` says `enabled`. A missing,
-     unreadable or malformed file is **off**.
+     implementation and validation workspace, at most 24 hours old when enable is confirmed (`smoke.ts`), and not invalidated since.
+  3. **Owner switch:** Rai confirmed `enable` on a card; `$STATE_DIRECTORY/workspace/activation.json` says `enabled` **and is bound**
+     to that validation: its id and finish time, and the policy hash, sandbox implementation and validation-workspace identity it
+     proved. A missing, unreadable or malformed file is **off**, and so is an `enabled` record without a complete binding.
+
+  **The switch is re-checked against the running configuration every time it is read** (when the tool list is built, at every tool
+  dispatch, at every confirmation and when a queued command starts; `activation.ts`). It reads as **off** unless the validation file
+  still holds that same validation, still `passed` and not invalidated, and the running policy hash, sandbox implementation and
+  validation workspace all equal the bound ones. A definite mismatch (the workspaces file was edited, bubblewrap changed, the
+  validation was replaced or invalidated, the host permission is gone) also **writes the switch off** with the reason, so reverting the
+  change later never brings it back. While the startup self-test has not finished, the sandbox implementation is not known yet: the
+  switch reads as off for that moment without being reset. Startup logs `workspace-owner: <enabled|off> (<why>)` once the self-test is
+  done.
+
+  **Expiry.** A validation is evidence for **enable** for 24 hours after it finished (the enable card and its confirmation both refuse
+  an older one). Once enabled, the switch does **not** expire by age: it stays on exactly as long as everything it is bound to is
+  unchanged, across restarts too. Any change turns it off, and turning it on again needs a validation of the new state (at most 24 hours
+  old) and a new enable confirmation.
+
+  **Host changes reset it.** Confirming `setup` or `revoke` turns the switch off first (and drains queued and running commands) and
+  invalidates the latest validation, before anything is sent to the root helper. A start with the host permission absent (revoked by
+  the helper or by hand, or an invalid configuration) resets a recorded `enabled` to off and invalidates the validation. So "revoke, then
+  setup again" always leaves the tools **off** until a new validation passes and Rai confirms enable.
 
   Without layer 1, `selectWorkspace` returns a service that offers **no tools** and refuses every confirmation. With layer 1 but the
   switch off, the service loads (status, recovery, validation and disable need it) but still offers the model **no workspace tool**
@@ -140,7 +160,11 @@ The model's argv appears only after `--`, as the command to run inside the sandb
   exists, and removes the cgroup. `treeGone` is true only on that evidence. **A launched run without it pauses exec**
   (`cleanup_unverified`): no command starts anywhere until a later reap (one re-check two seconds later, then at every ORBIT start)
   finds that run's cgroup gone or empty and records `cleanupVerifiedAt`. If ORBIT itself dies, `--die-with-parent` tears the
-  namespace down, and recovery at the next start kills whatever is left in the cgroups of runs that were in flight.
+  namespace down, and recovery at the next start kills whatever is left in the cgroups of runs that were in flight. The validation
+  runs (`validation-runs/ledger.json`, including the launcher's direct wall-clock run and the final cleanup run) count the same: the
+  main service reads that ledger (read-only), so an unverified cleanup there pauses exec, blocks validate and enable, and fails the
+  validation's own `no_cleanup_quarantine` check, which is judged after the last run. Recovery at a start covers that ledger too; an
+  unreadable one counts as unverified.
 * **Run ids and paths.** Run ids are ORBIT's own (`ws-` + 16 hex; `probe-` + 16 hex). A ledger entry with any other id makes the whole
   ledger untrusted (tools off, file untouched). Every run directory and cgroup path is checked to be a direct child of its parent
   before it is created, killed or removed, so a tampered ledger cannot aim cleanup anywhere else.
@@ -264,8 +288,8 @@ All of these use synthetic temporary directories. No production data or host is 
 | `test/workspace-config.test.ts` | default off and the host acknowledgement; root rules; exec requirements; identity binding; fixed bubblewrap argv; self-test verdicts (including capabilities, no_new_privs, cgroup namespace, nested userns) | yes |
 | `test/workspace-server.test.ts` | through the real server: model call, card, owner/digest/single use, results on the card | yes |
 | `test/workspace-review.test.ts` | the independent review's startup-race regressions (R1-R9) and one regression test per fixed finding WS-R1 to WS-R14, driving the production launcher with stub binaries | yes (gating and supervision only, **not** isolation evidence) |
-| `test/workspace-activation.test.ts` | owner switch (default off, corrupt is off); enable gating on a passing validation for the current policy; replay/tamper/stale refusal of activation cards; disable reporting (exit observed vs not); setup dispatched exactly as the plan key on the card; escaped helper text; preflight read-only and secret-free; the smoke harness against a well-behaved and a leaky scripted launcher; run-parent cgroup containment | yes (logic only, scripted launchers; **not** isolation evidence) |
-| `test/ops-ws.test.ts` | the host-setup helper against a fake host (`docs/orbit-ops-ws.md`) | yes (no host was changed) |
+| `test/workspace-activation.test.ts` | owner switch (default off, corrupt is off, an unbound `enabled` is off); enable gating on a passing validation for the current policy; the binding (policy, sandbox, validation-workspace changes while enabled, a missing/replaced/failed/invalidated validation, restarts, age), revoke then setup, permission lost at a start, enable races; replay/tamper/stale refusal of activation cards; disable reporting (exit observed vs not); setup dispatched exactly as the plan key on the card; dispatch/refresh races and restart (reported exactly once); escaped helper text and cwd; preflight read-only and secret-free; the smoke harness against a well-behaved and a leaky scripted launcher, unverified cleanups of the last and the direct runs, shared quarantine; run-parent cgroup containment | yes (logic only, scripted launchers; **not** isolation evidence) |
+| `test/ops-ws.test.ts` | the host-setup helper against a fake host (`docs/orbit-ops-ws.md`): concurrent and duplicate dispatch, crash recovery of reservations, replay after pruning, time budgets, partial-image recovery, the complete command surface | yes (no host was changed) |
 | `test/workspace-sandbox.test.ts` | 11 **real sandbox** tests and a requirement gate | **SKIPPED**: the runner is root and has no delegated cgroup v2. **OS isolation is unverified here** |
 
 The real isolation evidence is the **on-host validation** (section 9, step 4): it runs under the production sandbox where ORBIT runs,
@@ -349,8 +373,10 @@ Confirm.
   sudo sed -i '/^Environment=ORBIT_WORKSPACE_TOOLS=/d' /etc/systemd/system/orbit.service.d/60-orbit-workspace.conf
   sudo systemctl daemon-reload && sudo systemctl restart orbit.service
   ```
-  (Or confirm `revoke` on a card: the helper does exactly this.) The owner switch is also a file: writing
-  `{"schema":1,"mode":"off"}` to `/var/lib/private/orbit/workspace/activation.json` and restarting ORBIT turns the tools off.
+  (Or confirm `revoke` on a card: the switch goes off at once in ORBIT, then the helper does exactly this.) At the next start ORBIT
+  also resets its recorded switch to off and invalidates the validation, so setting the host up again never re-enables anything. The
+  owner switch is also a file: writing `{"schema":1,"mode":"off"}` to `/var/lib/private/orbit/workspace/activation.json` turns the tools
+  off (it is read on every use).
 * **ORBIT does not start after the setup** (not expected): `sudo rm /etc/systemd/system/orbit.service.d/60-orbit-workspace.conf &&
   sudo systemctl daemon-reload && sudo systemctl restart orbit.service`. The `orbit` user stays (ORBIT keeps running as it).
 * **`cleanup_unverified`** (exec paused): restart ORBIT; recovery re-reaps and lifts the pause only if the run's cgroup is gone or
@@ -362,7 +388,8 @@ Confirm.
 
 Installing (and updating) the root helper; any item the plan lists under "needs separate operator approval" (AppArmor user-namespace
 policy for bubblewrap, cgroup v2 unified hierarchy, systemd ≥ 254, unprivileged user namespaces); choosing other workspaces or limits
-(edit `/etc/orbit/workspaces.json` by hand, then restart ORBIT and validate again: a changed policy invalidates the validation);
+(edit `/etc/orbit/workspaces.json` by hand, then restart ORBIT: the switch turns itself off because the policy changed; validate
+and enable again);
 deleting workspace images or the `orbit` user.
 
 ## 10. Remaining risks and limitations
@@ -390,3 +417,44 @@ deleting workspace images or the `orbit` user.
 * **Held proposals live in memory.** A restart loses them (`410`).
 * **Mount and option checks** read `/proc/self/mountinfo` from ORBIT's namespace.
 * The card is the review surface. A 24,000-character card is long, and Rai must read it.
+
+## 11. Implemented surface, gates and what is still missing
+
+This is what the code does today. Code completion is not host readiness: nothing below has been run on the production host.
+
+**Tools (model-facing, owner-only, `workspace` policy port).** `workspace_list`, `fs_list`, `fs_stat`, `fs_read`, `fs_search` (run at
+once, read-only); `fs_write`, `fs_patch`, `exec_start` (only **propose**: each needs Rai's confirmation on its own card); `exec_status`,
+`exec_cancel` (the owner's own ledger). There is no delete tool, no network, no vault access and no generic shell. They are offered only
+when all three activation layers hold (section 2), and refused at dispatch otherwise.
+
+**Administration tools (owner-only).** `workspace_preflight` and `workspace_admin_status` (read-only), `workspace_admin_propose` with
+exactly `setup`, `validate`, `enable`, `disable` or `revoke` (each only proposes a card). Offered once the host permits the tools or the
+`orbit-ops-ws` socket exists.
+
+**Roots and limits.** Only operator-configured workspaces (`/etc/orbit/workspaces.json`; the host setup writes `scratch` at
+`/srv/orbit-workspaces/scratch`, 1 GiB, and `orbit-validation`, 64 MiB). A root must exist, be a directory owned by ORBIT's user with
+mode 0700, not be or pass through a symbolic link, and not be or lie under a forbidden or protected path (ORBIT's state, credentials,
+the vault, `/opt/orbit`, `/etc/credstore` and the system trees in `config.ts`). An exec root must be its own `nosuid,nodev` mount no
+larger than `workspaceBytes`. Paths: relative, at most 32 components, 255 bytes each, 1024 characters. Reads: 16 KiB pages, files up to
+16 MiB versioned; search: 2,000 entries, 3 s, 100 results; writes: 20,000 bytes; patches: 8 edits. Command defaults (operator-settable
+within bounds): wall 300 s, CPU 120 s, memory 1 GiB, 64 processes, files 64 MiB, 256 open files, output 1 MiB per stream, `/tmp`
+64 MiB, one run at a time (at most 4).
+
+**Approvals.** Every write, patch and command: one card, owner-confirmed, digest-bound, single use, 10-minute expiry, every
+precondition re-checked at run time (section 6). Every activation operation: its own card. Installing the root helper: an operator, as
+root, after Rai's separate approval.
+
+**Gates, in order, each separately confirmed** (section 9 has the exact commands):
+
+1. Install `orbit-ops-ws` (operator, root, `install-ws.sh --approved-by-owner`). Changes no ORBIT setting.
+2. `workspace_preflight` (read-only). Stop on any "needs separate operator approval" item.
+3. `setup` card → Confirm. The root helper applies exactly the plan on the card; ORBIT restarts; the tools stay **off**.
+4. `validate` card → Confirm. The bounded smoke suite runs under the production sandbox; it must pass (every cleanup verified).
+5. `enable` card → Confirm (within 24 hours of the validation). The switch is bound to that validation.
+6. `disable` card at any time (off at once), or `revoke` card (off at once, then the host permission is removed; validate and enable
+   again after any new setup).
+
+**Missing or unverified (needs work or a separate decision):** OS isolation on the production host (the real-sandbox suite has never run
+here: section 8); the units under their own sandboxes and the real outputs of the host commands (`docs/orbit-ops-ws.md`, Known
+limitations); a seccomp profile; host-wide prerequisites the helper never changes (cgroup v2 with `memory pids cpu`, systemd 254 or
+newer, unprivileged user namespaces, an AppArmor decision where `kernel.apparmor_restrict_unprivileged_userns=1`).

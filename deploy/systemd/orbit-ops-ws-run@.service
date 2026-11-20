@@ -12,8 +12,12 @@ Description=ORBIT workspace host-setup operation %i (ws_setup or ws_revoke)
 Type=oneshot
 # "run" mode re-runs itself under flock on /opt/orbit/state/deploy.lock (as tier 2 does), because it restarts orbit.service.
 ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/ws-run.ts %i run
-# Lock wait (300 s) + package unit (up to 1800 s) + mkfs/mount + restart + 60 s health check, with room to spare.
-TimeoutStartSec=2700
+# Deploy-lock wait (300 s) + the runner's own budget (RUN_BUDGET_MS, 4200 s: the worst case of the largest plan, i.e. the package unit's
+# 1900 s, two workspace filesystems at up to about 760 s each, the restart and both /status waits; src/ops/ws-core.ts) + 120 s for
+# node to start. The runner never starts a step that could outlive its budget, so systemd does not kill it in the middle of one. If
+# it is killed anyway (an operator, a reboot), a half-made image it created is recorded and replaced by the next setup. A test checks
+# that this value covers the budget.
+TimeoutStartSec=4620
 # A small, bounded process.
 MemoryMax=256M
 TasksMax=64

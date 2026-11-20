@@ -174,3 +174,55 @@ test("through the server: an activation card (ws_validate) is owner-only, digest
   assert.equal(after.live.state, "passed");
   assert.equal(owner.mode(), "off", "validation never enables");
 });
+
+test("through the server: workspace tools become discoverable only after validate + enable, and disappear when the binding breaks", async () => {
+  const { ownerActivation } = await import("../src/workspace/activation.ts");
+  const { workspaceAdmin } = await import("../src/workspace/admin.ts");
+  const { SMOKE_STEPS, VALIDATION_WORKSPACE } = await import("../src/workspace/smoke.ts");
+  const base = mkdtempSync(join(tmpdir(), "orbit-wssrv-gate-"));
+  const ws = makeWorkspace(base, "alpha");
+  const val = makeWorkspace(base, VALIDATION_WORKSPACE);
+  const config: WorkspaceConfig = { workspaces: [ws, val], sandbox: { bwrap: "/usr/bin/bwrap", prlimit: "/usr/bin/prlimit", shell: "/bin/sh", runtime: ["/usr"], cgroupParent: "/sys/fs/cgroup/t", limits: DEFAULT_LIMITS, maxConcurrentRuns: 1 }, policyHash: "sha256:" + "ef".repeat(32) };
+  const sandbox = fakeSandbox();
+  const running = { policyHash: config.policyHash };
+  const owner = ownerActivation(join(base, "owner"), () => ({ policyHash: running.policyHash, sandboxPolicy: sandbox.policyId(), sandboxState: sandbox.status().state, validationIdentity: val.identity }));
+  let admin: ReturnType<typeof workspaceAdmin> | undefined;
+  const script: { steps: ReturnType<typeof say>[] } = { steps: [say("ok")] };
+  let i = 0;
+  const model = scripted(() => script.steps[Math.min(i++, script.steps.length - 1)]!);
+  const h = rig({
+    model,
+    extra: ({ proposals }) => {
+      const svc = workspaceService({ activation: { state: "enabled", config }, sandbox, stateDir: join(base, "state"), proposals, active: () => owner.mode() === "enabled" });
+      admin = workspaceAdmin({ env: {}, activation: { state: "enabled", config }, service: svc, sandbox, owner, stateDir: join(base, "state"), proposals, smoke: async () => ({ passed: true, workspaceIdentity: val.identity, checks: SMOKE_STEPS.map((s) => ({ id: s.id, title: s.title, required: s.required, result: "pass" as const, detail: "scripted" })) }) });
+      return { workspace: svc, workspaceAdmin: admin };
+    },
+  });
+  const t = await h.create();
+  const turn = async (steps: ReturnType<typeof say>[]) => {
+    script.steps = steps;
+    i = 0;
+    model.seen.length = 0;
+    await h.send(t.id, "please");
+    return model.seen[0]!.tools;
+  };
+  const confirmLatest = async () => {
+    const cards = await cardsOf(h as never, t.id);
+    const card = cards.at(-1);
+    return h.api(`/chat/proposals/${card.id}/confirm`, "POST", { digest: card.digest });
+  };
+  const fsTools = (names: string[]) => names.filter((n) => n.startsWith("fs_") || n.startsWith("exec_") || n === "workspace_list");
+  assert.deepEqual(fsTools(await turn([{ text: "", calls: [call("workspace_admin_propose", { action: "enable" })] }, say("refused")])), [], "nothing before validation; enable is refused");
+  assert.equal((await cardsOf(h as never, t.id)).length, 0, "no enable card without a validation");
+  await turn([{ text: "", calls: [call("workspace_admin_propose", { action: "validate" })] }, say("proposed")]);
+  assert.equal((await confirmLatest()).status, 202);
+  await admin!.validating();
+  assert.deepEqual(fsTools(await turn([{ text: "", calls: [call("workspace_admin_propose", { action: "enable" })] }, say("proposed")])), [], "a passed validation alone offers nothing");
+  assert.equal((await confirmLatest()).status, 200);
+  const on = await turn([say("ok")]);
+  assert.deepEqual(fsTools(on).sort(), ["exec_cancel", "exec_start", "exec_status", "fs_list", "fs_patch", "fs_read", "fs_search", "fs_stat", "fs_write", "workspace_list"]);
+  // The operator edits the workspaces file and ORBIT restarts with a different policy: off, and no tool is offered.
+  running.policyHash = "sha256:" + "12".repeat(32);
+  assert.deepEqual(fsTools(await turn([say("ok")])), []);
+  assert.equal(owner.mode(), "off");
+});

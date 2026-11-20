@@ -17,8 +17,16 @@ import {
   DROPIN_TEXT,
   WORKSPACES_FILE,
   WS_CONFIG,
+  RUN_BUDGET_MS,
+  claimSlot,
   computePlan,
+  createRecord,
+  currentSlot,
   hostFs,
+  readImageMarker,
+  registerHas,
+  registerPath,
+  setupWorstMs,
   imagePath,
   loadRecord,
   mountPoint,
@@ -34,7 +42,8 @@ import {
 } from "../src/ops/ws-core.ts";
 import { handle, type WsAudit } from "../src/ops/ws-helper.ts";
 import { WS_ACTIONS, WS_MAX_REQUEST_BYTES, WS_MAX_RESPONSE_BYTES, opIdFor, parseWsRequest, planKeyOf, type PlanStep, type WsRecord } from "../src/ops/ws-protocol.ts";
-import { runOperation } from "../src/ops/ws-run.ts";
+import { lockedRerun, runOperation } from "../src/ops/ws-run.ts";
+import * as WS_CORE from "../src/ops/ws-core.ts";
 import { wsHostClient } from "../src/ops-ws-client.ts";
 
 const SHA_A = "a".repeat(40);
@@ -497,7 +506,7 @@ test("partial host: bwrap, the user and ext4 images exist; existing images are n
   assert.ok(readFileSync(w.p(imagePath("scratch"))).equals(before), "image bytes unchanged");
 });
 
-test("an existing image without ext4 is blocked: ws_setup is refused before anything is recorded or run", async () => {
+test("an existing image without ext4 is blocked: ws_setup is refused before anything is run (the id is recorded as rejected)", async () => {
   const w = world({ bwrap: "ok" });
   w.mkdir("/var/lib/orbit-workspaces", 0o700);
   w.put(imagePath("scratch"), "not a filesystem", 0o600);
@@ -512,9 +521,9 @@ test("an existing image without ext4 is blocked: ws_setup is refused before anyt
   assert.equal(out.ok, false);
   assert.equal(out.error!.code, "plan_blocked");
   assert.match(out.error!.message, /storage_scratch/);
-  assert.equal(loadRecord(w.cfg, OP), undefined);
+  assert.equal(loadRecord(w.cfg, OP)!.state, "rejected");
   assert.deepEqual(mutating(w), []);
-  assert.ok(!existsSync(join(w.cfg.stateDir, "active")), "the slot is released");
+  assert.equal((await status(w)).open, null, "the slot is free");
   assert.equal(readFileSync(w.p(imagePath("scratch")), "utf8"), "not a filesystem");
 });
 
@@ -592,7 +601,7 @@ test("the workspaces file needs ORBIT's control group: unreadable while ORBIT is
 
 // ---------------------------------------------------------------- the plan key binds the request
 
-test("plan_changed at the front: a key that does not match the current plan is refused with nothing recorded", async () => {
+test("plan_changed at the front: a key that does not match the current plan is refused, nothing runs, and that id can never run later", async () => {
   const w = world();
   const s = await status(w);
   w.put("/usr/bin/bwrap", "#fake", 0o755); // the host changed after the card was shown
@@ -600,11 +609,17 @@ test("plan_changed at the front: a key that does not match the current plan is r
   const out = await send(w, { action: "ws_setup", opId: OP, planKey: s.plan.planKey });
   assert.equal(out.ok, false);
   assert.equal(out.error!.code, "plan_changed");
-  assert.equal(loadRecord(w.cfg, OP), undefined);
+  assert.equal(loadRecord(w.cfg, OP)!.state, "rejected");
   assert.deepEqual(mutating(w), [], "no runner was started");
-  assert.ok(!existsSync(join(w.cfg.stateDir, "active")));
-  const wrong = await send(w, { action: "ws_setup", opId: OP, planKey: "0".repeat(24) });
+  assert.equal((await status(w)).open, null);
+  const wrong = await send(w, { action: "ws_setup", opId: OP2, planKey: "0".repeat(24) });
   assert.equal(wrong.error!.code, "plan_changed");
+  // A duplicate of the refused request, even with the now-current key, is a replay of the refusal: it never runs.
+  const dup = await send(w, { action: "ws_setup", opId: OP, planKey: (await status(w)).plan.planKey });
+  assert.equal(dup.data.replayed, true);
+  assert.equal(dup.data.accepted, false);
+  assert.equal(dup.data.operation.state, "rejected");
+  assert.deepEqual(mutating(w), [], "still nothing started");
 });
 
 test("plan_changed at the runner: the host changed between acceptance and execution, so nothing is changed", async () => {
@@ -652,7 +667,7 @@ test("one operation at a time: a second request is busy while the first runs; a 
   const busy = await send(w, { action: "ws_revoke", opId: OP2 });
   assert.equal(busy.ok, false);
   assert.equal(busy.error!.code, "busy");
-  assert.equal(loadRecord(w.cfg, OP2), undefined);
+  assert.equal(loadRecord(w.cfg, OP2)!.state, "rejected", "the refused id is recorded as refused (it can never run later)");
   // the runner vanished: after the stale window the record is interrupted (never success) and the slot can be taken
   w.host.runnerActive = false;
   w.advance(w.cfg.staleAfterMs + 1000);
@@ -660,8 +675,8 @@ test("one operation at a time: a second request is busy while the first runs; a 
   assert.equal(st.data.operation.state, "interrupted");
   assert.match(st.data.operation.summary, /outcome is unknown/);
   assert.equal(st.data.operation.verification.checked, false);
-  assert.ok(!existsSync(join(w.cfg.stateDir, "active")));
-  const next = await send(w, { action: "ws_revoke", opId: OP2 });
+  assert.equal((await status(w)).open, null);
+  const next = await send(w, { action: "ws_revoke", opId: OP3 });
   assert.equal(next.ok, true);
   assert.equal(next.data.operation.state, "accepted");
   // an interrupted record is never run later
@@ -702,7 +717,7 @@ test("the runner stops at the first failing step, reports it, runs nothing after
   assert.notEqual(rec.state, "verified");
 });
 
-test("a failed mkfs leaves the new image in place (never deleted) and the next plan blocks on it", async () => {
+test("a failed mkfs leaves the new image in place; the next setup replaces exactly that partial image and nothing else", async () => {
   const w = world({ bwrap: "ok" });
   w.host.fail = (f, a) => (f === BIN.mkfs && a.at(-1) === imagePath("orbit-validation") ? fail(1, "mkfs.ext4: No space left on device") : undefined);
   const rec = await setupAll(w);
@@ -714,8 +729,13 @@ test("a failed mkfs leaves the new image in place (never deleted) and the next p
   assert.ok(w.host.mounts.has(mountPoint("scratch")));
   w.host.fail = undefined;
   const s = await status(w);
-  assert.equal(stepOf(s.plan.steps, "storage_orbit-validation").state, "blocked");
+  const st = stepOf(s.plan.steps, "storage_orbit-validation");
+  assert.equal(st.state, "todo");
+  assert.match(st.action, /^remove the partial image \/var\/lib\/orbit-workspaces\/orbit-validation\.img left by an interrupted earlier setup/);
   assert.equal(stepOf(s.plan.steps, "storage_scratch").state, "done");
+  const again = await setupAll(w, OP2);
+  assert.equal(again.state, "verified", again.summary);
+  assert.ok(w.host.mounts.has(mountPoint("orbit-validation")));
 });
 
 test("mkfs is never run on an image the operation did not create, even if the image appears after the plan check", async () => {
@@ -1059,4 +1079,226 @@ test("contract: a real ws_status answer parses in ORBIT's admin module with ever
   assert.deepEqual(plan.steps.filter((x) => x.state === "todo").map((x) => x.action), s.plan.steps.filter((x: PlanStep) => x.state === "todo").map((x: PlanStep) => x.action));
   assert.ok(plan.steps.some((x) => x.id === "service_dropin" && x.state === "todo"));
   assert.ok(plan.blockers.some((b) => b.id === "apparmor_userns"), JSON.stringify(plan.blockers));
+});
+
+// ---------------------------------------------------------------- PR #147 review, finding 2: atomic, durable reservation
+
+test("concurrent ws_setup and ws_revoke: exactly one is accepted and exactly one runner is started", async () => {
+  for (let i = 0; i < 5; i++) {
+    const w = world();
+    const s = await status(w);
+    w.calls.length = 0;
+    const [a, b] = await Promise.all([send(w, { action: "ws_setup", opId: OP, planKey: s.plan.planKey }), send(w, { action: "ws_revoke", opId: OP2 })]);
+    const accepted = [a, b].filter((o) => o.ok && o.data.operation.state === "accepted");
+    const busy = [a, b].filter((o) => !o.ok && o.error!.code === "busy");
+    assert.equal(accepted.length, 1, JSON.stringify([a, b]));
+    assert.equal(busy.length, 1, JSON.stringify([a, b]));
+    assert.equal(w.calls.filter((c) => c.args[0] === "start" && c.args[1] === "--no-block").length, 1, "one runner");
+  }
+});
+
+test("duplicate dispatch of one opId, concurrently and later: one record, one runner, the others are replays", async () => {
+  const w = world();
+  const s = await status(w);
+  w.calls.length = 0;
+  const outs = await Promise.all([1, 2, 3].map(() => send(w, { action: "ws_setup", opId: OP, planKey: s.plan.planKey })));
+  assert.equal(outs.filter((o) => o.ok && !o.data.replayed).length, 1, JSON.stringify(outs));
+  assert.equal(outs.filter((o) => o.ok && o.data.replayed).length, 2);
+  assert.equal(w.calls.filter((c) => c.args[0] === "start" && c.args[1] === "--no-block").length, 1);
+  assert.equal(loadRecord(w.cfg, OP)!.state, "accepted", "the replays never overwrote the live record");
+  const later = await send(w, { action: "ws_setup", opId: OP, planKey: s.plan.planKey });
+  assert.equal(later.data.replayed, true);
+});
+
+test("crash recovery: a reservation left by a stopped front is busy while it could still be alive, then settled as interrupted (nothing ran)", async () => {
+  const w = world();
+  mkdirSync(join(w.cfg.stateDir, "ops"), { recursive: true });
+  const at = w.env.now().toISOString();
+  assert.ok(createRecord(w.cfg, { opId: OP, action: "ws_setup", state: "reserved", acceptedAt: at, updatedAt: at, steps: [] }, w.env));
+  assert.ok(claimSlot(w.cfg, currentSlot(w.cfg).gen + 1, OP, at));
+  assert.equal((await send(w, { action: "ws_revoke", opId: OP2 })).error!.code, "busy");
+  w.advance(w.cfg.reserveStaleMs + 1);
+  const next = await send(w, { action: "ws_revoke", opId: OP3 });
+  assert.equal(next.ok, true, JSON.stringify(next));
+  assert.equal(next.data.operation.state, "accepted");
+  const dead = loadRecord(w.cfg, OP)!;
+  assert.equal(dead.state, "interrupted");
+  assert.match(dead.summary!, /Nothing was done/);
+  assert.equal((await run(w, OP)).state, "interrupted", "a settled reservation never runs");
+});
+
+test("a slot whose holder has no record (edited by hand) is busy while young and never breaks a live holder", async () => {
+  const w = world();
+  mkdirSync(join(w.cfg.stateDir, "slots"), { recursive: true });
+  writeFileSync(join(w.cfg.stateDir, "slots", "000000000007"), `${"f".repeat(40)}\n${w.env.now().toISOString()}\n`);
+  assert.equal((await send(w, { action: "ws_revoke", opId: OP2 })).error!.code, "busy");
+  w.advance(w.cfg.reserveStaleMs + 1);
+  const out = await send(w, { action: "ws_revoke", opId: OP3 });
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal(currentSlot(w.cfg).gen, 8);
+  assert.equal(currentSlot(w.cfg).opId, OP3);
+  assert.equal(claimSlot(w.cfg, 8, OP2, w.env.now().toISOString()), false, "a generation can be taken exactly once");
+});
+
+// ---------------------------------------------------------------- PR #147 review, finding 3: replay protection survives pruning
+
+test("replay after pruning and restart: an old accepted opId is answered as a replay and never runs again", async () => {
+  const w = world();
+  w.cfg.keepRecords = 2;
+  const ids = ["4", "5", "6", "7"].map((d) => d.repeat(40));
+  // ws_revoke on a host without the drop-in: accepted, then the runner finishes with no_change (terminal).
+  for (const id of ids) {
+    const out = await send(w, { action: "ws_revoke", opId: id });
+    assert.equal(out.ok, true, JSON.stringify(out));
+    assert.equal((await run(w, id)).state, "no_change");
+  }
+  // One more acceptance triggers pruning.
+  await send(w, { action: "ws_revoke", opId: OP });
+  await run(w, OP);
+  assert.equal(loadRecord(w.cfg, ids[0]!), undefined, "the oldest record was pruned");
+  assert.ok(registerHas(w.cfg, ids[0]!), "its id is in the replay register");
+  // "Restart": every front is a fresh process; only the files carry state.
+  w.calls.length = 0;
+  const again = await send(w, { action: "ws_revoke", opId: ids[0]! });
+  assert.equal(again.ok, true);
+  assert.equal(again.data.replayed, true);
+  assert.match(again.data.operation.summary, /used before/);
+  assert.equal(w.calls.filter((c) => c.args[0] === "start").length, 0, "no runner was started");
+  assert.equal(loadRecord(w.cfg, ids[0]!), undefined, "no new record was created for it");
+  assert.equal(w.fronts.at(-1)!.outcome, "replayed");
+});
+
+test("the replay register is bounded: when it is full, records are kept instead of pruned (protection never lapses)", async () => {
+  const w = world();
+  w.cfg.keepRecords = 1;
+  mkdirSync(w.cfg.stateDir, { recursive: true });
+  writeFileSync(registerPath(w.cfg), `${"x".repeat(4 * 1024 * 1024 - 10)}\n`);
+  for (const id of ["4".repeat(40), "5".repeat(40), "6".repeat(40)]) {
+    await send(w, { action: "ws_revoke", opId: id });
+    await run(w, id);
+  }
+  assert.ok(loadRecord(w.cfg, "4".repeat(40)), "kept: the register had no room");
+  assert.equal((await send(w, { action: "ws_revoke", opId: "4".repeat(40) })).data.replayed, true);
+});
+
+// ---------------------------------------------------------------- PR #147 review, finding 5: time bounds and partial images
+
+test("time bounds: the largest plan fits the runner's budget, and the runner unit's TimeoutStartSec covers lock wait + budget", () => {
+  const { planFromFacts } = WS_CORE;
+  // A fresh host whose two images are both partial leftovers: every step is to do, with the most operations.
+  const facts = {
+    storage: [
+      { id: "scratch", sizeBytes: 1, image: { kind: "file", uid: 0, gid: 0, mode: 0o600, size: 0, mtimeMs: 0, dev: 1, ino: 11 }, imageExt4: false, imageLabel: "", unitEnabled: "", marker: { path: imagePath("scratch"), dev: 1, ino: 11, opId: OP, at: "t" } },
+      { id: "orbit-validation", sizeBytes: 1, image: { kind: "file", uid: 0, gid: 0, mode: 0o600, size: 0, mtimeMs: 0, dev: 1, ino: 12 }, imageExt4: false, imageLabel: "", unitEnabled: "", marker: { path: imagePath("orbit-validation"), dev: 1, ino: 12, opId: OP, at: "t" } },
+    ],
+    orbit: { activeState: "active", mainPid: 1, needReload: "no", dropInPaths: [], controlGroup: CG, readable: true },
+    prlimit: { kind: "file", uid: 0, gid: 0, mode: 0o755, size: 1, mtimeMs: 0 },
+    cgroup2: true,
+    controllers: ["memory", "pids", "cpu"],
+    systemdVersion: 255,
+  } as never;
+  const plan = planFromFacts(facts);
+  const todo = plan.planned.filter((st: { state: string }) => st.state === "todo");
+  assert.equal(todo.length, plan.planned.length, "every step is to do");
+  assert.ok(todo.some((st: { ops: { k: string }[] }) => st.ops.some((o) => o.k === "discard_partial_image")));
+  const worst = setupWorstMs(todo);
+  assert.ok(worst <= RUN_BUDGET_MS, `worst case ${worst} ms exceeds the budget ${RUN_BUDGET_MS} ms`);
+  const unit = readFileSync(join(import.meta.dirname, "..", "deploy/systemd/orbit-ops-ws-run@.service"), "utf8");
+  const timeout = Number(/^TimeoutStartSec=([0-9]+)$/m.exec(unit)![1]);
+  assert.ok(timeout * 1000 >= WS_CONFIG.lockWaitSeconds * 1000 + RUN_BUDGET_MS + 60_000, `TimeoutStartSec=${timeout} does not cover lock wait + budget`);
+  assert.equal(WS_CONFIG.runBudgetMs, RUN_BUDGET_MS);
+  const pkg = readFileSync(join(import.meta.dirname, "..", "deploy/systemd/orbit-ops-ws-pkg@.service"), "utf8");
+  const pkgStart = Number(/^TimeoutStartSec=([0-9]+)$/m.exec(pkg)![1]);
+  const pkgStop = Number(/^TimeoutStopSec=([0-9]+)$/m.exec(pkg)![1]);
+  assert.ok((pkgStart + pkgStop) * 1000 <= WS_CORE.T.pkg, "the runner waits for the package unit at least as long as systemd lets it run and stop");
+  assert.ok(!/^RuntimeMaxSec=/m.test(unit), "no second, shorter limit");
+});
+
+test("a plan over the runner's budget is refused before any change", async () => {
+  const w = world();
+  await accept(w);
+  w.calls.length = 0;
+  w.cfg.runBudgetMs = 1000;
+  const rec = await run(w);
+  assert.equal(rec.state, "failed");
+  assert.equal(rec.code, "over_budget");
+  assert.deepEqual(mutating(w), []);
+});
+
+test("interrupted during mkfs: the half-made image is recorded, the next setup replaces exactly it and verifies", async () => {
+  const w = world({ bwrap: "ok" });
+  let hang!: () => void;
+  const origExec = w.env.exec;
+  w.env.exec = async (file, args, t, o) => {
+    if (file === BIN.mkfs && args.at(-1) === imagePath("scratch")) {
+      w.calls.push({ file, args });
+      return new Promise<never>(() => (hang = () => undefined)); // the runner is killed here: this never returns
+    }
+    return origExec(file, args, t, o);
+  };
+  await accept(w);
+  void run(w);
+  for (let i = 0; i < 50 && !hang; i++) await new Promise((r) => setImmediate(r));
+  assert.ok(hang, "the runner reached mkfs");
+  const marker = readImageMarker(w.cfg, "scratch")!;
+  assert.equal(marker.ino, statSync(w.p(imagePath("scratch"))).ino);
+  // The runner unit is gone (killed); after the stale window the record is interrupted.
+  w.env.exec = origExec;
+  w.host.runnerActive = false;
+  w.advance(w.cfg.staleAfterMs + 1000);
+  assert.equal((await send(w, { action: "op_status", opId: OP })).data.operation.state, "interrupted");
+  // An unrelated image elsewhere is never touched; the partial one is shown as replaced on the card.
+  const s = await status(w);
+  const st = stepOf(s.plan.steps, "storage_scratch");
+  assert.equal(st.state, "todo");
+  assert.match(st.action, new RegExp(`inode ${marker.ino}`));
+  const rec = await setupAll(w, OP2);
+  assert.equal(rec.state, "verified", rec.summary);
+  assert.equal(readImageMarker(w.cfg, "scratch"), undefined, "formatted: no longer partial");
+  assert.ok(w.host.mounts.has(mountPoint("scratch")));
+});
+
+test("partial-image recovery never deletes another file: a replaced inode, a mounted root, or a formatted image with a mount unit stay blocked", async () => {
+  // The recorded inode no longer matches (an operator put another file there).
+  const a = world({ bwrap: "ok" });
+  a.mkdir("/var/lib/orbit-workspaces", 0o700);
+  a.put(imagePath("scratch"), "operator data", 0o600);
+  mkdirSync(join(a.cfg.stateDir, "images"), { recursive: true });
+  writeFileSync(join(a.cfg.stateDir, "images", "scratch.json"), JSON.stringify({ path: imagePath("scratch"), dev: 1, ino: 1, opId: OP, at: "t" }));
+  const sa = await status(a);
+  assert.equal(stepOf(sa.plan.steps, "storage_scratch").state, "blocked");
+  assert.match(stepOf(sa.plan.steps, "storage_scratch").detail, /operator must inspect/);
+  // The runner re-checks at run time too: a file swapped after the plan is refused.
+  const b = world({ bwrap: "ok" });
+  b.mkdir("/var/lib/orbit-workspaces", 0o700);
+  b.put(imagePath("scratch"), "", 0o600);
+  const ino = statSync(b.p(imagePath("scratch"))).ino;
+  mkdirSync(join(b.cfg.stateDir, "images"), { recursive: true });
+  writeFileSync(join(b.cfg.stateDir, "images", "scratch.json"), JSON.stringify({ path: imagePath("scratch"), dev: statSync(b.p(imagePath("scratch"))).dev, ino, opId: OP, at: "t" }));
+  const sb = await status(b);
+  assert.equal(stepOf(sb.plan.steps, "storage_scratch").state, "todo");
+  await send(b, { action: "ws_setup", opId: OP2, planKey: sb.plan.planKey });
+  // swap the file for another inode with the same name before the runner gets to it
+  const { renameSync, writeFileSync: wf } = await import("node:fs");
+  wf(b.p(`${imagePath("scratch")}.other`), "precious");
+  renameSync(b.p(`${imagePath("scratch")}.other`), b.p(imagePath("scratch")));
+  const rec = await run(b, OP2);
+  assert.notEqual(rec.state, "verified");
+  assert.equal(readFileSync(b.p(imagePath("scratch")), "utf8"), "precious", "the other file is untouched");
+});
+
+// ---------------------------------------------------------------- PR #147 review, finding 8: the complete privileged command surface
+
+test("the runner's own re-exec under the deploy lock is fixed: /usr/bin/flock and node running ws-run.ts, nothing else", () => {
+  const [file, args] = lockedRerun(WS_CONFIG, OP, "/usr/local/bin/node", "/usr/local/lib/orbit/ops/ws-run.ts");
+  assert.equal(file, "/usr/bin/flock");
+  assert.deepEqual(args, ["-w", "300", "/opt/orbit/state/deploy.lock", "/usr/local/bin/node", "--max-old-space-size=64", "/usr/local/lib/orbit/ops/ws-run.ts", OP, "run"]);
+  assert.throws(() => lockedRerun(WS_CONFIG, "x; rm -rf /", "/usr/local/bin/node", "/x"));
+  // No other process is started anywhere in the three programs except through WsEnv.exec (systemWsEnv) and this re-exec.
+  for (const f of ["ws-core.ts", "ws-helper.ts", "ws-run.ts", "ws-protocol.ts"]) {
+    const src = readFileSync(join(import.meta.dirname, "..", "src/ops", f), "utf8");
+    const spawns = src.match(/\b(execFile|execFileSync|spawn|spawnSync|exec|execSync|fork)\(/g)?.filter((m) => m !== "exec(") ?? [];
+    const expected = f === "ws-core.ts" ? 1 : f === "ws-run.ts" ? 1 : 0;
+    assert.equal(spawns.length, expected, `${f}: ${spawns.join(", ")}`);
+  }
 });

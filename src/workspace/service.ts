@@ -4,7 +4,7 @@ import { hasVaultFindings, maskVaultText } from "../vault/filter.ts";
 import type { Activation, Workspace, WorkspaceConfig } from "./config.ts";
 import { applyPatch, atomicWrite, currentVersion, listDir, openRoot, parseRelPath, PATCH_EDITS_MAX, readPage, READ_PAGE_DEFAULT, READ_PAGE_MAX, search, snapshot, statPath, WorkspaceFsError, WRITE_MAX_BYTES } from "./fsops.ts";
 import type { RootHandle, Snapshot } from "./fsops.ts";
-import { ACTIVE, opLedger } from "./ledger.ts";
+import { ACTIVE, opLedger, unverifiedCleanups } from "./ledger.ts";
 import type { OpEntry, OpKind, OpLedger } from "./ledger.ts";
 import { CLEAN_ENV, SANDBOX_HOME, SCRIPT_PATH } from "./sandbox.ts";
 import type { ReapResult, RunHandle, Sandbox } from "./sandbox.ts";
@@ -108,7 +108,8 @@ export function cardFor(op: HeldOp): { summary: string; display: Record<string, 
   const l = op.limits;
   const display: Record<string, string> = {
     workspace: ws,
-    "working directory": op.cwd ? `${SANDBOX_HOME}/${op.cwd}` : SANDBOX_HOME,
+    // WS-R5 / finding 6: the cwd is model-chosen text like argv and the script, so it is escaped the same way.
+    "working directory": op.cwd ? `${SANDBOX_HOME}/${showText(op.cwd)}` : SANDBOX_HOME,
     argv: showText(op.argv.map(quoteArg).join(" ")),
     ...(op.script !== null ? { [`script (read-only at ${SCRIPT_PATH})`]: showBlock(op.script) } : {}),
     environment: Object.entries(op.environment).map(([k, v]) => `${k}=${v}`).join(" "),
@@ -132,7 +133,9 @@ export type WorkspaceService = ReturnType<typeof workspaceService>;
 
 // `active`: the owner's switch (src/workspace/activation.ts). With a valid host configuration but the switch off, the service exists
 // (status, recovery, validation and disable need it) yet offers no tool to the model and refuses every confirmation.
-export function workspaceService(d: { activation: Activation; sandbox?: Sandbox; stateDir?: string; proposals: Proposals; audit?: (e: WorkspaceAudit) => void; now?: () => Date; ledger?: OpLedger; active?: () => boolean }) {
+// `foreignQuarantine`: unverified cleanups recorded in ANOTHER ledger (the validation runs'), which pause exec here exactly like this
+// service's own (finding 7 of the PR #147 review).
+export function workspaceService(d: { activation: Activation; sandbox?: Sandbox; stateDir?: string; proposals: Proposals; audit?: (e: WorkspaceAudit) => void; now?: () => Date; ledger?: OpLedger; active?: () => boolean; foreignQuarantine?: () => string[] }) {
   const active = () => (d.active ? d.active() : true);
   const now = d.now ?? (() => new Date());
   const iso = () => now().toISOString();
@@ -208,8 +211,14 @@ export function workspaceService(d: { activation: Activation; sandbox?: Sandbox;
     return v;
   };
   const wsParam = str("Workspace id (from workspace_list). Only operator-configured workspaces exist.");
+  // Checked again at DISPATCH, not only when the tool list is built: a reply that was offered the tools before the switch went off
+  // (disable, revoke, setup, or a binding that no longer holds) cannot use them afterwards.
+  const gate = () => {
+    if (config && !active()) refuse("disabled", "Workspace tools are switched off by the owner (or their activation no longer matches the validated policy). Nothing was done.");
+  };
   const run = (fn: (a: Record<string, unknown>) => unknown, source: string) => async (a: Record<string, unknown>) => {
     try {
+      gate();
       return result(fn(a), source);
     } catch (e) {
       throw asError(e);
@@ -217,6 +226,7 @@ export function workspaceService(d: { activation: Activation; sandbox?: Sandbox;
   };
   const runP = (kind: OpKind, fn: (a: Record<string, unknown>) => ReturnType<typeof propose>) => async (a: Record<string, unknown>) => {
     try {
+      gate();
       return fn(a);
     } catch (e) {
       const err = asError(e);
@@ -609,8 +619,17 @@ export function workspaceService(d: { activation: Activation; sandbox?: Sandbox;
   }
 
   // WS-R8: exec runs whose process tree was not confirmed gone, and not verified clean since. While any exists, nothing starts.
+  function ownQuarantined(): string[] {
+    return unverifiedCleanups(ledger.list());
+  }
   function quarantined(): string[] {
-    return ledger.list().filter((e) => e.kind === "exec" && !ACTIVE.includes(e.state) && e.events.some((x) => x.state === "running") && e.treeGone !== true && !e.cleanupVerifiedAt).map((e) => e.opId);
+    let foreign: string[] = [];
+    try {
+      foreign = d.foreignQuarantine?.() ?? [];
+    } catch {
+      foreign = ["foreign-ledger-unreadable"];
+    }
+    return [...new Set([...ownQuarantined(), ...foreign])];
   }
 
   // Asks the sandbox to kill and remove whatever is left of these runs, and records positive evidence only.
@@ -671,7 +690,7 @@ export function workspaceService(d: { activation: Activation; sandbox?: Sandbox;
       audit({ event: "recovery", kind: e.kind, workspace: e.workspace, opId: e.opId, detail: String(patch.state) });
       return { opId: e.opId, state: patch.state };
     });
-    await verifyCleanup(quarantined());
+    await verifyCleanup(ownQuarantined());
     return settled;
   }
 

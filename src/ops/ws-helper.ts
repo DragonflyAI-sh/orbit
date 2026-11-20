@@ -4,15 +4,18 @@
 //   - ws_status inspects the host read-only and answers with facts, the fixed plan, its 24-hex plan key, host-wide blockers and
 //     whether an operation is open.
 //   - ws_setup must name the plan key the owner was shown. The plan is recomputed here; a different key is refused (plan_changed) and
-//     so is a plan with a blocked step (plan_blocked). Nothing is recorded or run in either case.
+//     so is a plan with a blocked step (plan_blocked). Nothing is run in either case; the id is recorded as rejected.
 //   - ws_setup and ws_revoke become a durable record plus a separate runner unit (ws-run.ts) that outlives this connection and the
-//     ORBIT restart. A repeated opId returns the existing record and never runs again. One operation at a time.
+//     ORBIT restart. The record is created exclusively FIRST (the id's reservation), so a duplicate request with the same id is a
+//     replay, never a second run, even concurrently; ids whose records were pruned stay in a replay register for good. One operation
+//     at a time, through an exclusive slot generation.
 // Writable here: only /var/lib/orbit-ops-ws. No command, path, unit or file content comes from the caller.
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   OP_ID,
   OpsReject,
+  cap,
   WS_ACTIONS,
   WS_MAX_REQUEST_BYTES,
   WS_MAX_RESPONSE_BYTES,
@@ -26,15 +29,18 @@ import {
 import {
   BIN,
   WS_CONFIG,
-  activePath,
+  claimSlot,
   computePlan,
+  createRecord,
+  currentSlot,
   ensureDirs,
   loadRecord,
   pruneRecords,
   publicFacts,
   publicRecord,
   readSlot,
-  releaseSlot,
+  recordPath,
+  registerHas,
   saveRecord,
   systemWsEnv,
   type WsConfig,
@@ -54,10 +60,20 @@ async function runnerActive(env: WsEnv, c: WsConfig, rec: WsRecord): Promise<boo
 }
 
 // A record that says accepted/running but whose runner is gone (and which has been quiet for a while) did not finish. Say so; never
-// leave it looking in flight, never guess its outcome, never run it again.
+// leave it looking in flight, never guess its outcome, never run it again. A "reserved" record whose front was stopped never ran.
 export async function settleIfDead(env: WsEnv, c: WsConfig, rec: WsRecord): Promise<WsRecord> {
   if (isWsTerminal(rec.state)) return rec;
-  if (env.now().getTime() - Date.parse(rec.updatedAt) < c.staleAfterMs) return rec;
+  const age = env.now().getTime() - Date.parse(rec.updatedAt);
+  if (rec.state === "reserved") {
+    if (!(age >= c.reserveStaleMs)) return rec;
+    rec.state = "interrupted";
+    rec.finishedAt = env.now().toISOString();
+    rec.summary = "The helper's front stopped while it was checking this request, before anything was started. Nothing was done. Ask again.";
+    rec.verification = { checked: false, detail: "Nothing ran." };
+    saveRecord(c, rec, env);
+    return rec;
+  }
+  if (age < c.staleAfterMs) return rec;
   if (await runnerActive(env, c, rec)) return rec;
   rec.state = "interrupted";
   rec.finishedAt = env.now().toISOString();
@@ -68,7 +84,6 @@ export async function settleIfDead(env: WsEnv, c: WsConfig, rec: WsRecord): Prom
   rec.verification = { checked: false, detail: "No verification happened." };
   delete rec.pkgRequested;
   saveRecord(c, rec, env);
-  releaseSlot(c, rec.opId);
   return rec;
 }
 
@@ -82,45 +97,66 @@ export async function openOperation(env: WsEnv, c: WsConfig): Promise<WsRecord |
   return isWsTerminal(settled.state) ? undefined : settled;
 }
 
-// One operation at a time. The slot is created exclusively, so two simultaneous requests cannot both get it (tier 2's approach).
+// One operation at a time (finding 2 of the PR #147 review). The caller's record already exists (reserved), so every slot holder has a
+// record; taking the slot creates the next generation exclusively (ws-core.ts), so of two requests that both find the holder finished,
+// exactly one gets it. A slot whose holder has no record (corrupt or edited by hand) is busy until it is older than a stopped front.
 async function takeSlot(env: WsEnv, c: WsConfig, opId: string): Promise<void> {
-  const slot = activePath(c);
-  for (let attempt = 0; ; attempt++) {
-    try {
-      writeFileSync(slot, opId, { flag: "wx", mode: 0o600 });
-      return;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      let holderId = "";
-      try {
-        holderId = readFileSync(slot, "utf8").trim();
-      } catch {
-        // released in between
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const cur = currentSlot(c);
+    if (cur.opId !== undefined) {
+      const holder = OP_ID.test(cur.opId) ? loadRecord(c, cur.opId) : undefined;
+      if (holder) {
+        const settled = await settleIfDead(env, c, holder);
+        if (!isWsTerminal(settled.state)) throw new OpsReject("busy", "Another workspace host operation is still running. Wait for its result, then ask again.");
+      } else if (!(env.now().getTime() - (cur.takenAtMs ?? env.now().getTime()) >= c.reserveStaleMs)) {
+        throw new OpsReject("busy", "Another workspace host operation holds the slot.");
       }
-      const holder = OP_ID.test(holderId) ? loadRecord(c, holderId) : undefined;
-      const settled = holder ? await settleIfDead(env, c, holder) : undefined;
-      if (holder && settled && !isWsTerminal(settled.state)) throw new OpsReject("busy", "Another workspace host operation is still running. Wait for its result, then ask again.");
-      if (attempt >= 1) throw new OpsReject("busy", "Another workspace host operation holds the slot.");
-      rmSync(slot, { force: true });
     }
+    if (claimSlot(c, cur.gen + 1, opId, env.now().toISOString())) return;
+    // Someone else took that generation first: look again (they are alive, so this is busy).
   }
+  throw new OpsReject("busy", "Another workspace host operation holds the slot.");
 }
 
 function newRecord(env: WsEnv, opId: string, action: WsMutatingAction): WsRecord {
   const at = env.now().toISOString();
-  return { opId, action, state: "accepted", acceptedAt: at, updatedAt: at, steps: [{ at, step: "accepted", detail: "Request validated and recorded. Nothing has been done yet." }] };
+  return { opId, action, state: "reserved", acceptedAt: at, updatedAt: at, steps: [{ at, step: "reserved", detail: "Request received; the id is reserved while it is checked. Nothing has been done." }] };
+}
+
+// A refused request: recorded as rejected (nothing was done), so its id can never run later, then answered with the refusal.
+function reject(env: WsEnv, c: WsConfig, rec: WsRecord, err: OpsReject): never {
+  rec.state = "rejected";
+  rec.code = err.code;
+  rec.finishedAt = env.now().toISOString();
+  rec.summary = `Refused (${err.code}); nothing was done. ${err.message}`;
+  rec.verification = { checked: false, detail: "Nothing ran." };
+  rec.steps.push({ at: rec.finishedAt, step: "rejected", detail: cap(err.message, 200) });
+  saveRecord(c, rec, env);
+  throw err;
 }
 
 async function accept(env: WsEnv, c: WsConfig, action: WsMutatingAction, opId: string, planKey?: string) {
   ensureDirs(c);
-  const existing = loadRecord(c, opId);
-  if (existing) return { replayed: true, record: await settleIfDead(env, c, existing) };
-  await takeSlot(env, c, opId);
-  let rec: WsRecord;
+  const replay = async () => {
+    const existing = loadRecord(c, opId);
+    if (existing) return { replayed: true, record: await settleIfDead(env, c, existing) };
+    // Pruned long ago: the id is in the replay register. It is never run again.
+    const at = env.now().toISOString();
+    return { replayed: true, record: { opId, action, state: "interrupted", acceptedAt: at, updatedAt: at, steps: [], summary: "This operation id was used before; its record was pruned. It is not run again.", verification: { checked: false, detail: "Not run again." } } as WsRecord };
+  };
+  if (registerHas(c, opId) || loadRecord(c, opId)) return replay();
+  const rec = newRecord(env, opId, action);
+  // The reservation: exactly one request can create the record for this id, durably, before anything else happens.
+  if (!createRecord(c, rec, env)) return replay();
+  // Pruning registers an id before it removes the record; check again after creating it so an id pruned in between is not reused.
+  if (registerHas(c, opId)) {
+    rmSync(recordPath(c, opId), { force: true });
+    return replay();
+  }
   try {
-    rec = newRecord(env, opId, action);
+    await takeSlot(env, c, opId);
     if (action === "ws_setup") {
-      const plan = await computePlan(env);
+      const plan = await computePlan(env, c);
       const blocked = plan.steps.filter((s) => s.state === "blocked").map((s) => s.id);
       if (blocked.length) throw new OpsReject("plan_blocked", `Nothing was done: ${blocked.join(", ")} ${blocked.length > 1 ? "are" : "is"} blocked and needs an operator first (see ws_status).`);
       if (plan.planKey !== planKey) throw new OpsReject("plan_changed", "Nothing was done: the host no longer matches the plan that was confirmed. Ask for the current plan (ws_status) and confirm that one.");
@@ -134,14 +170,20 @@ async function accept(env: WsEnv, c: WsConfig, action: WsMutatingAction, opId: s
         rec.summary = `The host is already set up; nothing was changed and ORBIT was not restarted.${rec.blockers.length ? ` Host blockers remain (${rec.blockers.join(", ")}): sandboxed exec stays unavailable until an operator resolves them.` : ""}`;
         rec.verification = { checked: false, detail: "Nothing ran; the plan showed every step done." };
         saveRecord(c, rec, env);
-        releaseSlot(c, opId);
         return { replayed: false, record: rec };
       }
     }
   } catch (err) {
-    releaseSlot(c, opId);
+    if (err instanceof OpsReject) reject(env, c, rec, err);
+    rec.state = "failed";
+    rec.finishedAt = env.now().toISOString();
+    rec.summary = "The request could not be checked; nothing was done.";
+    rec.verification = { checked: false, detail: "Nothing ran." };
+    saveRecord(c, rec, env);
     throw err;
   }
+  rec.state = "accepted";
+  rec.steps.push({ at: env.now().toISOString(), step: "accepted", detail: "Request validated and recorded. Nothing has been done yet." });
   saveRecord(c, rec, env);
   const started = await env.exec(BIN.systemctl, ["start", "--no-block", runnerUnit(c, opId)], 8000);
   if (started.code !== 0 || started.timedOut) {
@@ -150,7 +192,6 @@ async function accept(env: WsEnv, c: WsConfig, action: WsMutatingAction, opId: s
     rec.summary = "The runner could not be started, so nothing was done.";
     rec.verification = { checked: false, detail: "Nothing ran." };
     saveRecord(c, rec, env);
-    releaseSlot(c, opId);
     return { replayed: false, record: rec };
   }
   pruneRecords(c);
@@ -160,7 +201,7 @@ async function accept(env: WsEnv, c: WsConfig, action: WsMutatingAction, opId: s
 export async function runWsAction(raw: string, env: WsEnv, c: WsConfig) {
   const req = parseWsRequest(raw);
   if (req.action === "ws_status") {
-    const plan = await computePlan(env);
+    const plan = await computePlan(env, c);
     const open = await openOperation(env, c);
     return {
       req,
@@ -185,11 +226,11 @@ export async function runWsAction(raw: string, env: WsEnv, c: WsConfig) {
     req,
     replayed,
     data: {
-      accepted: dispatched || replayed || record.state === "no_change",
+      accepted: record.state !== "rejected" && (dispatched || replayed || record.state === "no_change"),
       replayed,
       operation: publicRecord(record),
       note: replayed
-        ? "This operation id was already used; it was not run again. Its recorded state is shown."
+        ? `This operation id was already used; it was not run again. Its recorded state is shown${record.state === "rejected" ? " (it was refused and nothing was done)" : ""}.`
         : dispatched
           ? "Dispatched to a separate runner. Nothing is verified yet: ask op_status for the result."
           : record.state === "no_change"

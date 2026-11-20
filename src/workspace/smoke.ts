@@ -56,7 +56,10 @@ export type SmokeDeps = {
   audit?: (e: WorkspaceAudit) => void;
   // Each check as it completes (progress for the record and the journal).
   onCheck?: (c: ValidationCheck) => void;
-  timeouts?: { runMs?: number; startMs?: number };
+  timeouts?: { runMs?: number; startMs?: number; recheckMs?: number };
+  // Unverified cleanups ORBIT's main service knows about (its own ledger). They pause the validation's commands and fail its
+  // no_cleanup_quarantine check, exactly as the validation's own do (finding 7 of the PR #147 review).
+  outsideQuarantine?: () => string[];
 };
 
 export async function runSmoke(d: SmokeDeps): Promise<{ checks: ValidationCheck[]; passed: boolean; workspaceIdentity: string }> {
@@ -88,7 +91,7 @@ export async function runSmoke(d: SmokeDeps): Promise<{ checks: ValidationCheck[
   // A private service over the validation workspace only: the production tools, confirmation checks, queue and launcher, its own
   // proposals (no card ever reaches a conversation) and its own records.
   const proposals = newProposals();
-  const svc = workspaceService({ activation: { state: "enabled", config: { ...d.config, workspaces: [w] } }, sandbox: d.sandbox, stateDir: join(d.stateDir, "validation-runs"), proposals, audit: d.audit });
+  const svc = workspaceService({ activation: { state: "enabled", config: { ...d.config, workspaces: [w] } }, sandbox: d.sandbox, stateDir: join(d.stateDir, "validation-runs"), proposals, audit: d.audit, foreignQuarantine: d.outsideQuarantine });
   await svc.recover();
   const tool = (n: string) => svc.tools.find((t) => t.name === n)!;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -203,10 +206,16 @@ export async function runSmoke(d: SmokeDeps): Promise<{ checks: ValidationCheck[
 
     // ---- timeout, cancel, background cleanup ------------------------------------------------------------------------------------
     // The wall-clock kill is the launcher's own; it is exercised directly with a 3-second limit (the configured limit is minutes).
+    // It is recorded in the validation ledger like every other run, so an unverified cleanup of it pauses exec too (WS-R8).
     const t0 = Date.now();
-    const ht = d.sandbox.start({ runId: `ws-${randomBytes(8).toString("hex")}`, workspace: w, cwd: [], argv: ["sleep", "30"], limits: { ...d.config.sandbox.limits, timeoutSec: 3 } });
+    const tid = `ws-${randomBytes(8).toString("hex")}`;
+    const tat = new Date().toISOString();
+    svc.ledger.put({ opId: tid, proposalId: "validation-direct", kind: "exec", workspace: w.id, digest: "-", state: "accepted", createdAt: tat, updatedAt: tat, events: [{ at: tat, state: "accepted" }], summary: "validation: launcher wall-clock limit (sleep 30, killed at 3 s)" });
+    const ht = d.sandbox.start({ runId: tid, workspace: w, cwd: [], argv: ["sleep", "30"], limits: { ...d.config.sandbox.limits, timeoutSec: 3 } });
+    if (ht.pid !== undefined) svc.ledger.update(tid, { state: "running" }, { state: "running", detail: "sandbox process started" });
     const rt = await ht.done;
     const took = Date.now() - t0;
+    svc.ledger.update(tid, { state: ht.pid === undefined ? "failed" : "completed", exitCode: rt.code, signal: rt.signal, ...(rt.killedBy ? { killedBy: rt.killedBy } : {}), ...(ht.pid !== undefined ? { treeGone: rt.treeGone === true } : {}), ...(rt.startError ? { reason: `not_started: ${rt.startError}`.slice(0, 300) } : {}) }, { state: ht.pid === undefined ? "failed" : "completed" });
     record("timeout_enforced", ht.pid !== undefined && rt.killedBy === "timeout" && rt.treeGone === true && took < 15_000, `killed by ${rt.killedBy ?? "nothing"} after ${Math.round(took / 100) / 10} s; tree gone ${rt.treeGone}${rt.startError ? `; ${rt.startError}` : ""}`);
 
     const pk = await call("exec_start", { workspace: w.id, argv: ["sleep", "60"] });
@@ -233,7 +242,8 @@ export async function runSmoke(d: SmokeDeps): Promise<{ checks: ValidationCheck[
     const pending = SMOKE_STEPS.find((s) => !checks.some((c) => c.id === s.id));
     if (pending) record(pending.id, false, `error: ${e instanceof Error ? e.message : String(e)}`);
   } finally {
-    record("no_cleanup_quarantine", svc.quarantined().length === 0, svc.quarantined().length ? `unverified: ${svc.quarantined().join(", ")}` : "none");
+    // Clean up FIRST, then judge the cleanups: every run of the validation, including this last one, is covered by the
+    // no_cleanup_quarantine check. (Without a passing check the validation fails, and enable is refused.)
     let removed = false;
     try {
       rmSync(canary, { force: true });
@@ -244,6 +254,14 @@ export async function runSmoke(d: SmokeDeps): Promise<{ checks: ValidationCheck[
       removed = false;
     }
     record("synthetic_files_removed", removed ? true : "not_checked", removed ? "removed" : `could not be confirmed; leftover files are named smoke-${tag}-* in the validation workspace`);
+    // One bounded re-check of any unverified cleanup (as the service itself does after a run), then the verdict.
+    const own = svc.quarantined();
+    if (own.length) {
+      await new Promise<void>((r) => setTimeout(r, d.timeouts?.recheckMs ?? 2000));
+      await svc.verifyCleanup(own).catch(() => undefined);
+    }
+    const left = svc.quarantined();
+    record("no_cleanup_quarantine", left.length === 0, left.length ? `unverified: ${left.join(", ")} (exec stays paused until a reap confirms them gone)` : "none: every run's process tree was confirmed gone");
   }
   return finishWith(w.identity);
 }

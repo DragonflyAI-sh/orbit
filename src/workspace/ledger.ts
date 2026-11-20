@@ -131,3 +131,26 @@ export function opLedger(dir: string | undefined) {
   };
 }
 export type OpLedger = ReturnType<typeof opLedger>;
+
+// WS-R8, the same rule for every ledger: an exec run that started and whose process tree was never confirmed gone (and not verified
+// clean since). `inFlight`: also count runs still recorded as active (their process is not running in THIS process, e.g. a validation
+// interrupted by a restart).
+export function unverifiedCleanups(entries: OpEntry[], o: { inFlight?: boolean } = {}): string[] {
+  return entries
+    .filter((e) => e.kind === "exec" && (o.inFlight || !ACTIVE.includes(e.state)) && e.events.some((x) => x.state === "running") && e.treeGone !== true && !e.cleanupVerifiedAt)
+    .map((e) => e.opId);
+}
+
+// Read-only view of another ledger's unverified cleanups (the validation runs' ledger, seen by the main service: finding 7 of the PR
+// #147 review). It never writes. A ledger that cannot be read is itself unverified evidence: exec and enable stay blocked.
+export function ledgerQuarantine(dir: string, o: { inFlight?: boolean } = {}): string[] {
+  const file = join(dir, "ledger.json");
+  if (!existsSync(file)) return [];
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8")) as { entries?: unknown };
+    if (!Array.isArray(raw?.entries) || !raw.entries.every(entryOk)) return ["validation-ledger-invalid"];
+    return unverifiedCleanups(raw.entries as OpEntry[], o);
+  } catch {
+    return ["validation-ledger-unreadable"];
+  }
+}

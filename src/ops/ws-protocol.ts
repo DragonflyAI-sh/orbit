@@ -79,9 +79,11 @@ export function parseWsRequest(raw: string): WsRequest {
 
 // ---- operation records: one JSON file per operation under the helper's state directory ----
 
-export const WS_OP_STATES = ["accepted", "running", "verified", "no_change", "failed", "interrupted"] as const;
+// reserved: the id is taken and the front is still checking the request (nothing runs from this state). rejected: the front refused it
+// (busy, plan changed, plan blocked); nothing was done, and the id stays used so a duplicate of the request can never run later.
+export const WS_OP_STATES = ["reserved", "accepted", "running", "verified", "no_change", "failed", "interrupted", "rejected"] as const;
 export type WsOpState = (typeof WS_OP_STATES)[number];
-export const WS_TERMINAL_STATES: readonly WsOpState[] = ["verified", "no_change", "failed", "interrupted"];
+export const WS_TERMINAL_STATES: readonly WsOpState[] = ["verified", "no_change", "failed", "interrupted", "rejected"];
 export const isWsTerminal = (s: string): boolean => (WS_TERMINAL_STATES as readonly string[]).includes(s);
 
 export type WsStep = { at: string; step: string; detail: string };
