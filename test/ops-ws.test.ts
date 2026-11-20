@@ -104,13 +104,24 @@ function world(opts: { bwrap?: "absent" | "ok" | "setuid"; prlimit?: boolean; sy
   const audit: object[] = [];
   const p = (path: string) => `${prefix}${path}`;
   const w = { base, prefix, host, calls, audit, fronts: [] as WsAudit[], owners, p } as unknown as World;
+  // Every directory the fake host creates is recorded as root-owned, as on a real host. Without this, an intermediate directory
+  // (e.g. /etc/orbit) would report the uid running the tests: root locally, but an unprivileged user in CI.
+  const parents = (path: string) => {
+    const parts = path.split("/").filter(Boolean);
+    for (let i = 0; i < parts.length; i++) {
+      const dir = `/${parts.slice(0, i).join("/")}`;
+      if (!existsSync(p(dir))) mkdirSync(p(dir));
+      if (!owners.has(dir)) owners.set(dir, { uid: 0, gid: 0 });
+    }
+  };
   w.put = (path, content, mode = 0o644, uid = 0, gid = 0) => {
-    mkdirSync(join(p(path), ".."), { recursive: true });
+    parents(path);
     writeFileSync(p(path), content);
     chmodSync(p(path), mode);
     owners.set(path, { uid, gid });
   };
   w.mkdir = (path, mode = 0o755, uid = 0) => {
+    parents(path);
     mkdirSync(p(path), { recursive: true });
     chmodSync(p(path), mode);
     owners.set(path, { uid, gid: uid });
