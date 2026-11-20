@@ -8,7 +8,7 @@ import { proposals as newProposals } from "../src/agent.ts";
 import type { ChatTool } from "../src/agent.ts";
 import { vaultMemory } from "../src/memory.ts";
 import type { ModelPort, Step } from "../src/model.ts";
-import { isTaskExcludedNote, normalizedNotePath, taskMemory, taskScopedTools } from "../src/task-context.ts";
+import { isTaskExcludedNote, taskMemory, taskNotePath, taskScopedTools } from "../src/task-context.ts";
 import { taskSupervisor } from "../src/task-supervisor.ts";
 import { marker, taskVaultSync } from "../src/task-vault.ts";
 import type { TaskVaultPort } from "../src/task-vault.ts";
@@ -47,11 +47,13 @@ const expectError = (fn: () => unknown, code: number, re?: RegExp) => {
 // ---- finding 1: the task memory policy ---------------------------------------------------------------------------------------
 
 test("finding 1: every spelling of the rolling note resolves to it and is excluded; search drops it; reads refuse it; other notes are untouched", () => {
-  for (const p of ["Memory/recent-context.md", "./Memory/recent-context.md", "Memory//recent-context.md", "/Memory/recent-context.md", "Projects/../Memory/recent-context.md", "Memory/./recent-context.md", "memory/RECENT-CONTEXT.md", "Memory\\recent-context.md", " Memory/recent-context.md "])
-    assert.equal(isTaskExcludedNote(p), true, p);
-  for (const p of ["Memory/recent-context.md.bak", "Memory/recent-context", "Projects/recent-context.md", "Memory/other.md", "../Memory/recent-context.md/..", 42, undefined])
+  // Repair 2: spellings the port would resolve but the task policy does not accept (a leading slash, .., backslashes) are refused as
+  // spellings; the rest are canonicalized and the canonical form is compared (test/task-repair2.test.ts has the port-level proof).
+  for (const p of ["Memory/recent-context.md", "./Memory/recent-context.md", "Memory//recent-context.md", "/Memory/recent-context.md", "Projects/../Memory/recent-context.md", "Memory/./recent-context.md", "memory/RECENT-CONTEXT.md", "Memory\\recent-context.md", " Memory/recent-context.md ", "../Memory/recent-context.md/..", 42, undefined])
+    assert.equal(isTaskExcludedNote(p), true, String(p));
+  for (const p of ["Memory/recent-context.md.bak", "Memory/recent-context", "Projects/recent-context.md", "Memory/other.md"])
     assert.equal(isTaskExcludedNote(p), false, String(p));
-  assert.equal(normalizedNotePath("Projects/../Memory//recent-context.md"), "memory/recent-context.md");
+  assert.deepEqual(taskNotePath("./Memory//recent-context.md/"), { ok: true, path: "Memory/recent-context.md", excluded: true });
 
   const root = tmp("orbit-task-memory-");
   const notes: Record<string, string> = { "Memory/recent-context.md": "garden cross-conversation WALNUTLEDGER", "Projects/garden.md": "garden project", "Memory/garden-facts.md": "garden facts" };
@@ -161,8 +163,9 @@ test("finding 2: when the message cannot be stored after admission, the admissio
   assert.equal(r.threads.isBusy(r.t.session.thread), false);
   fail = false;
   const ok = await r.sup.humanTurn(r.t.id, "This one is stored.", r.base);
-  assert.equal(ok.admitted?.instruction, 1);
-  assert.deepEqual(r.tasks.get(r.t.id)!.instructions.map((i) => [i.v, i.text]), [[1, "This one is stored."]]);
+  // Repair 2: the undone admission's version (1) is not reused, so nothing that recorded v1 can later point at another text.
+  assert.equal(ok.admitted?.instruction, 2);
+  assert.deepEqual(r.tasks.get(r.t.id)!.instructions.map((i) => [i.v, i.text]), [[2, "This one is stored."]]);
 });
 
 // ---- finding 4: links across tasks and restarts; legacy records ----------------------------------------------------------------

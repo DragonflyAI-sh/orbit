@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { after, test } from "node:test";
 import { createRequire } from "node:module";
 import type { Item, ModelPort, Step } from "../src/model.ts";
 import { taskFile, taskStore } from "../src/tasks.ts";
+import { vaultMemory } from "../src/memory.ts";
 import type { Tasks } from "../src/tasks.ts";
 import { TASK_ASSISTANT_TOOL_NAMES, TASK_TURN_MAX_ROUNDS, TASK_TURN_TOOL_NAMES } from "../src/task-supervisor.ts";
 import { call, rig, say } from "./threads-fixture.ts";
@@ -519,12 +520,18 @@ test("finding 1, context boundary: a task turn never gets the rolling recent-con
   const x = stack({ vault: BOUNDARY_VAULT });
   const t = (await x.assistantTool("task_create", CREATE)).result.task;
   const thread = t.session.link.slice("/sessions/".length);
+  // Repair 2: the spellings the memory port itself resolves to the note although they do not look like it: the absolute path under the
+  // vault root (with and without extra separators), and climbing out of the root and back in through its own directory name.
+  const absolute = join(x.vaultRoot, "Memory/recent-context.md");
+  const spellings = [...ROLLING_SPELLINGS, absolute, `${x.vaultRoot}//Memory/./recent-context.md`, `../${basename(x.vaultRoot)}/Memory/recent-context.md`];
+  assert.match(JSON.stringify(vaultMemory(x.vaultRoot).read(absolute)), /WALNUTLEDGER/, "the ordinary port does resolve the absolute spelling (the route Repair 2 closes)");
   // A supervised turn that searches for the note and tries to read it under every spelling, then reads the project note.
   x.d.ctl.taskSteps.push({
     calls: [
       call("memory_search", { query: "garden sensor CSV exporter WALNUTLEDGER recent context" }, "m0"),
-      ...ROLLING_SPELLINGS.map((p, i) => call("memory_read", { path: p }, `m${i + 1}`)),
+      ...spellings.map((p, i) => call("memory_read", { path: p }, `m${i + 1}`)),
       call("memory_read_page", { path: "Memory/../Memory/recent-context.md" }, "mp"),
+      call("memory_read_page", { path: absolute }, "mpa"),
       call("memory_read", { path: "Projects/garden-sensors.md" }, "mg"),
     ],
     reply: "Read the project note.",
@@ -542,20 +549,24 @@ test("finding 1, context boundary: a task turn never gets the rolling recent-con
   assert.ok(!/recent-context|WALNUTLEDGER/i.test(JSON.stringify(search)), JSON.stringify(search));
   // (Outputs of one round are collected newest first, so they are matched by content, not by order.)
   const reads = x.outputsOf("memory_read");
-  assert.equal(reads.length, ROLLING_SPELLINGS.length + 1);
+  assert.equal(reads.length, spellings.length + 1);
   const refusedReads = reads.filter((r) => r.ok === false);
-  assert.equal(refusedReads.length, ROLLING_SPELLINGS.length, JSON.stringify(reads));
-  // Every spelling resolves to the note and is refused by the task policy, never by accident of the file system.
+  assert.equal(refusedReads.length, spellings.length, JSON.stringify(reads));
+  // Every spelling is refused by the task policy (as the excluded note, or as a spelling a task turn does not accept), never by accident
+  // of the file system, and none returns the note's text.
   for (const r of refusedReads) {
-    assert.match(JSON.stringify(r), /not available in a task session/);
-    assert.doesNotMatch(JSON.stringify(r), /WALNUTLEDGER/);
+    assert.match(JSON.stringify(r), /not available in a task session|refused in a task session/);
+    assert.doesNotMatch(JSON.stringify(r), /WALNUTLEDGER|no such note|outside the vault/);
   }
   const project = reads.find((r) => r.ok === true);
   assert.match(JSON.stringify(project), /garden sensor CSV exporter project/);
-  const page = x.outputsOf("memory_read_page").at(-1)!;
-  assert.equal(page.ok, false);
-  assert.match(JSON.stringify(page), /denied/);
-  assert.doesNotMatch(JSON.stringify(page), /WALNUTLEDGER/);
+  const pages = x.outputsOf("memory_read_page");
+  assert.equal(pages.length, 2);
+  for (const page of pages) {
+    assert.equal(page.ok, false);
+    assert.match(JSON.stringify(page), /denied/);
+    assert.doesNotMatch(JSON.stringify(page), /WALNUTLEDGER/);
+  }
 
   // Rai writing in the task session (an interactive task turn): the same policy.
   const steer = await x.send(thread, "Check the garden sensor CSV exporter recent context notes.");

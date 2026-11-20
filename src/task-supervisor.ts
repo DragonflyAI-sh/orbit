@@ -300,7 +300,10 @@ export function taskSupervisor(d: SupervisorDeps) {
   // - paused: the text is recorded as an instruction for when the task resumes; no task turn runs and the reply has the task's context
   //   read-only and no task tools. Photos alone record nothing.
   // - done or cancelled: an ordinary reply with the task's context read-only; nothing is recorded.
-  // If the user message then cannot be stored, the admission is undone (rollback). The thread route checks the caller is the owner.
+  // If the user message then cannot be stored, the admission is undone (rollback), by the admitted instruction's identity.
+  // Ownership is checked HERE, not by the thread route: the route (POST /threads/:id/messages) answers anyone the chat channel allows
+  // (a non-owner gets an ordinary tool-less chat reply in other threads), and only this check refuses a non-owner in a task's session
+  // (403, nothing recorded), whatever the task's lifecycle.
   async function humanTurn(taskId: string, text: string, base: TurnPrep): Promise<{ thread: ThreadView; error?: string; admitted?: { instruction?: number; turn?: number } }> {
     const t = tasks.get(taskId);
     if (!t) throw new TaskError(404, "No task with that id.");
@@ -318,6 +321,8 @@ export function taskSupervisor(d: SupervisorDeps) {
     }
     const mode = t.lifecycle === "active" ? "active" : "paused";
     let admitted: { instruction?: number; turn?: number } = {};
+    // The admitted instruction's identity (its time, with its version), so a rollback removes exactly it and nothing recorded after it.
+    let admittedAt: string | undefined;
     let n = 0;
     const tools = mode === "active" ? [...plain, ...turnTools(taskId, () => n)] : plain;
     const prep: TurnPrep = {
@@ -327,11 +332,12 @@ export function taskSupervisor(d: SupervisorDeps) {
       admit: () => {
         const a = tasks.admitHuman(taskId, { text, photos }, by, d.modelName(), mode);
         admitted = { ...(a.instruction ? { instruction: a.instruction.v } : {}), ...(a.turn ? { turn: a.turn.n } : {}) };
+        admittedAt = a.instruction?.at;
         n = a.turn?.n ?? 0;
         return {
           notes: contextBlock(a.task, n, mode === "active" ? "interactive" : "paused", { recorded: Boolean(a.instruction) }),
           rollback: (reason) => {
-            if (admitted.instruction !== undefined || admitted.turn !== undefined) tasks.revertAdmission(taskId, admitted, `the message could not be stored (${reason})`);
+            if (admitted.instruction !== undefined || admitted.turn !== undefined) tasks.revertAdmission(taskId, { ...admitted, ...(admittedAt ? { instructionAt: admittedAt } : {}) }, `the message could not be stored (${reason})`);
             admitted = {};
           },
         };

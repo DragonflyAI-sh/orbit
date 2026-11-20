@@ -174,6 +174,10 @@ export type Task = {
   turns: TurnRecord[];
   // Turn numbers are never reused, even when old turn records are dropped.
   turnSeq: number;
+  // The highest instruction version ever given out (Repair 2). Instruction versions are never reused, even when an admission that
+  // could not be stored is undone, so a turn's `instructionsSeen` and an idempotency record never point at a different text later.
+  // Absent in older records: the newest version on record is used.
+  instructionSeq?: number;
   vault?: VaultLink;
   // Owner request ids already handled (steer, run-turn), per operation, with the payload they came with and what they produced, so a
   // repeated POST returns the same result and changes nothing, and a reused id with another payload is refused.
@@ -362,6 +366,8 @@ function bind(r: TaskRequest, p: LinkableProposal, by: Provenance, accept: unkno
 }
 
 export const currentInstructionVersion = (t: Task) => t.instructions.at(-1)?.v ?? 0;
+// The version a new instruction gets: one above any version ever given out on this task (never reused; see `instructionSeq`).
+const nextInstructionVersion = (t: Task) => Math.max(t.instructionSeq ?? 0, currentInstructionVersion(t)) + 1;
 // Instructions the task's model has not been given yet: newer than what its latest turn saw.
 export function unseenInstructions(t: Task): Instruction[] {
   const seen = t.turns.at(-1)?.instructionsSeen ?? 0;
@@ -397,8 +403,18 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       problem = "the task file has an unknown shape; it is left as it is";
       throw new TaskError(503, `Tasks are unavailable: ${problem}.`);
     }
-    if (raw.v > TASK_FILE_VERSION || !TASK_FILE_VERSIONS_READ.includes(raw.v)) {
+    // Three different refusals (Repair 2), each leaving the file as it is: a version that is not a positive whole number is malformed
+    // (not "newer"); a higher one is a newer schema; a lower one this build does not read is unsupported.
+    if (!Number.isSafeInteger(raw.v) || raw.v < 1) {
+      problem = `the task file's schema version (${JSON.stringify(raw.v).slice(0, 20)}) is not a valid version number, so the file is malformed or damaged; it is left as it is`;
+      throw new TaskError(503, `Tasks are unavailable: ${problem}.`);
+    }
+    if (raw.v > TASK_FILE_VERSION) {
       problem = `the task file has schema version ${raw.v}, newer than this build understands (${TASK_FILE_VERSION}); it is left as it is`;
+      throw new TaskError(503, `Tasks are unavailable: ${problem}.`);
+    }
+    if (!TASK_FILE_VERSIONS_READ.includes(raw.v)) {
+      problem = `the task file has schema version ${raw.v}, which this build does not read (it reads ${TASK_FILE_VERSIONS_READ.join(", ")}); it is left as it is`;
       throw new TaskError(503, `Tasks are unavailable: ${problem}.`);
     }
     problem = undefined;
@@ -453,13 +469,16 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     if (!key) return;
     t.idem = [...(t.idem ?? []), { op, key, digest, at: now().toISOString(), ...result }].slice(-TASK_IDEMPOTENCY_KEPT);
   };
-    // The turn an earlier identical owner request started, or undefined when this request is new. 409 for a reused id with another rev.
+  // The turn an earlier identical owner request started, or undefined when this request is new. 409 for a reused id with another rev.
+  // Repair 2: when that turn's record is no longer kept (only the newest TASK_TURNS_KEPT are), its outcome is not known here, so the
+  // repeat is refused (409, `expired`) with the turn number; nothing is started and no state is made up for it.
   function priorTurn(id: string, expectRev: number | undefined, key?: string): { task: Task; turn: TurnRecord } | undefined {
     const existing = get(id);
     if (!existing) return undefined;
     const again = prior(existing, "turn", key, digestOf({ rev: expectRev ?? null }));
     if (!again || again.turn === undefined) return undefined;
-    const turn = existing.turns.find((x) => x.n === again.turn) ?? ({ n: again.turn, startedAt: again.at, state: "done", trigger: { actor: "human", via: "api" }, instructionsSeen: 0, model: "unknown", error: "this turn's record is no longer kept (only the newest 50 are)" } satisfies TurnRecord);
+    const turn = existing.turns.find((x) => x.n === again.turn);
+    if (!turn) throw new TaskError(409, `This requestId already started turn ${again.turn} of this task (at ${again.at}), whose record is no longer kept (only the newest ${TASK_TURNS_KEPT} are), so its outcome is unknown here (expired). Nothing was started; use a new requestId to start another turn.`);
     return { task: structuredClone(existing), turn: structuredClone(turn) };
   }
   // Every link (current or previous) to a proposal id across all tasks: a proposal answers at most one request, ever.
@@ -568,8 +587,9 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       }
       const { task, result } = change(id, { expectRev }, (t) => {
         if (t.instructions.length >= TASK_INSTRUCTIONS_MAX) throw new TaskError(409, `This task already has ${TASK_INSTRUCTIONS_MAX} instruction versions.`);
-        const inst: Instruction = { v: currentInstructionVersion(t) + 1, at: now().toISOString(), text: clean, by };
+        const inst: Instruction = { v: nextInstructionVersion(t), at: now().toISOString(), text: clean, by };
         t.instructions.push(inst);
+        t.instructionSeq = inst.v;
         remember(t, "steer", key, digest, { instruction: inst.v });
         return inst;
       });
@@ -596,8 +616,9 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         let instruction: Instruction | undefined;
         if (clean) {
           if (t.instructions.length >= TASK_INSTRUCTIONS_MAX) throw new TaskError(409, `This task already has ${TASK_INSTRUCTIONS_MAX} instruction versions. Nothing was sent or recorded.`);
-          instruction = { v: currentInstructionVersion(t) + 1, at: now().toISOString(), text: clean, by };
+          instruction = { v: nextInstructionVersion(t), at: now().toISOString(), text: clean, by };
           t.instructions.push(instruction);
+          t.instructionSeq = instruction.v;
         }
         let turn: TurnRecord | undefined;
         if (expect === "active") {
@@ -610,12 +631,23 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       return { task, ...(result.instruction ? { instruction: structuredClone(result.instruction) } : {}), ...(result.turn ? { turn: structuredClone(result.turn) } : {}) };
     },
     // Undoes an admission whose message could not be stored in the thread: the instruction it added is removed (it was never sent) and
-    // its turn record ends as an error. Only the admission's own records are touched.
-    revertAdmission(id: string, a: { instruction?: number; turn?: number }, reason: string): Task {
+    // its turn record ends as an error. Only the admission's own records are touched (Repair 2):
+    // - the instruction is found by its identity (version, time and author, as admitHuman returned them), wherever it is: a steer the
+    //   Assistant or the task panel recorded after it (while the turn code was still preparing) stays, with its own version;
+    // - versions are never reused (`instructionSeq` keeps the removed one), so the next instruction does not take the removed number;
+    // - the turn never ran, so it is recorded as having seen only what the turn before it saw (nothing is marked seen that was not sent).
+    revertAdmission(id: string, a: { instruction?: number; instructionAt?: string; turn?: number }, reason: string): Task {
       return change(id, { allowTerminal: true }, (t) => {
-        if (a.instruction !== undefined && t.instructions.at(-1)?.v === a.instruction) t.instructions.pop();
-        const turn = a.turn === undefined ? undefined : t.turns.find((x) => x.n === a.turn);
-        if (turn && turn.state === "running") Object.assign(turn, { state: "error", endedAt: now().toISOString(), error: `Not run: ${reason}`.slice(0, 500) });
+        if (a.instruction !== undefined) {
+          const i = t.instructions.findIndex((x) => x.v === a.instruction && x.by.actor === "human" && x.by.via === "sessions-ui" && (a.instructionAt === undefined || x.at === a.instructionAt));
+          if (i >= 0) {
+            t.instructionSeq = Math.max(t.instructionSeq ?? 0, currentInstructionVersion(t), a.instruction);
+            t.instructions.splice(i, 1);
+          }
+        }
+        const k = a.turn === undefined ? -1 : t.turns.findIndex((x) => x.n === a.turn);
+        const turn = k >= 0 ? t.turns[k] : undefined;
+        if (turn && turn.state === "running") Object.assign(turn, { state: "error", endedAt: now().toISOString(), error: `Not run: ${reason}`.slice(0, 500), instructionsSeen: k > 0 ? t.turns[k - 1]!.instructionsSeen : 0 });
       }).task;
     },
 
