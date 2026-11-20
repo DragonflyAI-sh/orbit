@@ -413,8 +413,12 @@ function bind(r: TaskRequest, p: LinkableProposal, by: Provenance, accept: unkno
   const want = laneOf(r.kind);
   if ((p.lane ?? "build") !== want) throw new TaskError(409, want === "research" ? "Not linked: this is a research request and the proposal is a BUILD launch. Research is proposed with research_launch (the research lane); a build job is never a substitute. Nothing was changed." : "Not linked: this is a build job request and the proposal is a RESEARCH launch. Propose it with job_launch, or decline the request. Nothing was changed.");
   if (r.job!.routine && r.job!.routine !== p.routine) throw new TaskError(409, `Not linked: the request asked for routine ${r.job!.routine}; the proposal launches ${p.routine}. Nothing was changed.`);
-  const requestBriefSha256 = briefDigest(r.job!.brief);
+  // A research proposal's brief is "Research question: <question>\n\n<brief>" (research_launch builds it). A research request matches
+  // when the Assistant proposed it with the request's text as the question and the request's brief as the brief, or when the request's
+  // brief already is that whole text. Nothing else is loosened: the question is compared too.
   const briefSha256 = briefDigest(cleanText(p.brief, Number.MAX_SAFE_INTEGER));
+  const candidates = want === "research" ? [r.job!.brief, `Research question: ${r.text}\n\n${r.job!.brief}`] : [r.job!.brief];
+  const requestBriefSha256 = candidates.map(briefDigest).find((x) => x === briefSha256) ?? briefDigest(candidates.at(-1)!);
   const base = { kind: "job_launch" as const, lane: want, routine: p.routine, briefSha256, requestBriefSha256, origin: p.origin, proposedAt: p.createdAt, requestKey: r.key };
   if (briefSha256 === requestBriefSha256) return { ...base, match: "exact" };
   if (by.actor === "human" && accept === briefSha256) return { ...base, match: "accepted-by-rai" };
@@ -992,9 +996,10 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         // The automatic follow-up's outcome is the turn's, recorded in the same change.
         const slot = t.auto?.slot;
         if (slot && slot.state === "started" && slot.turn === n) Object.assign(slot, { state: "ended", at: turn.endedAt, outcome: outcome.state, ...(outcome.error ? { error: outcome.error.slice(0, 300) } : {}) });
-        // A supervised or automatic turn that ended in an error needs the supervisor (Repair 3). Rai's own interactive turn does not: he
-        // was there and saw the reply fail.
-        if (outcome.state === "error" && turn.trigger.actor !== "human") raise(t, turn.endedAt!, { key: `turn:${n}`, kind: "turn-failed", summary: `Turn ${n} (started by ${actorLabel(turn.trigger)}) ended with an error: ${cleanText(outcome.error ?? "unknown", 200)}`, source: { type: "turn", turn: n, trigger: turn.trigger.actor } });
+        // A supervised or automatic turn that ended in an error (including one a pause or cancel cut short) needs the supervisor
+        // (Repair 3), whoever started it: it ran in the background. Rai's own interactive turn in the session does not: he was there
+        // and saw the reply fail.
+        if (outcome.state === "error" && !(turn.trigger.actor === "human" && turn.trigger.via === "sessions-ui")) raise(t, turn.endedAt!, { key: `turn:${n}`, kind: "turn-failed", summary: `Turn ${n} (started by ${actorLabel(turn.trigger)}) ended with an error: ${cleanText(outcome.error ?? "unknown", 200)}`, source: { type: "turn", turn: n, trigger: turn.trigger.actor } });
       }).task;
     },
 

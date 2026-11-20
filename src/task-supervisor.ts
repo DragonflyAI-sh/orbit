@@ -575,7 +575,7 @@ export function taskSupervisor(d: SupervisorDeps) {
       },
       {
         name: "task_respond",
-        description: "Answer a task's request: answer (a clarification or blocker, with text), decline (with a reason), or link_proposal (a job request: first propose the launch with job_launch; a research request: with research_launch, never job_launch; then link that proposal id here; Rai still confirms the card). A proposal of the other lane, another brief or one already linked anywhere is refused. You cannot confirm or approve anything. Needs the current rev.",
+        description: "Answer a task's request: answer (a clarification or blocker, with text), decline (with a reason), or link_proposal (a job request: first propose the launch with job_launch; a research request: with research_launch, never job_launch, using the request's text as the question and its brief as the brief; then link that proposal id here; Rai still confirms the card). A proposal of the other lane, another brief or one already linked anywhere is refused. You cannot confirm or approve anything. Needs the current rev.",
         parameters: obj({ id: str("Task id."), rev: int("The task's current rev."), request: str("The request id, for example req-1."), action: { type: "string", enum: ["answer", "decline", "link_proposal"] }, text: str("The answer or reason."), proposalId: str("link_proposal only: the proposalId job_launch returned.") }, ["id", "rev", "request", "action"]),
         run: (a, ctx) =>
           guard(() => {
