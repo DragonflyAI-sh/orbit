@@ -11,7 +11,8 @@
 <link rel="icon" href="/avatar.png">
 <link rel="apple-touch-icon" href="/avatar.png">
 <style>
-  /* Colors from the ORBIT avatar: deep space, violet and electric-blue ribbons, gold filaments. */
+  /* Colors from the ORBIT avatar: deep space, violet and electric-blue ribbons, gold filaments. --live, --mock and --down are
+     the status vocabulary (live, degraded or mock, down); the semantic names after the themes map meaning onto them. */
   :root {
     --bg: #f4f2fb; --bg-glow: rgba(124, 92, 230, 0.14); --fg: #1c1838; --muted: #5d5880;
     --line: #dcd6f0; --card: #ffffff; --accent: #6d4fd8; --accent-2: #1a6f9e; --on-accent: #ffffff;
@@ -24,17 +25,47 @@
       --live: #6fc3ff; --mock: #f2c46d; --down: #ff7a8a; --gold: #f2c46d;
     }
   }
-  /* Design tokens (docs/web-shell.md). One small scale each for spacing, type, radii, borders, elevation, layering and
+  /* Semantic colours: components use these, so a meaning has one colour everywhere. Each has a soft tint for backgrounds.
+     --info is the link/accent blue, --ok the live blue, --warn amber, --danger red, --attention ORBIT's gold (waiting on Rai). */
+  :root {
+    --info: var(--accent-2); --ok: var(--live); --warn: var(--mock); --danger: var(--down); --attention: var(--gold);
+    --danger-soft: color-mix(in srgb, var(--danger) 9%, var(--card)); --warn-soft: color-mix(in srgb, var(--warn) 9%, var(--card));
+    --info-soft: color-mix(in srgb, var(--info) 8%, var(--card)); --attention-soft: color-mix(in srgb, var(--attention) 10%, var(--card));
+  }
+  /* Design tokens (docs/web-shell.md, docs/design-system.md). One small scale each for spacing, type, radii, borders, elevation, layering and
      control sizes; the rules below use these instead of one-off values. Colors stay the theme variables above. */
   :root {
     --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px;
-    --text-xs: 12px; --text-sm: 13px; --text-md: 15px; --text-lg: 17px; --leading: 1.5;
-    --radius-sm: 6px; --radius-md: 10px; --radius-lg: 12px; --radius-pill: 999px;
+    /* Type (docs/design-system.md). System fonts only: no web-font download, tracker or licence. The UI face is the
+       platform's own (San Francisco, Segoe UI, Roboto, Cantarell...), code is the platform's monospace. One scale: 11 micro
+       labels, 12 meta, 13 secondary, 14 UI text, 15 body, 17 titles (18 on wide screens), 20 page titles. */
+    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --text-2xs: 11px; --text-xs: 12px; --text-sm: 13px; --text-ui: 14px; --text-md: 15px; --text-lg: 17px; --text-xl: 20px;
+    --leading: 1.5; --leading-tight: 1.3; --leading-code: 1.45;
+    --weight-regular: 400; --weight-medium: 500; --weight-strong: 600; --weight-heavy: 700;
+    --tracking-caps: .08em; --tracking-wordmark: .18em;
+    --radius-xs: 4px; --radius-sm: 8px; --radius-md: 10px; --radius-lg: 12px; --radius-pill: 999px;
+    /* Motion: short and functional (hover, press, a chevron); nothing moves on its own. Reduced motion turns all of it off. */
+    --dur-1: .08s; --dur-2: .12s; --ease: cubic-bezier(.2, 0, 0, 1);
     --border: 1px solid var(--line);
     --elev-1: 0 4px 14px -4px var(--header-shadow); --elev-2: 0 8px 28px rgba(0, 0, 0, .28); --elev-3: 0 12px 40px rgba(0, 0, 0, .45);
     --z-dock: 5; --z-header: 10; --z-popover: 40; --z-modal: 50;
     --ctl-sm: 28px; --ctl-md: 36px; --tap: 44px;
+    /* Action buttons (cards, the session picker, Jobs): one height for every variant. */
+    --btn-h: 32px;
     --gutter: var(--space-4);
+    /* Surfaces derived from the theme colours: a quiet track (the page tabs, inset blocks) and the hover tint. */
+    --surface-2: color-mix(in srgb, var(--fg) 6%, var(--bg));
+    --surface-hover: color-mix(in srgb, var(--fg) 6%, transparent);
+    /* Keyboard focus: one ring for every control. Text fields add a soft halo while focused. */
+    --focus-ring: 2px solid var(--accent-2);
+    --field-halo: 0 0 0 3px color-mix(in srgb, var(--accent-2) 22%, transparent);
+    /* The reading column. On wide screens the conversation, its status line and the composer share one centred column
+       (--measure), so lines stay readable and the composer lines up with the messages; Jobs uses a wider one for its
+       grids. Below that width the column is simply the gutter. --col-l/--col-r are the side paddings that produce it;
+       the 100% is the scroller's (or composer's) own width, which is the page's width. */
+    --measure: 860px; --measure-wide: 1040px;
     /* Safe areas (viewport-fit=cover): the page pads itself away from notches, rounded corners and the home indicator. The
        bottom inset is dropped while the on-screen keyboard is open (the keyboard already covers the home indicator), so the
        composer never gets that space twice. */
@@ -48,15 +79,21 @@
   :root[data-vv] { --app-1: calc(var(--app-h) / 100); }
   :root[data-kb="open"] { --safe-b: 0px; }
   @media (max-width: 480px) { :root { --gutter: var(--space-3); } }
-  @media (pointer: coarse) { :root { --ctl-sm: 36px; } }
+  @media (pointer: coarse) { :root { --ctl-sm: 36px; --btn-h: var(--tap); } }
+  /* Laptops and desktops: a roomier gutter. */
+  @media (min-width: 900px) { :root { --gutter: var(--space-5); --text-lg: 18px; } }
   * { box-sizing: border-box; }
+  /* The column paddings are worked out on each element that uses them, so a region can set its own --measure (Jobs). */
+  #log, #alog, #jobs, #astatus, #form, #aform {
+    --col-l: max(calc(var(--gutter) + var(--safe-l)), calc((100% - var(--measure)) / 2));
+    --col-r: max(calc(var(--gutter) + var(--safe-r)), calc((100% - var(--measure)) / 2)); }
   /* The app shell. The document itself never scrolls: the page is pinned to the visible area (position: fixed, so iOS
      Safari has no page to scroll, bounce or slide under its toolbars), and only the conversation, the Jobs list and the
      small panels scroll inside it. Its height is the visible height: the page's own measurement of the visual viewport
      while that is known (it follows Safari's toolbars and the on-screen keyboard), else 100dvh, else 100vh. */
   html { height: 100%; overflow: hidden; overscroll-behavior: none; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; background: var(--bg); }
   body {
-    margin: 0; color: var(--fg); font: var(--text-md)/var(--leading) system-ui, sans-serif;
+    margin: 0; color: var(--fg); font: var(--text-md)/var(--leading) var(--font-sans);
     position: fixed; top: 0; left: 0; right: 0; height: 100vh; overflow: hidden; overscroll-behavior: none;
     display: flex; flex-direction: column; min-width: 0;
     background: radial-gradient(ellipse 80% 60% at 50% 30%, var(--bg-glow), transparent 70%), var(--bg);
@@ -85,9 +122,29 @@
   .brand { display: flex; align-items: center; gap: 8px; flex: none; }
   .bar nav { flex: 0 1 auto; min-width: 0; }
   .hctl { display: flex; align-items: center; gap: 4px; margin-left: auto; flex: none; }
+  /* Laptops and desktops: one calm row with clear groups. The brand, a divider, the page tabs, then (Sessions only) the open
+     session as a context switcher, and on the right the notifications and status toggles with visible labels. The panels
+     below the bar sit side by side when both are open, as cards, so they read as part of the header, not loose text. */
+  @media (min-width: 900px) {
+    header { padding: calc(8px + var(--safe-t)) calc(var(--gutter) + var(--safe-r)) 8px calc(var(--gutter) + var(--safe-l));
+             display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: flex-end; gap: 0 var(--space-3); }
+    header > * { flex: 1 1 100%; min-width: 0; }
+    /* The open panels hang under their toggles (right-aligned, notifications then status, as the toggles are ordered), at a
+       readable width, instead of stretching across the page. */
+    #inbox { order: 1; } #statusline { order: 2; } #tstatus, #signin { order: 3; }
+    .bar { gap: 6px var(--space-4); }
+    .brand { padding-right: var(--space-4); border-right: var(--border); }
+    .brand img { width: 30px; height: 30px; }
+    #sesswrap { max-width: 520px; }
+    .hctl { gap: var(--space-2); }
+    #health, .hbtn { min-height: var(--btn-h); padding: 0 var(--space-3); font-size: var(--text-sm); }
+    #statusline:not([hidden]), #inbox:not([hidden]) { flex: 0 1 520px; padding: 10px var(--space-3); border: var(--border); border-radius: var(--radius-lg);
+                                                       background: color-mix(in srgb, var(--card) 70%, transparent); }
+    #inbox .note { background: var(--card); box-shadow: 0 0 0 1px var(--line); }
+  }
   @media (max-width: 560px) {
     .bar { row-gap: var(--space-2); }
-    .bar nav { order: 3; flex-basis: 100%; }
+    .bar nav { order: 3; flex-basis: 100%; padding: 2px; border: 0; } /* a borderless track: the phone header stays compact */
     .bar nav a { flex: 1 1 0; min-width: max-content; text-align: center; white-space: nowrap; }
   }
   @media (max-width: 400px) { body[data-tab="chat"] .brand h1 { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); white-space: nowrap; } }
@@ -102,28 +159,30 @@
   .ico { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
   #statusline { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-2); min-width: 0; max-height: calc(var(--app-1) * 30); overflow-y: auto; overscroll-behavior: contain; }
   #statusline #ports { flex: 1 1 0; min-width: 0; }
-  #statusopen { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; border-radius: 8px; color: var(--accent-2); border: 1px solid var(--line); background: var(--card); }
+  #statusopen { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; border-radius: var(--radius-sm); color: var(--accent-2); border: 1px solid var(--line); background: var(--card); }
   #statusopen:hover { box-shadow: 0 0 0 2px var(--ring); }
   /* The running release, under the pills on its own row: a quiet two-column list (labels, then values), aligned whatever the
      width. Long values wrap inside their column; nothing scrolls sideways. */
   #deployinfo { flex: 1 0 100%; display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: baseline; gap: 3px 14px;
-                margin: 0; padding-top: 7px; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.5; }
-  #deployinfo dt { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+                margin: 0; padding-top: 7px; border-top: 1px solid var(--line); font-size: var(--text-xs); line-height: 1.5; }
+  #deployinfo dt { color: var(--muted); font-size: var(--text-2xs); font-weight: 600; letter-spacing: var(--tracking-caps); text-transform: uppercase; }
   #deployinfo dd { margin: 0; min-width: 0; color: var(--fg); overflow-wrap: anywhere; }
   #deployinfo time { font-variant-numeric: tabular-nums; }
-  #deployinfo code { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .02em; padding: 0 6px;
-                     border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); }
+  #deployinfo code { font: var(--text-xs)/var(--leading-code) var(--font-mono); letter-spacing: .02em; padding: 0 6px;
+                     border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--card); color: var(--fg); }
   #deployinfo .na { color: var(--muted); font-style: italic; }
-  #inbox .empty { color: var(--muted); font-size: 13px; }
-  #inbox .readerr { color: var(--down); font-size: 13px; }
+  /* Empty, loading and error states share two looks: quiet muted text for "nothing here" and "reading…", and for a failure
+     the danger colour in a tinted block with a danger edge (the script gives those role="alert"). */
+  #inbox .empty, #jobs .empty { color: var(--muted); font-size: var(--text-sm); }
+  #inbox .readerr { color: var(--danger); font-size: var(--text-sm); background: var(--danger-soft); border-left: 3px solid var(--danger); padding: 4px 10px; border-radius: var(--radius-xs); }
   .brand img { width: 28px; height: 28px; flex: none; border-radius: 50%; box-shadow: 0 0 0 1px var(--line), 0 0 12px var(--bg-glow); }
   h1 {
-    margin: 0; font-size: 16px; letter-spacing: .18em;
+    margin: 0; font-size: 16px; font-weight: var(--weight-heavy); letter-spacing: var(--tracking-wordmark);
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
-  #ports { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
-  .pill { border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; background: var(--card); }
+  #ports { display: flex; flex-wrap: wrap; gap: 6px; font-size: var(--text-xs); }
+  .pill { border: 1px solid var(--line); border-radius: var(--radius-pill); padding: 1px 8px; background: var(--card); }
   .pill::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; background: currentColor; vertical-align: middle; }
   /* States (status pills, reply tags): the state is also in the text ("model: degraded"). Degraded is amber like the overall
      indicator (working, with a caveat); down is red. */
@@ -132,14 +191,14 @@
   /* Both panels open: they share the room (20% each), and the header as a whole never takes more than 60% of the height
      (it scrolls inside past that), so the conversation and the composer always keep the rest. */
   #statusline:not([hidden]) ~ #inbox, #statusline:has(~ #inbox:not([hidden])) { max-height: calc(var(--app-1) * 20); }
-  .note { border-left: 3px solid var(--gold); padding: 4px 8px; background: var(--card); border-radius: 4px; overflow-wrap: anywhere; }
+  .note { border-left: 3px solid var(--attention); padding: 4px 6px 4px 10px; background: var(--card); border-radius: var(--radius-xs); overflow-wrap: anywhere; }
   .note .top { display: flex; gap: 6px; align-items: flex-start; }
   .note .first { flex: 1; min-width: 0; }
-  .note .rest { margin-top: 4px; white-space: pre-wrap; font-size: 14px; }
-  .note button { flex: none; background: none; border: 0; padding: 2px 6px; min-height: 24px; color: var(--accent-2); font: inherit; font-size: 13px; cursor: pointer; }
+  .note .rest { margin-top: 4px; white-space: pre-wrap; font-size: var(--text-ui); }
+  .note button { flex: none; background: none; border: 0; padding: 2px 6px; min-height: 24px; color: var(--accent-2); font: inherit; font-size: var(--text-sm); cursor: pointer; }
   .note button.x { color: var(--muted); font-size: 16px; line-height: 1; }
   .note a, .ev a, .latest a { color: var(--accent-2); }
-  #inbox .showall { align-self: flex-start; background: none; border: 0; padding: 2px 0; color: var(--accent-2); font: inherit; font-size: 13px; cursor: pointer; }
+  #inbox .showall { align-self: flex-start; background: none; border: 0; padding: 2px 0; color: var(--accent-2); font: inherit; font-size: var(--text-sm); cursor: pointer; }
   /* Sessions: the open session's title and a chevron sit in the header bar (no row of their own). The title takes the room
      left between the page links and the toggles and is cut with an ellipsis; its full text is the button's hover text and
      accessible name. The button opens the session picker, which overlays the page under the header (it never pushes the
@@ -149,46 +208,49 @@
              background: var(--card); color: var(--fg); border: var(--border); border-radius: var(--radius-md); font-weight: 600; }
   #sessbtn[aria-expanded="true"] { border-color: var(--accent-2); }
   #sesstitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #sessbtn .chev { transition: transform .12s ease; }
+  #sessbtn .chev { transition: transform var(--dur-2) var(--ease); }
   #sessbtn[aria-expanded="true"] .chev { transform: rotate(180deg); }
   #sesspicker { position: fixed; z-index: var(--z-popover); display: flex; flex-direction: column; gap: 6px; padding: var(--space-2); max-height: min(calc(var(--app-1) * 70), 520px);
                 border: var(--border); border-radius: var(--radius-lg); background: var(--card); box-shadow: var(--elev-2); }
   #sesspicker .prow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   #sesspicker .prow button { min-height: 36px; padding: 4px 12px; }
   #sesspicker .pcur { border-top: 1px solid var(--line); padding-top: 6px; }
-  #sesspicker .pcur button { background: var(--card); color: var(--fg); border: 1px solid var(--line); }
-  #pcurlabel { flex: 1 1 auto; font-size: 12px; color: var(--muted); }
-  .parch { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; min-height: 36px; margin-left: auto; }
+  #pcurlabel { flex: 1 1 auto; font-size: var(--text-xs); color: var(--muted); }
+  .parch { font-size: var(--text-sm); color: var(--muted); display: flex; align-items: center; gap: 6px; min-height: 36px; margin-left: auto; }
   .parch input { width: 18px; height: 18px; margin: 0; }
   #sesslist { list-style: none; margin: 0; padding: 3px; overflow-y: auto; overscroll-behavior: contain; min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; }
-  #sesslist .sitem { display: block; width: 100%; min-height: 40px; padding: 6px 10px; text-align: left; border-radius: 8px; background: none; color: var(--fg);
+  #sesslist .sitem { display: block; width: 100%; min-height: 40px; padding: 6px 10px; text-align: left; border-radius: var(--radius-sm); background: none; color: var(--fg);
                      border: 1px solid transparent; overflow-wrap: anywhere; font-weight: 400; }
   #sesslist .sitem[aria-current="true"] { background: var(--press-bg); border-color: var(--accent-2); font-weight: 600; }
-  #sesslist .sempty { padding: 6px 10px; font-size: 13px; color: var(--muted); }
+  #sesslist .sempty { padding: 6px 10px; font-size: var(--text-sm); color: var(--muted); }
   @media (pointer: coarse) { #sesslist .sitem, #sesspicker .prow button, .parch { min-height: var(--tap); } }
-  #tstatus { margin-top: 6px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+  #tstatus { margin-top: 6px; font-size: var(--text-xs); color: var(--muted); overflow-wrap: anywhere; }
   #tstatus:empty { display: none; }
   #log[aria-busy="true"] { opacity: 0.6; }
-  .banner { align-self: stretch; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); border: 1px solid var(--gold); background: var(--card); font-size: 14px; overflow-wrap: anywhere; }
+  .banner { align-self: stretch; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); border: 1px solid color-mix(in srgb, var(--attention) 55%, var(--line));
+             border-left: 3px solid var(--attention); background: var(--card); font-size: var(--text-ui); overflow-wrap: anywhere; }
   .banner button { margin-top: 6px; padding: 4px 12px; display: block; }
-  .compact { align-self: stretch; padding: 6px 10px; border-radius: 10px; border: 1px dashed var(--line); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
-  .compact pre { white-space: pre-wrap; margin: 4px 0 0; font: 12px/1.4 ui-monospace, monospace; max-height: calc(var(--app-1) * 50); overflow: auto; overscroll-behavior: contain; }
-  .msg .warn { color: var(--mock); font-weight: 600; margin-top: .3rem; }
-  .compact .warn, .dup { color: var(--mock); font-weight: 600; }
-  .cardstate { margin-top: 6px; font-size: 13px; overflow-wrap: anywhere; }
-  .cardstate .ok { color: var(--live); } .cardstate .bad { color: var(--down); }
-  .proposal.closed { border-color: var(--line); }
-  #signin:not(:empty) { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  .compact { align-self: stretch; padding: 6px 10px; border-radius: var(--radius-md); border: 1px dashed var(--line); font-size: var(--text-xs); color: var(--muted); overflow-wrap: anywhere; }
+  .compact pre { white-space: pre-wrap; margin: 4px 0 0; font: var(--text-xs)/var(--leading-code) var(--font-mono); max-height: calc(var(--app-1) * 50); overflow: auto; overscroll-behavior: contain; }
+  .msg .warn { color: var(--warn); font-weight: 600; margin-top: .3rem; }
+  .compact .warn, .dup { color: var(--warn); font-weight: 600; }
+  .cardstate { margin-top: 6px; font-size: var(--text-sm); overflow-wrap: anywhere; }
+  .cardstate .ok { color: var(--live); } .cardstate .bad { color: var(--danger); }
+  .proposal.closed { border-color: var(--line); box-shadow: none; }
+  #signin:not(:empty) { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--card); }
   #signin button { padding: 4px 12px; margin-top: 4px; }
-  #signin code { font-size: 16px; letter-spacing: .12em; color: var(--gold); }
+  #signin code { font-size: 16px; letter-spacing: .12em; color: var(--attention); }
   #signin a { color: var(--accent-2); }
   #log, #alog, #jobs { flex: 1 1 0; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
-                      padding: var(--gutter) calc(var(--gutter) + var(--safe-r)) var(--gutter) calc(var(--gutter) + var(--safe-l)); display: flex; flex-direction: column; gap: 10px; }
+                      padding: var(--gutter) var(--col-r) var(--gutter) var(--col-l); display: flex; flex-direction: column; gap: 10px; }
+  #jobs { --measure: var(--measure-wide); }
+  @media (min-width: 900px) { #log, #alog { gap: var(--space-3); } }
   /* Messages, in Chat and the Assistant alike: one left-aligned list, no bubbles. Every row is the sender's icon in a
      narrow first column and everything else (name and time, then the content parts) in one content column. The sender
      shows as an icon (ORBIT's avatar, or Rai's initial), the name in the sender's color, and a thin line in that color
-     down the content's left edge; never a background. Rows, cards, banners and the context line use the log's full width
-     (no fixed cap; the log's own padding keeps them off the edges). A message never grows past the log's width: long
+     down the content's left edge; never a background. Rows, cards, banners and the context line use the full width of the
+     reading column (--measure, centred on wide screens; the whole log, less its gutter, on narrow ones). A message never
+     grows past the column: long
      words and URLs wrap, wide code and tables scroll inside it. */
   .msg { --who: var(--accent-2); position: relative; display: grid; grid-template-columns: 32px minmax(0, 1fr); column-gap: 10px;
          align-self: stretch; width: 100%; max-width: 100%; min-width: 0; padding: 4px 8px 4px 4px;
@@ -200,61 +262,67 @@
   .msg:hover { background: color-mix(in srgb, var(--fg) 4%, transparent); }
   .mavatar { width: 32px; height: 32px; margin-top: 2px; border-radius: 50%; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 0 1px var(--line); }
   img.mavatar { object-fit: cover; }
-  span.mavatar { background: var(--accent); color: var(--on-accent); font-weight: 700; font-size: 15px; line-height: 1; white-space: nowrap; }
+  span.mavatar { background: var(--accent); color: var(--on-accent); font-weight: 700; font-size: var(--text-md); line-height: 1; white-space: nowrap; }
   .mhead { position: relative; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; min-height: 24px; white-space: normal; line-height: 1.35; }
   .mname { font-weight: 600; color: var(--who); overflow-wrap: anywhere; }
   /* The time beside the name: small and muted. It is a button, so the full date, time and time zone show on hover, on
      keyboard focus and on a tap (aria-expanded), and screen readers get them in its name. The tip is anchored to the name
      line, so it is never wider than the content column and never widens the page. */
-  .mtime { font: inherit; font-size: 12px; color: var(--muted); background: none; border: 0; border-radius: 4px; padding: 0 2px; min-height: 24px; cursor: help; }
+  .mtime { font: inherit; font-size: var(--text-xs); color: var(--muted); background: none; border: 0; border-radius: var(--radius-xs); padding: 0 2px; min-height: 24px; cursor: help; }
   .mtime:not(:disabled):hover, .mtime:not(:disabled):active { filter: none; box-shadow: none; transform: none; text-decoration: underline; }
   .mtime.provisional { font-style: italic; }
-  .mtip { display: none; position: absolute; left: 0; top: 100%; z-index: 5; width: max-content; max-width: 100%; padding: 6px 8px; border-radius: 6px;
-          background: var(--fg); color: var(--bg); font-size: 12px; line-height: 1.4; text-align: left; white-space: normal; overflow-wrap: anywhere; box-shadow: 0 2px 8px rgba(0, 0, 0, .3); }
+  .mtip { display: none; position: absolute; left: 0; top: 100%; z-index: 5; width: max-content; max-width: 100%; padding: 6px 8px; border-radius: var(--radius-sm);
+          background: var(--fg); color: var(--bg); font-size: var(--text-xs); line-height: 1.4; text-align: left; white-space: normal; overflow-wrap: anywhere; box-shadow: 0 2px 8px rgba(0, 0, 0, .3); }
   .mtime:hover .mtip, .mtime:focus-visible .mtip, .mtime[aria-expanded="true"] .mtip { display: block; }
   @media (max-width: 480px) {
     .msg { grid-template-columns: 28px minmax(0, 1fr); column-gap: 8px; padding: 4px 2px; }
     .msg::before { left: 33px; top: 26px; }
-    .mavatar { width: 28px; height: 28px; } span.mavatar { font-size: 13px; }
+    .mavatar { width: 28px; height: 28px; } span.mavatar { font-size: var(--text-sm); }
   }
   .msg a { color: var(--accent-2); overflow-wrap: anywhere; }
-  .tag { display: block; font-size: 11px; margin-top: 4px; }
-  .calls { display: block; margin-top: 6px; font-size: 12px; color: var(--muted); }
+  .tag { display: block; font-size: var(--text-2xs); margin-top: 4px; }
+  .calls { display: block; margin-top: 6px; font-size: var(--text-xs); color: var(--muted); }
   .calls div { margin-top: 2px; }
-  .proposal { margin-top: var(--space-2); padding: var(--space-2) 10px; border: 1px solid var(--gold); border-radius: var(--radius-md); background: var(--bg); }
-  .proposal pre { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; overscroll-behavior: contain; font: 12px/1.4 ui-monospace, monospace; }
-  .proposal button { padding: 4px 12px; margin-right: 6px; min-height: var(--ctl-sm); }
-  .proposal button.cancel { background: var(--card); color: var(--fg); border: 1px solid var(--line); }
+  /* Confirmation cards: a card with a gold edge (it is waiting for Rai), the proposal as its title, the exact brief or
+     command in an inset block, then the actions in their own row: Confirm (primary) first, Cancel (secondary) beside it.
+     Once answered, the actions are replaced by the result and the gold edge goes quiet. */
+  .proposal { margin-top: var(--space-2); padding: var(--space-3); display: flex; flex-direction: column; align-items: stretch; gap: var(--space-2); white-space: normal;
+              border: 1px solid color-mix(in srgb, var(--attention) 55%, var(--line)); border-left: 3px solid var(--attention); border-radius: var(--radius-lg);
+              background: var(--card); box-shadow: 0 1px 3px -1px var(--header-shadow); }
+  .proposal .ptitle { font-weight: 600; line-height: 1.4; }
+  .proposal pre { margin: 0; padding: var(--space-2) 10px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; overscroll-behavior: contain;
+                  font: var(--text-xs)/var(--leading-code) var(--font-mono); background: var(--surface-2); border: var(--border); border-radius: var(--radius-sm); }
+  .proposal .pactions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
   [hidden] { display: none !important; }
   /* Photo attachments (docs/photos.md): the tray of photos waiting to be sent, and photos shown in stored messages. */
   form { flex-wrap: wrap; }
   .phototray { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 8px; }
-  .ph { position: relative; width: 84px; display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 11px; color: var(--muted); }
-  .phthumb { width: 84px; height: 84px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); background: var(--card); display: flex; align-items: center; justify-content: center; }
-  .ph.failed .phthumb { border-color: var(--down); }
+  .ph { position: relative; width: 84px; display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: var(--text-2xs); color: var(--muted); }
+  .phthumb { width: 84px; height: 84px; object-fit: cover; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--card); display: flex; align-items: center; justify-content: center; }
+  .ph.failed .phthumb { border-color: var(--danger); }
   .phstatus { max-width: 84px; text-align: center; overflow-wrap: anywhere; line-height: 1.25; }
-  .phstatus.bad { color: var(--down); font-weight: 600; }
+  .phstatus.bad { color: var(--danger); font-weight: 600; }
   .ph .phx { position: absolute; top: -6px; right: -6px; min-width: 28px; min-height: 28px; padding: 0; border-radius: 50%; font-size: 16px; line-height: 1; }
-  .ph .phretry { padding: 2px 8px; min-height: 28px; font-size: 12px; }
-  .phnote { flex: 1 1 100%; font-size: 12px; color: var(--mock); }
+  .ph .phretry { padding: 2px 8px; min-height: 28px; font-size: var(--text-xs); }
+  .phnote { flex: 1 1 100%; font-size: var(--text-xs); color: var(--warn); }
   .phbtn { flex: none; padding: 0; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
   .photos { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-  .photos img { width: 96px; height: 96px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); background: var(--card); display: block; }
+  .photos img { width: 96px; height: 96px; object-fit: cover; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--card); display: block; }
   .photos a { display: block; line-height: 0; }
   @media (max-width: 480px) { .photos img { width: 72px; height: 72px; } }
   /* Galleries photos_show displayed under a reply (docs/photo-recall.md): stored photos loaded through the conversation's own route. */
   .gallery { margin-top: 8px; display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; max-width: 100%; }
-  .gallery .gnote { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
+  .gallery .gnote { grid-column: 1 / -1; font-size: var(--text-xs); color: var(--muted); }
   .gitem { margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-  .gthumb { padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--card); line-height: 0; cursor: zoom-in; width: 100%; aspect-ratio: 1 / 1; }
+  .gthumb { padding: 0; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--card); line-height: 0; cursor: zoom-in; width: 100%; aspect-ratio: 1 / 1; }
   .gthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .gitem figcaption { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; line-height: 1.3; }
+  .gitem figcaption { font-size: var(--text-2xs); color: var(--muted); overflow-wrap: anywhere; line-height: 1.3; }
   .gitem figcaption a { color: inherit; }
-  .gmissing { aspect-ratio: 1 / 1; border: 1px dashed var(--line); border-radius: 8px; display: flex; align-items: center; justify-content: center; text-align: center; padding: 6px; font-size: 11px; color: var(--muted); }
+  .gmissing { aspect-ratio: 1 / 1; border: 1px dashed var(--line); border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; text-align: center; padding: 6px; font-size: var(--text-2xs); color: var(--muted); }
   .gviewer { position: fixed; inset: 0; z-index: var(--z-modal); background: rgba(0, 0, 0, 0.88); display: flex; flex-direction: column; align-items: center; justify-content: center;
              padding: calc(var(--space-4) + var(--safe-t)) calc(var(--space-4) + var(--safe-r)) calc(var(--space-4) + var(--safe-b)) calc(var(--space-4) + var(--safe-l)); gap: var(--space-2); overscroll-behavior: contain; }
   .gviewer img { max-width: 100%; max-height: calc(100% - 72px); object-fit: contain; }
-  .gviewer .glabel { color: #eee; font-size: 13px; text-align: center; overflow-wrap: anywhere; max-width: 100%; }
+  .gviewer .glabel { color: #eee; font-size: var(--text-sm); text-align: center; overflow-wrap: anywhere; max-width: 100%; }
   .gviewer button { position: absolute; top: calc(var(--space-2) + var(--safe-t)); right: calc(var(--space-2) + var(--safe-r)); min-width: var(--tap); min-height: var(--tap); }
   /* The session control, its picker and its status line belong to the Sessions page only. */
   body:not([data-tab="chat"]) #sesswrap, body:not([data-tab="chat"]) #sesspicker, body:not([data-tab="chat"]) #tstatus { display: none !important; }
@@ -262,118 +330,124 @@
      differs per level too (circle, diamond, square, ring), and the level is in the label and accessible name, never colour alone. */
   /* The header toggles (notifications, status): compact pill buttons, not navigation. aria-expanded shows which panel is open. */
   #health, .hbtn { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); min-height: var(--ctl-sm); font-size: var(--text-xs); color: var(--muted); border: var(--border); border-radius: var(--radius-pill); padding: 2px 8px; background: var(--card); }
-  #health[aria-expanded="true"], .hbtn[aria-expanded="true"] { border-color: var(--accent-2); color: var(--fg); }
-  .hbtn .count { min-width: 1.5em; padding: 0 4px; border-radius: 999px; text-align: center; font-weight: 600; line-height: 1.4; }
-  .hbtn.has .count { background: var(--gold); color: #1c1838; }
+  #health[aria-expanded="true"], .hbtn[aria-expanded="true"] { border-color: var(--accent-2); color: var(--fg); background: color-mix(in srgb, var(--accent-2) 8%, var(--card)); }
+  #health:not(:disabled):hover, .hbtn:not(:disabled):hover { color: var(--fg); filter: none; }
+  .hbtn .label { display: none; }
+  @media (min-width: 900px) { .hbtn .label { display: inline; } .hbtn { gap: 6px; } }
+  .hbtn .count { min-width: 1.5em; padding: 0 4px; border-radius: var(--radius-pill); text-align: center; font-weight: 600; line-height: 1.4; }
+  .hbtn.has .count { background: var(--attention); color: #1c1838; }
   #health .dot { box-sizing: border-box; width: 10px; height: 10px; border-radius: 50%; flex: none; background: transparent; border: 2px solid var(--muted); }
   #health.ok .dot { border: 0; background: var(--green-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--green-dot) 25%, transparent); }
   #health.degraded .dot { border: 0; border-radius: 1px; transform: rotate(45deg) scale(.85); background: var(--amber-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber-dot) 25%, transparent); }
   #health.down .dot { border: 0; border-radius: 2px; background: var(--red-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--red-dot) 25%, transparent); }
   :root { --green-dot: #1f9d55; --amber-dot: #d99a00; --red-dot: #d23c3c; }
-    #alog .older { align-self: center; padding: 4px 14px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
-  .ctxline { align-self: stretch; font-size: 12px; color: var(--muted); border-top: 1px dashed var(--line); padding-top: 4px; overflow-wrap: anywhere; }
+  #alog .older { align-self: center; }
+  .ctxline { align-self: stretch; font-size: var(--text-xs); color: var(--muted); border-top: 1px dashed var(--line); padding-top: 4px; overflow-wrap: anywhere; }
   .msg.outctx { opacity: .75; }
-  .msg details { margin-top: 6px; font-size: 12px; color: var(--muted); white-space: normal; }
+  .msg details { margin-top: 6px; font-size: var(--text-xs); color: var(--muted); white-space: normal; }
   .msg details summary { cursor: pointer; min-height: 24px; }
   .msg details .rows div { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .bounded { margin-top: 6px; font-size: 12px; color: var(--mock); }
+  .bounded { margin-top: 6px; font-size: var(--text-xs); color: var(--warn); }
   /* A message's Details footer (detailsFooter in the script): closed by default, a small muted "Details" with a chevron that
      points right when closed and down when open (no motion). It holds the provenance/model/memory tag, tool calls and, in the
      Assistant, the Tool output and Resource usage panes. Long model ids and note paths wrap. */
   .msg details.mfoot { margin-top: 4px; }
-  .mfoot > summary { display: inline-flex; align-items: center; gap: 6px; list-style: none; padding: 0 6px 0 2px; border-radius: 6px; color: var(--muted); }
+  .mfoot > summary { display: inline-flex; align-items: center; gap: 6px; list-style: none; padding: 0 6px 0 2px; border-radius: var(--radius-sm); color: var(--muted); }
   .mfoot > summary::-webkit-details-marker { display: none; }
   .mfoot > summary::before { content: ""; flex: none; width: 5px; height: 5px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); }
   .mfoot[open] > summary::before { transform: translateY(-2px) rotate(45deg); }
   .mfoot > summary:hover, .mfoot[open] > summary { color: var(--fg); }
-  .mfoothint { color: var(--mock); font-weight: 600; }
+  .mfoothint { color: var(--warn); font-weight: 600; }
   .mfoothint:empty { display: none; }
   .mfootbody { margin: 2px 0 0 4px; padding-left: 10px; border-left: 2px solid var(--line); overflow-wrap: anywhere; }
   .mfootbody > :first-child { margin-top: 0; }
   @media (pointer: coarse) { .mfoot > summary { min-height: 32px; } }
-  #astatus { padding: 0 calc(var(--gutter) + var(--safe-r)) 0 calc(var(--gutter) + var(--safe-l)); font-size: var(--text-sm); color: var(--muted); }
+  #astatus { padding: 0 var(--col-r) 0 var(--col-l); font-size: var(--text-sm); color: var(--muted); }
   #astatus:empty { display: none; }
-  #astatus.bad { color: var(--down); font-weight: 600; }
+  #astatus.bad { color: var(--danger); font-weight: 600; }
   @media (max-width: 480px) { #health .label { display: none; } }
-  nav { display: flex; flex-wrap: wrap; gap: 6px; }
-  nav a { padding: 3px 10px; border-radius: var(--radius-md); background: var(--card); color: var(--fg); border: var(--border); text-decoration: none; }
-  nav a[aria-current="page"] { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: var(--on-accent); border-color: transparent; }
-  nav a:hover { box-shadow: 0 0 0 2px var(--ring); }
+  /* The page tabs: a segmented control (navigation, so it looks unlike the action buttons). The track is a quiet surface;
+     the current page is a raised card segment in bold with ORBIT's gradient as an underline, and aria-current="page" says
+     the same to assistive technology. Other tabs tint on hover. */
+  nav { display: flex; flex-wrap: wrap; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--surface-2); border: var(--border); }
+  nav a { padding: 3px 12px; border-radius: calc(var(--radius-md) - 3px); color: var(--fg); border: 1px solid transparent; text-decoration: none; font-weight: 500; }
+  nav a[aria-current="page"] { background: linear-gradient(90deg, var(--accent), var(--accent-2)) bottom 2px center / calc(100% - 20px) 2px no-repeat, var(--card);
+                               border-color: var(--line); font-weight: 650; box-shadow: 0 1px 2px var(--header-shadow); }
+  nav a:not([aria-current="page"]):hover { background: var(--surface-hover); }
   nav a:active { transform: translateY(1px); }
-    #jobs h2 { margin: 6px 0 0; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  @media (min-width: 900px) { nav a { padding: 3px 14px; } }
+    #jobs h2 { margin: 6px 0 0; font-size: var(--text-sm); letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--muted); }
   .card { width: 100%; min-width: 0; padding: 10px var(--space-3); border-radius: var(--radius-lg); background: var(--card); border: var(--border); overflow-wrap: anywhere; }
-  .card.bad { border-color: var(--down); }
-  .card.warn { border-color: var(--mock); }
+  .card.bad { border-color: var(--danger); }
+  .card.warn { border-color: var(--warn); }
   .card .row { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
-  .card .id { font: 600 13px ui-monospace, monospace; }
-  .card .meta { font-size: 12px; color: var(--muted); }
-  .card .latest { margin-top: 4px; font-size: 14px; }
+  .card .id { font: var(--weight-strong) var(--text-sm) var(--font-mono); }
+  .card .meta { font-size: var(--text-xs); color: var(--muted); }
+  .card .latest { margin-top: 4px; font-size: var(--text-ui); }
   .card a { color: var(--accent-2); }
   .card button.open { margin-top: 6px; padding: 4px 12px; }
-  .health-not-started, .health-quiet { color: var(--mock); font-weight: 600; }
-  .health-launch-failed { color: var(--down); font-weight: 600; }
+  .health-not-started, .health-quiet { color: var(--warn); font-weight: 600; }
+  .health-launch-failed { color: var(--danger); font-weight: 600; }
   .health-ok { color: var(--live); }
   .health-awaiting-first-checkin { color: var(--muted); font-weight: 600; }
-  .ev { font-size: 13px; padding: 4px 0; border-top: 1px solid var(--line); white-space: pre-wrap; }
+  .ev { font-size: var(--text-sm); padding: 4px 0; border-top: 1px solid var(--line); white-space: pre-wrap; }
   .ev:first-child { border-top: 0; }
   #jobs textarea { width: 100%; }
   #jobs .steerbox { display: flex; flex-direction: column; gap: 6px; }
   #jobs .steerbox button { align-self: flex-start; padding: 6px 16px; }
-  #jobs button.back, #jobs button.cancel { background: var(--card); color: var(--fg); border: 1px solid var(--line); padding: 4px 12px; align-self: flex-start; }
-  #jobs .empty { color: var(--muted); }
+  #jobs button.back, #jobs button.cancel { padding: 4px 12px; align-self: flex-start; }
   /* Jobs list and detail (docs/jobs-page.md). */
   #jobs .jlistview, #jobs .jdetail { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
   #jobs .jtools { display: flex; flex-direction: column; gap: 6px; }
-  #jobs .jtools input[type=search] { font: inherit; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--fg); width: 100%; box-sizing: border-box; }
-  #jobs select { font: inherit; font-size: 13px; padding: 4px 6px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); max-width: 100%; }
-  #jobs .chk { font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
-  #jobs button.mini { font-size: 12px; padding: 3px 10px; min-height: 26px; background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; }
-  #jobs button.mini:disabled { opacity: .5; }
+  #jobs .jtools input[type=search] { font: inherit; padding: 6px 10px; border-radius: var(--radius-md); border: 1px solid var(--line); background: var(--card); color: var(--fg); width: 100%; box-sizing: border-box; }
+  #jobs select { font: inherit; font-size: var(--text-sm); padding: 4px 6px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--card); color: var(--fg); max-width: 100%; }
+  #jobs .chk { font-size: var(--text-sm); display: inline-flex; align-items: center; gap: 4px; }
+  #jobs button.mini { font-size: var(--text-xs); padding: 3px 10px; min-height: 26px; border-radius: var(--radius-sm); }
   #jobs .jlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
   #jobs .jtitle { font-weight: 600; color: var(--fg); text-decoration: none; }
   #jobs .jtitle:hover { text-decoration: underline; }
   #jobs .chips { margin-top: 2px; }
-  #jobs .chip, #jobs .badge { font-size: 12px; padding: 0 7px; border-radius: 8px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  #jobs .chip, #jobs .badge { font-size: var(--text-xs); padding: 0 7px; border-radius: var(--radius-sm); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
   #jobs .badge.state-done { color: var(--live); border-color: var(--live); }
-  #jobs .badge.state-failed, #jobs .badge.state-blocked { color: var(--down); border-color: var(--down); }
-  #jobs .badge.health-not-started, #jobs .badge.health-quiet { color: var(--mock); border-color: var(--mock); }
-  #jobs .badge.health-launch-failed { color: var(--down); border-color: var(--down); }
+  #jobs .badge.state-failed, #jobs .badge.state-blocked { color: var(--danger); border-color: var(--danger); }
+  #jobs .badge.health-not-started, #jobs .badge.health-quiet { color: var(--warn); border-color: var(--warn); }
+  #jobs .badge.health-launch-failed { color: var(--danger); border-color: var(--danger); }
   #jobs .badge.health-awaiting-first-checkin { color: var(--muted); border-style: dashed; }
   #jobs .badge.basis-recorded { color: var(--live); }
-  #jobs .badge.basis-unavailable, #jobs .badge.steer-queued, #jobs .badge.steer-proposed { color: var(--mock); }
+  #jobs .badge.basis-unavailable, #jobs .badge.steer-queued, #jobs .badge.steer-proposed { color: var(--warn); }
   #jobs .badge.steer-delivered, #jobs .badge.steer-replied { color: var(--live); }
   #jobs .jrow .meta { margin-top: 4px; }
   #jobs .jpager { justify-content: space-between; }
   #jobs a.back { align-self: flex-start; color: var(--accent-2); }
-  #jobs .jtitlebig { font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
+  #jobs .jtitlebig { font-size: var(--text-lg); font-weight: 600; overflow-wrap: anywhere; }
   #jobs details.jsec { border-top: 1px solid var(--line); padding-top: 4px; }
   #jobs details.jsec > summary { cursor: pointer; min-height: 28px; display: flex; align-items: center; }
   #jobs details.jsec > summary h2 { display: inline; margin: 0; }
   #jobs .jsecbody { display: flex; flex-direction: column; gap: 8px; padding: 6px 0 4px; min-width: 0; }
-  #jobs h3 { margin: 6px 0 0; font-size: 14px; }
-  #jobs .jdl { display: grid; grid-template-columns: minmax(7em, max-content) 1fr; gap: 3px 12px; margin: 6px 0 0; font-size: 13px; }
+  #jobs h3 { margin: 6px 0 0; font-size: var(--text-ui); }
+  #jobs .jdl { display: grid; grid-template-columns: minmax(7em, max-content) 1fr; gap: 3px 12px; margin: 6px 0 0; font-size: var(--text-sm); }
   #jobs .jdl dt { color: var(--muted); }
   #jobs .jdl dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
   #jobs .jlinks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-  #jobs .lrow { display: grid; grid-template-columns: minmax(10em, 16em) minmax(0, 1fr) auto auto; gap: 2px 10px; align-items: baseline; padding: 4px 0; border-top: 1px solid var(--line); font-size: 13px; }
+  #jobs .lrow { display: grid; grid-template-columns: minmax(10em, 16em) minmax(0, 1fr) auto auto; gap: 2px 10px; align-items: baseline; padding: 4px 0; border-top: 1px solid var(--line); font-size: var(--text-sm); }
   #jobs .lrow .lval { min-width: 0; overflow-wrap: anywhere; }
   #jobs .lrow .lnote { grid-column: 1 / -1; }
   #jobs .lrow a { color: var(--accent-2); }
   #jobs .lrow button.mini, #jobs .lrow .badge { justify-self: start; }
-  #jobs .meta { font-size: 12.5px; color: var(--muted); }
-  #jobs .stages { margin: 0; padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+  #jobs .meta { font-size: var(--text-xs); color: var(--muted); }
+  #jobs .stages { margin: 0; padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: var(--text-sm); }
   #jobs .stage { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; }
   #jobs .stage .meta { flex-basis: 100%; padding-left: 1.6em; }
   #jobs .smark { width: 1.2em; text-align: center; font-weight: 700; }
-  #jobs .stage-done .smark { color: var(--live); } #jobs .stage-failed .smark { color: var(--down); } #jobs .stage-unknown .smark, #jobs .stage-pending .smark { color: var(--mock); }
+  #jobs .stage-done .smark { color: var(--live); } #jobs .stage-failed .smark { color: var(--danger); } #jobs .stage-unknown .smark, #jobs .stage-pending .smark { color: var(--warn); }
   #jobs .lt { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   #jobs .lthead { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
-  #jobs .ltlabel { font-weight: 600; font-size: 13px; }
-  #jobs pre.ltbody { margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-monospace, monospace; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); overflow: auto; max-height: calc(var(--app-1) * 70); overscroll-behavior: contain; }
+  #jobs .ltlabel { font-weight: 600; font-size: var(--text-sm); }
+  #jobs pre.ltbody { margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--text-xs)/var(--leading-code) var(--font-mono); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); overflow: auto; max-height: calc(var(--app-1) * 70); overscroll-behavior: contain; }
   #jobs pre.ltbody.folded { max-height: 16em; }
   #jobs .steeritem { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; border-top: 1px solid var(--line); }
-  #jobs .warnline { color: var(--mock); }
-  #jobs .times { margin: 0; padding-left: 1.1em; font-size: 13px; }
+  #jobs .warnline { color: var(--warn); }
+  #jobs .times { margin: 0; padding-left: 1.1em; font-size: var(--text-sm); }
   #jobs .evs { display: flex; flex-direction: column; }
   #jobs .evtext { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
   #jobs .ev a { color: var(--accent-2); }
@@ -387,11 +461,41 @@
   /* Jobs has no composer under it, so it keeps the home indicator's room itself. */
   #jobs { padding-bottom: calc(var(--gutter) + var(--safe-b)); }
   form { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
-  textarea { flex: 1; resize: none; font: inherit; padding: 8px; border-radius: 10px; border: 1px solid var(--line);
+  /* Text fields (the composers, steers, Jobs search and filters): one look. A card surface with the line border, the
+     medium radius, and while focused the accent border with a soft halo plus the shared focus ring. */
+  textarea { flex: 1; resize: none; font: inherit; padding: 8px; border-radius: var(--radius-md); border: var(--border);
              background: var(--card); color: var(--fg); }
-  textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-  button { font: inherit; padding: 0 16px; border-radius: 10px; border: 0; color: var(--on-accent);
+  textarea, #jobs input[type=search], #jobs select { transition: border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease); }
+  textarea:hover, #jobs input[type=search]:hover, #jobs select:hover { border-color: color-mix(in srgb, var(--accent-2) 35%, var(--line)); }
+  textarea:focus { outline: var(--focus-ring); outline-offset: 1px; border-color: var(--accent-2); box-shadow: var(--field-halo); }
+  textarea::placeholder, input::placeholder { color: var(--muted); opacity: 1; }
+  textarea:disabled { background: var(--surface-2); color: var(--muted); cursor: not-allowed; }
+  /* Buttons. One shape and height for every variant; the variant says how much the action matters:
+     - primary (the default for a <button>): ORBIT's violet-to-blue gradient, the one main action in a place (Confirm,
+       Send, New session, Send steer);
+     - secondary (.btn-secondary, and the existing quiet buttons listed below): a card with a border, for the other
+       choices (Cancel, Rename, Load earlier, paging);
+     - destructive (.btn-danger): red text and border, tinted on hover (Archive);
+     - disabled: faded and inert; loading (aria-busy="true", set by the script while a request runs): a small spinner
+       after the label, and a progress cursor. Hover, pressed and focus are shared, further down. */
+  button { font: inherit; padding: 0 16px; border-radius: var(--radius-md); border: 0; color: var(--on-accent);
            background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+  .btn-secondary, .proposal button.cancel, #sesspicker .pcur button, #jobs button.back, #jobs button.cancel, #jobs button.mini, #alog .older, .gviewer button {
+    background: var(--card); color: var(--fg); border: var(--border); }
+  .btn-secondary:not(:disabled):hover, .proposal button.cancel:not(:disabled):hover, #sesspicker .pcur button:not(:disabled):hover, #jobs button.back:not(:disabled):hover,
+  #jobs button.cancel:not(:disabled):hover, #jobs button.mini:not(:disabled):hover, #alog .older:not(:disabled):hover {
+    filter: none; background: var(--surface-2); border-color: color-mix(in srgb, var(--accent-2) 45%, var(--line)); }
+  .btn-danger, #sesspicker .pcur button.btn-danger { background: var(--card); color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--line)); }
+  .btn-danger:not(:disabled):hover, #sesspicker .pcur button.btn-danger:not(:disabled):hover { filter: none; background: var(--danger-soft); border-color: var(--danger);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 35%, transparent); }
+  .proposal button, #sesspicker .prow button, #jobs .steerbox button, .banner button, #signin button, .card button.open, #alog .older {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: var(--btn-h); padding: 0 14px; font-weight: 600; font-size: var(--text-sm); }
+  .banner button, #signin button { display: flex; width: max-content; max-width: 100%; }
+  button[aria-busy="true"] { cursor: progress; }
+  button[aria-busy="true"]::after { content: ""; flex: none; width: .9em; height: .9em; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent;
+                                    animation: orbit-spin .7s linear infinite; }
+  button[aria-busy="true"]:disabled { opacity: .75; }
+  @keyframes orbit-spin { to { transform: rotate(360deg); } }
   /* The message composers (Sessions #form, Assistant #aform): compact padding, then one row of "+" (add image), the message
      box and Send. The box starts one line tall and grows upward with its text, to at most eight lines, then scrolls inside
      (fitComposer in the script, which hides the scrollbar only while the text fits; the CSS never clips). The row is
@@ -418,6 +522,9 @@
   .sendbtn::before { content: ""; position: absolute; top: calc(-1 * var(--chit)); bottom: calc(-1 * var(--chit)); left: 0; right: -8px; }
   #form .ico, #aform .ico { width: 17px; height: 17px; }
   @media (max-width: 480px) { #form, #aform { padding-left: calc(var(--space-2) + var(--safe-l)); padding-right: calc(var(--space-2) + var(--safe-r)); } }
+  /* Laptops and desktops: the composer sits in the reading column, its edges level with the conversation's, with a little
+     more room above and below. The row, the gap before Send and the hit areas are unchanged. */
+  @media (min-width: 900px) { #form, #aform { padding: var(--space-3) var(--col-r) max(var(--space-3), var(--safe-b)) var(--col-l); } }
   /* Other text fields on touch screens: 16px too, for the same reason. */
   @media (pointer: coarse) { #jobs textarea, #jobs input[type=search], #jobs select { font-size: 16px; } }
   /* "↓ click to latest" (latestControl in the script): shown while a conversation (Sessions #log, Assistant #alog) is scrolled
@@ -431,7 +538,7 @@
   .tolatest { position: absolute; left: 0; right: 0; bottom: 10px; width: max-content; max-width: calc(100% - 24px); margin: 0 auto;
               display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 16px;
               border-radius: var(--radius-pill); border: 1px solid var(--accent-2); background: var(--card); color: var(--fg);
-              font-size: 14px; font-weight: 600; white-space: nowrap; pointer-events: auto; box-shadow: var(--elev-1); }
+              font-size: var(--text-ui); font-weight: 600; white-space: nowrap; pointer-events: auto; box-shadow: var(--elev-1); }
   .tolatest[hidden] { display: none; }
   @media (pointer: coarse) { .tolatest { min-height: var(--tap); padding: 0 20px; } }
 
@@ -446,22 +553,22 @@
   .md li > ul, .md li > ol { margin: .2em 0; }
   .md blockquote { margin-left: 0; margin-right: 0; padding-left: 10px; border-left: 3px solid var(--line); color: var(--muted); }
   .md hr { border: 0; border-top: 1px solid var(--line); }
-  .md code { font: .9em/1.4 ui-monospace, monospace; padding: 0 3px; border-radius: 4px; background: var(--bg); border: 1px solid var(--line); }
+  .md code { font: .9em/var(--leading-tight) var(--font-mono); padding: 0 3px; border-radius: var(--radius-xs); background: var(--bg); border: 1px solid var(--line); }
   .md pre { margin: 0; padding: 8px 10px; white-space: pre; overflow-wrap: normal; width: max-content; min-width: 100%; }
-  .md pre code { padding: 0; border: 0; background: none; font-size: 12.5px; }
-  .md table { border-collapse: collapse; font-size: 13px; white-space: normal; overflow-wrap: normal; }
+  .md pre code { padding: 0; border: 0; background: none; font-size: var(--text-xs); }
+  .md table { border-collapse: collapse; font-size: var(--text-sm); white-space: normal; overflow-wrap: normal; }
   .md th, .md td { padding: 4px 8px; border: 1px solid var(--line); text-align: left; vertical-align: top; min-width: 5em; }
   .md th { background: var(--card); }
   .md .al-center { text-align: center; } .md .al-right { text-align: right; }
   /* Wide or very long content scrolls inside its own region (focusable, so the keyboard can scroll it) instead of
      widening the page or hiding text. */
-  .scrollx { max-width: 100%; max-height: calc(var(--app-1) * 60); overflow: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
-  .card .scrollx pre { margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.4 ui-monospace, monospace; }
+  .scrollx { max-width: 100%; max-height: calc(var(--app-1) * 60); overflow: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); }
+  .card .scrollx pre { margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--text-xs)/var(--leading-code) var(--font-mono); }
 
   /* Button states, shared by every button: a visible hover ring, a pressed look while the mouse is down, a focus ring
      for keyboard users only, a clearly inert disabled state, and no motion for people who ask for reduced motion. */
   :root { --ring: color-mix(in srgb, var(--accent-2) 50%, transparent); --press-bg: color-mix(in srgb, var(--accent) 16%, transparent); }
-  button { cursor: pointer; transition: filter .12s ease, box-shadow .12s ease, transform .08s ease, background-color .12s ease; }
+  button { cursor: pointer; transition: filter var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease), transform var(--dur-1) var(--ease), background-color var(--dur-2) var(--ease); }
   button:not(:disabled):hover { filter: brightness(1.08); box-shadow: 0 0 0 2px var(--ring); }
   button:not(:disabled):active { filter: brightness(.9); transform: translateY(1px) scale(.97); box-shadow: 0 0 0 2px var(--ring), inset 0 2px 4px rgba(0, 0, 0, .25); }
   .note button:not(:disabled):hover, .note button:not(:disabled):active, #inbox .showall:not(:disabled):hover, #inbox .showall:not(:disabled):active { background: var(--press-bg); box-shadow: none; text-decoration: underline; }
@@ -469,7 +576,7 @@
   button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible, .scrollx:focus-visible, pre[tabindex]:focus-visible {
     outline: 2px solid var(--accent-2); outline-offset: 2px;
   }
-  nav a { transition: box-shadow .12s ease, transform .08s ease; }
+  nav a { transition: box-shadow var(--dur-2) var(--ease), transform var(--dur-1) var(--ease); }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
     button:not(:disabled):active, nav a:active { transform: none; }
@@ -477,7 +584,7 @@
 </style>
 </head>
 <body>
-<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions</a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: not read yet" title="Notifications: not read yet. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">?</span></button><button type="button" id="health" class="unknown" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a><dl id="deployinfo" aria-label="Running release"><dt>Deployed</dt><dd id="deployedat"><span class="na">Not read yet</span></dd><dt>Commit</dt><dd id="deploycommit"><span class="na">Not read yet</span></dd></dl></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header>
+<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions</a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: not read yet" title="Notifications: not read yet. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span class="label" aria-hidden="true">Notifications</span><span id="notecount" class="count" aria-hidden="true">?</span></button><button type="button" id="health" class="unknown" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a><dl id="deployinfo" aria-label="Running release"><dt>Deployed</dt><dd id="deployedat"><span class="na">Not read yet</span></dd><dt>Commit</dt><dd id="deploycommit"><span class="na">Not read yet</span></dd></dl></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header>
 <main id="log" hidden></main>
 <div class="latestdock"><button type="button" class="tolatest" id="tolatest" title="Scroll to the latest message" hidden><span aria-hidden="true">↓</span> click to latest</button></div>
 <main id="alog" aria-label="Assistant conversation"></main>
@@ -844,6 +951,7 @@
     const box = document.createElement("div");
     box.className = "proposal";
     const head = document.createElement("div");
+    head.className = "ptitle";
     const steer = p.kind === "job_steer";
     const sysop = p.kind === "ops_sys";
     const vault = p.kind === "vault_edit";
@@ -866,6 +974,7 @@
     const act = async (verb) => {
       hadFocus = box.contains(document.activeElement);
       confirm.disabled = cancel.disabled = true;
+      (verb === "confirm" ? confirm : cancel).setAttribute("aria-busy", "true");
       try {
         const res = await fetch(`/chat/proposals/${p.id}/${verb}`, ops && verb === "confirm"
           ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ digest: p.digest }) }
@@ -879,7 +988,9 @@
     const cancel = Object.assign(document.createElement("button"), { type: "button", textContent: "Cancel", className: "cancel" });
     confirm.addEventListener("click", () => act("confirm"));
     cancel.addEventListener("click", () => act("cancel"));
-    box.append(head, ...dups, brief, confirm, cancel, status);
+    const actions = Object.assign(document.createElement("div"), { className: "pactions" });
+    actions.append(confirm, cancel);
+    box.append(head, ...dups, brief, actions, status);
     el.append(box);
   }
 
@@ -1022,6 +1133,7 @@
     sessBtn.title = label;
     sessBtn.setAttribute("aria-label", `Session: ${label}${current?.archived && !pending ? " (archived)" : ""}. Show sessions`);
     document.getElementById("tarchive").textContent = current?.archived ? "Restore" : "Archive";
+    document.getElementById("tarchive").classList.toggle("btn-danger", !current?.archived);
     updateTitle();
     chatPhotoBar();
     document.getElementById("trename").disabled = document.getElementById("tarchive").disabled = !current || Boolean(pending);
@@ -2070,6 +2182,7 @@
       const text = area.value.trim();
       if (!text) return;
       send.disabled = true;
+      send.setAttribute("aria-busy", "true");
       try {
         const r = await fetch(`/jobs/${encodeURIComponent(id)}/steer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
         const b = await r.json();
@@ -2077,6 +2190,7 @@
         else { jv.drafts.delete(id); area.value = ""; status.textContent = `Steer ${b.n} queued. It is received when the runner acknowledges it.`; refreshJobs(); }
       } catch { status.textContent = "ORBIT did not answer."; }
       send.disabled = false;
+      send.removeAttribute("aria-busy");
     });
     return el("div", { className: "card steerbox" }, area, send, status);
   }
@@ -2246,11 +2360,12 @@
       b.dataset.key = "older";
       b.addEventListener("click", async () => {
         b.disabled = true;
+        b.setAttribute("aria-busy", "true");
         try {
           const r = await fetch(`/jobs/${encodeURIComponent(id)}/events?before=${more}`);
           const p = await r.json();
           if (r.ok && jv.detail === view) { for (const e of p.events) view.known.set(e.seq, e); fillActivity(view); }
-        } finally { b.disabled = false; }
+        } finally { b.disabled = false; b.removeAttribute("aria-busy"); }
       });
       out.push(b);
     } else if (events.length) out.push(note("This is the oldest retained event."));

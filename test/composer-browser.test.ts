@@ -220,11 +220,15 @@ test("browser: the box grows upward with newlines, wrapping and paste to eight l
   await page.keyboard.insertText("word ".repeat(60).trim());
   const wrapped = await geo(page, "a");
   assert.ok(wrapped.lines >= 2 && wrapped.lines <= 8, `wrapped text grows the box (${wrapped.lines} lines)`);
-  // A wider window wraps less: the box shrinks; a narrower one wraps more: it grows.
-  await page.setViewportSize({ width: 1400, height: 700 });
-  await page.waitForFunction((n: number) => document.getElementById("ainput")!.getBoundingClientRect().height < n, wrapped.h);
+  // A narrower window wraps more: the box grows; a wider one wraps less: it shrinks again. (On wide screens the composer
+  // sits in the reading column, so past about 900px the box stops getting wider; the shrink is checked from 600px.)
   await page.setViewportSize({ width: 600, height: 700 });
   await page.waitForFunction((n: number) => document.getElementById("ainput")!.getBoundingClientRect().height > n, wrapped.h);
+  const narrow = (await geo(page, "a")).h;
+  await page.setViewportSize({ width: 1400, height: 700 });
+  await page.waitForFunction((n: number) => document.getElementById("ainput")!.getBoundingClientRect().height < n, narrow);
+  await page.setViewportSize({ width: 600, height: 700 });
+  await page.waitForFunction((n: number) => document.getElementById("ainput")!.getBoundingClientRect().height >= n, narrow);
   const g = await geo(page, "a");
   near(g.formBottom, g.vh, "after resizing the composer is still on the bottom edge");
   // An empty box fits its placeholder, and is refitted when the page changes the placeholder.
@@ -287,11 +291,18 @@ test("browser: compact header and composer fit desktop and narrow phones with no
       const h = document.querySelector("header")!, cs = getComputedStyle(h), b = getComputedStyle(document.getElementById("health")!), n = getComputedStyle(document.getElementById("notesbtn")!);
       return { top: parseFloat(cs.paddingTop), left: parseFloat(cs.paddingLeft), hbtn: [parseFloat(b.paddingLeft), parseFloat(n.paddingLeft)], btnH: [document.getElementById("health")!.getBoundingClientRect().height, document.getElementById("notesbtn")!.getBoundingClientRect().height] };
     });
-    assert.ok(header.top <= 6 && header.left <= 12, `${w}px: tight header padding (${header.top}/${header.left})`);
-    assert.ok(header.hbtn.every((x: number) => x <= 8), `${w}px: tight header button padding`);
+    // Phones keep the tight header; laptops get the page gutter (24px) and labelled toggles, in a header still under 56px.
+    const wide = w >= 900;
+    assert.ok(wide ? header.top <= 8 && header.left === 24 : header.top <= 6 && header.left <= 12, `${w}px: header padding (${header.top}/${header.left})`);
+    assert.ok(header.hbtn.every((x: number) => x <= (wide ? 12 : 8)), `${w}px: header button padding`);
     assert.ok(header.btnH.every((x: number) => x >= 28), `${w}px: header buttons stay at least 28px tall`);
+    assert.ok(await page.evaluate(() => document.querySelector("header")!.getBoundingClientRect().height) <= (wide ? 56 : 100), `${w}px: the header stays compact`);
     const form = await page.evaluate(() => { const cs = getComputedStyle(document.getElementById("aform")!); return { top: parseFloat(cs.paddingTop), left: parseFloat(cs.paddingLeft), bottom: parseFloat(cs.paddingBottom) }; });
-    assert.ok(form.top <= 6 && form.left <= 12 && form.bottom >= 6, `${w}px: compact composer padding (${JSON.stringify(form)})`);
+    if (wide) {
+      // The composer's left edge is the conversation's: both use the reading column.
+      const logLeft = await page.evaluate(() => parseFloat(getComputedStyle(document.getElementById("alog")!).paddingLeft));
+      assert.ok(form.top <= 12 && form.bottom >= 6 && Math.abs(form.left - logLeft) <= 1, `${w}px: composer in the reading column (${JSON.stringify(form)}, log ${logLeft})`);
+    } else assert.ok(form.top <= 6 && form.left <= 12 && form.bottom >= 6, `${w}px: compact composer padding (${JSON.stringify(form)})`);
     await page.fill("#ainput", "line\n".repeat(11) + "x".repeat(300));
     const g = await geo(page, "a");
     assert.equal(g.lines, 8, `${w}px: capped at eight lines`);
