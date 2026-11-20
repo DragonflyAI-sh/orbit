@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#080a1a" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f4f2fb" media="(prefers-color-scheme: light)">
 <!-- The owner's time zone for message times. The server writes ORBIT's configured zone (src/time.ts ZONE) here. -->
@@ -14,8 +14,8 @@
   /* Colors from the ORBIT avatar: deep space, violet and electric-blue ribbons, gold filaments. */
   :root {
     --bg: #f4f2fb; --bg-glow: rgba(124, 92, 230, 0.14); --fg: #1c1838; --muted: #5d5880;
-    --line: #dcd6f0; --card: #ffffff; --accent: #6d4fd8; --accent-2: #2f8fd6; --on-accent: #ffffff;
-    --live: #1b7fb8; --mock: #9a6a00; --down: #c2334d; --gold: #c9921f;
+    --line: #dcd6f0; --card: #ffffff; --accent: #6d4fd8; --accent-2: #1a6f9e; --on-accent: #ffffff;
+    --live: #17709f; --mock: #855b00; --down: #c2334d; --gold: #c9921f;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -24,23 +24,60 @@
       --live: #6fc3ff; --mock: #f2c46d; --down: #ff7a8a; --gold: #f2c46d;
     }
   }
+  /* Design tokens (docs/web-shell.md). One small scale each for spacing, type, radii, borders, elevation, layering and
+     control sizes; the rules below use these instead of one-off values. Colors stay the theme variables above. */
+  :root {
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px;
+    --text-xs: 12px; --text-sm: 13px; --text-md: 15px; --text-lg: 17px; --leading: 1.5;
+    --radius-sm: 6px; --radius-md: 10px; --radius-lg: 12px; --radius-pill: 999px;
+    --border: 1px solid var(--line);
+    --elev-1: 0 4px 14px -4px var(--header-shadow); --elev-2: 0 8px 28px rgba(0, 0, 0, .28); --elev-3: 0 12px 40px rgba(0, 0, 0, .45);
+    --z-dock: 5; --z-header: 10; --z-popover: 40; --z-modal: 50;
+    --ctl-sm: 28px; --ctl-md: 36px; --tap: 44px;
+    --gutter: var(--space-4);
+    /* Safe areas (viewport-fit=cover): the page pads itself away from notches, rounded corners and the home indicator. The
+       bottom inset is dropped while the on-screen keyboard is open (the keyboard already covers the home indicator), so the
+       composer never gets that space twice. */
+    --safe-t: env(safe-area-inset-top, 0px); --safe-r: env(safe-area-inset-right, 0px);
+    --safe-b: env(safe-area-inset-bottom, 0px); --safe-l: env(safe-area-inset-left, 0px);
+    /* 1% of the app's height: the visible height measured by the page (data-vv, see viewportShell in the script), else the
+       dynamic viewport where supported, else the classic viewport. */
+    --app-1: 1vh;
+  }
+  @supports (height: 100dvh) { :root { --app-1: 1dvh; } }
+  :root[data-vv] { --app-1: calc(var(--app-h) / 100); }
+  :root[data-kb="open"] { --safe-b: 0px; }
+  @media (max-width: 480px) { :root { --gutter: var(--space-3); } }
+  @media (pointer: coarse) { :root { --ctl-sm: 36px; } }
   * { box-sizing: border-box; }
+  /* The app shell. The document itself never scrolls: the page is pinned to the visible area (position: fixed, so iOS
+     Safari has no page to scroll, bounce or slide under its toolbars), and only the conversation, the Jobs list and the
+     small panels scroll inside it. Its height is the visible height: the page's own measurement of the visual viewport
+     while that is known (it follows Safari's toolbars and the on-screen keyboard), else 100dvh, else 100vh. */
+  html { height: 100%; overflow: hidden; overscroll-behavior: none; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; background: var(--bg); }
   body {
-    margin: 0; color: var(--fg); font: 15px/1.5 system-ui, sans-serif;
-    display: flex; flex-direction: column; height: 100dvh;
+    margin: 0; color: var(--fg); font: var(--text-md)/var(--leading) system-ui, sans-serif;
+    position: fixed; top: 0; left: 0; right: 0; height: 100vh; overflow: hidden; overscroll-behavior: none;
+    display: flex; flex-direction: column; min-width: 0;
     background: radial-gradient(ellipse 80% 60% at 50% 30%, var(--bg-glow), transparent 70%), var(--bg);
   }
-  /* Compact header: tight outer padding so the conversation keeps the room. Toggles and links stay at least 28px tall.
-     Under the separator line, a clear downward shadow (only below: the negative spread keeps it off the sides) sets the
-     header apart from the content, which visibly scrolls under it. The header is positioned with a z-index so it, and its
-     shadow, paint above the conversation: message rows are themselves positioned (for the sender line and the time tip)
-     and would otherwise paint over the shadow. The header sets no overflow, so neither the shadow nor focus rings are
-     clipped. Its overlays still stack correctly: the session picker (position: fixed, z-index 40) sits inside the header,
-     so it rides above the page with it, and the photo viewer (z-index 50) still covers everything. */
+  @supports (height: 100dvh) { body { height: 100dvh; } }
+  :root[data-vv] body { top: var(--app-top, 0px); height: var(--app-h); }
+  body > * { flex: none; min-width: 0; }
+  /* Compact header: tight outer padding so the conversation keeps the room. Toggles and links are at least 28px tall with
+     a mouse and 36px (44px hit area) on touch screens. Under the separator line, a clear downward shadow (only below: the
+     negative spread keeps it off the sides) sets the header apart from the content, which visibly scrolls under it. The
+     header is positioned with a z-index (--z-header) so it, and its shadow, paint above the conversation: message rows are
+     themselves positioned (for the sender line and the time tip) and would otherwise paint over the shadow. Its own shadow
+     is never clipped; its height is capped (60% of the app) and only scrolls inside when both panels are open on a very
+     short screen, and its padding leaves room for focus rings. Its overlays still stack correctly: the session picker
+     (position: fixed, --z-popover) sits inside the header but is not clipped by it, and the photo viewer (--z-modal)
+     still covers everything. */
   :root { --header-shadow: rgba(28, 24, 56, .22); }
   @media (prefers-color-scheme: dark) { :root { --header-shadow: rgba(0, 0, 0, .8); } }
-  header { position: relative; z-index: 10; padding: 6px 12px; border-bottom: 1px solid var(--line); box-shadow: 0 4px 14px -4px var(--header-shadow); }
-  @media (max-width: 480px) { header { padding: 6px 10px; } }
+  header { position: relative; z-index: var(--z-header); padding: calc(6px + var(--safe-t)) calc(var(--space-3) + var(--safe-r)) 6px calc(var(--space-3) + var(--safe-l));
+           border-bottom: var(--border); box-shadow: var(--elev-1); max-height: calc(var(--app-1) * 60); overflow-y: auto; overscroll-behavior: contain; }
+  @media (max-width: 480px) { header { padding-left: calc(10px + var(--safe-l)); padding-right: calc(10px + var(--safe-r)); } }
   /* The header bar: logo, the page links, then (right-aligned) the notifications and status toggles. The status line and the
      notifications panel open directly below the bar; both are collapsed by default. On narrow screens the links take their
      own row under the logo and the toggles, so nothing scrolls sideways. */
@@ -48,9 +85,22 @@
   .brand { display: flex; align-items: center; gap: 8px; flex: none; }
   .bar nav { flex: 0 1 auto; min-width: 0; }
   .hctl { display: flex; align-items: center; gap: 4px; margin-left: auto; flex: none; }
-  @media (max-width: 560px) { .bar nav { order: 3; flex-basis: 100%; } }
+  @media (max-width: 560px) {
+    .bar { row-gap: var(--space-2); }
+    .bar nav { order: 3; flex-basis: 100%; }
+    .bar nav a { flex: 1 1 0; min-width: max-content; text-align: center; white-space: nowrap; }
+  }
+  @media (max-width: 400px) { body[data-tab="chat"] .brand h1 { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); white-space: nowrap; } }
+  /* Touch screens: header controls are at least 36px tall and 44px wide, and an invisible frame around each (::after) makes
+     the hit area 44px tall without making the header taller. */
+  @media (pointer: coarse) {
+    nav a, #health, .hbtn, #sessbtn { position: relative; min-height: var(--ctl-sm); display: inline-flex; align-items: center; justify-content: center; }
+    #health, .hbtn { min-width: var(--tap); }
+    nav a::after, #health::after, .hbtn::after, #sessbtn::after { content: ""; position: absolute; left: -1px; right: -1px; top: calc((var(--ctl-sm) - var(--tap)) / 2 - 1px); bottom: calc((var(--ctl-sm) - var(--tap)) / 2 - 1px); } /* -1px: from the padding box, past the 1px border */
+    .hctl { gap: var(--space-2); }
+  }
   .ico { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-  #statusline { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; margin-top: 8px; min-width: 0; }
+  #statusline { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-2); min-width: 0; max-height: calc(var(--app-1) * 30); overflow-y: auto; overscroll-behavior: contain; }
   #statusline #ports { flex: 1 1 0; min-width: 0; }
   #statusopen { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; border-radius: 8px; color: var(--accent-2); border: 1px solid var(--line); background: var(--card); }
   #statusopen:hover { box-shadow: 0 0 0 2px var(--ring); }
@@ -78,7 +128,10 @@
   /* States (status pills, reply tags): the state is also in the text ("model: degraded"). Degraded is amber like the overall
      indicator (working, with a caveat); down is red. */
   .live { color: var(--live); } .mock, .degraded { color: var(--mock); } .down { color: var(--down); }
-  #inbox { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; max-height: 30dvh; overflow-y: auto; overscroll-behavior: contain; }
+  #inbox { display: flex; flex-direction: column; gap: 6px; margin-top: var(--space-2); max-height: calc(var(--app-1) * 30); overflow-y: auto; overscroll-behavior: contain; }
+  /* Both panels open: they share the room (20% each), and the header as a whole never takes more than 60% of the height
+     (it scrolls inside past that), so the conversation and the composer always keep the rest. */
+  #statusline:not([hidden]) ~ #inbox, #statusline:has(~ #inbox:not([hidden])) { max-height: calc(var(--app-1) * 20); }
   .note { border-left: 3px solid var(--gold); padding: 4px 8px; background: var(--card); border-radius: 4px; overflow-wrap: anywhere; }
   .note .top { display: flex; gap: 6px; align-items: flex-start; }
   .note .first { flex: 1; min-width: 0; }
@@ -92,14 +145,14 @@
      accessible name. The button opens the session picker, which overlays the page under the header (it never pushes the
      conversation down) and holds New session, the list, Show archived, and Rename / Archive for the open session. */
   #sesswrap { flex: 1 1 0; min-width: 5em; display: flex; }
-  #sessbtn { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; min-height: 32px; padding: 2px 8px 2px 10px;
-             background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; font-weight: 600; }
+  #sessbtn { display: inline-flex; align-items: center; gap: var(--space-1); max-width: 100%; min-width: 0; min-height: max(32px, var(--ctl-sm)); padding: 2px 8px 2px 10px;
+             background: var(--card); color: var(--fg); border: var(--border); border-radius: var(--radius-md); font-weight: 600; }
   #sessbtn[aria-expanded="true"] { border-color: var(--accent-2); }
   #sesstitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #sessbtn .chev { transition: transform .12s ease; }
   #sessbtn[aria-expanded="true"] .chev { transform: rotate(180deg); }
-  #sesspicker { position: fixed; z-index: 40; display: flex; flex-direction: column; gap: 6px; padding: 8px; max-height: min(70dvh, 520px);
-                border: 1px solid var(--line); border-radius: 12px; background: var(--card); box-shadow: 0 8px 28px rgba(0, 0, 0, .28); }
+  #sesspicker { position: fixed; z-index: var(--z-popover); display: flex; flex-direction: column; gap: 6px; padding: var(--space-2); max-height: min(calc(var(--app-1) * 70), 520px);
+                border: var(--border); border-radius: var(--radius-lg); background: var(--card); box-shadow: var(--elev-2); }
   #sesspicker .prow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   #sesspicker .prow button { min-height: 36px; padding: 4px 12px; }
   #sesspicker .pcur { border-top: 1px solid var(--line); padding-top: 6px; }
@@ -112,14 +165,14 @@
                      border: 1px solid transparent; overflow-wrap: anywhere; font-weight: 400; }
   #sesslist .sitem[aria-current="true"] { background: var(--press-bg); border-color: var(--accent-2); font-weight: 600; }
   #sesslist .sempty { padding: 6px 10px; font-size: 13px; color: var(--muted); }
-  @media (pointer: coarse) { #sessbtn { min-height: 40px; } #sesslist .sitem, #sesspicker .prow button, .parch { min-height: 44px; } }
+  @media (pointer: coarse) { #sesslist .sitem, #sesspicker .prow button, .parch { min-height: var(--tap); } }
   #tstatus { margin-top: 6px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
   #tstatus:empty { display: none; }
   #log[aria-busy="true"] { opacity: 0.6; }
-  .banner { align-self: stretch; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--gold); background: var(--card); font-size: 14px; overflow-wrap: anywhere; }
+  .banner { align-self: stretch; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); border: 1px solid var(--gold); background: var(--card); font-size: 14px; overflow-wrap: anywhere; }
   .banner button { margin-top: 6px; padding: 4px 12px; display: block; }
   .compact { align-self: stretch; padding: 6px 10px; border-radius: 10px; border: 1px dashed var(--line); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
-  .compact pre { white-space: pre-wrap; margin: 4px 0 0; font: 12px/1.4 ui-monospace, monospace; max-height: 50vh; overflow: auto; overscroll-behavior: contain; }
+  .compact pre { white-space: pre-wrap; margin: 4px 0 0; font: 12px/1.4 ui-monospace, monospace; max-height: calc(var(--app-1) * 50); overflow: auto; overscroll-behavior: contain; }
   .msg .warn { color: var(--mock); font-weight: 600; margin-top: .3rem; }
   .compact .warn, .dup { color: var(--mock); font-weight: 600; }
   .cardstate { margin-top: 6px; font-size: 13px; overflow-wrap: anywhere; }
@@ -129,7 +182,8 @@
   #signin button { padding: 4px 12px; margin-top: 4px; }
   #signin code { font-size: 16px; letter-spacing: .12em; color: var(--gold); }
   #signin a { color: var(--accent-2); }
-  #log { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  #log, #alog, #jobs { flex: 1 1 0; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
+                      padding: var(--gutter) calc(var(--gutter) + var(--safe-r)) var(--gutter) calc(var(--gutter) + var(--safe-l)); display: flex; flex-direction: column; gap: 10px; }
   /* Messages, in Chat and the Assistant alike: one left-aligned list, no bubbles. Every row is the sender's icon in a
      narrow first column and everything else (name and time, then the content parts) in one content column. The sender
      shows as an icon (ORBIT's avatar, or Rai's initial), the name in the sender's color, and a thin line in that color
@@ -167,9 +221,9 @@
   .tag { display: block; font-size: 11px; margin-top: 4px; }
   .calls { display: block; margin-top: 6px; font-size: 12px; color: var(--muted); }
   .calls div { margin-top: 2px; }
-  .proposal { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--gold); border-radius: 8px; background: var(--bg); }
+  .proposal { margin-top: var(--space-2); padding: var(--space-2) 10px; border: 1px solid var(--gold); border-radius: var(--radius-md); background: var(--bg); }
   .proposal pre { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; overscroll-behavior: contain; font: 12px/1.4 ui-monospace, monospace; }
-  .proposal button { padding: 4px 12px; margin-right: 6px; }
+  .proposal button { padding: 4px 12px; margin-right: 6px; min-height: var(--ctl-sm); }
   .proposal button.cancel { background: var(--card); color: var(--fg); border: 1px solid var(--line); }
   [hidden] { display: none !important; }
   /* Photo attachments (docs/photos.md): the tray of photos waiting to be sent, and photos shown in stored messages. */
@@ -197,16 +251,17 @@
   .gitem figcaption { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; line-height: 1.3; }
   .gitem figcaption a { color: inherit; }
   .gmissing { aspect-ratio: 1 / 1; border: 1px dashed var(--line); border-radius: 8px; display: flex; align-items: center; justify-content: center; text-align: center; padding: 6px; font-size: 11px; color: var(--muted); }
-  .gviewer { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, 0.88); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 16px; gap: 8px; }
+  .gviewer { position: fixed; inset: 0; z-index: var(--z-modal); background: rgba(0, 0, 0, 0.88); display: flex; flex-direction: column; align-items: center; justify-content: center;
+             padding: calc(var(--space-4) + var(--safe-t)) calc(var(--space-4) + var(--safe-r)) calc(var(--space-4) + var(--safe-b)) calc(var(--space-4) + var(--safe-l)); gap: var(--space-2); overscroll-behavior: contain; }
   .gviewer img { max-width: 100%; max-height: calc(100% - 72px); object-fit: contain; }
   .gviewer .glabel { color: #eee; font-size: 13px; text-align: center; overflow-wrap: anywhere; max-width: 100%; }
-  .gviewer button { position: absolute; top: 8px; right: 8px; min-width: 44px; min-height: 44px; }
+  .gviewer button { position: absolute; top: calc(var(--space-2) + var(--safe-t)); right: calc(var(--space-2) + var(--safe-r)); min-width: var(--tap); min-height: var(--tap); }
   /* The session control, its picker and its status line belong to the Sessions page only. */
   body:not([data-tab="chat"]) #sesswrap, body:not([data-tab="chat"]) #sesspicker, body:not([data-tab="chat"]) #tstatus { display: none !important; }
   /* Overall status (aggregateStatus): green all live; amber degraded but working; red a core port down; grey unknown. The dot's shape
      differs per level too (circle, diamond, square, ring), and the level is in the label and accessible name, never colour alone. */
   /* The header toggles (notifications, status): compact pill buttons, not navigation. aria-expanded shows which panel is open. */
-  #health, .hbtn { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; background: var(--card); }
+  #health, .hbtn { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); min-height: var(--ctl-sm); font-size: var(--text-xs); color: var(--muted); border: var(--border); border-radius: var(--radius-pill); padding: 2px 8px; background: var(--card); }
   #health[aria-expanded="true"], .hbtn[aria-expanded="true"] { border-color: var(--accent-2); color: var(--fg); }
   .hbtn .count { min-width: 1.5em; padding: 0 4px; border-radius: 999px; text-align: center; font-weight: 600; line-height: 1.4; }
   .hbtn.has .count { background: var(--gold); color: #1c1838; }
@@ -215,8 +270,7 @@
   #health.degraded .dot { border: 0; border-radius: 1px; transform: rotate(45deg) scale(.85); background: var(--amber-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber-dot) 25%, transparent); }
   #health.down .dot { border: 0; border-radius: 2px; background: var(--red-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--red-dot) 25%, transparent); }
   :root { --green-dot: #1f9d55; --amber-dot: #d99a00; --red-dot: #d23c3c; }
-  #alog { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-  #alog .older { align-self: center; padding: 4px 14px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
+    #alog .older { align-self: center; padding: 4px 14px; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
   .ctxline { align-self: stretch; font-size: 12px; color: var(--muted); border-top: 1px dashed var(--line); padding-top: 4px; overflow-wrap: anywhere; }
   .msg.outctx { opacity: .75; }
   .msg details { margin-top: 6px; font-size: 12px; color: var(--muted); white-space: normal; }
@@ -237,18 +291,17 @@
   .mfootbody { margin: 2px 0 0 4px; padding-left: 10px; border-left: 2px solid var(--line); overflow-wrap: anywhere; }
   .mfootbody > :first-child { margin-top: 0; }
   @media (pointer: coarse) { .mfoot > summary { min-height: 32px; } }
-  #astatus { padding: 0 16px; font-size: 13px; color: var(--muted); }
+  #astatus { padding: 0 calc(var(--gutter) + var(--safe-r)) 0 calc(var(--gutter) + var(--safe-l)); font-size: var(--text-sm); color: var(--muted); }
   #astatus:empty { display: none; }
   #astatus.bad { color: var(--down); font-weight: 600; }
-  @media (max-width: 480px) { #alog { padding: 12px; } #health .label { display: none; } }
+  @media (max-width: 480px) { #health .label { display: none; } }
   nav { display: flex; flex-wrap: wrap; gap: 6px; }
-  nav a { padding: 3px 10px; border-radius: 10px; background: var(--card); color: var(--fg); border: 1px solid var(--line); text-decoration: none; }
+  nav a { padding: 3px 10px; border-radius: var(--radius-md); background: var(--card); color: var(--fg); border: var(--border); text-decoration: none; }
   nav a[aria-current="page"] { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: var(--on-accent); border-color: transparent; }
   nav a:hover { box-shadow: 0 0 0 2px var(--ring); }
   nav a:active { transform: translateY(1px); }
-  #jobs { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-  #jobs h2 { margin: 6px 0 0; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
-  .card { width: 100%; min-width: 0; padding: 10px 12px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); overflow-wrap: anywhere; }
+    #jobs h2 { margin: 6px 0 0; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .card { width: 100%; min-width: 0; padding: 10px var(--space-3); border-radius: var(--radius-lg); background: var(--card); border: var(--border); overflow-wrap: anywhere; }
   .card.bad { border-color: var(--down); }
   .card.warn { border-color: var(--mock); }
   .card .row { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
@@ -316,7 +369,7 @@
   #jobs .lt { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   #jobs .lthead { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
   #jobs .ltlabel { font-weight: 600; font-size: 13px; }
-  #jobs pre.ltbody { margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-monospace, monospace; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); overflow: auto; max-height: 70vh; overscroll-behavior: contain; }
+  #jobs pre.ltbody { margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-monospace, monospace; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); overflow: auto; max-height: calc(var(--app-1) * 70); overscroll-behavior: contain; }
   #jobs pre.ltbody.folded { max-height: 16em; }
   #jobs .steeritem { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; border-top: 1px solid var(--line); }
   #jobs .warnline { color: var(--mock); }
@@ -330,7 +383,9 @@
     #jobs .jdl { grid-template-columns: 1fr; }
     #jobs .jdl dd { margin-bottom: 4px; }
   }
-  @media (max-width: 480px) { #jobs, #log { padding: 12px; } .card { padding: 8px 10px; } }
+  @media (max-width: 480px) { .card { padding: 8px 10px; } }
+  /* Jobs has no composer under it, so it keeps the home indicator's room itself. */
+  #jobs { padding-bottom: calc(var(--gutter) + var(--safe-b)); }
   form { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
   textarea { flex: 1; resize: none; font: inherit; padding: 8px; border-radius: 10px; border: 1px solid var(--line);
              background: var(--card); color: var(--fg); }
@@ -344,16 +399,27 @@
      bottom padding leaves room for a phone's home indicator. The box's inner padding and the two icon buttons are kept
      small (34px, 17px icons) to match the compact header; each button's tap area is larger than it looks (an invisible
      ::before: 42px wide, reaching up to but never into the box, and 42px tall, 46px on touch screens), so it stays easy to hit. */
+  /* The composer is a fixed row at the bottom of the shell. Explicit layout space keeps Send clear of every scrollbar: the
+     box (which shows its own scrollbar, inside its border, once it scrolls) is separated from Send by an 8px gap, and the
+     buttons' enlarged hit areas grow vertically and toward the screen edge (Send: 8px to the right, nothing to the left;
+     "+": 4px each side, its right side faces the box's left edge, where there is no scrollbar), never into the box, so a
+     drag on the box's scrollbar can never land on Send. The conversation's scrollbar stops at the composer's top edge. On touch screens the
+     box uses 16px text (iOS Safari zooms the whole page into any smaller text field it focuses), and the compact 34px
+     controls keep hit areas 42px wide and 46px tall. The bottom padding keeps the home indicator clear, except while the keyboard is open. */
   #form, #aform { --cline: 22px; --cpad: 5px; --cctl: calc(var(--cline) + 2 * var(--cpad) + 2px); --chit: 4px;
-                  gap: 6px; align-items: flex-end; padding: 6px 12px max(6px, env(safe-area-inset-bottom)); }
-  @media (pointer: coarse) { #form, #aform { --chit: 6px; } }
+                  gap: var(--space-2); align-items: flex-end;
+                  padding: 6px calc(var(--space-3) + var(--safe-r)) max(6px, var(--safe-b)) calc(var(--space-3) + var(--safe-l)); }
+  @media (pointer: coarse) { #form, #aform { --chit: 6px; } #form textarea, #aform textarea { font-size: 16px; } }
   #form textarea, #aform textarea { min-width: 0; line-height: var(--cline); padding: var(--cpad) 8px; height: var(--cctl);
-                                    max-height: calc(8 * var(--cline) + 2 * var(--cpad) + 2px); }
+                                    max-height: calc(8 * var(--cline) + 2 * var(--cpad) + 2px); overscroll-behavior: contain; }
   #form .phbtn, #aform .phbtn, .sendbtn { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center;
                                           width: var(--cctl); min-width: var(--cctl); height: var(--cctl); min-height: var(--cctl); padding: 0; }
-  #form .phbtn::before, #aform .phbtn::before, .sendbtn::before { content: ""; position: absolute; inset: calc(-1 * var(--chit)) -4px; }
+  #form .phbtn::before, #aform .phbtn::before { content: ""; position: absolute; top: calc(-1 * var(--chit)); bottom: calc(-1 * var(--chit)); left: -4px; right: -4px; }
+  .sendbtn::before { content: ""; position: absolute; top: calc(-1 * var(--chit)); bottom: calc(-1 * var(--chit)); left: 0; right: -8px; }
   #form .ico, #aform .ico { width: 17px; height: 17px; }
-  @media (max-width: 480px) { #form, #aform { gap: 4px; padding-left: 8px; padding-right: 8px; } }
+  @media (max-width: 480px) { #form, #aform { padding-left: calc(var(--space-2) + var(--safe-l)); padding-right: calc(var(--space-2) + var(--safe-r)); } }
+  /* Other text fields on touch screens: 16px too, for the same reason. */
+  @media (pointer: coarse) { #jobs textarea, #jobs input[type=search], #jobs select { font-size: 16px; } }
   /* "↓ click to latest" (latestControl in the script): shown while a conversation (Sessions #log, Assistant #alog) is scrolled
      back from its newest message, whether or not anything new has arrived. It sits in a zero-height dock between the
      conversation and its composer (and the Assistant's status line), so it floats over the bottom of the messages, just
@@ -361,13 +427,13 @@
      dock lets clicks through to the messages around it, and the button never reaches down over the composer. It is
      centered without a transform (the shared pressed look uses one). Colors are the page's text on a card, for contrast in
      both themes; the shared button states give it the hover ring and the keyboard focus ring. */
-  .latestdock { position: relative; z-index: 5; flex: none; height: 0; pointer-events: none; }
+  .latestdock { position: relative; z-index: var(--z-dock); flex: none; height: 0; pointer-events: none; }
   .tolatest { position: absolute; left: 0; right: 0; bottom: 10px; width: max-content; max-width: calc(100% - 24px); margin: 0 auto;
               display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 16px;
-              border-radius: 999px; border: 1px solid var(--accent-2); background: var(--card); color: var(--fg);
-              font-size: 14px; font-weight: 600; white-space: nowrap; pointer-events: auto; box-shadow: 0 4px 14px -4px var(--header-shadow); }
+              border-radius: var(--radius-pill); border: 1px solid var(--accent-2); background: var(--card); color: var(--fg);
+              font-size: 14px; font-weight: 600; white-space: nowrap; pointer-events: auto; box-shadow: var(--elev-1); }
   .tolatest[hidden] { display: none; }
-  @media (pointer: coarse) { .tolatest { min-height: 44px; padding: 0 20px; } }
+  @media (pointer: coarse) { .tolatest { min-height: var(--tap); padding: 0 20px; } }
 
   /* Markdown replies (see the markdown block in the script). Paragraph line breaks are kept, as in plain replies. */
   .md { white-space: pre-line; min-width: 0; }
@@ -389,7 +455,7 @@
   .md .al-center { text-align: center; } .md .al-right { text-align: right; }
   /* Wide or very long content scrolls inside its own region (focusable, so the keyboard can scroll it) instead of
      widening the page or hiding text. */
-  .scrollx { max-width: 100%; max-height: 60vh; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+  .scrollx { max-width: 100%; max-height: calc(var(--app-1) * 60); overflow: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
   .card .scrollx pre { margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.4 ui-monospace, monospace; }
 
   /* Button states, shared by every button: a visible hover ring, a pressed look while the mouse is down, a focus ring
@@ -422,6 +488,44 @@
 <form id="aform"><div id="atray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="apick" accept="image/*" multiple hidden><button type="button" class="phbtn" id="apickbtn" title="Add image (up to 10)" aria-label="Add image"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14 M5 12h14"/></svg></button><textarea id="ainput" rows="1" placeholder="Message the Assistant" aria-label="Message the Assistant"></textarea><button id="asend" class="sendbtn" title="Send" aria-label="Send"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13 M22 2l-7 20-4-9-9-4z"/></svg></button></form>
 <script src="/photos.js"></script>
 <script>
+  // ---- The app shell's height (docs/web-shell.md). CSS sizes the shell to 100dvh (100vh where dvh is unknown). That is
+  // right everywhere except iOS Safari with the on-screen keyboard open: Safari never shrinks the layout viewport or dvh
+  // for the keyboard, it pans the visible area over the page instead, so a 100dvh shell would leave the composer under the
+  // keyboard and the header pushed off the top. Where the browser reports the visual viewport, the shell takes its height
+  // and top instead (--app-h, --app-top, set with data-vv), and data-kb="open" marks the keyboard as open so the CSS drops
+  // the home-indicator inset the keyboard already covers. Only the visual viewport's own height is used: no keyboard height
+  // or inset is subtracted on top of it, so nothing is taken twice. While the reader has pinch-zoomed (scale above 1) the
+  // page lets go and falls back to the CSS height, so zoom works as normal. Updates are batched to one per frame, and the
+  // listeners are removed when the page is hidden (pagehide) and added again if it is shown from the back/forward cache.
+  // Chromium on Android shrinks the layout itself for the keyboard (interactive-widget=resizes-content in the viewport
+  // meta), so there the measured height is simply the layout height.
+  const viewportShell = (() => {
+    const vv = window.visualViewport, root = document.documentElement;
+    if (!vv) return null;
+    let frame = 0, on = false, kbOpen = false;
+    const KB_PX = 120; // a gap this big between the layout and visible heights is a keyboard, not a toolbar
+    const apply = () => {
+      frame = 0;
+      if (vv.scale > 1.01) { root.removeAttribute("data-vv"); root.removeAttribute("data-kb"); root.style.removeProperty("--app-h"); root.style.removeProperty("--app-top"); return; }
+      const layoutH = root.clientHeight; // the layout viewport: on iOS it ignores the keyboard, so the gap below is the keyboard
+      const h = Math.round(vv.height), top = Math.max(0, Math.round(vv.offsetTop));
+      root.style.setProperty("--app-h", `${h}px`);
+      root.style.setProperty("--app-top", `${top}px`);
+      root.setAttribute("data-vv", "");
+      const kb = layoutH - vv.height > KB_PX;
+      if (kb) root.setAttribute("data-kb", "open"); else root.removeAttribute("data-kb");
+      // The keyboard closed: if Safari left the page scrolled while panning, put it back, so nothing stays under its toolbar.
+      if (kbOpen && !kb && (window.scrollX || window.scrollY)) window.scrollTo(0, 0);
+      kbOpen = kb;
+    };
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(apply); };
+    const start = () => { if (on) return; on = true; vv.addEventListener("resize", schedule); vv.addEventListener("scroll", schedule); window.addEventListener("orientationchange", schedule); apply(); };
+    const stop = () => { if (!on) return; on = false; vv.removeEventListener("resize", schedule); vv.removeEventListener("scroll", schedule); window.removeEventListener("orientationchange", schedule); if (frame) cancelAnimationFrame(frame); frame = 0; };
+    window.addEventListener("pagehide", stop);
+    window.addEventListener("pageshow", start);
+    start();
+    return { start, stop, apply };
+  })();
   const history = [];
   const log = document.getElementById("log");
 
@@ -439,6 +543,7 @@
     let stuck = true;      // at the bottom as last measured while showing: kept there across size changes
     let jumping = false;   // a click's smooth scroll is under way: the button stays hidden until it ends or the reader takes over
     let jumpTimer = 0;
+    let boxH = scroller.clientHeight; // the conversation's own height when last measured
     const showing = () => scroller.getClientRects().length > 0;
     const distanceOk = () => fromLatest(scroller) <= AT_LATEST_PX;
     // A focused button that hides hands keyboard focus to the message box (keyboard users only: on a touch screen that
@@ -449,8 +554,13 @@
       button.hidden = true;
       if (kb && input) input.focus({ preventScroll: true });
     };
-    const update = () => {
+    const update = (byScroll) => {
       if (!showing()) { hide(); return; }
+      // The box itself got shorter or taller since the last look (a status line or a taller composer appeared in the
+      // same moment as new messages): that is a size change, not the reader scrolling away, so a reader at the bottom
+      // stays there. Without this, whichever observer noticed first decided, and a page could open short of its newest message.
+      // A scroll event is the reader (or the page) choosing a position, so it only records the new height, never pins.
+      if (scroller.clientHeight !== boxH) { boxH = scroller.clientHeight; if (!byScroll && (stuck || jumping) && !distanceOk()) pin(); }
       const at = distanceOk();
       if (jumping) { if (!at) { hide(); return; } jumping = false; clearTimeout(jumpTimer); }
       stuck = at;
@@ -458,8 +568,8 @@
     };
     const pin = () => { scroller.scrollTop = scroller.scrollHeight; };
     // A size change: keep a reader who was at the bottom there, then re-measure.
-    const resized = () => { if (showing() && (stuck || jumping) && !distanceOk()) pin(); update(); };
-    scroller.addEventListener("scroll", update, { passive: true });
+    const resized = () => { boxH = scroller.clientHeight; if (showing() && (stuck || jumping) && !distanceOk()) pin(); update(); };
+    scroller.addEventListener("scroll", () => update(true), { passive: true });
     // The reader taking over (wheel, touch, a key, the scrollbar) ends a jump in progress.
     const takeOver = () => { if (jumping) { jumping = false; clearTimeout(jumpTimer); update(); } };
     for (const t of ["wheel", "touchstart", "pointerdown", "keydown"]) scroller.addEventListener(t, takeOver, { passive: true });
@@ -1103,10 +1213,15 @@
   const pickerOpen = () => !sessPicker.hidden;
   function placePicker() {
     const r = sessBtn.getBoundingClientRect(), vw = document.documentElement.clientWidth;
+    const vv = window.visualViewport;
+    const visibleBottom = vv && vv.scale <= 1.01 ? vv.offsetTop + vv.height : window.innerHeight;
     const width = Math.min(420, vw - 16);
+    const top = Math.round(r.bottom + 6);
     sessPicker.style.width = `${width}px`;
     sessPicker.style.left = `${Math.max(8, Math.min(r.left, vw - width - 8))}px`;
-    sessPicker.style.top = `${Math.round(r.bottom + 6)}px`;
+    sessPicker.style.top = `${top}px`;
+    // Never past the visible bottom (8px margin), and never less than about three rows tall.
+    sessPicker.style.maxHeight = `${Math.max(160, Math.min(520, Math.floor(visibleBottom - top - 8)))}px`;
   }
   function openPicker() {
     if (pickerOpen()) return;
@@ -1147,6 +1262,7 @@
   document.addEventListener("pointerdown", (e) => { if (pickerOpen() && !sessPicker.contains(e.target) && !sessBtn.contains(e.target)) closePicker(false); });
   sessPicker.addEventListener("focusout", (e) => { if (e.relatedTarget && !sessPicker.contains(e.relatedTarget) && e.relatedTarget !== sessBtn) closePicker(false); });
   window.addEventListener("resize", () => { if (pickerOpen()) placePicker(); });
+  if (window.visualViewport) for (const t of ["resize", "scroll"]) window.visualViewport.addEventListener(t, () => { if (pickerOpen()) requestAnimationFrame(placePicker); });
   document.getElementById("tshowarch").addEventListener("change", (e) => { showArchived = e.target.checked; renderBar(); });
   const listQuietly = async () => { try { await loadList(); } catch { /* the next poll tries again */ } };
   document.getElementById("tnew").addEventListener("click", async () => {

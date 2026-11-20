@@ -266,35 +266,47 @@ test("the main content uses the full available width: no fixed cap on rows, card
     assert.ok(r, `${sel} has a rule`);
     assert.doesNotMatch(r, /max-width:\s*(?!100%)\S/, `${sel} is not capped below the log's width`);
   }
-  for (const sel of ["#alog", "#log", "#jobs"]) {
-    assert.doesNotMatch(rule(sel), /max-width|width:\s*\d/, `${sel} spans the page`);
-    assert.match(rule(sel), /padding:\s*16px/, `${sel} keeps its edge padding`);
-  }
+  // The three scrollers share one rule; their edge padding is the --gutter token (16px, 12px on a phone) plus the safe area.
+  const scrollers = css.match(/#log, #alog, #jobs \{([^}]*)\}/)?.[1] ?? "";
+  assert.ok(scrollers, "one shared rule for #log, #alog and #jobs");
+  assert.doesNotMatch(scrollers, /max-width|(?<![-\w])width:\s*\d/, "the conversation and Jobs span the page");
+  assert.match(scrollers, /padding:\s*var\(--gutter\)/, "they keep their edge padding");
+  assert.match(css, /--gutter:\s*var\(--space-4\)/);
+  assert.match(css, /--space-4:\s*16px/);
+  assert.match(css, /@media \(max-width: 480px\) \{ :root \{ --gutter: var\(--space-3\); \} \}/);
+  assert.match(css, /--space-3:\s*12px/);
   assert.doesNotMatch(css, /max-width:\s*(?:min\()?(?:7[0-9]{2}|6[0-9]{2})px/, "no old 720px/780px reading-width caps remain");
 });
 
 test("the header's downward shadow paints above the scrolling content", () => {
   const header = rule("header");
-  // A stacking context above the (positioned) message rows; no overflow rule that could clip the shadow or focus rings.
+  // A stacking context above the (positioned) message rows. The header's own shadow is never clipped by its overflow; its
+  // only overflow rule is a height cap (both panels open on a very short screen), with padding left for focus rings.
   assert.match(header, /position:\s*relative/);
-  assert.match(header, /z-index:\s*10\b/);
-  assert.doesNotMatch(header, /overflow/);
-  assert.match(header, /box-shadow:\s*0 4px 14px -4px var\(--header-shadow\)/);
+  assert.match(header, /z-index:\s*var\(--z-header\)/);
+  assert.match(css, /--z-header:\s*10;/);
+  assert.match(header, /max-height:\s*calc\(var\(--app-1\) \* 60\);\s*overflow-y:\s*auto;/);
+  assert.doesNotMatch(header, /overflow(-x)?:\s*hidden/);
+  assert.match(header, /padding:\s*calc\(6px \+ var\(--safe-t\)\)/, "room above and below for focus rings");
+  assert.match(header, /box-shadow:\s*var\(--elev-1\)/);
+  assert.match(css, /--elev-1:\s*0 4px 14px -4px var\(--header-shadow\)/);
   const alphas = [...css.matchAll(/--header-shadow:\s*rgba\([^)]*,\s*(0?\.\d+)\)/g)].map((m) => Number(m[1]));
   assert.equal(alphas.length, 2, "a light and a dark shadow colour");
   assert.ok(alphas.every((a) => a >= 0.2), `the shadow is strong enough to see (${alphas})`);
   // Overlays still stack above the header: the picker lives inside it, the photo viewer above it, and the time tip
   // (inside the conversation) stays under it.
-  assert.match(rule("#sesspicker"), /position:\s*fixed;\s*z-index:\s*40/);
+  assert.match(rule("#sesspicker"), /position:\s*fixed;\s*z-index:\s*var\(--z-popover\)/);
+  assert.match(css, /--z-popover:\s*40;/);
   assert.match(html, /<header>[\s\S]*id="sesspicker"[\s\S]*<\/header>/);
-  assert.match(rule(".gviewer"), /z-index:\s*50/);
+  assert.match(rule(".gviewer"), /z-index:\s*var\(--z-modal\)/);
+  assert.match(css, /--z-modal:\s*50;/);
   assert.match(rule(".mtip"), /z-index:\s*5;/);
 });
 
 test("wide code and tables scroll inside a bounded region; nothing is clipped without a scrollbar", () => {
   const sx = rule(".scrollx");
   assert.match(sx, /max-width:\s*100%/);
-  assert.match(sx, /max-height:\s*60vh/);
+  assert.match(sx, /max-height:\s*calc\(var\(--app-1\) \* 60\)/, "60% of the app's visible height");
   assert.match(sx, /overflow:\s*auto/);
   assert.match(rule(".md pre"), /white-space:\s*pre;/);
   assert.match(rule(".compact pre"), /overflow:\s*auto/);
@@ -304,7 +316,8 @@ test("wide code and tables scroll inside a bounded region; nothing is clipped wi
   assert.match(title, /text-overflow:\s*ellipsis/);
   assert.match(html, /sessBtn\.title = label;/);
   assert.match(html, /sessBtn\.setAttribute\("aria-label", `Session: \$\{label\}/);
-  const rest = css.replace(/#sesstitle\s*\{[^}]*\}/, "");
+  // Also excepted: the app shell itself (html and body), which never scrolls; its content scrolls in the regions inside it.
+  const rest = css.replace(/#sesstitle\s*\{[^}]*\}/, "").replace(/\n  html \{[^}]*\}/, "").replace(/\n  body \{[^}]*\}/, "");
   assert.notEqual(rest, css);
   assert.doesNotMatch(rest, /overflow(-x|-y)?:\s*hidden/, "no content is hidden by clipping");
   assert.doesNotMatch(rest, /text-overflow:\s*ellipsis/);

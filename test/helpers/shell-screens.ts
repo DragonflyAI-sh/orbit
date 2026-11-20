@@ -1,0 +1,65 @@
+// Before/after screenshots of the app shell with synthetic content (test/helpers/shell-fixture.ts), for review.
+//   node test/helpers/shell-screens.ts <out-dir> [<before-index.html>]
+// SHELL_SCREENS_SMALL=1 writes the side-by-side images as 1x JPEGs (small enough to keep in docs/web-shell/).
+// With a second argument, each scenario is shot with that page too and the two are put side by side ("before" left).
+// Playwright's Chromium with phone-sized viewports and touch emulation: not iOS Safari, no real keyboard or toolbar.
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { join } from "node:path";
+import { shellServer, type ShellOpts } from "./shell-fixture.ts";
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+const [out, beforePath] = process.argv.slice(2);
+if (!out) { console.error("usage: node test/helpers/shell-screens.ts <out-dir> [<before-index.html>]"); process.exit(2); }
+mkdirSync(out, { recursive: true });
+const pw = createRequire(import.meta.url)("playwright");
+const before = beforePath ? readFileSync(beforePath, "utf8") : null;
+const small = process.env.SHELL_SCREENS_SMALL === "1";
+
+type Shot = { name: string; width: number; height: number; route: string; data: ShellOpts; dark?: boolean; act?: (page: any) => Promise<void> };
+const shots: Shot[] = [
+  { name: "375-assistant-long", width: 375, height: 667, route: "/#assistant", data: { exchanges: 24, card: true } },
+  { name: "320-sessions-long", width: 320, height: 568, route: "/sessions", data: { exchanges: 24, card: true, pending: true } },
+  { name: "390-multiline-composer", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24 },
+    act: async (p) => { await p.fill("#ainput", Array.from({ length: 12 }, (_, i) => `Draft line ${i + 1} of a long message`).join("\n")); } },
+  { name: "320-session-picker", width: 320, height: 568, route: "/sessions", data: { exchanges: 8 },
+    act: async (p) => { await p.waitForFunction(() => !document.getElementById("sesswrap")!.hidden); await p.click("#sessbtn"); } },
+  { name: "568x320-landscape-panels", width: 568, height: 320, route: "/#assistant", data: { exchanges: 8, notes: 12 },
+    act: async (p) => { await p.click("#notesbtn"); await p.click("#health"); } },
+  { name: "430-dark-assistant", width: 430, height: 932, route: "/#assistant", data: { exchanges: 24, card: true }, dark: true },
+  { name: "1280-desktop", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true } },
+];
+
+const browser = await pw.chromium.launch();
+async function shoot(html: string | undefined, s: Shot): Promise<Buffer> {
+  const srv = shellServer({ ...s.data, ...(html ? { html } : {}) });
+  const url = await srv.start();
+  const phone = s.width < 1000;
+  const ctx = await browser.newContext({ viewport: { width: s.width, height: s.height }, deviceScaleFactor: 2, colorScheme: s.dark ? "dark" : "light", ...(phone ? { isMobile: true, hasTouch: true } : {}) });
+  const page = await ctx.newPage();
+  await page.goto(url + s.route);
+  await page.waitForFunction((id: string) => document.getElementById(id)!.querySelectorAll(".msg").length > 0, s.route.includes("sessions") ? "log" : "alog");
+  await page.waitForTimeout(400);
+  if (s.act) await s.act(page);
+  await page.waitForTimeout(250);
+  const png = await page.screenshot();
+  await ctx.close();
+  srv.close();
+  return png;
+}
+for (const s of shots) {
+  const after = await shoot(undefined, s);
+  if (!before) { writeFileSync(join(out, `${s.name}.png`), after); continue; }
+  const prior = await shoot(before, s);
+  // Side by side: before (left), after (right), labelled.
+  const ctx = await browser.newContext({ viewport: { width: s.width * 2 + 48, height: s.height + 40 }, deviceScaleFactor: small ? 1 : 2 });
+  const page = await ctx.newPage();
+  const img = (b: Buffer) => `data:image/png;base64,${b.toString("base64")}`;
+  await page.setContent(`<body style="margin:0;background:#888;font:600 14px system-ui;display:flex;gap:16px;padding:8px 16px">${
+    [["Before (main)", prior], ["After", after]].map(([l, b]) => `<figure style="margin:0"><figcaption style="height:24px;color:#fff">${l}</figcaption><img style="width:${s.width}px;height:${s.height}px;display:block" src="${img(b as Buffer)}"></figure>`).join("")}</body>`);
+  if (small) writeFileSync(join(out, `${s.name}.jpg`), await page.screenshot({ type: "jpeg", quality: 72 }));
+  else writeFileSync(join(out, `${s.name}.png`), await page.screenshot());
+  await ctx.close();
+}
+await browser.close();
+console.log(`wrote ${shots.length} screenshot(s) to ${out}`);
