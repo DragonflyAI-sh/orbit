@@ -48,7 +48,27 @@ const designShots: Shot[] = [
   { name: "1280-dark-assistant", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true }, dark: true },
   { name: "390-dark-assistant", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true }, dark: true },
 ];
+// SHELL_SCREENS_SET=panel: the desktop menu and side panel pass (docs/design-system.md, "Side panel"), kept in
+// docs/side-panel/: the side panel populated with long content in both themes, the session menu with a hovered row, the
+// phone header panels (unchanged) and the phone composer after Return.
+const notesOpen = async (p: any) => { await p.click("#notesbtn"); await p.click("#inbox .showall"); await p.click("#inbox .note button:not(.x)"); };
+const hoverMenu = async (p: any) => { await picker(p); await p.hover("#sesslist li:nth-child(2) .sitem"); };
+const panelShots: Shot[] = [
+  { name: "1280-side-notes", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true, notes: 14, longNotes: true }, act: notesOpen },
+  { name: "1280-dark-side-notes", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true, notes: 14, longNotes: true }, dark: true, act: notesOpen },
+  { name: "1440-side-status", width: 1440, height: 900, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 }, act: async (p) => { await p.click("#health"); } },
+  { name: "1280-dark-side-status", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true, notes: 5, pending: true }, dark: true, act: async (p) => { await p.click("#health"); } },
+  { name: "1024-side-notes", width: 1024, height: 700, route: "/sessions", data: { exchanges: 24, card: true, notes: 6 }, act: async (p) => { await p.click("#notesbtn"); } },
+  { name: "1280-session-menu", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true }, act: hoverMenu },
+  { name: "1280-dark-session-menu", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true }, dark: true, act: hoverMenu },
+  { name: "390-panels", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6, longNotes: true }, act: async (p) => { await p.click("#notesbtn"); await p.click("#health"); } },
+  { name: "390-dark-panels", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6, longNotes: true }, dark: true, act: async (p) => { await p.click("#notesbtn"); await p.click("#health"); } },
+  // Before: Return sent the first line (the box is empty again). After: three lines in the box, nothing sent.
+  { name: "390-composer-return", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24 },
+    act: async (p) => { await p.focus("#ainput"); for (const [i, l] of ["First line", "Second line", "Third line"].entries()) { if (i) await p.keyboard.press("Enter"); await p.keyboard.type(l); } } },
+];
 if (process.env.SHELL_SCREENS_SET === "design") shots.splice(0, shots.length, ...designShots);
+if (process.env.SHELL_SCREENS_SET === "panel") shots.splice(0, shots.length, ...panelShots);
 
 const browser = await pw.chromium.launch();
 async function shoot(html: string | undefined, s: Shot): Promise<Buffer> {

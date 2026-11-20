@@ -213,7 +213,8 @@ test("phone flow in Chat: photos go to the open thread only; switching threads d
   const { page, ctx } = await phonePage(`${await base(r)}/#chat/${a.id}`);
   await page.waitForFunction((id: string) => document.getElementById("sessbtn")?.dataset.session === id && !(document.getElementById("pickbtn") as HTMLButtonElement).disabled, a.id);
   await page.fill("#input", "text only first");
-  await page.press("#input", "Enter");
+  // On a touch-only phone Return adds a line; Send sends (test/composer-keys.test.ts).
+  await page.click("#send");
   await page.waitForFunction(() => document.body.textContent!.includes("saw 0 photo(s)"));
   assert.equal("images" in (model.seen.at(-1)!.input.at(-1) as object), false);
   await page.setInputFiles("#pick", [file("a.jpg", "image/jpeg", encodeJpeg(80, 60, pattern(1))), file("b.png", "image/png", png(70, 50, pattern(2)))]);

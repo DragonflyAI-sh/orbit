@@ -107,7 +107,7 @@ test("deploy info: absent or invalid metadata says Unavailable, with the reason,
 
 test("the markup: the deployment rows are a labelled list inside the status line, after the pills and the /status link", () => {
   const line = html.match(/<div id="statusline"[^>]*>[\s\S]*?<\/dl><\/div>/)?.[0] ?? "";
-  assert.match(line, /<div id="ports"><\/div><a id="statusopen"[\s\S]*?<\/a><dl id="deployinfo" aria-label="Running release"><dt>Deployed<\/dt><dd id="deployedat">[\s\S]*?<\/dd><dt>Commit<\/dt><dd id="deploycommit">/);
+  assert.match(line, /<div id="ports"><span class="empty">Reading status…<\/span><\/div><a id="statusopen"[\s\S]*?<\/a><dl id="deployinfo" aria-label="Running release"><dt>Deployed<\/dt><dd id="deployedat">[\s\S]*?<\/dd><dt>Commit<\/dt><dd id="deploycommit">/);
   assert.doesNotMatch(grab("deployinfo"), /Date\.now|new Date\(\)|performance\.now|mtime|lastModified/, "no time from the page's clock or a file");
 });
 

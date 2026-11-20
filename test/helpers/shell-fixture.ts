@@ -28,7 +28,7 @@ function exchange(i: number, at: (n: number) => string) {
   return [user, reply];
 }
 
-export type ShellOpts = { exchanges?: number; pending?: boolean; notes?: number; card?: boolean; html?: string };
+export type ShellOpts = { exchanges?: number; pending?: boolean; notes?: number; card?: boolean; html?: string; longNotes?: boolean };
 
 export function shellServer(opts: ShellOpts = {}) {
   let o: ShellOpts = { exchanges: 2, pending: false, notes: 3, card: false, ...opts };
@@ -50,7 +50,11 @@ export function shellServer(opts: ShellOpts = {}) {
     budgets: { unit: "characters", activeChars: 32000, chunkMaxChars: 12000, contextChars: 52000, notesMaxChars: 12000 },
   });
   const thread = () => ({ id: T1, title: "A synthetic session with a deliberately long title that will not fit", rev: 1, busy: Boolean(o.pending), archived: false, cards: o.card ? [card] : [], messages: messages() });
-  const notes = () => Array.from({ length: o.notes ?? 0 }, (_, i) => ({ id: `n${i}`, at: at(i), text: `Synthetic notification ${i + 1}: job orbit-2026111800${i}0-abcd finished.\nIt pushed a branch and wrote a summary.` }));
+  // longNotes: every third note has a long first line and a long body with an unbroken URL, for wrapping checks.
+  const LONG = " The summary says what changed, why, and how it was tested; it also lists what could not be checked here. ".repeat(3);
+  const notes = () => Array.from({ length: o.notes ?? 0 }, (_, i) => ({ id: `n${i}`, at: at(i), text: o.longNotes && i % 3 === 0
+    ? `Synthetic notification ${i + 1}: job orbit-2026111800${i}0-abcd finished after a long run with several check-ins and one steer answered.\n${LONG}\nhttps://github.com/example/very-long-repository-name/pull/12345/files#diff-0123456789abcdef0123456789abcdef`
+    : `Synthetic notification ${i + 1}: job orbit-2026111800${i}0-abcd finished.\nIt pushed a branch and wrote a summary.` }));
 
   const server: Server = createServer(async (req, res) => {
     const url = new URL(req.url!, "http://x");
