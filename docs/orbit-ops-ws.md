@@ -13,16 +13,16 @@ changes tiers 1-3, `orbit.service`'s unit file or the deploy.
   no user created, no image formatted, nothing mounted, no unit installed or started, and ORBIT was not restarted.
 - It is **not installed** by any deploy or by `install.sh`, `install-admin.sh` or `install-sys.sh`. A person installs it as root with
   `deploy/install-ws.sh --approved-by-owner` after Rai has approved that separately.
-- The ORBIT-side tools and cards that call it, and ORBIT's own owner-controlled switch for workspace tools, are being built separately.
-  This document describes the helper and the client (`src/ops-ws-client.ts`) only.
+- The ORBIT-side tools and cards that call it (`src/workspace/admin.ts`) and ORBIT's own owner switch are described in
+  `docs/workspace-tools.md`. This document describes the helper and the client (`src/ops-ws-client.ts`).
 
 ## Actions
 
 | Action | Arguments | What the helper does |
 |---|---|---|
 | `ws_status` | none | Inspects the host **read-only** and answers with facts, the plan (every step with its state and the exact action it would take), the 24-hex `planKey`, host-wide blockers, and whether an operation is open. Runs only queries (`systemctl show/--version/is-enabled`, `getent`). |
-| `ws_setup` | `opId`, `planKey` | Recomputes the plan; refuses with `plan_changed` if its key differs from `planKey`, and with `plan_blocked` if any step is blocked. Otherwise records the operation and starts `orbit-ops-ws-run@<opId>.service`. With nothing to do it records `no_change` and starts nothing. |
-| `ws_revoke` | `opId` | Records and starts the runner, which rewrites the drop-in **without** its `Environment=` line, reloads systemd, restarts ORBIT and verifies. |
+| `ws_setup` | `opId`, `planKey` | Reserves the id (below), takes the one-at-a-time slot, recomputes the plan; refuses with `busy`, `plan_changed` if its key differs from `planKey`, or `plan_blocked` if any step is blocked (the id is then recorded as `rejected`: nothing was done, and it can never run later). Otherwise records the operation as `accepted` and starts `orbit-ops-ws-run@<opId>.service`. With nothing to do it records `no_change` and starts nothing. |
+| `ws_revoke` | `opId` | Reserves the id and takes the slot as above, then records and starts the runner, which rewrites the drop-in **without** its `Environment=` line, reloads systemd, restarts ORBIT and verifies. |
 | `op_status` | `opId` | The operation's public record. |
 
 Requests are strict JSON (at most 4096 bytes; answers at most 16 KiB): exactly the keys above, `opId` = 40 lowercase hex, `planKey` = 24
@@ -87,20 +87,60 @@ A *blocked step* is different: it **does** stop `ws_setup` (`plan_blocked`), bec
 The runner (`orbit-ops-ws-run@<opId>.service`, `src/ops/ws-run.ts`) runs only a record in `accepted`, holds the deploy lock
 (`/opt/orbit/state/deploy.lock`, like tier 2's restart), recomputes the plan, and refuses with nothing changed (`failed`, code
 `plan_changed` or `plan_blocked`) if it differs. It executes the to-do steps in order with bounded timeouts, recording every operation,
-and **stops at the first failure**: no rollback, nothing deleted (images, workspace data, packages, the user and files are never
-removed); a new image whose formatting failed is left in place and named in the summary (the next plan then shows that workspace as
-blocked). `mkfs.ext4` refuses to run on any image the operation did not create itself a moment earlier.
+and **stops at the first failure**: no rollback, nothing deleted (workspace data, packages, the user and files are never removed). A new
+image whose formatting did not complete is left in place and named in the summary. `mkfs.ext4` refuses to run on any image the
+operation did not create itself a moment earlier.
+
+**Partial images (crash-safe).** Right after the runner creates an image (exclusively), it records the image's device and inode in
+`/var/lib/orbit-ops-ws/images/<id>.json`, and it removes that marker only when `mkfs.ext4` on that image exited 0. A marker therefore
+means "this helper created exactly this file and never saw it formatted", whether the runner failed, timed out or was killed. The next
+plan shows such an image as a **todo** step (`remove the partial image ... inode N ...`, then create, `fallocate`, `mkfs.ext4` again)
+instead of blocking every later setup. It is replaced only if it is still exactly the recorded inode, root-owned and regular, nothing is
+mounted at the workspace root, and it is not a formatted-looking image with a mount unit present (that could have been mounted and hold
+data); the runner re-checks the inode and the mount table when it runs, and refuses otherwise. An image without a marker, or one whose
+marker does not match, is never touched (`blocked`, operator decision). Nothing else is ever deleted.
+
+**Time bounds.** Every timeout lives in `T` in `src/ops/ws-core.ts`; `opWorstMs`/`setupWorstMs` add them up. After it holds the deploy
+lock the runner has a budget of 4200 s (`RUN_BUDGET_MS`): it refuses, before any change (`over_budget`), a plan whose worst case does not
+fit, and it never starts an operation that could outlive the budget. The largest possible plan (a fresh host whose two images are both
+partial leftovers) fits; a test checks that and that the unit's `TimeoutStartSec=4620` covers the lock wait (300 s), the budget and
+node's start.
+
+| Part | Bound |
+|---|---|
+| deploy-lock wait (`flock -w`) | 300 s |
+| reading the host (`systemctl show`, `--version`, 2 `getent`, 2 `is-enabled`) | 65 s, twice per run |
+| package unit (`systemctl start orbit-ops-ws-pkg@`; that unit: `TimeoutStartSec=1800`, `TimeoutStopSec=90`, never SIGKILL) | 1900 s |
+| `useradd` | 60 s |
+| each workspace filesystem (`fallocate` 120, `mkfs.ext4` 300, `daemon-reload` 120, `enable --now` 180, `getent`, `rmdir`, `chown`, `chmod` 10 each) | about 760 s |
+| apply (`daemon-reload` 120, `restart orbit.service` 120, `/status` 60 + one probe) | about 306 s |
+| final `/status` wait | about 66 s |
+| worst case of the largest plan | about 4000 s, within the 4200 s budget |
 
 Outcome: `verified` only when, afterwards, the recomputed plan shows **every step done** and `/status` (HOST/PORT from
 `/opt/orbit/orbit.env`) answers 200 with the commit read from `/opt/orbit/current/COMMIT` before the restart, within 60 s. `no_change`
 when nothing was to do. `failed` names the step (`failedStep`) and why. A runner that vanished is `interrupted` (outcome unknown), never
-success. One operation at a time (exclusive slot file, as tier 2); a repeated `opId` returns the existing record and never runs again.
+success.
+
+**One operation at a time, each id once.** A request's record is created **first**, exclusively (`link()` of a complete file; state
+`reserved`), so two requests with the same `opId`, even at the same moment, cannot both create it: the second is a replay. Only then is
+the slot taken. The slot is a sequence of generations, `/var/lib/orbit-ops-ws/slots/<n>`, each created exclusively and holding the
+taker's `opId` and time; the newest generation is the holder. Taking the slot means creating generation n+1, which exactly one contender
+can do, and only when the holder's record is finished (or settled: a `reserved` record older than 60 s belongs to a front systemd has
+already stopped, `RuntimeMaxSec=40`, and is settled as `interrupted` with nothing done; an `accepted`/`running` one whose runner unit is
+inactive after 30 s is `interrupted`, outcome unknown). Nothing is ever "broken" by deleting a slot file, so a live holder can never be
+displaced. A slot whose holder has no record (edited by hand) is `busy` until it is older than 60 s.
+
+**Replay protection never lapses.** Old finished records are pruned beyond the newest 50, but each id is first appended (and fsynced)
+to `/var/lib/orbit-ops-ws/used-opids`, which is never pruned; a request for a registered id is answered as a replay and never runs. At
+every moment an id is either recorded or registered. The register holds about 100,000 ids (4 MiB); when it is full, records are simply
+not pruned any more (storage grows; replay protection stays).
 
 `ws_revoke` never deletes images, mounts, the user, the workspaces file or packages. It is `no_change` when the drop-in is absent or
 already revoked (and loaded); it refuses an operator-written drop-in.
 
-Record (`/var/lib/orbit-ops-ws/ops/<opId>.json`, root 0600): `opId`, `action`, `state` (`accepted`, `running`, `verified`, `no_change`,
-`failed`, `interrupted`), `acceptedAt`, `updatedAt`, `startedAt`, `finishedAt`, `planKey`, `todo` (step ids), `blockers` (ids),
+Record (`/var/lib/orbit-ops-ws/ops/<opId>.json`, root 0600): `opId`, `action`, `state` (`reserved`, `accepted`, `running`, `verified`,
+`no_change`, `failed`, `interrupted`, `rejected`), `acceptedAt`, `updatedAt`, `startedAt`, `finishedAt`, `planKey`, `todo` (step ids), `blockers` (ids),
 `pkgResult`, `steps` (at most 64, each `{at, step, detail}` redacted and capped), `failedStep`, `code`, `verification` (`checked`,
 `healthy`, `planComplete`, `expectedCommit`, `servedCommit`, `detail`), `summary`. Answers show the last 16 steps.
 
@@ -126,10 +166,24 @@ Record (`/var/lib/orbit-ops-ws/ops/<opId>.json`, root 0600): `opId`, `action`, `
 | `orbit-ops-ws-run@<op>.service` (runner) | the fixed steps, restart, verification | `ProtectSystem=yes`: `/etc`, `/var`, `/srv` writable (useradd, unit files, `/etc/orbit`, images, roots); `/usr`, `/boot` read-only; `/opt/orbit` read-only except `state/` (deploy lock) | only `localhost`, `100.64.0.0/10`, `fd7a:115c:a1e0::/48` (to probe `/status`) | `CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_AUDIT_WRITE`; no `CAP_SYS_ADMIN` (systemd, not the runner, mounts) |
 | `orbit-ops-ws-pkg@<op>.service` (package) | `apt-get install bubblewrap` once, only when the runner asked a moment ago | whatever dpkg needs (no `ProtectSystem`, like tier 3's update unit) | **yes**: apt must reach the mirrors. It is the only unit with general network, so the runner, which writes `/etc` and restarts ORBIT, has none beyond localhost and the tailnet | default root; `SendSIGKILL=no` |
 
-Every command is a fixed absolute path with fixed arguments (`/usr/bin/systemctl`, `/usr/bin/getent`, `/usr/sbin/useradd`,
-`/usr/bin/apt-get`, `/usr/bin/fallocate`, `/usr/sbin/mkfs.ext4`, `/usr/bin/chown`, `/usr/bin/chmod`, `/usr/bin/rmdir`); the only variable
-token is the validated 40-hex id inside a unit instance name. A test asserts that every command any of the three programs issues is on
-that list. Every step detail, summary, audit line and answer is redacted by the tier 1 rules and capped.
+**The complete privileged command surface.** Every process the helper's programs start is a fixed absolute path with fixed arguments;
+the only variable token is the validated 40-hex id (inside a unit instance name, or as the runner's own argument):
+
+| Program | Started processes |
+|---|---|
+| front (`ws-helper.ts`, through `WsEnv.exec`) | `/usr/bin/systemctl show orbit.service ...`, `--version`, `is-enabled <mount unit>`, `is-active orbit-ops-ws-run@<opId>.service`, `start --no-block orbit-ops-ws-run@<opId>.service`; `/usr/bin/getent passwd orbit`, `group orbit` |
+| runner (`ws-run.ts run`, through `WsEnv.exec`) | the same queries; the plan's commands: `/usr/sbin/useradd ...`, `/usr/bin/fallocate -l <fixed size> <fixed image>`, `/usr/sbin/mkfs.ext4 -q -F -L <fixed label> <image this run created>`, `/usr/bin/systemctl daemon-reload`, `enable --now <fixed mount unit>`, `restart orbit.service`, `start orbit-ops-ws-pkg@<opId>.service`, `/usr/bin/chown`, `/usr/bin/chmod`, `/usr/bin/rmdir` on the fixed paths |
+| runner, outside `WsEnv.exec` (`main()`, `lockedRerun`) | exactly one: `/usr/bin/flock -w 300 /opt/orbit/state/deploy.lock <node> --max-old-space-size=64 <ws-run.ts> <opId> run`, i.e. the runner re-running itself (the unit's `/usr/local/bin/node`) under the deploy lock |
+| package unit (`ws-run.ts pkg`) | `/usr/bin/apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends bubblewrap` (at most once) |
+| installer (`deploy/install-ws.sh`, run by an operator as root) | `install`, `cmp`, `getent group orbit-ops`, `groupadd --system orbit-ops` (if absent), `systemctl daemon-reload`, `enable orbit-ops-ws.socket`, `restart orbit-ops-ws.socket`, `systemctl show orbit.service -p SupplementaryGroups` |
+
+File changes without a command (Node's `fs`, fixed paths only): the helper's own state directory (records, register, slots, markers);
+`ensure_dir`, `create_image` (exclusive), unit files, the workspaces file and the drop-in (temp file + rename, or `link()` when it must
+not exist); and removing exactly a recorded partial image (inode checked). Tests: "every command the front, the runner and the package
+unit issue is on a fixed allowlist" (every scenario's `WsEnv.exec` calls) and "the runner's own re-exec under the deploy lock is fixed"
+(the `flock`/node argv, and a source scan that no other process is started in `src/ops/ws-*.ts`). The installer is a shell script read
+by the operator; its refusal paths are tested. Every step detail, summary, audit line and answer is redacted by the tier 1 rules and
+capped.
 
 ## Install (root; Rai's separate approval first)
 
@@ -197,3 +251,5 @@ how to remove it by hand. To stop the host permitting workspace tools without un
 - The front and the runner must see the same host for the plan key to match; a host that changes between them (another admin at work)
   gives `plan_changed`, which is the intended, safe outcome.
 - `ws_revoke` does not unmount or delete anything; removing workspaces is a manual, operator decision (see Uninstall).
+- The older tiers (`orbit-ops-admin`, `orbit-ops-sys`) still forget an operation id once its record is pruned (50 records); the replay
+  register above is this helper's only. That is outside this change.
