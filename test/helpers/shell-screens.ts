@@ -1,6 +1,7 @@
 // Before/after screenshots of the app shell with synthetic content (test/helpers/shell-fixture.ts), for review.
 //   node test/helpers/shell-screens.ts <out-dir> [<before-index.html>]
 // SHELL_SCREENS_SMALL=1 writes the side-by-side images as 1x JPEGs (small enough to keep in docs/web-shell/).
+// SHELL_SCREENS_SET=design shoots the desktop design set instead (kept in docs/design-system/).
 // With a second argument, each scenario is shot with that page too and the two are put side by side ("before" left).
 // Playwright's Chromium with phone-sized viewports and touch emulation: not iOS Safari, no real keyboard or toolbar.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -29,6 +30,25 @@ const shots: Shot[] = [
   { name: "430-dark-assistant", width: 430, height: 932, route: "/#assistant", data: { exchanges: 24, card: true }, dark: true },
   { name: "1280-desktop", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true } },
 ];
+
+// SHELL_SCREENS_SET=design: the desktop design pass (docs/design-system.md): laptop widths, the header menu and panels,
+// the conversation with a confirmation card, dark mode, and the phone layout for comparison.
+const picker = async (p: any) => { await p.waitForFunction(() => !document.getElementById("sesswrap")!.hidden); await p.click("#sessbtn"); };
+const designShots: Shot[] = [
+  { name: "1280-assistant", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true } },
+  { name: "1440-assistant-panels", width: 1440, height: 900, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 },
+    act: async (p) => { await p.click("#notesbtn"); await p.click("#health"); } },
+  { name: "1280-session-picker", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true }, act: picker },
+  { name: "1280-dark-sessions", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true, pending: true }, dark: true },
+  { name: "390-assistant", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true } },
+  { name: "390-session-picker", width: 390, height: 844, route: "/sessions", data: { exchanges: 8 }, act: picker },
+  // The theme menu does not exist before this change; the "before" side shows the same page without it.
+  { name: "1280-theme-menu", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true },
+    act: async (p) => { if (await p.$("#themebtn")) await p.click("#themebtn"); } },
+  { name: "1280-dark-assistant", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true }, dark: true },
+  { name: "390-dark-assistant", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true }, dark: true },
+];
+if (process.env.SHELL_SCREENS_SET === "design") shots.splice(0, shots.length, ...designShots);
 
 const browser = await pw.chromium.launch();
 async function shoot(html: string | undefined, s: Shot): Promise<Buffer> {

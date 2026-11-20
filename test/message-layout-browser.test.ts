@@ -204,21 +204,24 @@ for (const surface of ["assistant", "chat"] as const) {
     assert.equal(await time.getAttribute("aria-expanded"), "false", "Escape closes it");
   });
 
-  test(`browser (${surface}): on a wide screen every row uses the log's full width, and the header's shadow shades the content scrolling under it`, { skip }, async () => {
+  test(`browser (${surface}): on a wide screen every row fills one centred reading column, and the header's shadow shades the content scrolling under it`, { skip }, async () => {
     reset();
     const sel = await open(hash, { width: 1600, height: 700 });
     const w = await page.$eval(sel, (log: HTMLElement) => {
       const cs = getComputedStyle(log);
       return {
-        inner: log.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), pad: parseFloat(cs.paddingLeft),
+        inner: log.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), pad: parseFloat(cs.paddingLeft), padR: parseFloat(cs.paddingRight),
         page: document.documentElement.clientWidth, rows: [...log.querySelectorAll(".msg")].map((m) => m.getBoundingClientRect().width),
+        form: (() => { const f = document.querySelector(log.id === "alog" ? "#aform textarea" : "#form textarea")!.closest("form")!, fc = getComputedStyle(f); return { left: parseFloat(fc.paddingLeft), right: parseFloat(fc.paddingRight) }; })(),
         cards: [...log.querySelectorAll(".proposal")].map((c) => c.getBoundingClientRect().width),
         sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
       };
     });
-    assert.equal(w.pad, 16, "the log keeps its edge padding");
-    assert.ok(w.inner >= w.page - 2 * 16 - 20, `the log spans the page (${w.inner} of ${w.page})`);
-    assert.ok(w.rows.every((x: number) => Math.abs(x - w.inner) <= 1), `every row is as wide as the log (${w.inner}): ${w.rows}`);
+    // A readable column (docs/web-shell.md, --measure 860px), centred: equal side padding, at least the 24px gutter.
+    assert.ok(Math.abs(w.pad - (w.page - 860) / 2) <= 1 && Math.abs(w.padR - w.pad) <= 1, `the log centres an 860px column (${w.pad}/${w.padR} of ${w.page})`);
+    assert.ok(w.inner <= 860 && w.inner >= 860 - 20, `the column is the measure, less any scrollbar (${w.inner})`);
+    assert.ok(Math.abs(w.form.left - w.pad) <= 1 && Math.abs(w.form.right - w.padR) <= 1, `the composer uses the same column (${JSON.stringify(w.form)})`);
+    assert.ok(w.rows.every((x: number) => Math.abs(x - w.inner) <= 1), `every row is as wide as the column (${w.inner}): ${w.rows}`);
     assert.ok(w.cards.length > 0 && w.cards.every((x: number) => x > w.inner * 0.9), `proposal cards fill their row too: ${w.cards}`);
     assert.equal(w.sideways, false, "nothing scrolls sideways");
     // An opaque, positioned block at the very top of the log, positioned the way message rows are (relative, z-index auto),
