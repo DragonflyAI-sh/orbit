@@ -73,6 +73,11 @@ import { WORKSPACE_TOOL_NAMES } from "./workspace/service.ts";
 import type { WorkspaceService } from "./workspace/service.ts";
 import { WORKSPACE_ADMIN_TOOL_NAMES } from "./workspace/admin.ts";
 import type { WorkspaceAdmin } from "./workspace/admin.ts";
+import { isTaskId, parseCreate, TaskError, taskFile, taskStore } from "./tasks.ts";
+import type { Observers, Provenance, Tasks } from "./tasks.ts";
+import { isTaskToolName, TASK_ASSISTANT_TOOL_NAMES, TASK_TURNS_MAX_CONCURRENT, taskSupervisor } from "./task-supervisor.ts";
+import { taskVaultSync } from "./task-vault.ts";
+import type { TaskVaultPort } from "./task-vault.ts";
 
 export const STALE_AFTER_MS = 5 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -165,6 +170,14 @@ export type Deps = {
   photoSemantic?: { embedder: Embedder | undefined; cacheDir: string | undefined; status(): PortStatus };
   // Startup smoke checks (docs/smoke-checks.md). Started once, when the server starts listening; /status only reads the records.
   smoke?: SmokeRunner;
+  // Supervised tasks (src/tasks.ts, src/task-supervisor.ts, docs/adr/0003-supervised-tasks.md). Absent means memory only, which a restart
+  // empties. `taskVault`: the vault write pipeline for task status lines (src/task-vault.ts); absent means task vault sync reports that
+  // vault writes are not enabled. `taskModel`: the model port supervised task turns run on; absent means the same model as every other
+  // turn (which model that is stays configuration; nothing here picks one). `taskTurnsMax`: supervised turns running at once.
+  tasks?: Tasks;
+  taskVault?: TaskVaultPort;
+  taskModel?: ModelPort;
+  taskTurnsMax?: number;
   // The clock for thread cards and the recent-context note. Tests inject one; it must be the clock the proposals use.
   now?: () => Date;
   // Chat tool execution deadline and abort grace period (docs/tool-deadlines.md). Tests lower them; production uses the defaults.
@@ -261,6 +274,10 @@ export function buildServer({
   photoSemantic,
   smoke,
   recentContext: recentPort = stateRecentContext(jsonStore(undefined, "recent-context", null)),
+  tasks = taskStore(taskFile(undefined)),
+  taskVault,
+  taskModel,
+  taskTurnsMax = TASK_TURNS_MAX_CONCURRENT,
   now,
   toolDeadlineMs,
   abortGraceMs,
@@ -408,6 +425,76 @@ export function buildServer({
   // The service that owns a proposal's card: the Assistant's when its card is there, otherwise the chat threads'.
   const cardSvc = (proposalId: string) => (assistant.threadOfCard(proposalId) ? asvc : svc);
 
+  // ---- Supervised tasks (docs/adr/0003-supervised-tasks.md). A task's session is a chat thread; its turns run through their own thread
+  // service over the same thread store (so the thread's single-turn lock serializes them with Rai's own messages), with the task model,
+  // and without the rolling recent-context note, so no other conversation's context reaches a task turn.
+  const tsvc = threadService({ threads, model: taskModel ?? model, proposals, jobs, admin: adminOps, sys: sysOps, workspace, workspaceAdmin, now, toolDeadlineMs, abortGraceMs, origin: chatSessionId, photos: (tid, aid) => attachments.read(aid, chatScope(tid)), galleries: (tid, g) => display.galleries(chatSessionId(tid), g) });
+  // What a linked launch proposal became (the proposal store, then its card) and what the job store says of a job. Read only.
+  const taskObservers: Observers = {
+    proposal: (pid) => {
+      if (proposals.peek(pid)) return { state: "awaiting-confirmation" };
+      const card = assistant.card(pid) ?? threads.card(pid);
+      if (!card) return { state: "unknown", detail: "no card records this proposal" };
+      if (card.state === "confirmed") return { state: "confirmed", ...(card.outcome?.jobId ? { job: card.outcome.jobId } : {}), ...(card.outcome?.error ? { detail: card.outcome.error } : {}) };
+      return { state: card.state === "open" ? "expired" : card.state, ...(card.outcome?.error ? { detail: card.outcome.error } : {}) };
+    },
+    job: (id) => {
+      if (!jobs) return { found: false, why: "jobs are not enabled" };
+      try {
+        const j = jobs.get(id);
+        return j ? { found: true, state: j.state, health: jobs.health(j) } : { found: false, why: "not in the job store (it keeps the newest 200)" };
+      } catch {
+        return { found: false, why: "the job store is unavailable" };
+      }
+    },
+  };
+  const tasksVault = taskVaultSync({ tasks, port: taskVault, observers: taskObservers, now });
+  const supervisor = taskSupervisor({
+    tasks,
+    createThread: (title) => threads.create(title).id,
+    threadBusy: (tid) => threads.isBusy(tid),
+    threadExists: (tid) => Boolean(threads.get(tid)),
+    turn: (tid, text, prep, opts) => tsvc.turn(tid, text, prep, opts),
+    prepare: async (isOwner, query, tid) => {
+      const p = await prepare(isOwner, query, "chat", chatSessionId(tid));
+      return { notes: p.notes, used: p.used, current: p.current, offered: p.offered };
+    },
+    allowChat: (isOwner) => allowAgent(isOwner, "chat"),
+    decide: (action, isOwner) => {
+      const dec = decide("tasks", action, isOwner);
+      audit("tasks", action, dec);
+      return dec;
+    },
+    observers: taskObservers,
+    // Only an open job_launch proposal bound to the Assistant (made by its own job_launch call) can answer a task's job request.
+    linkable: (pid) => {
+      const p = proposals.peek(pid);
+      if (!p) return { ok: false, why: "no open proposal has that id (it was never made, already used, or expired)" };
+      if (p.kind !== "job_launch") return { ok: false, why: "that proposal is not a job launch" };
+      if (p.origin !== assistantSessionId()) return { ok: false, why: "that proposal was not made in the Assistant" };
+      return { ok: true };
+    },
+    vault: tasksVault,
+    modelName: () => (taskModel ?? model).status().impl,
+    canUseTools: () => Boolean((taskModel ?? model).step),
+    now: clock,
+    maxConcurrent: taskTurnsMax,
+  });
+  // Restart recovery: a task turn recorded as running when ORBIT stopped is marked interrupted (never re-run).
+  try {
+    for (const id of tasks.recover()) console.log(JSON.stringify({ at: clock().toISOString(), event: "task_turn_interrupted_by_restart", task: id }));
+  } catch (e) {
+    console.log(JSON.stringify({ at: clock().toISOString(), event: "task_recover_failed", detail: e instanceof Error ? e.message.slice(0, 200) : "error" }));
+  }
+  const taskOfThread = (tid: string) => {
+    try {
+      const t = tasks.byThread(tid);
+      return t ? supervisor.view(t, "summary") : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   // Where a launch proposal was made (docs/adr/0002-work-sessions.md, "Origin"). Two server-side records, both written from the turn's own
   // context: the conversation that stores the proposal's card, and the origin bound on the proposal when that card was stored. Nothing
   // from the request body or the model is used. When both exist they must agree; when neither does, the origin is unknown.
@@ -534,6 +621,14 @@ export function buildServer({
         audit("sessions", "digest", d);
         digest = sessionDigest(sessions, { isOwner });
       }
+      // Supervised tasks: the supervisor's tools and the open tasks that need attention, Assistant scope and owner only (tasks port).
+      const td = decide("tasks", "supervise", isOwner);
+      if (td.allow) {
+        audit("tasks", "supervise", td);
+        if (offered.length) offered.push(...supervisor.assistantTools(isOwner));
+        const block = supervisor.activityBlock();
+        if (block) digest = [digest, block].filter(Boolean).join("\n\n");
+      }
     }
     return { notes, used, current, offered, digest };
   };
@@ -541,6 +636,15 @@ export function buildServer({
     const decision = decide("agent", tool, isOwner);
     audit("agent", tool, decision);
     if (!decision.allow) return decision.reason;
+    // Supervised tasks: the supervisor's tools are owner only (tasks port) and only inside the Assistant; a task's own tools are only
+    // offered inside that task's turns, which use their own policy hook (src/task-supervisor.ts), so they are refused here.
+    if (isTaskToolName(tool)) {
+      if (!(TASK_ASSISTANT_TOOL_NAMES as readonly string[]).includes(tool)) return `${tool} is refused: it is only offered inside a task's own turn`;
+      const second = decide("tasks", tool, isOwner);
+      audit("tasks", tool, second);
+      if (!second.allow) return second.reason;
+      return scope === "assistant" ? undefined : `${tool} is refused: task supervision is only offered in the Assistant`;
+    }
     // Session discovery and reading (sessions_list, session_inspect, session_read): owner only (its own policy port) and only inside
     // the Assistant, even if a chat turn names the tool.
     if ((SESSION_TOOL_NAMES as readonly string[]).includes(tool)) {
@@ -838,7 +942,7 @@ export function buildServer({
       const callerIsOwner = await isOwnerOf(req);
       if (!isThreadId(id) || !threads.get(id)) return send(res, 404, { error: "No thread with that id." });
       try {
-        if (!action) return send(res, 200, { thread: svc.view(id) });
+        if (!action) return send(res, 200, { thread: { ...svc.view(id), ...(taskOfThread(id) ? { task: taskOfThread(id) } : {}) } });
         const input = await body();
         if (!input) return;
         if (action === "rename") {
@@ -865,15 +969,82 @@ export function buildServer({
         const photos = photosOf(input, chatScope(id));
         if (!photos) return;
         let out;
+        // A task's session: Rai's message is recorded as a new instruction version from Rai and answered with the task's context
+        // (src/task-supervisor.ts humanTurn). Any other thread: an ordinary chat turn, unchanged.
+        const task = (() => {
+          try {
+            return tasks.byThread(id);
+          } catch {
+            return undefined;
+          }
+        })();
         try {
-          out = await svc.turn(id, text, { notes: prep.notes, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner), isOwner: callerIsOwner, ...(photos.refs.length ? { attachments: photos.refs } : {}) });
+          const base = { notes: prep.notes, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner), isOwner: callerIsOwner, ...(photos.refs.length ? { attachments: photos.refs } : {}) };
+          out = task ? await supervisor.humanTurn(task.id, text, base) : await svc.turn(id, text, base);
         } catch (err) {
           photos.release(() => hasRefs(threads.get(id)?.messages ?? [], photos.refs));
+          if (err instanceof TaskError) return send(res, err.code, { error: err.message });
           throw err;
         }
-        return send(res, out.error ? 502 : 200, { thread: out.thread, limits: prep.current, ...(out.error ? { error: out.error } : {}) });
+        const linked = taskOfThread(id);
+        return send(res, out.error ? 502 : 200, { thread: { ...out.thread, ...(linked ? { task: linked } : {}) }, limits: prep.current, ...(out.error ? { error: out.error } : {}) });
       } catch (err) {
         return threadFail(err);
+      }
+    }
+
+    // ---- Supervised tasks (owner only, every route; docs/adr/0003-supervised-tasks.md). Rai's own actions: list, inspect, create,
+    // steer, pause, resume, cancel, run one turn, attest evidence, answer a request, sync to the vault, and mark done (evidence-gated).
+    // Every mutation names the rev it was based on; a stale one is refused (409) and changes nothing.
+    const taskMatch = url.pathname.match(/^\/tasks\/([^/]{1,80})(?:\/(steer|pause|resume|cancel|turn|complete|evidence|respond|sync))?$/);
+    if (url.pathname === "/tasks" || taskMatch) {
+      const action = taskMatch ? (taskMatch[2] ?? "inspect") : req.method === "POST" ? "create" : "list";
+      const method = action === "list" || action === "inspect" ? "GET" : "POST";
+      if (req.method !== method) return send(res, 405, { error: `Use ${method} for this route.` });
+      if (!(await owned("tasks", action))) return;
+      const human: Provenance = { actor: "human", via: "task-panel" };
+      try {
+        if (action === "list") return send(res, 200, { tasks: tasks.all().map((t) => supervisor.view(t, "summary")), status: tasks.status(), turnsRunning: supervisor.runningCount() });
+        if (action === "create") {
+          const input = await body();
+          if (!input) return;
+          const parsed = parseCreate(input as never, clock());
+          const r = tasks.create(parsed, { actor: "human", via: "api" }, () => threads.create(`Task: ${parsed.title}`).id);
+          return send(res, r.duplicate ? 200 : 201, { task: supervisor.view(r.task), duplicate: r.duplicate });
+        }
+        const id = taskMatch![1]!;
+        if (!isTaskId(id) || !tasks.get(id)) return send(res, 404, { error: "No task with that id." });
+        if (action === "inspect") return send(res, 200, { task: supervisor.view(tasks.get(id)!) });
+        const input = await body();
+        if (!input) return;
+        const rev = tasks.requireRev(input.rev);
+        const key = typeof input.requestId === "string" && /^[A-Za-z0-9-]{8,64}$/.test(input.requestId) ? `owner:${input.requestId}` : undefined;
+        if (action === "steer") {
+          const r = tasks.steer(id, rev, input.text, human, key);
+          return send(res, r.duplicate ? 200 : 201, { task: supervisor.view(r.task), instruction: r.instruction.v, duplicate: r.duplicate });
+        }
+        if (action === "pause" || action === "resume" || action === "cancel") {
+          const r = supervisor.setLifecycle(id, rev, action === "pause" ? "paused" : action === "resume" ? "active" : "cancelled", human, input.reason);
+          return send(res, 200, { task: supervisor.view(r.task), stoppedRunningTurn: r.stoppedRunningTurn });
+        }
+        if (action === "turn") {
+          const r = await supervisor.startTurn(id, { trigger: human, isOwner: true, expectRev: rev, key });
+          return send(res, r.duplicate ? 200 : 202, { task: supervisor.view(tasks.get(id)!), turn: r.turn.n, duplicate: r.duplicate, note: "The turn runs in the task's session; its outcome is not known yet." });
+        }
+        if (action === "complete") return send(res, 200, { task: supervisor.view(tasks.complete(id, rev, human, taskObservers)) });
+        if (action === "evidence") {
+          const r = tasks.addEvidence(id, input as { criterion: unknown; kind: unknown; ref: unknown }, human, rev);
+          return send(res, r.duplicate ? 200 : 201, { task: supervisor.view(r.task), evidence: r.evidence.id, duplicate: r.duplicate });
+        }
+        if (action === "respond") {
+          const r = supervisor.respond(id, rev, input, human);
+          return send(res, 200, { task: supervisor.view(r.task), request: r.request.id });
+        }
+        const r = await tasksVault.sync(id);
+        return send(res, r.state === "failed" || r.state === "blocked" ? 502 : 200, { task: supervisor.view(tasks.get(id)!), sync: r });
+      } catch (err) {
+        if (err instanceof TaskError) return send(res, err.code, { error: err.message });
+        throw err;
       }
     }
 
