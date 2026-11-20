@@ -29,7 +29,11 @@ export type TaskVaultPort = {
 
 export function cloneTaskVault(clone: VaultClone): TaskVaultPort {
   return {
-    read: (path) => clone.readNoteQueued(path),
+    // Fetch first, so the idempotency check reads the remote's current text (a line already pushed before a crash is found).
+    read: async (path) => {
+      await clone.sync();
+      return clone.readNoteQueued(path);
+    },
     append: async (path, heading, text, summary) => {
       const edit = parseEdit("append_section", { path, heading, text });
       const r = await clone.write([edit], { kind: "direct" }, { actor: "task-sync", summary });

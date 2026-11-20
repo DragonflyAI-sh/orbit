@@ -227,6 +227,8 @@ export function taskSupervisor(d: SupervisorDeps) {
     if (!d.canUseTools()) throw new TaskError(503, "The connected model cannot call tools, so no task turn can run.");
     const t = tasks.get(taskId);
     if (!t) throw new TaskError(404, "No task with that id.");
+    // The same owner request again (a repeated POST): answered from the record, before any busy check, and nothing starts.
+    if (o.key && t.seen?.includes(o.key) && t.turns.length) return { turn: t.turns.at(-1)!, duplicate: true, done: Promise.resolve(t.turns.at(-1)) };
     if (!d.threadExists(t.session.thread)) throw new TaskError(409, "This task's session (its chat thread) no longer exists. Nothing was started.");
     if (running.size >= maxConcurrent && !running.has(taskId)) throw new TaskError(429, `At most ${maxConcurrent} supervised task turns run at once and that many are running. Nothing was started or queued; try again when one ends.`);
     if (d.threadBusy(t.session.thread)) throw new TaskError(409, "This task's session already has a reply in progress. Nothing was started.");
