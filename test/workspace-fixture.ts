@@ -21,9 +21,10 @@ export function fakeSandbox(opts: { state?: ProbeState["state"]; noPid?: boolean
   const runs: FakeRun[] = [];
   const reaped: string[][] = [];
   let state: ProbeState = { state: opts.state ?? "supported", reasons: opts.state === "unsupported" ? ["bubblewrap lacks required options: --disable-userns"] : [], checkedAt: "2026-11-19T00:00:00.000Z", bwrapVersion: "0.11.0" };
-  const sandbox: Sandbox & { runs: FakeRun[]; reaped: string[][]; set(s: ProbeState["state"]): void } = {
+  const sandbox: Sandbox & { runs: FakeRun[]; reaped: string[][]; set(s: ProbeState["state"]): void; reapGone: boolean } = {
     runs,
     reaped,
+    reapGone: true,
     set: (s) => (state = { ...state, state: s, reasons: s === "supported" ? [] : ["changed by test"] }),
     probe: async () => state,
     status: () => state,
@@ -49,9 +50,9 @@ export function fakeSandbox(opts: { state?: ProbeState["state"]; noPid?: boolean
         },
       };
     },
-    reap: (ids) => {
+    reap: async (ids) => {
       reaped.push(ids);
-      return Object.fromEntries(ids.map((id) => [id, { leftover: 0, killed: false }]));
+      return Object.fromEntries(ids.map((id) => [id, { leftover: 0, killed: false, gone: sandbox.reapGone }]));
     },
   };
   return sandbox;

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { tailscaleIdentify } from "./identity.ts";
 import { buildIngress } from "./ingress.ts";
 import { jobLauncher } from "./job-launch.ts";
@@ -45,6 +45,8 @@ import { githubRepoStatus, toolbox } from "./tools.ts";
 import { processIdentity, smokeRunner } from "./smoke.ts";
 import { orbitSmokeChecks } from "./smoke-checks.ts";
 import { selectWorkspace } from "./workspace/select.ts";
+import { wsHostClient } from "./ops-ws-client.ts";
+import { WS_SOCKET_PATH } from "./ops/ws-protocol.ts";
 
 const port = Number(process.env.PORT ?? 8790);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -110,8 +112,14 @@ const workspace = selectWorkspace(process.env, {
   proposals,
   protectedPaths: [stateDir ?? "", process.env.CREDENTIALS_DIRECTORY ?? "", process.env.ORBIT_VAULT ?? "/opt/orbit/vault", "/opt/orbit", "/etc/credstore"],
   audit: (e) => console.log(JSON.stringify(e)),
+  // The named activation operations (docs/workspace-tools.md, "Activation"): host setup goes through the separately installed root
+  // helper orbit-ops-ws (docs/orbit-ops-ws.md); its operations are persisted so their results survive the restart the setup causes.
+  host: wsHostClient(),
+  hostStore: jsonStore(stateDir, "workspace-host-ops", []),
+  hostHelperPresent: () => existsSync(WS_SOCKET_PATH),
+  notify: (text) => notify.send(text, true),
 });
-console.log(`workspace-tools: ${workspace.activation.state}${workspace.activation.state === "enabled" ? "" : ` (${workspace.activation.reason})`}`);
+console.log(`workspace-tools: ${workspace.activation.state}${workspace.activation.state === "enabled" ? ` (host permits them; owner switch ${workspace.owner.mode()})` : ` (${workspace.activation.reason})`}`);
 const config = configView({ env: process.env, ops, commit, vaultPolicy: vault ? () => vault.policyCheck() : undefined, photos: () => model.images?.() });
 // Startup: sync the vault clone once now (the tick's refresh shares this run) so the vault AGENTS.md is hashed and compared with the
 // baseline the coded rules were written against; drift or an unavailable AGENTS.md is logged here and shown in the config view.
@@ -178,6 +186,7 @@ const tick = () => {
   // Collect the outcome of any server operation still in flight (including one that restarted this process).
   void admin.refresh().catch(() => {});
   void sys.refresh().catch(() => {});
+  void workspace.admin.refresh().catch(() => {});
   // Renew the ChatGPT login shortly before it expires. Not awaited: a slow token endpoint must not hold up the tick
   // or the watch. maintain() never throws and runs one renewal at a time.
   void model.maintain?.();
@@ -265,6 +274,7 @@ buildServer({
   // Off unless ORBIT_HOST_INVENTORY=enabled; the helper also refuses until the host is activated (docs/host-inventory.md).
   hostInventory: hostInventoryEnabled(process.env) ? [hostInventoryTool({ ops })] : undefined,
   workspace: workspace.service,
+  workspaceAdmin: workspace.admin,
   prInspect: selectPrInspect(process.env, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), () => jobs.all()),
   // The rolling note is the vault file Memory/recent-context.md when the clone exists (written through the vault tools, with the
   // same policy, secret refusal, log line and git pipeline); otherwise it stays in ORBIT's state directory.

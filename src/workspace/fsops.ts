@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, opendirSync, openSync, readFileSync, readlinkSync, readSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import type { Stats } from "node:fs";
 
 // Workspace filesystem operations, confined at OPERATION time (docs/workspace-tools.md, "Filesystem confinement").
@@ -34,7 +34,29 @@ export const LIST_PAGE_MAX = 200;
 // so every write the tool accepts can be shown in full.
 export const WRITE_MAX_BYTES = 20_000;
 export const PATCH_EDITS_MAX = 8;
-export const SEARCH_LIMITS = { files: 2000, bytesPerFile: 1024 * 1024, totalBytes: 16 * 1024 * 1024, depth: 16, matchesDefault: 50, matchesMax: 100, lineChars: 200, queryMax: 200 };
+// WS-R3: every walk is bounded in ENTRIES visited (directories, links and special files count, not only regular files) and in TIME, so a
+// workspace filled with millions of names cannot hold ORBIT's single event loop. Directory reads stream and stop at the bound.
+export const SEARCH_LIMITS = { files: 2000, entries: 2000, ms: 3000, bytesPerFile: 1024 * 1024, totalBytes: 16 * 1024 * 1024, depth: 16, matchesDefault: 50, matchesMax: 100, lineChars: 200, queryMax: 200 };
+// fs_list reads at most this many names of one directory (to sort and page them); a bigger directory is listed from that subset and
+// its total is reported as a lower bound.
+export const LIST_SCAN_MAX = 10_000;
+
+// Reads at most `max` names of a directory through its descriptor, streaming (never the whole directory at once). `more` is true when
+// the directory has further names that were not read.
+function readNames(dirFd: number, max: number): { names: Buffer[]; more: boolean } {
+  const dir = opendirSync(via(dirFd), { encoding: "buffer" as BufferEncoding, bufferSize: 128 });
+  const names: Buffer[] = [];
+  try {
+    for (;;) {
+      const e = dir.readSync();
+      if (!e) return { names, more: false };
+      if (names.length >= max) return { names, more: true };
+      names.push(e.name as unknown as Buffer);
+    }
+  } finally {
+    dir.closeSync();
+  }
+}
 
 export class WorkspaceFsError extends Error {
   readonly code: string;
@@ -244,7 +266,7 @@ export function listDir(root: RootHandle, segments: string[], opts: { cursor?: s
   if ("missing" in w) return fail("not_found", "Not found.");
   try {
     if (!w.st.isDirectory()) fail("not_a_directory", `${segments.join("/")} is not a directory.`);
-    const raw = readdirSync(via(w.fd), { encoding: "buffer" }) as Buffer[];
+    const { names: raw, more: clipped } = readNames(w.fd, LIST_SCAN_MAX);
     let undecodable = 0;
     const names: string[] = [];
     for (const b of raw) {
@@ -264,7 +286,7 @@ export function listDir(root: RootHandle, segments: string[], opts: { cursor?: s
       }
     });
     const more = start >= 0 && start + limit < names.length;
-    return { path: segments.join("/") || ".", total: names.length, entries, nextCursor: more ? page.at(-1) : null, ...(undecodable ? { omittedUndecodableNames: undecodable } : {}) };
+    return { path: segments.join("/") || ".", total: names.length, ...(clipped ? { totalIsLowerBound: true, note: `This directory has more than ${LIST_SCAN_MAX} entries; only ${LIST_SCAN_MAX} were read and are paged here.` } : {}), entries, nextCursor: more ? page.at(-1) : null, ...(undecodable ? { omittedUndecodableNames: undecodable } : {}) };
   } finally {
     closeAll(w.opened);
   }
@@ -306,7 +328,7 @@ export function readPage(root: RootHandle, segments: string[], opts: { offset?: 
 
 // Literal (not regular-expression) search, bounded in files, bytes, depth and matches. Links, mounts, special files and
 // multiply-linked files are skipped and counted, never followed or opened.
-export function search(root: RootHandle, segments: string[], query: string, opts: { maxResults?: number } = {}) {
+export function search(root: RootHandle, segments: string[], query: string, opts: { maxResults?: number; ms?: number } = {}) {
   guardRoot(root);
   if (typeof query !== "string" || !query.length || query.length > SEARCH_LIMITS.queryMax || /[\u0000\n\r]/.test(query)) fail("invalid_query", `The query must be 1-${SEARCH_LIMITS.queryMax} characters on one line.`);
   const max = Math.min(Math.max(1, opts.maxResults ?? SEARCH_LIMITS.matchesDefault), SEARCH_LIMITS.matchesMax);
@@ -316,6 +338,8 @@ export function search(root: RootHandle, segments: string[], query: string, opts
   const skipped = { symlinks: 0, special: 0, hardlinked: 0, mounts: 0, tooLarge: 0, binary: 0, unreadable: 0, tooDeep: 0, undecodableNames: 0 };
   let files = 0;
   let bytes = 0;
+  let visited = 0;
+  const deadline = Date.now() + (opts.ms ?? SEARCH_LIMITS.ms);
   let stop: string | undefined;
   const needle = Buffer.from(query, "utf8");
   const visitFile = (fd: number, st: Stats, rel: string) => {
@@ -341,12 +365,16 @@ export function search(root: RootHandle, segments: string[], query: string, opts
     if (depth > SEARCH_LIMITS.depth) return void skipped.tooDeep++;
     let names: Buffer[];
     try {
-      names = (readdirSync(via(dirFd), { encoding: "buffer" }) as Buffer[]).sort(Buffer.compare);
+      // Never more names than the remaining entry budget (+1, to know the budget was hit).
+      names = readNames(dirFd, Math.max(0, SEARCH_LIMITS.entries - visited) + 1).names.sort(Buffer.compare);
     } catch {
       return void skipped.unreadable++;
     }
     for (const b of names) {
       if (stop) return;
+      if (visited >= SEARCH_LIMITS.entries) return void (stop = `stopped after ${visited} entries (limit ${SEARCH_LIMITS.entries})`);
+      if (Date.now() > deadline) return void (stop = `stopped at the time limit (${opts.ms ?? SEARCH_LIMITS.ms} ms)`);
+      visited++;
       const name = b.toString("utf8");
       if (!Buffer.from(name, "utf8").equals(b) || name.includes("/")) {
         skipped.undecodableNames++;
@@ -384,7 +412,7 @@ export function search(root: RootHandle, segments: string[], query: string, opts
   } finally {
     closeAll(start.opened);
   }
-  return { query, matches, filesSearched: files, bytesSearched: bytes, complete: !stop, ...(stop ? { stoppedBecause: stop } : {}), skipped: Object.fromEntries(Object.entries(skipped).filter(([, v]) => v > 0)) };
+  return { query, matches, filesSearched: files, entriesVisited: visited, bytesSearched: bytes, complete: !stop, ...(stop ? { stoppedBecause: stop } : {}), skipped: Object.fromEntries(Object.entries(skipped).filter(([, v]) => v > 0)) };
 }
 
 export type WritePrecondition = { kind: "new" } | { kind: "version"; version: string };
@@ -487,7 +515,7 @@ export function applyPatch(text: string, edits: PatchEdit[]): string {
 // The workspace's reviewed snapshot: every entry (path, type, mode, size; content hash for regular files; target for links),
 // sorted, hashed. An exec approval is bound to this digest: if anything in the workspace differs when the run starts, the approval
 // does not carry over. Bounded; a workspace too large to snapshot cannot be used for exec.
-export const SNAPSHOT_LIMITS = { entries: 20_000, bytes: 128 * 1024 * 1024, depth: 64 };
+export const SNAPSHOT_LIMITS = { entries: 20_000, bytes: 128 * 1024 * 1024, depth: 64, ms: 15_000 };
 export type Snapshot = { digest: string; entries: number; bytes: number };
 
 export function snapshot(root: RootHandle, limits = SNAPSHOT_LIMITS): Snapshot {
@@ -495,17 +523,24 @@ export function snapshot(root: RootHandle, limits = SNAPSHOT_LIMITS): Snapshot {
   const h = createHash("sha256");
   let entries = 0;
   let bytes = 0;
+  const deadline = Date.now() + limits.ms;
+  // WS-R11: the root's own mode is part of the reviewed snapshot (a chmod of the workspace root is a change too).
+  h.update(`${JSON.stringify([".", "dir", fstatSync(root.fd).mode & 0o7777])}\n`);
   const visit = (dirFd: number, rel: string, depth: number) => {
     if (depth > limits.depth) fail("snapshot_too_large", `The workspace is deeper than ${limits.depth} levels.`);
     let names: Buffer[];
     try {
-      names = (readdirSync(via(dirFd), { encoding: "buffer" }) as Buffer[]).sort(Buffer.compare);
+      const read = readNames(dirFd, limits.entries - entries + 1);
+      if (read.more || entries + read.names.length > limits.entries) fail("snapshot_too_large", `The workspace has more than ${limits.entries} entries.`);
+      names = read.names.sort(Buffer.compare);
     } catch (e) {
+      if (e instanceof WorkspaceFsError) throw e;
       // An unreadable directory (for example a root-owned lost+found left by mkfs) cannot be part of a reviewed snapshot.
       return fail("snapshot_unsupported", `${rel || "the workspace root"} cannot be read (${errno(e) ?? "error"}), so the workspace cannot be snapshotted; remove it or make it readable by ORBIT.`);
     }
     for (const b of names) {
       if (++entries > limits.entries) fail("snapshot_too_large", `The workspace has more than ${limits.entries} entries.`);
+      if (Date.now() > deadline) fail("snapshot_too_large", `The workspace could not be snapshotted within the time limit (${limits.ms} ms).`);
       const name = b.toString("utf8");
       if (!Buffer.from(name, "utf8").equals(b)) fail("snapshot_unsupported", "A file name is not valid UTF-8; the workspace cannot be snapshotted.");
       const childRel = rel ? `${rel}/${name}` : name;

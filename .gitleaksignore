@@ -1,0 +1,5 @@
+# Fingerprint-specific exceptions only (commit:path:rule:line). Never add path- or rule-wide entries.
+# c37adade added a synthetic test fixture (planKey = cyclic "0123456789abcdef" placeholder, 24 hex chars) in
+# test/workspace-activation.test.ts; generic-api-key matched it. It is not a credential, and the line is now built at
+# runtime, so only this historical commit needs the exception.
+c37adade43e9503f23f7e22a7262345a2df04cfd:test/workspace-activation.test.ts:generic-api-key:257

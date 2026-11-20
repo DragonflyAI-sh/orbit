@@ -35,7 +35,7 @@ export type TurnPrep = {
   attachments?: AttachmentRef[];
 };
 
-export type Live = { source: "jobs" | "ops-admin" | "ops-sys" | "workspace"; found: boolean; state?: string; health?: string; detail?: string; url?: string; delivered?: boolean };
+export type Live = { source: "jobs" | "ops-admin" | "ops-sys" | "workspace" | "workspace-admin"; found: boolean; state?: string; health?: string; detail?: string; url?: string; delivered?: boolean };
 export type CardView = Card & { live?: Live };
 // `galleries`: the message's stored galleries resolved for the page now (docs/photo-recall.md); the stored refs themselves are not sent.
 export type MessageView = Omit<ThreadMessage, "calls" | "gallery"> & { calls?: (Omit<StoredCall, "output"> & { outputChars: number })[]; galleries?: GalleryView[] };
@@ -63,6 +63,8 @@ export function threadService(d: {
   sys?: SysOps;
   // The workspace operations ledger (src/workspace/ledger.ts): where a confirmed workspace card's result is looked up.
   workspace?: { ledger: { list(): { opId: string; proposalId: string; state: string; reason?: string }[] } };
+  // The named activation operations (src/workspace/admin.ts) keep their own records.
+  workspaceAdmin?: { cardState(proposalId: string): { state: string; detail?: string } | undefined };
   recent?: RecentContextRefresher;
   now?: () => Date;
   // Characters of live context before compaction starts. Tests lower it; production uses the documented default.
@@ -129,6 +131,10 @@ export function threadService(d: {
       return e
         ? { source, found: true, state: e.state, detail: e.result ?? e.error, health: e.verification && "healthy" in e.verification && e.verification.healthy !== undefined ? (e.verification.healthy ? "verified healthy" : "not healthy") : undefined }
         : { source, found: false, detail: "ORBIT's operations ledger has no record for this confirmation." };
+    }
+    if (c.kind === "workspace_op" && c.action?.startsWith("ws_")) {
+      const e = d.workspaceAdmin?.cardState(c.id);
+      return e ? { source: "workspace-admin", found: true, state: e.state, detail: e.detail } : { source: "workspace-admin", found: false, detail: "ORBIT has no record of this activation operation." };
     }
     if (c.kind === "workspace_op") {
       const e = d.workspace?.ledger.list().find((x) => x.proposalId === c.id);

@@ -1,15 +1,16 @@
-# Workspace tools: confined files and sandboxed commands (implemented, OFF, NOT activated)
+# Workspace tools: confined files and sandboxed commands (implemented, OFF, NOT activated on any host)
 
 ORBIT's first local filesystem and command tools. They work only inside dedicated workspaces that the operator configures. Reads
 are owner-only and run directly. Every write, patch and command is a **proposal** that Rai confirms on a card. Commands run in a
 separate, unprivileged bubblewrap sandbox. It has no network, no host state and no ORBIT credentials, and the workspace is the only
 place it can write.
 
-**Status.** This is code and tests only. It was written and tested on a cloud runner, not on the production host. Nothing has been
+**Status.** This is code and tests only. It was written and tested on cloud runners, not on the production host. Nothing has been
 installed, enabled or run on a live host. The capability is **off by default**: merging or deploying this code turns nothing on.
-Turning it on needs two things that have not happened yet: the independent security review and the live-host isolation checks in
-section 9. The real-sandbox integration tests **did not run** on this job's runner (section 8), so OS isolation is
-**unverified**.
+Turning it on is now an owner-approved path **on the existing ORBIT host** (section 9): a read-only preflight, an owner-confirmed host
+setup by a separately installed root helper, a bounded synthetic validation under the production sandbox, and a separately confirmed
+enable. None of these steps has been run anywhere. The real-sandbox tests **did not run** on the cloud runners (section 8), so OS
+isolation is **unverified** until the on-host validation passes. Designing the isolation is not proving it.
 
 Code: `src/workspace/config.ts` (activation and operator configuration), `fsops.ts` (operation-time file confinement), `sandbox.ts`
 (the bubblewrap launcher, probe, limits and supervision), `ledger.ts` (durable operation records), `service.ts` (tools, proposals,
@@ -24,8 +25,9 @@ cancel routes (`src/server.ts`), the `workspace` policy port (`src/policy.ts`) a
 | `workspace_list`, `fs_list`, `fs_stat`, `fs_read` (paged, versioned), `fs_search` (literal, bounded) | Any delete tool |
 | `fs_write` (atomic, strict preconditions), `fs_patch` (exact unique matches, version precondition): proposals | Writing vault notes (the vault tools remain the only route) |
 | `exec_start` (a proposal), `exec_status` (states, paged output), `exec_cancel` | Network access of any kind, from any command |
-| Durable ledger, audit lines, restart recovery | Any change to the `orbit-ops` helpers, their protocol, or their units |
-| Default off and a pre-activation gate | Installing bubblewrap, changing `orbit.service`, cgroup delegation: these are operator steps, not done here |
+| Durable ledger, audit lines, restart recovery | Any change to the tier 1-3 `orbit-ops` helpers, their protocol, or their units |
+| Default off; three activation layers (host permission, on-host validation, owner switch) | Host-wide changes: the cgroup hierarchy, kernel or AppArmor settings, reboots, other services, package removal |
+| Named, owner-confirmed activation operations (section 9) and a separately installed host-setup helper (`docs/orbit-ops-ws.md`) | Installing that helper (an operator step, like tiers 1-3) |
 
 OpenClaw and other external systems are not touched, read or integrated.
 
@@ -44,11 +46,19 @@ Rai: POST /chat/proposals/<id>/confirm {digest} ── owner (workspace.confirm)
                ─► "starting" recorded ─► bubblewrap (cgroup + rlimits) ─► running (pid) ─► exit observed ─► completed/failed/cancelled
 ```
 
-* **Activation** (`config.ts`, `select.ts`). The tools exist only when `ORBIT_WORKSPACE_TOOLS=enabled` **and** the JSON file named by
-  `ORBIT_WORKSPACES_FILE` contains `"preActivationChecklist": "workspace-tools-preactivation-v1"`. ORBIT must also not be running as
-  root, the platform must be Linux with `/proc/self/fd`, and ORBIT must have a state directory. In every other case `selectWorkspace`
-  returns a service that offers **no tools** and refuses every confirmation. The startup log line `workspace-tools: <state> (<reason>)`
-  says which case applies.
+* **Activation** (`config.ts`, `activation.ts`, `admin.ts`, `select.ts`). Three layers, all required:
+  1. **Host permission:** `ORBIT_WORKSPACE_TOOLS=enabled` **and** the JSON file named by `ORBIT_WORKSPACES_FILE` contains
+     `"preActivationChecklist": "workspace-tools-host-setup-v2"` (both written by the host setup, section 9). ORBIT must also not be
+     running as root, the platform must be Linux with `/proc/self/fd`, and ORBIT must have a state directory.
+  2. **Validation:** a bounded synthetic validation passed under the production sandbox for the **current** policy hash, sandbox
+     implementation and validation workspace, within the last 24 hours (`smoke.ts`).
+  3. **Owner switch:** Rai confirmed `enable` on a card; `$STATE_DIRECTORY/workspace/activation.json` says `enabled`. A missing,
+     unreadable or malformed file is **off**.
+
+  Without layer 1, `selectWorkspace` returns a service that offers **no tools** and refuses every confirmation. With layer 1 but the
+  switch off, the service loads (status, recovery, validation and disable need it) but still offers the model **no workspace tool**
+  and refuses every workspace confirmation. Startup log lines: `workspace-tools: <state> (<reason>)`, `workspace-cgroup: ...`,
+  `workspace-sandbox: <supported|unsupported> (<reasons>)`.
 * **What the model controls.** Only a workspace **id**, relative paths, file content, patch edits, argv, an optional script and a cwd.
   Roots, mounts, environment, identity, runtime, limits and sandbox policy come only from the operator's file. Unknown arguments are
   refused, including `env`, `limits` and `root`.
@@ -94,7 +104,8 @@ The model's argv appears only after `--`, as the command to run inside the sandb
 
 `/bin/sh -c '<fixed cgroup wrapper>' <run cgroup> → prlimit <rlimits> -- → bwrap <fixed options> -- <argv>`
 
-* **Namespaces.** User, PID, network, IPC, UTS and cgroup namespaces are all new (`--unshare-*`). `--disable-userns` blocks nested
+* **Namespaces.** User, PID, network, IPC, UTS and cgroup namespaces are all new (`--unshare-*`; `--unshare-cgroup` is required, not
+  `-try`, so a kernel without cgroup namespaces fails the self-test). `--disable-userns` blocks nested
   user namespaces, and `--uid/--gid 1000` makes the command an unprivileged user inside. bubblewrap must not be setuid, and ORBIT
   refuses to launch at all when running as root.
 * **Privileges.** `--cap-drop ALL` drops all capabilities. no_new_privs is always set by bubblewrap. `--new-session` gives the
@@ -125,17 +136,25 @@ The model's argv appears only after `--`, as the command to run inside the sandb
     than `workspaceBytes`, mounted `nosuid,nodev`.
   * Concurrency: `maxConcurrentRuns` (1 to 4, default 1) runs at once overall, and one per workspace through its lock.
 * **Cleanup.** On exit, timeout or cancel, ORBIT sends `SIGKILL` to bubblewrap. Its init dies, and the kernel kills every process in
-  the PID namespace. ORBIT then writes `cgroup.kill`, waits up to about one second for `cgroup.procs` to empty, and removes the cgroup.
-  `treeGone` records whether it was empty (evidence, not an assumption). If ORBIT itself dies, `--die-with-parent` tears the namespace down, and recovery at the next start
-  kills whatever is left in the cgroups of runs that were in flight.
+  the PID namespace. ORBIT then writes `cgroup.kill`, waits (asynchronously, up to about one second) until no listed process still
+  exists, and removes the cgroup. `treeGone` is true only on that evidence. **A launched run without it pauses exec**
+  (`cleanup_unverified`): no command starts anywhere until a later reap (one re-check two seconds later, then at every ORBIT start)
+  finds that run's cgroup gone or empty and records `cleanupVerifiedAt`. If ORBIT itself dies, `--die-with-parent` tears the
+  namespace down, and recovery at the next start kills whatever is left in the cgroups of runs that were in flight.
+* **Run ids and paths.** Run ids are ORBIT's own (`ws-` + 16 hex; `probe-` + 16 hex). A ledger entry with any other id makes the whole
+  ledger untrusted (tools off, file untouched). Every run directory and cgroup path is checked to be a direct child of its parent
+  before it is created, killed or removed, so a tampered ledger cannot aim cleanup anywhere else.
 * **No fallback.** At startup ORBIT probes:
   * bubblewrap must offer every required option;
   * `prlimit` must be present;
   * the delegated cgroup must enable `memory pids cpu` for its children and must be writable;
-  * while the probe runs, the sandbox state is `unknown` and nothing but the self-test itself can launch;
+  * while any probe runs, the sandbox state is `unknown` and nothing but the self-test itself can launch. Probes are serialized and
+    generation-pinned: only the newest one sets the verdict. A probe that throws is `unsupported` with the error, never stuck;
   * a live self-test must run a command in the sandbox. That command checks its uid, network interfaces, PID namespace, environment,
-    that host paths (ORBIT state, credentials, `/etc/shadow`, `/home`, `/root`, `/var`, `/opt`) are hidden, and that the runtime is
-    read-only.
+    `CapEff`/`CapBnd` zero, `NoNewPrivs: 1`, a private cgroup namespace, that a nested user namespace is refused (when `unshare`
+    exists in the runtime), that host paths (ORBIT state, credentials, `/etc/shadow`, `/home`, `/root`, `/var`, `/opt`) are hidden, and
+    that the runtime is read-only. The run cgroup's limits are read back after they are written, and the self-test's own process tree
+    must be confirmed gone.
 
   Any failure makes the sandbox `unsupported`: `exec_start` refuses and nothing runs. The sandbox is re-checked when a run is
   confirmed and when it starts. No other launcher exists, and every model path uses this one backend (section 6).
@@ -151,15 +170,18 @@ operator-configured id matching `^[a-z0-9][a-z0-9-]{0,31}$`.
 | Tool | Arguments | Result (main fields) |
 |---|---|---|
 | `workspace_list` | none | `workspaces[{id, exec}]`, `sandbox{state, checkedAt, reasons}`, `limits` |
-| `fs_list` | `workspace`, `path?`, `cursor?`, `limit?` (max 200) | `entries[{name, type, size?, nlink?, mount?}]`, `total`, `nextCursor`, `omittedUndecodableNames?` |
+| `fs_list` | `workspace`, `path?`, `cursor?`, `limit?` (max 200) | `entries[{name, type, size?, nlink?, mount?}]`, `total`, `nextCursor`, `omittedUndecodableNames?`; at most 10,000 names of one directory are read (`totalIsLowerBound: true` beyond) |
 | `fs_stat` | `workspace`, `path` | `type` (file, dir, symlink, fifo, socket, char-device, block-device), `size`, `mode`, `nlink`, `modifiedAt`, `version` or `versionUnavailable` |
 | `fs_read` | `workspace`, `path`, `offset?`, `length?` (default 8 KiB, max 16 KiB) | `text` (masked) or `binary: true`, `version` (whole file), `size`, `offset`, `bytes`, `nextOffset`, `truncated`, `masked?`, `untrusted: true` |
-| `fs_search` | `workspace`, `query` (literal, 1-200 characters, one line), `path?`, `maxResults?` (max 100) | `matches[{path, line, text}]` (masked), `filesSearched`, `bytesSearched`, `complete`, `stoppedBecause?`, `skipped{...}`, `untrusted: true` |
+| `fs_search` | `workspace`, `query` (literal, 1-200 characters, one line), `path?`, `maxResults?` (max 100) | `matches[{path, line, text}]` (masked), `filesSearched`, `entriesVisited` (every entry counts, at most 2,000), `bytesSearched`, `complete`, `stoppedBecause?` (also after 3 s), `skipped{...}`, `untrusted: true` |
 | `fs_write` | `workspace`, `path`, `content` (at most 20,000 bytes of text, so the whole card fits its 24,000-character budget), exactly one of `expectedVersion` or `createOnly: true` | `status: "pending-confirmation"`, `executed: false`, `proposalId`, `digest`, `expiresAt`, `warnings` |
 | `fs_patch` | `workspace`, `path`, `expectedVersion`, `edits[{find, replace}]` (1-8) | the same proposal fields |
 | `exec_start` | `workspace`, `argv` (1-64 strings, each at most 4096 characters), `script?` (at most 16,000 bytes, at `/run/orbit/script`), `cwd?` | the same proposal fields |
 | `exec_status` | `runId?`, `stream?` (stdout or stderr), `offset?`, `length?` (max 16 KiB) | without `runId`: `proposals[{state: "proposal", ...}]` and the last 10 `operations`. With it: `operation{state, reason, exitCode, signal, killedBy, processTreeGone, output{...}, events[]}` and an `output` page (masked, `untrusted: true`) |
 | `exec_cancel` | `runId` | `cancelled` / `cancelRequested` with the state. A running command is reported `cancelled` only after its exit is observed |
+| `workspace_preflight` | none | read-only `checks[{id, status, detail}]`, the host helper's setup plan, the owner record, `nextStep` |
+| `workspace_admin_propose` | `action`: `setup`, `validate`, `enable`, `disable` or `revoke` | the same proposal fields (a `workspace_op` card with a `ws_*` action) |
+| `workspace_admin_status` | none | owner switch, host permission, sandbox, unverified cleanups, latest validation with every check, host operations, enable blockers |
 
 **States** (`exec_status`):
 
@@ -177,12 +199,16 @@ operator-configured id matching `^[a-z0-9][a-z0-9-]{0,31}$`.
 ## 6. Confirmation semantics
 
 * **Proposing does nothing.** Each mutating tool validates its arguments and previews them against the current state (version, or
-  workspace snapshot). It then holds the frozen canonical operation in memory and opens a `workspace_op` card. The card shows
-  **every field the digest covers, in full**: the path and the whole content, every patch edit and the resulting version, the exact
+  workspace snapshot). It then holds the frozen canonical operation in memory and opens a `workspace_op` card. **What Rai reads is
+  what runs:** characters that are invisible or reorder text (bidi controls, zero-width and other format characters, C0/C1 controls
+  other than newline and tab) are shown as visible markers such as `⟨U+202E⟩`, and every multi-line value (content, script, patch
+  text) is fenced (`┌ begin (N lines, M bytes)` … `└ end`) with each line prefixed `│ `, so no line can pass for a card field or a
+  warning. The digest still covers the exact original text. The card shows **every field the digest covers, in full** (including
+  the full workspace identity and policy hash): the path and the whole content, every patch edit and the resulting version, the exact
   argv and script, cwd, clean environment, network `none`, sandbox implementation and policy hash, limits, and the reviewed snapshot.
   It also shows the mutation scope: "the command can create, change or delete ANY file in workspace X; nothing else". Nothing is
-  ever clipped. An operation whose card would exceed 24,000 characters, or whose text the content filter flags as credential-shaped,
-  is refused, and no proposal exists.
+  ever clipped. An operation whose card would exceed 24,000 characters **as shown** (after escaping and fencing; for example a write of
+  thousands of very short lines), or whose text the content filter flags as credential-shaped, is refused, and no proposal exists.
 * **Binding.** The digest is SHA-256 over the canonical (sorted-key) JSON of the held operation. That operation includes the
   workspace id and identity. The identity is a hash of the id, root, device, inode, exec flag and the whole sandbox policy, including
   the limits. The confirm route checks, in this order:
@@ -197,13 +223,13 @@ operator-configured id matching `^[a-z0-9][a-z0-9-]{0,31}$`.
 * **Expiry and replay.** Proposals expire after 10 minutes. A confirmed or cancelled proposal cannot be confirmed again.
   Cross-owner, cross-session and cross-workspace substitutions, edits after confirmation and stale inputs are all refused (tested in
   `test/workspace-approvals.test.ts` and `test/workspace-server.test.ts`).
-* **Snapshot strategy for exec.** The approval is bound to the workspace's **reviewed snapshot**. That is a digest over every entry:
-  path, type, mode and size, the content hash of each regular file, and the target of each link. It is bounded at 20,000 entries,
-  128 MiB and depth 64. A workspace too large for this cannot be used for exec. When the run starts, under the workspace lock, the
+* **Snapshot strategy for exec.** The approval is bound to the workspace's **reviewed snapshot**. That is a digest over the root's own
+  mode and every entry: path, type, mode and size, the content hash of each regular file, and the target of each link. It is bounded
+  at 20,000 entries, 128 MiB, depth 64 and 15 seconds. A workspace too large for this cannot be used for exec. When the run starts, under the workspace lock, the
   snapshot is taken again. If **anything** differs (an edited script, a changed input, a mode change, a new file, or another run's
   effects), the run fails as `stale` and does not start. A changed executable or input therefore never inherits an earlier approval.
-* **Backend enforcement.** Owner, digest, workspace identity, preconditions, snapshot, sandbox state and policy are all checked in
-  the backend at run time. The model is never trusted for any of them. A tool's output, a file's content or a command's output can
+* **Backend enforcement.** Owner, digest, workspace identity, preconditions, snapshot, sandbox state and policy (again at dequeue, not
+  only at confirmation) and the cleanup pause are all checked in the backend at run time. The model is never trusted for any of them. A tool's output, a file's content or a command's output can
   never change the sandbox policy or skip a confirmation.
 * **Every model path is the same.** The primary model and the OpenRouter fallback get the same tool objects and the same
   server-side `allow` (`src/fallback.ts`). Calling a mutating tool from any path only proposes
@@ -213,7 +239,9 @@ operator-configured id matching `^[a-z0-9][a-z0-9-]{0,31}$`.
 
 * **Audit lines.** Each proposal, confirmation, denial, invocation, result, cancellation and recovery is one JSON line on stdout
   (the journal): `{at, port: "workspace", event, kind, workspace, proposalId?, opId?, digest (prefix), detail}`. The details are
-  states, error codes and reasons. File contents, script text, argv and command output are **never** included (tested). The server
+  states and error **codes** only: never error messages (they can echo model- or workspace-chosen names), and the workspace field is a
+  configured id or `?`. File contents, script text, argv, paths and command output are **never** included (tested). Activation
+  operations (`ws_*`) are audited the same way. The server
   also writes its usual `agent.<tool>` and `workspace.confirm:<action>` policy audit lines.
 * **Ledger.** The ledger is `$STATE_DIRECTORY/workspace/ledger.json` (written atomically, mode 0600). Run output is stored in
   `output/<opId>.stdout|stderr` (mode 0600, at most `outputBytes` per stream). The 200 most recent finished entries are kept, and a
@@ -224,110 +252,141 @@ operator-configured id matching `^[a-z0-9][a-z0-9-]{0,31}$`.
 * **No secrets in workspaces.** A credential-shaped write, argv or script is refused. Service secrets are never copied anywhere:
   the sandbox has no ORBIT environment and no credential directory, and the probe checks this.
 
-## 8. Tests (this job's runner)
+
+## 8. Tests (cloud runner) and what they do not prove
 
 All of these use synthetic temporary directories. No production data or host is involved.
 
-| File | Tests | Ran here |
+| File | What | Ran on the cloud runner |
 |---|---|---|
-| `test/workspace-fs.test.ts` | 14: lexical rules; symlinks at every depth (to the outside, `/proc/self/root`, `/`, relative ones); hard links; FIFO and character device; bind mount inside the workspace; root replaced; **symlink-swap races** on reads and on writes; atomic write preconditions and modes; patch; paging, UTF-8 and binary; list and search bounds; snapshot sensitivity | yes, as root (device and bind-mount cases need root) |
-| `test/workspace-approvals.test.ts` | 18: owner-only port; disabled refusal; propose then confirm then replay; tampering (digest, card, workspace, identity); stale file; patch; tool confinement and unknown arguments; secret refusal and masking; exec card disclosure and single run; changed script or mode means stale; concurrency (busy, queue, cross-workspace); cancel queued and running; timeout and no-pid; no unsandboxed fallback; restart recovery; status and paging; ledger persistence; no effect from direct calls | yes (supervision through a labelled test double; **not** isolation evidence) |
-| `test/workspace-config.test.ts` | 8: default off and checklist gate; production wiring off; root rules; exec requirements (dedicated mount, trusted binaries, runtime allowlist, cgroup); identity binding; fixed bubblewrap argv; probe verdicts; `nosuid,nodev` | yes |
-| `test/workspace-server.test.ts` | 4: through the real server, model call, card, non-owner and wrong digest refused, owner confirm once, result on the card; exec end to end; expiry and cancel; disabled and non-owner offering | yes |
-| `test/workspace-review.test.ts` | 18, from the independent review (`docs/reviews/workspace-tools-security-review.md`): 9 startup-race regression tests through the production launcher with stub binaries (gating only, **not** isolation evidence), 8 `todo` reproducers of open review findings, 1 precondition check | yes (todo tests fail by design until their findings are fixed) |
-| `test/workspace-sandbox.test.ts` | 7 **real sandbox** tests (plus 4 added by the review and a requirement gate): probe; uid, capabilities, no_new_privs, nested userns; network and host loopback; host filesystem invisibility and read-only runtime; environment; process-tree cleanup on exit, timeout and cancel; fork bomb, memory, output, `/tmp` and file-size limits | **SKIPPED.** This runner runs as root, has no bubblewrap, and has no cgroup v2 controllers. **OS isolation is unverified** |
+| `test/workspace-fs.test.ts` | lexical rules; symlinks at every depth; hard links; FIFO and device; bind mount inside the workspace; root replaced; symlink-swap races on reads and writes; atomic write preconditions and modes; patch; paging, UTF-8 and binary; list and search bounds; snapshot sensitivity | yes, as root (one `lost+found` case skips as root) |
+| `test/workspace-approvals.test.ts` | owner-only port; disabled refusal; propose, confirm, replay; tampering; stale input; confinement and unknown arguments; secret refusal; exec card and single run; concurrency; cancel; timeout; restart recovery; status paging; card-budget refusal after fencing | yes (supervision through a labelled test double; **not** isolation evidence) |
+| `test/workspace-config.test.ts` | default off and the host acknowledgement; root rules; exec requirements; identity binding; fixed bubblewrap argv; self-test verdicts (including capabilities, no_new_privs, cgroup namespace, nested userns) | yes |
+| `test/workspace-server.test.ts` | through the real server: model call, card, owner/digest/single use, results on the card | yes |
+| `test/workspace-review.test.ts` | the independent review's startup-race regressions (R1-R9) and one regression test per fixed finding WS-R1 to WS-R14, driving the production launcher with stub binaries | yes (gating and supervision only, **not** isolation evidence) |
+| `test/workspace-activation.test.ts` | owner switch (default off, corrupt is off); enable gating on a passing validation for the current policy; replay/tamper/stale refusal of activation cards; disable reporting (exit observed vs not); setup dispatched exactly as the plan key on the card; escaped helper text; preflight read-only and secret-free; the smoke harness against a well-behaved and a leaky scripted launcher; run-parent cgroup containment | yes (logic only, scripted launchers; **not** isolation evidence) |
+| `test/ops-ws.test.ts` | the host-setup helper against a fake host (`docs/orbit-ops-ws.md`) | yes (no host was changed) |
+| `test/workspace-sandbox.test.ts` | 11 **real sandbox** tests and a requirement gate | **SKIPPED**: the runner is root and has no delegated cgroup v2. **OS isolation is unverified here** |
 
-To run the real sandbox suite, use an isolated Linux VM, never production. It needs a bubblewrap at `/usr/bin/bwrap` that offers every
-option in `REQUIRED_FLAGS` (`src/workspace/sandbox.ts`, including `--size` and `--disable-userns`; a recent release is expected), and a
-non-root user that owns a cgroup v2 directory with `memory pids cpu` in its `cgroup.subtree_control`. Then run
-`ORBIT_SANDBOX_TEST_REQUIRED=1 ORBIT_SANDBOX_TEST_CGROUP=<dir> node --test test/workspace-sandbox.test.ts` (with `REQUIRED=1` an
-unsuitable runner fails instead of skipping). Every test must pass, not skip. The runbook, with expected results, is section 7 of
-`docs/reviews/workspace-tools-security-review.md`; `tools/workspace-sandbox-preflight/preflight.sh` lists unmet requirements first.
+The real isolation evidence is the **on-host validation** (section 9, step 4): it runs under the production sandbox where ORBIT runs,
+and enable refuses without a passing record for the current policy. The full real-sandbox suite (fork bomb, memory exhaustion and
+other adversarial cases) stays an **optional offline** check on a disposable machine, never on the production host:
+`ORBIT_SANDBOX_TEST_REQUIRED=1 ORBIT_SANDBOX_TEST_CGROUP=<dir> node --test test/workspace-sandbox.test.ts` as a non-root user with a
+delegated cgroup (runbook: `docs/reviews/workspace-tools-security-review.md`, section 7; `tools/workspace-sandbox-preflight/preflight.sh`
+lists unmet requirements first).
 
-## 9. Operator setup, disable, and the pre-activation checklist
+## 9. Activation on the existing ORBIT host
 
-Nothing below has been done. It must not be done until **every** checklist item is complete and recorded.
+This replaces the former "separate VM only" gate. Rai accepted bounded, owner-approved testing on the existing host. Every host change
+is a separately confirmed named operation done by the root helper (or an explicit operator step); nothing is changed by a deploy or a
+merge; the tools stay off until the owner enables them after a passing validation.
 
-**Pre-activation checklist** (all required, in order):
+**What changes on the host, and what never does.** The setup plan (built by the helper from what it finds, shown on the card in full)
+can: install the distribution's `bubblewrap` package if it is missing; create a static system user and group `orbit` (ORBIT's unit is
+`DynamicUser=yes` without `User=`, so systemd names its user after the unit and, when a static user of that name exists, uses it: ORBIT
+gets a stable uid that can own the workspaces, and systemd re-owns ORBIT's state directory at the next start); create two loop-mounted
+ext4 filesystems from image files under `/var/lib/orbit-workspaces/` (`scratch`, 1 GiB, and `orbit-validation`, 64 MiB) mounted
+`nosuid,nodev` at `/srv/orbit-workspaces/<id>` (root `orbit:orbit`, mode 0700); write `/etc/orbit/workspaces.json` (root:orbit 0640,
+never overwritten if an operator changed it); and write the drop-in `/etc/systemd/system/orbit.service.d/60-orbit-workspace.conf`
+(`Delegate=memory pids cpu`, `DelegateSubgroup=main`, `ReadWritePaths=-` for the two workspaces, and the host permission
+`Environment=ORBIT_WORKSPACE_TOOLS=enabled ORBIT_WORKSPACES_FILE=/etc/orbit/workspaces.json`). Then `daemon-reload` and a restart of
+`orbit.service` only. It **never** changes the host's cgroup hierarchy, kernel or AppArmor settings, reboots, restarts or touches any
+other service, removes a package, reformats an existing image or deletes workspace data. If the host needs any of those (cgroup v1,
+`systemd` older than 254, unprivileged user namespaces disabled, `kernel.apparmor_restrict_unprivileged_userns=1` without a bubblewrap
+profile), the plan lists it under **"NOT done by this (needs separate operator approval)"**, and exec stays unavailable until an
+operator decides.
 
-1. **Independent security review** of `src/workspace/*`, the `workspace_op` confirm route and card, and this document. The reviewer
-   must not be the author. Record the reviewer, date and findings, and resolve the findings. A first independent review is recorded in
-   `docs/reviews/workspace-tools-security-review.md` (2026-11-19): its findings are **open**, and OS isolation is still unverified.
-2. **Real sandbox suite** (`test/workspace-sandbox.test.ts`): all 7 pass, not skip, in an isolated Linux VM with the same
-   distribution, kernel series and bubblewrap version as the host. Record the output.
-3. **Live-host isolation checks** with throwaway workspaces, run after deploy but **before** the checklist line is written:
-   * the startup probe reports `supported`;
-   * from inside a run, check that: there are no interfaces other than `lo`; ORBIT's port and the helper sockets are unreachable;
-     `/etc/shadow`, `$STATE_DIRECTORY`, `/etc/credstore`, `/opt/orbit` and `/home` are absent; `NoNewPrivs: 1`; `CapEff` is 0;
-     the uid is 1000;
-   * a fork bomb and a memory hog are contained by the run cgroup, and the host stays healthy;
-   * after cancel and timeout, `cgroup.procs` is empty.
+At start, ORBIT (unprivileged) creates its run-parent cgroup `<orbit.service cgroup>/workspace-exec` **inside its own delegated unit
+cgroup only** and enables `memory pids cpu` for its children (`src/workspace/cgroup.ts`); a layout that does not match is left alone.
 
-   Adversarial tests run only in a disposable workspace, and their results go in the review record.
-4. **Decisions recorded:** which workspaces exist and which allow exec; the limits; that production workspaces hold no secrets or
-   copies of production data.
-5. Only then write `"preActivationChecklist": "workspace-tools-preactivation-v1"` into the workspaces file, set the env flag, and
-   restart.
+### The shortest operator sequence
 
-**Operator setup** (host changes, each its own reviewed change; this job made none):
+Each step names who does it. Chat steps are owner-only; "card" means the `workspace_op` card in the thread; nothing happens without
+Confirm.
 
-* Install bubblewrap (root-owned, not setuid, offering every option in `REQUIRED_FLAGS`; the probe refuses an older one) and util-linux
-  `prlimit`.
-* Make one dedicated filesystem per exec workspace, mounted `nosuid,nodev`, no larger than `workspaceBytes`. For example, a tmpfs
-  or a loop-mounted ext4 under `/srv/orbit-workspaces/<id>`. Make the root directory owned by the ORBIT user, mode `0700`. Remove the
-  root-owned `lost+found` that `mkfs.ext4` creates (or give it to the ORBIT user): an unreadable directory makes the workspace
-  impossible to snapshot, so every command there is refused with `snapshot_unsupported`. Read-only
-  workspaces (exec off) only need the directory.
-* Delegate a cgroup v2 subtree to ORBIT: an `orbit.service` drop-in with `Delegate=memory pids cpu` and `DelegateSubgroup=main`
-  (systemd ≥ 254), and a child directory with `+memory +pids +cpu` in its `cgroup.subtree_control`. Name that directory as
-  `cgroupParent`. This changes a pinned unit (`test/tier12-pin.test.ts`), so it needs its own reviewed change.
-* Write the workspaces file (mode 0600, owned by root, readable by ORBIT). Values are schematic:
+1. **Deploy the app (normal).** Merge; the deploy timer puts the ORBIT side live. Effect: none. The workspace tools stay off; the admin
+   tools appear only once the helper socket exists or the host permits the tools.
+2. **Install the host-setup helper (operator, root, once; a deploy never does this):**
+   ```bash
+   sudo test -f /opt/orbit/current/deploy/install-ws.sh && echo "release contains orbit-ops-ws"   # must print this
+   sudo /opt/orbit/current/deploy/install-ws.sh --approved-by-owner
+   ls -l /run/orbit-ops-ws.sock                 # srw-rw---- root orbit-ops
+   systemctl is-active orbit-ops-ws.socket      # active
+   ```
+   Full verification and the read-only socket checks: `docs/orbit-ops-ws.md`. It does not restart ORBIT and changes nothing else.
+3. **Preflight (chat, read-only):** "run the workspace preflight". Read `nextStep`, the plan and any operator-approval items. If there
+   are any, stop here: they are host-wide decisions outside this path.
+4. **Setup (chat → card → Confirm).** "propose the workspace host setup". Check every step on the card (each is shown verbatim), then
+   Confirm. ORBIT restarts after a short while; the notification "Workspace host setup verified" (or the failing step) follows. Check
+   on the host:
+   ```bash
+   systemctl cat orbit.service | grep -A6 60-orbit-workspace     # the drop-in
+   findmnt -no SOURCE,OPTIONS /srv/orbit-workspaces/scratch      # a loop device, nosuid,nodev
+   ps -o user= -p "$(systemctl show -p MainPID --value orbit.service)"   # orbit
+   sudo journalctl -u orbit.service -n 80 --no-pager | grep -E 'workspace-(tools|cgroup|sandbox)'
+   #   workspace-tools: enabled (host permits them; owner switch off)
+   #   workspace-cgroup: ready (...)
+   #   workspace-sandbox: supported        (anything else: the reasons say what is missing; do not continue)
+   ```
+5. **Validate (chat → card → Confirm).** "propose the workspace validation". The card lists the fixed checks and commands. Confirm;
+   it takes about a minute; the notification says `passed` or names the failed checks. `workspace_admin_status` shows every check.
+   A failure is a finding: do not enable; fix the cause and validate again. **Nothing can skip or fake this step.**
+6. **Enable (chat → card → Confirm).** "propose enabling the workspace tools". The card shows the validation it relies on. The answer
+   says `ON (verified: N tools are offered from the next reply)`.
+7. **Verify availability (chat):** "list the workspaces" → `workspace_list` shows `scratch` and `orbit-validation` and sandbox
+   `supported`.
+8. **First owner-confirmed command (chat → card → Confirm):** "in workspace scratch, run `ls -la`". Confirm the card; "status of that
+   run" → `completed`, exit 0, `processTreeGone: true`.
+9. **Disable (chat → card → Confirm), any time:** "propose disabling the workspace tools". The switch is off at once; queued runs are
+   withdrawn; running ones are killed and each is reported `cancelled` only once its exit was observed (otherwise "kill sent; exit not
+   observed yet", visible in `exec_status`).
 
-  ```json
-  {
-    "preActivationChecklist": "<written only at step 5>",
-    "workspaces": [{ "id": "scratch", "root": "/srv/orbit-workspaces/scratch", "exec": true }],
-    "sandbox": {
-      "bwrap": "/usr/bin/bwrap", "prlimit": "/usr/bin/prlimit", "shell": "/bin/sh",
-      "runtime": ["/usr", "/bin", "/sbin", "/lib", "/lib64"],
-      "cgroupParent": "/sys/fs/cgroup/system.slice/orbit.service/workspace-exec",
-      "limits": { "timeoutSec": 300, "cpuSec": 120, "memoryBytes": 1073741824, "processes": 64, "fileSizeBytes": 67108864,
-                  "openFiles": 256, "outputBytes": 1048576, "tmpBytes": 67108864, "workspaceBytes": 1073741824 },
-      "maxConcurrentRuns": 1
-    }
-  }
+### Recovery
+
+* **Turn everything off without ORBIT's cooperation** (operator, root): remove the host permission and restart ORBIT. The tools are off
+  after the restart; running commands die with the old process and are recorded `uncertain` at the next start.
+  ```bash
+  sudo sed -i '/^Environment=ORBIT_WORKSPACE_TOOLS=/d' /etc/systemd/system/orbit.service.d/60-orbit-workspace.conf
+  sudo systemctl daemon-reload && sudo systemctl restart orbit.service
   ```
+  (Or confirm `revoke` on a card: the helper does exactly this.) The owner switch is also a file: writing
+  `{"schema":1,"mode":"off"}` to `/var/lib/private/orbit/workspace/activation.json` and restarting ORBIT turns the tools off.
+* **ORBIT does not start after the setup** (not expected): `sudo rm /etc/systemd/system/orbit.service.d/60-orbit-workspace.conf &&
+  sudo systemctl daemon-reload && sudo systemctl restart orbit.service`. The `orbit` user stays (ORBIT keeps running as it).
+* **`cleanup_unverified`** (exec paused): restart ORBIT; recovery re-reaps and lifts the pause only if the run's cgroup is gone or
+  empty. If it stays, inspect `/sys/fs/cgroup/system.slice/orbit.service/workspace-exec/orbit-run-*/cgroup.procs`.
+* **Remove the helper:** `sudo /opt/orbit/current/deploy/uninstall-ws.sh` (units and code only; never data, images, mounts or the
+  drop-in; it prints what is left and how to remove it by hand).
 
-  Then set `ORBIT_WORKSPACE_TOOLS=enabled` and `ORBIT_WORKSPACES_FILE=<path>` in `orbit.env`. Those keys are not among the five that
-  `ops_propose_config_change` may change, so this is a manual operator step.
+### Capabilities that still need an operator
 
-**Disable.** Use any one of these, then restart ORBIT: remove `ORBIT_WORKSPACE_TOOLS` (or set it to anything but `enabled`), remove
-the checklist line, or remove the file. ORBIT then offers no workspace tool and refuses every confirmation. Running commands die
-with the old process. At the next start, recovery records them as `uncertain` and kills any leftovers. The ledger stays readable
-on disk.
+Installing (and updating) the root helper; any item the plan lists under "needs separate operator approval" (AppArmor user-namespace
+policy for bubblewrap, cgroup v2 unified hierarchy, systemd ≥ 254, unprivileged user namespaces); choosing other workspaces or limits
+(edit `/etc/orbit/workspaces.json` by hand, then restart ORBIT and validate again: a changed policy invalidates the validation);
+deleting workspace images or the `orbit` user.
 
 ## 10. Remaining risks and limitations
 
-* **OS isolation is unverified here** (section 8). The bubblewrap options, the cgroup steps and the probe are untested against a real
-  kernel in this job.
-* **Kernel attack surface.** There is no seccomp filter beyond what bubblewrap and no_new_privs give. Unprivileged user namespaces
-  are required on the host (Ubuntu's AppArmor userns restriction must allow bubblewrap). A kernel bug reachable from an unprivileged
-  user namespace would break the boundary. Adding a seccomp profile is a recommended follow-up.
-* **Same kernel uid.** Inside the sandbox the command is uid 1000, but on the host its processes and files belong to ORBIT's own
-  service user, the only user that can create the user namespace without a privileged helper. The namespaces, the absent mounts and
-  the dropped capabilities keep it away from ORBIT's files, processes and sockets. A sandbox escape would land as ORBIT's user,
-  though, not as a separate account. A dedicated sandbox user needs a privileged launcher, which this slice deliberately does not
-  add.
-* **Device nodes in `/dev`.** bubblewrap's minimal `/dev` includes `null`, `zero`, `full`, `random`, `urandom`, `tty` and `pts`.
-  `tty` is unusable with `--new-session`.
-* **CPU** is limited to one CPU per run (`cpu.max`) and by `RLIMIT_CPU` per process, not by a run-wide CPU-seconds budget. The
-  wall-clock timeout bounds the total.
-* **Workspace size** is bounded only by the dedicated mount. ORBIT checks that mount's size at load time and does not enforce a
-  quota itself.
-* **Reads during a run** may see a workspace in flux. They stay inside the boundary, and versions make any later write fail
-  deterministically.
-* **A corrupt ledger** (`ledger.json`) turns the workspace tools off with `invalid` and the reason; ORBIT still starts, and the file is
-  left untouched for inspection.
-* **Held proposals live in memory.** A restart loses them (`410`), like vault proposals.
-* **Mount and option checks** read `/proc/self/mountinfo` from ORBIT's namespace, so they cover what ORBIT sees.
+* **OS isolation is unverified until the on-host validation passes**, and the validation is a bounded smoke test, not an adversarial
+  suite. It checks the basic properties where ORBIT runs (no network, hidden host paths and a fresh canary, read-only runtime, no
+  capabilities, clean environment, timeout, cancel and process-tree cleanup); it does not attempt kernel exploits or resource
+  exhaustion.
+* **Kernel attack surface.** No seccomp filter beyond bubblewrap and no_new_privs. Unprivileged user namespaces are required. A kernel
+  bug reachable from an unprivileged user namespace would break the boundary. A seccomp profile is a recommended follow-up.
+* **Same kernel uid.** Inside the sandbox the command is uid 1000; on the host its processes and files belong to ORBIT's own user
+  (`orbit` after the setup). A sandbox escape would land as ORBIT's user. A separate sandbox account needs a privileged launcher,
+  which this design deliberately does not add.
+* **The host-setup runner is root and the least confined unit** (it installs a package, creates a user, makes filesystems and writes
+  systemd files). Its restriction is its fixed plan and command list, not its sandbox (`docs/orbit-ops-ws.md`).
+* **The helper cannot know the owner clicked.** As in tiers 2 and 3, membership of the `orbit-ops` group is the trust boundary; the
+  plan key binds the request to the card, it is not a signature.
+* **Same-loop work.** File operations are synchronous on ORBIT's event loop. They are now bounded (entries and time), not moved to a
+  worker thread.
+* **Device nodes in `/dev`:** bubblewrap's minimal `/dev` (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pts`).
+* **CPU** is one CPU per run (`cpu.max`) and `RLIMIT_CPU` per process; the wall-clock timeout bounds the total.
+* **Workspace size** is bounded by the dedicated mount only.
+* **Reads during a run** may see a workspace in flux; they stay inside the boundary, and versions make any later write fail.
+* **A corrupt ledger** turns the workspace tools off with `invalid`; ORBIT still starts; the file is left untouched.
+* **Held proposals live in memory.** A restart loses them (`410`).
+* **Mount and option checks** read `/proc/self/mountinfo` from ORBIT's namespace.
 * The card is the review surface. A 24,000-character card is long, and Rai must read it.

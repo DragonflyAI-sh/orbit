@@ -71,6 +71,8 @@ import { JPEG_MAX_BYTES, normalizeJpeg } from "./jpeg.ts";
 import type { CheckRecord, SmokeRunner } from "./smoke.ts";
 import { WORKSPACE_TOOL_NAMES } from "./workspace/service.ts";
 import type { WorkspaceService } from "./workspace/service.ts";
+import { WORKSPACE_ADMIN_TOOL_NAMES } from "./workspace/admin.ts";
+import type { WorkspaceAdmin } from "./workspace/admin.ts";
 
 export const STALE_AFTER_MS = 5 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -123,6 +125,9 @@ export type Deps = {
   // Workspace filesystem and sandboxed exec tools (src/workspace/service.ts, docs/workspace-tools.md). Owner only; off unless the
   // operator activated them. Absent (or not enabled) means no workspace tool is offered and every workspace confirmation is refused.
   workspace?: WorkspaceService;
+  // The named workspace activation operations (src/workspace/admin.ts): preflight, setup/revoke via the root helper, validation, enable,
+  // disable. Owner only (the `workspace` port); confirmed on `workspace_op` cards with ws_* actions.
+  workspaceAdmin?: WorkspaceAdmin;
   nodes: Nodes;
   jobs?: Jobs;
   publicJobUrl?: string;
@@ -232,6 +237,7 @@ export function buildServer({
   prInspect,
   hostInventory,
   workspace,
+  workspaceAdmin,
   nodes,
   jobs,
   publicJobUrl,
@@ -333,7 +339,7 @@ export function buildServer({
   // `origin`: a proposal made in a turn is bound to that turn's conversation (server context, never model text) before its card is stored.
   // Photos are loaded per conversation scope: a chat thread's turn can only read that thread's attachments, the Assistant's only its own.
   const chatScope = (threadId: string) => `chat:${threadId}`;
-  const svc = threadService({ threads, model, proposals, jobs, admin: adminOps, sys: sysOps, workspace, recent, now, toolDeadlineMs, abortGraceMs, origin: chatSessionId, photos: (tid, aid) => attachments.read(aid, chatScope(tid)), galleries: (tid, g) => display.galleries(chatSessionId(tid), g) });
+  const svc = threadService({ threads, model, proposals, jobs, admin: adminOps, sys: sysOps, workspace, workspaceAdmin, recent, now, toolDeadlineMs, abortGraceMs, origin: chatSessionId, photos: (tid, aid) => attachments.read(aid, chatScope(tid)), galleries: (tid, g) => display.galleries(chatSessionId(tid), g) });
 
   // The Assistant (docs/assistant.md): one server-owned rolling conversation in its own chunk store, run by the same turn code as
   // chat threads but with a bounded context and no compaction. It does not feed or read the chat threads' rolling note.
@@ -509,7 +515,7 @@ export function buildServer({
     }
     const current = limits(isOwner);
     const offered = isOwner && model.step
-      ? [...refuseLegacyContext(withDuplicateWarning([...withLaneGuard(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), () => researchLane().names, () => [...routines.keys()]), ...textReaderTools({ memory, jobs }), ...laneTools()], proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(hostInventory ?? []), ...(workspace?.tools ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? [...photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...observationTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE, onChange: semantic ? (ref) => semantic.invalidate(ref) : undefined }), ...(semantic ? [photoSearchTool({ semantic, attachments, caller: conversation, isOwner, zone: ZONE })] : [])] : [])]
+      ? [...refuseLegacyContext(withDuplicateWarning([...withLaneGuard(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), () => researchLane().names, () => [...routines.keys()]), ...textReaderTools({ memory, jobs }), ...laneTools()], proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(hostInventory ?? []), ...(workspace?.tools ?? []), ...(workspaceAdmin?.tools ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? [...photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...observationTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE, onChange: semantic ? (ref) => semantic.invalidate(ref) : undefined }), ...(semantic ? [photoSearchTool({ semantic, attachments, caller: conversation, isOwner, zone: ZONE })] : [])] : [])]
       : [];
     if (!offered.length) {
       current.push(
@@ -557,7 +563,7 @@ export function buildServer({
       return undefined;
     }
     // Vault writes, the config view and pull-request inspection have their own policy port entries, so the owner-only rule is stated for each.
-    const port = tool.startsWith("vault_") ? "vault" : tool === "orbit_config_view" ? "config" : (PR_INSPECT_TOOL_NAMES as readonly string[]).includes(tool) ? "pulls" : (WORKSPACE_TOOL_NAMES as readonly string[]).includes(tool) ? "workspace" : undefined;
+    const port = tool.startsWith("vault_") ? "vault" : tool === "orbit_config_view" ? "config" : (PR_INSPECT_TOOL_NAMES as readonly string[]).includes(tool) ? "pulls" : (WORKSPACE_TOOL_NAMES as readonly string[]).includes(tool) || (WORKSPACE_ADMIN_TOOL_NAMES as readonly string[]).includes(tool) ? "workspace" : undefined;
     if (port) {
       const second = decide(port, tool, isOwner);
       audit(port, tool, second);
@@ -1011,7 +1017,7 @@ export function buildServer({
       return send(res, result.code, result.body);
     }
     // Open proposals from chat, so they can be confirmed or cancelled after the reply has scrolled away.
-    if ((jobs || adminOps || sysOps || workspace?.enabled) && url.pathname === "/chat/proposals" && req.method === "GET") {
+    if ((jobs || adminOps || sysOps || workspace?.enabled || workspaceAdmin) && url.pathname === "/chat/proposals" && req.method === "GET") {
       if (!(await owned("jobs", "proposals"))) return;
       return send(res, 200, { proposals: proposals.list() });
     }
@@ -1028,7 +1034,7 @@ export function buildServer({
     }
     // A chat proposal does nothing until Rai confirms it here; each proposal can be confirmed or cancelled once.
     const proposalMatch = url.pathname.match(/^\/chat\/proposals\/([0-9a-f-]+)\/(confirm|cancel)$/);
-    if ((jobs || adminOps || sysOps || vaultEdits || workspace?.enabled) && proposalMatch && req.method === "POST") {
+    if ((jobs || adminOps || sysOps || vaultEdits || workspace?.enabled || workspaceAdmin) && proposalMatch && req.method === "POST") {
       const confirming = proposalMatch[2] === "confirm";
       if (!(await owned("jobs", confirming ? "confirm" : "cancel"))) return;
       const gone = { error: "No open proposal with that id. It was already confirmed, cancelled or expired." };
@@ -1099,13 +1105,15 @@ export function buildServer({
         const input = await body();
         if (!input) return;
         if (input.digest !== open.digest) return send(res, 409, { error: "The confirmation does not match this proposal's digest. Nothing was done." });
-        if (!workspace?.enabled) return send(res, 503, { error: "Workspace tools are not enabled." });
+        // ws_* are the named activation operations (setup, validate, enable, disable, revoke): they exist before the tools are on.
+        const adminOp = Boolean(workspaceAdmin?.owns(open.action));
+        if (adminOp ? !workspaceAdmin : !workspace?.enabled) return send(res, 503, { error: "Workspace tools are not enabled." });
         if ("conflict" in originOf(open)) return send(res, 409, { error: "This proposal's recorded conversation does not match the conversation that stores its card. Nothing was done." });
         const taken = proposals.take(open.id);
         if (!taken || taken.kind !== "workspace_op") return send(res, 404, gone);
         if (!claimed(taken.id, "confirmed")) return alreadyUsed();
         audit("workspace", `confirm:${taken.action}`, { allow: true, reason: `owner confirmed proposal ${taken.id} (digest ${taken.digest.slice(7, 19)})` });
-        const result = await workspace.confirm(taken);
+        const result = adminOp ? await workspaceAdmin!.confirm(taken) : await workspace!.confirm(taken);
         cardSvc(taken.id).settle(taken.id, result);
         return send(res, result.code, result.body);
       }
@@ -1179,7 +1187,7 @@ export function buildServer({
       if (proposalMatch[2] === "cancel") {
         if (!claimed(proposal.id, "cancelled")) return alreadyUsed();
         if (proposal.kind === "vault_edit") vaultEdits?.cancelled(proposal.id);
-        if (proposal.kind === "workspace_op") workspace?.cancelled(proposal.id);
+        if (proposal.kind === "workspace_op") (workspaceAdmin?.owns(proposal.action) ? workspaceAdmin.cancelled(proposal.id) : workspace?.cancelled(proposal.id));
         return send(res, 200, { cancelled: proposal.id });
       }
       if (proposal.kind === "ops_admin" || proposal.kind === "ops_sys") return send(res, 409, { error: "Not confirmed: server operations need their digest." });

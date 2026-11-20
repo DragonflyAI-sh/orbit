@@ -113,7 +113,7 @@ test("the launcher interface is fixed: model argv only after '--', every isolati
 });
 
 test("probe verdicts: anything short of full isolation is unsupported", () => {
-  const good = "uid=1000\nifaces=lo,\nprocs=2\nenv=HOME,LANG,LOGNAME,PATH,PWD,SHLVL,TMPDIR,USER,\nworkspace_writable\n";
+  const good = "uid=1000\nifaces=lo,\nprocs=2\ncapeff=0000000000000000\ncapbnd=0000000000000000\nnnp=1\ncgroup=0::/\nenv=HOME,LANG,LOGNAME,PATH,PWD,SHLVL,TMPDIR,USER,\nworkspace_writable\n";
   assert.deepEqual(judgeProbe(good, []), []);
   assert.ok(judgeProbe(good.replace("uid=1000", "uid=0"), []).length);
   assert.ok(judgeProbe(good.replace("ifaces=lo,", "ifaces=lo,eth0,"), []).length);
@@ -122,6 +122,13 @@ test("probe verdicts: anything short of full isolation is unsupported", () => {
   assert.ok(judgeProbe(good.replace("USER,", "USER,CREDENTIALS_DIRECTORY,"), []).length);
   assert.ok(judgeProbe(`${good}runtime_writable\n`, []).length);
   assert.ok(judgeProbe(good.replace("workspace_writable\n", ""), []).length);
+  // WS-R10: capabilities, no_new_privs, the cgroup namespace and nested user namespaces.
+  assert.ok(judgeProbe(good.replace("capeff=0000000000000000", "capeff=0000000000000400"), []).length);
+  assert.ok(judgeProbe(good.replace("capbnd=0000000000000000", "capbnd=000001ffffffffff"), []).length);
+  assert.ok(judgeProbe(good.replace("nnp=1", "nnp=0"), []).length);
+  assert.ok(judgeProbe(good.replace("cgroup=0::/", "cgroup=0::/system.slice/orbit.service/main"), []).length);
+  assert.ok(judgeProbe(`${good}nested_userns_allowed\n`, []).length);
+  assert.ok(judgeProbe(good.replace(/capeff=.*\n/, ""), []).length, "a missing line is a failure, not a pass");
 });
 
 test("exec workspace mounts must be nosuid,nodev: the per-mount options are read from the mount table", () => {
@@ -154,7 +161,7 @@ test("probe: while the self-test runs the sandbox is never 'supported' and nothi
   const pending = sb.probe();
   try {
     assert.equal(sb.status().state, "unknown");
-    const h = sb.start({ runId: "early", workspace: { id: "w", root: base, exec: true, dev: 0, ino: 0, identity: "w" }, cwd: [], argv: ["true"], limits: DEFAULT_LIMITS });
+    const h = sb.start({ runId: "ws-00000000000000e1", workspace: { id: "w", root: base, exec: true, dev: 0, ino: 0, identity: "w" }, cwd: [], argv: ["true"], limits: DEFAULT_LIMITS });
     assert.equal(h.pid, undefined, "no run can start while the probe is pending");
     assert.match(String((await h.done).startError), /not available/);
     const verdict = await pending;

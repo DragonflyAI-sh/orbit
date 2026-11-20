@@ -33,6 +33,8 @@ export type OpEntry = {
   signal?: string | null;
   killedBy?: "timeout" | "cancel";
   treeGone?: boolean;
+  // Set when a later reap found the run's cgroup gone or empty: the evidence that ends a cleanup quarantine (WS-R8).
+  cleanupVerifiedAt?: string;
   snapshotBefore?: string;
   snapshotAfter?: string;
   output?: { stdoutBytes: number; stderrBytes: number; truncated: { stdout: boolean; stderr: boolean }; limitBytes: number };
@@ -42,6 +44,16 @@ export const LEDGER_MAX = 200;
 // A ledger that cannot be trusted stops the workspace tools (fail closed), never ORBIT itself (src/workspace/select.ts).
 export class LedgerError extends Error {}
 export const ACTIVE: OpState[] = ["accepted", "queued", "running"];
+const STATES: OpState[] = ["accepted", "queued", "running", "completed", "failed", "cancelled", "uncertain"];
+const KINDS: OpKind[] = ["fs_write", "fs_patch", "exec"];
+// Operation ids are ORBIT's own ("ws-" + 16 hex, src/workspace/service.ts). They become file names (output/<opId>.*) and, for exec,
+// run directory and cgroup names, so an entry with any other id makes the whole ledger untrusted (WS-R4).
+export const OP_ID = /^ws-[0-9a-f]{16}$/;
+const entryOk = (e: unknown): boolean => {
+  if (!e || typeof e !== "object") return false;
+  const x = e as Partial<OpEntry>;
+  return typeof x.opId === "string" && OP_ID.test(x.opId) && STATES.includes(x.state as OpState) && KINDS.includes(x.kind as OpKind) && typeof x.workspace === "string" && Array.isArray(x.events);
+};
 
 export function opLedger(dir: string | undefined) {
   const entries = new Map<string, OpEntry>();
@@ -56,8 +68,8 @@ export function opLedger(dir: string | undefined) {
     } catch {
       throw new LedgerError("The workspace ledger (ledger.json) cannot be read or is not valid JSON; it was left untouched.");
     }
-    if (!Array.isArray(raw?.entries) || raw.entries.some((e) => !e || typeof e !== "object" || typeof (e as OpEntry).opId !== "string" || typeof (e as OpEntry).state !== "string")) {
-      throw new LedgerError("The workspace ledger (ledger.json) has an unexpected shape; it was left untouched.");
+    if (!Array.isArray(raw?.entries) || !raw.entries.every(entryOk)) {
+      throw new LedgerError("The workspace ledger (ledger.json) has an unexpected shape or an operation id ORBIT did not issue; it was left untouched.");
     }
     for (const e of raw.entries as OpEntry[]) entries.set(e.opId, e);
   }
@@ -81,12 +93,13 @@ export function opLedger(dir: string | undefined) {
   };
   const dropOutput = (opId: string) => {
     memOut.delete(opId);
-    if (outDir) for (const s of ["stdout", "stderr"]) rmSync(join(outDir, `${opId}.${s}`), { force: true });
+    if (outDir && OP_ID.test(opId)) for (const s of ["stdout", "stderr"]) rmSync(join(outDir, `${opId}.${s}`), { force: true });
   };
   return {
     get: (opId: string) => entries.get(opId),
     list: () => [...entries.values()],
     put(e: OpEntry) {
+      if (!OP_ID.test(e.opId)) throw new LedgerError("refused: not an ORBIT operation id");
       entries.set(e.opId, e);
       persist();
     },
@@ -100,12 +113,14 @@ export function opLedger(dir: string | undefined) {
       return next;
     },
     saveOutput(opId: string, stdout: Buffer, stderr: Buffer) {
+      if (!OP_ID.test(opId)) return;
       if (!outDir) return void memOut.set(opId, { stdout, stderr });
       mkdirSync(outDir, { recursive: true, mode: 0o700 });
       writeFileSync(join(outDir, `${opId}.stdout`), stdout, { mode: 0o600 });
       writeFileSync(join(outDir, `${opId}.stderr`), stderr, { mode: 0o600 });
     },
     readOutput(opId: string, stream: "stdout" | "stderr"): Buffer | undefined {
+      if (!OP_ID.test(opId)) return undefined;
       if (!outDir) return memOut.get(opId)?.[stream];
       try {
         return readFileSync(join(outDir, `${opId}.${stream}`));

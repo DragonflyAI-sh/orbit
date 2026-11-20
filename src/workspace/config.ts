@@ -7,19 +7,23 @@ import { dirname, isAbsolute, normalize } from "node:path";
 // the sandbox gets, and every limit. The model only ever passes a workspace id; it cannot nominate a root, a mount, an environment
 // variable, an identity or a sandbox policy.
 //
-// OFF BY DEFAULT, twice over: ORBIT_WORKSPACE_TOOLS must be exactly "enabled", AND the file named by ORBIT_WORKSPACES_FILE must carry
-// `preActivationChecklist` equal to PRE_ACTIVATION_CHECKLIST, which an operator writes only after the independent security review and
-// the live-host isolation checks in docs/workspace-tools.md have passed. Merging or deploying this code activates nothing.
+// OFF BY DEFAULT, three times over. This file decides only whether the HOST PERMITS the tools: ORBIT_WORKSPACE_TOOLS must be exactly
+// "enabled", AND the file named by ORBIT_WORKSPACES_FILE must carry `preActivationChecklist` equal to PRE_ACTIVATION_CHECKLIST (written
+// by the owner-confirmed host setup, src/ops/ws-*.ts, or by an operator following docs/workspace-tools.md). Even then the model sees
+// no workspace tool until a bounded validation passed under the production sandbox AND Rai confirmed "enable" on a card
+// (src/workspace/activation.ts, src/workspace/admin.ts). Merging or deploying this code activates nothing.
 
 export const WORKSPACE_FLAG = "ORBIT_WORKSPACE_TOOLS";
 export const WORKSPACE_FILE_ENV = "ORBIT_WORKSPACES_FILE";
-export const PRE_ACTIVATION_CHECKLIST = "workspace-tools-preactivation-v1";
+// v2: the host was prepared for the on-host, owner-approved activation path (setup, validation, enable). It does not mean "enabled".
+export const PRE_ACTIVATION_CHECKLIST = "workspace-tools-host-setup-v2";
 
 export const ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 // The only host trees the sandbox may see (read-only). Anything else (/etc, /home, /var, /run, /opt, ORBIT's state, credentials) is
 // refused at load. A merged-/usr symlink (/bin -> usr/bin) is recreated inside the sandbox as the same symlink.
 export const RUNTIME_ALLOWED = ["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"] as const;
-// Roots that may never be (or contain) a workspace.
+// Roots that may never be a workspace. Trees no workspace may be inside (WS-R7: a prefix check, not only equality).
+const FORBIDDEN_TREES = ["/proc", "/sys", "/dev", "/etc", "/run", "/boot", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/root"];
 const FORBIDDEN_ROOTS = ["/", "/etc", "/proc", "/sys", "/dev", "/run", "/boot", "/root", "/home", "/var", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/tmp", "/srv", "/mnt", "/media"];
 
 export type Limits = {
@@ -114,11 +118,18 @@ function trustedBinary(path: string, what: string) {
   if (rs.uid !== 0) bad(`${what} (${path}) is not owned by root.`);
   if (rs.mode & 0o022) bad(`${what} (${path}) is writable by group or others.`);
   if (rs.mode & 0o6000) bad(`${what} (${path}) is setuid or setgid; the sandbox runs without privileged setup.`);
+  // WS-R9: the binary is later executed by path, so no directory on its (resolved) path may be replaceable by anyone but root.
+  for (let dir = dirname(real); ; dir = dirname(dir)) {
+    const ds = statSync(dir);
+    if (ds.uid !== 0 || ds.mode & 0o022) bad(`${what} (${path}): the directory ${dir} on its path is not root-owned or is writable by group or others.`);
+    if (dir === "/") break;
+  }
   return path;
 }
 
 function checkRoot(id: string, root: string, exec: boolean, limits: Limits, host: HostChecks): { dev: number; ino: number } {
   for (const f of FORBIDDEN_ROOTS) if (root === f) bad(`Workspace ${id}: ${root} cannot be a workspace root.`);
+  for (const t of FORBIDDEN_TREES) if (under(root, t)) bad(`Workspace ${id}: ${root} cannot be a workspace root (nothing under ${t} is allowed).`);
   for (const p of host.protectedPaths) if (under(p, root) || under(root, p)) bad(`Workspace ${id}: the root overlaps a protected ORBIT path.`);
   const st = lstatSync(root, { throwIfNoEntry: false });
   if (!st) bad(`Workspace ${id}: ${root} does not exist.`);
@@ -244,7 +255,7 @@ export function loadActivation(env: Record<string, string | undefined>, host: Ho
   try {
     const raw = JSON.parse(text) as { preActivationChecklist?: unknown };
     if (raw?.preActivationChecklist !== PRE_ACTIVATION_CHECKLIST) {
-      return { state: "not_activated", reason: `The pre-activation checklist has not been acknowledged (preActivationChecklist must be "${PRE_ACTIVATION_CHECKLIST}" after the security review and live-host isolation checks in docs/workspace-tools.md).` };
+      return { state: "not_activated", reason: `The host setup has not been acknowledged (preActivationChecklist must be "${PRE_ACTIVATION_CHECKLIST}"; see docs/workspace-tools.md, "Activation").` };
     }
   } catch {
     return { state: "invalid", reason: "The workspaces file is not valid JSON." };

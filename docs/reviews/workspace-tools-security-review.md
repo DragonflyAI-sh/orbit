@@ -310,3 +310,41 @@ Results on this runner (root, no delegated cgroup v2):
 **Still needed before activation:** review of this job's test, harness and tool changes; fixes or explicit acceptance for WS-R1 to WS-R14
 in a separate production change, with their own review; the section 7 VM run; the live-host checks (checklist item 3); and the operator
 decisions (item 4). A clean or partly clean review does not authorize activation.
+
+## 9. Resolution of WS-R1 to WS-R14 (job `orbit-202611190917-2nsg`, 2026-11-19)
+
+These fixes were made by the activation job, **not** by the reviewer, and need their own review. Each finding's reproducer in
+`test/workspace-review.test.ts` is now an ordinary regression test (no `todo` remains); further regressions were added for the findings
+that had none. Evidence class of all of them: **U** (unit/stub). None is OS evidence; the on-host validation
+(`docs/workspace-tools.md`, section 9) is where the isolation itself is checked.
+
+| Finding | Fix | Regression test(s) |
+|---|---|---|
+| WS-R1 overlapping probes | Probes serialized behind one promise and generation-pinned: only the newest sets the verdict; status stays `unknown` while any is pending; per-probe random run id and scratch workspace | "WS-R1 (fixed)", "WS-R1b (fixed)" |
+| WS-R2 thrown probe | A throw is a failed self-test (`unsupported`, with the error); `select.ts` logs `workspace-sandbox: <state> (<reasons>)` after recovery | "WS-R2 (fixed)" |
+| WS-R3 unbounded walks | `fs_search` counts every visited entry (2,000) and stops at 3 s; `fs_list` streams at most 10,000 names (`totalIsLowerBound`); snapshot streams within its entry bound and stops at 15 s | three "WS-R3 (fixed)" tests |
+| WS-R4 ledger opIds into paths | Ledger entries must have `ws-<16 hex>` ids, known states and kinds (else the ledger is refused, tools off); run ids validated and every run/cgroup path checked to be a direct child; `reap()` refuses foreign ids | "WS-R4 (fixed)" |
+| WS-R5 bidi/invisible text on cards | Visible `⟨U+XXXX⟩` markers for format, bidi, zero-width and control characters; multi-line values fenced and line-prefixed; applied to summary, every display field and helper-provided plan text | "WS-R5 (fixed)", card-budget test, setup escaping test |
+| WS-R6 audit privacy | Denials and results audit error codes and states only; workspace field only a configured id | "WS-R6 (fixed)" |
+| WS-R7 roots under `/proc` etc. | Prefix check for `/proc`, `/sys`, `/dev`, `/etc`, `/run`, `/boot`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/root` | "WS-R7 (fixed)" |
+| WS-R8 unverified tree does not block | A launched run without positive cleanup evidence (`false` **or none**) pauses exec (`cleanup_unverified`) at proposal, confirmation and dequeue, until a reap finds its cgroup gone or empty (`cleanupVerifiedAt`); restart recovery records `treeGone` only from that evidence | three "WS-R8 (fixed)" tests |
+| WS-R9 path use after check | Every directory on the resolved path of bwrap/prlimit/shell must be root-owned and not group/other-writable; the launcher re-checks the root's dev/ino immediately before spawning | two "WS-R9 (fixed)" tests |
+| WS-R10 self-test coverage | Transcript and `judgeProbe` check `CapEff`, `CapBnd`, `NoNewPrivs`, a private cgroup namespace and nested userns refusal; cgroup limits read back; the self-test's own tree must be confirmed gone | `workspace-config` "probe verdicts" |
+| WS-R11 doc/code mismatches | Full identity and policy hash on the card; policy re-checked at dequeue; snapshot includes the root's mode | "WS-R11 (fixed)", R6 |
+| WS-R12 leftover run dir | Removed when the cgroup cannot be prepared | "WS-R12 (fixed)" |
+| WS-R13 `--unshare-cgroup-try` | `--unshare-cgroup` required | "WS-R13 (fixed)" |
+| WS-R14 blocking cleanup wait | Asynchronous wait; `reap()` and recovery are async | "WS-R14 (fixed)" |
+
+**Deferred or partial, stated plainly (not called fixed):**
+
+* WS-R3: walks are **bounded**, not moved to a worker thread. A slow filesystem can still hold the event loop for up to the time
+  budgets (3 s search, 15 s snapshot) per call.
+* WS-R9: the workspace is still bound by **path** (`--bind`, not `--bind-fd`); the dev/ino re-check narrows the window to the
+  microseconds between that check and bubblewrap's own path lookup. Only an attacker who can already rename directories next to the
+  workspace root (ORBIT's user or root) could use it.
+* WS-R10: host-loopback unreachability is still implied by the private network namespace (interfaces `lo` only), not probed by
+  connecting to a host service; the on-host validation additionally checks that there are no routes and that a TCP attempt to a
+  TEST-NET address fails.
+* Section 3.1 checklist items 2-4 (separate-VM suite, live-host checks, recorded decisions) are **superseded** by the owner-approved
+  on-host path (`docs/workspace-tools.md`, section 9): host setup by the separately installed helper, then a bounded validation under
+  the production sandbox that enable cannot skip. The full adversarial suite (section 7) remains available as an optional offline check.

@@ -38,7 +38,7 @@ test("fs_write: the tool only proposes; nothing is written until confirm; confir
   assert.equal(res.value.executed, false);
   assert.throws(() => readFileSync(join(r.a.root, "new.txt")), "no effect before approval");
   const p = r.proposal(res.value.proposalId);
-  assert.equal(p.display.content, "hello\n", "the card shows the complete content");
+  assert.equal(p.display.content, "┌ begin (2 lines, 6 bytes)\n│ hello\n│ \n└ end", "the card shows the complete content, fenced line by line");
   const ok = await r.svc.confirm(p);
   assert.equal(ok.code, 200, JSON.stringify(ok.body));
   assert.equal(readFileSync(join(r.a.root, "new.txt"), "utf8"), "hello\n");
@@ -261,17 +261,17 @@ test("restart recovery: in-flight runs become uncertain (never success), unstart
   const c1 = await r.svc.confirm(r.proposal(e1.value.proposalId));
   await tick();
   // Simulate a crash: e2 is recorded as queued but was never started (no start record).
-  const c2 = { opId: "queued-op" };
+  const c2 = { opId: "ws-00000000000000aa" };
   r.svc.ledger.put({ opId: c2.opId, proposalId: e2.value.proposalId, kind: "exec", workspace: "beta", digest: "d", state: "queued", createdAt: "t", updatedAt: "t", events: [{ at: "t", state: "queued" }], summary: "s" });
   // A "new process" over the same state directory.
   const after = r.make();
-  const out = after.recover();
+  const out = await after.recover();
   assert.deepEqual(Object.fromEntries(out.map((o) => [o.opId, o.state])), { [String(c1.body.opId)]: "uncertain", [c2.opId]: "failed" });
   assert.deepEqual(sb.reaped.at(-1)!.sort(), [String(c1.body.opId), c2.opId].sort());
   assert.match(after.ledger.get(String(c1.body.opId))!.reason!, /unknown/);
   const gone = await after.confirm(r.proposal(pending.value.proposalId));
   assert.equal(gone.code, 410, "a proposal held only by the old process cannot be confirmed after a restart");
-  assert.equal(after.recover().length, 0, "recovery is idempotent");
+  assert.equal((await after.recover()).length, 0, "recovery is idempotent");
 });
 
 test("status distinguishes proposal from confirmed states, and pages bounded output with capture truncation reported", async () => {
@@ -336,4 +336,11 @@ test("the largest write the tool accepts fits its card in full (no write is refu
   assert.equal(res.value.status, "pending-confirmation");
   assert.equal(r.proposal(res.value.proposalId).display.content.length, 20_000);
   await assert.rejects(r.call("fs_write", { workspace: "alpha", path: "y.txt", content: "x".repeat(20_001), createOnly: true }), /too_large/);
+});
+
+test("WS-R5: a write whose fenced, escaped card would exceed the card budget is refused whole (never clipped), and says why", async () => {
+  const r = wsRig();
+  // 10,000 one-character lines: 20,000 bytes of content, but each line is shown with its "│ " prefix.
+  await assert.rejects(r.call("fs_write", { workspace: "alpha", path: "lines.txt", content: "x\n".repeat(10_000), createOnly: true }), /too_large.*nothing is ever clipped/s);
+  assert.equal(r.proposals.list().length, 0);
 });

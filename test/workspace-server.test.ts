@@ -50,7 +50,7 @@ test("through the server: fs_write -> open card -> non-owner and wrong digest re
   const card = cards[0];
   assert.equal(card.kind, "workspace_op");
   assert.equal(card.state, "open");
-  assert.equal(card.display.content, "from the model\n");
+  assert.equal(card.display.content, "┌ begin (2 lines, 15 bytes)\n│ from the model\n│ \n└ end");
   assert.throws(() => readFileSync(join(h.ws.root, "out.txt")), "nothing written before confirmation");
 
   h.caller.who = "someone@example.com";
@@ -124,4 +124,53 @@ test("through the server: disabled (default) offers no workspace tool; a non-own
   await on.turn(t2.id, [say("hi")]);
   for (const n of ["workspace_list", "fs_list", "fs_stat", "fs_read", "fs_search", "fs_write", "fs_patch", "exec_start", "exec_status", "exec_cancel"]) assert.ok(on.model.seen[0]!.tools.includes(n), n);
   assert.ok(!on.model.seen[0]!.tools.includes("fs_delete"), "there is no delete tool");
+});
+
+test("through the server: an activation card (ws_validate) is owner-only, digest-bound and single use; its live state comes from the activation record", async () => {
+  const { ownerActivation } = await import("../src/workspace/activation.ts");
+  const { workspaceAdmin } = await import("../src/workspace/admin.ts");
+  const { SMOKE_STEPS, VALIDATION_WORKSPACE } = await import("../src/workspace/smoke.ts");
+  const base = mkdtempSync(join(tmpdir(), "orbit-wssrv-adm-"));
+  const ws = makeWorkspace(base, "alpha");
+  const val = makeWorkspace(base, VALIDATION_WORKSPACE);
+  const config: WorkspaceConfig = { workspaces: [ws, val], sandbox: { bwrap: "/usr/bin/bwrap", prlimit: "/usr/bin/prlimit", shell: "/bin/sh", runtime: ["/usr"], cgroupParent: "/sys/fs/cgroup/t", limits: DEFAULT_LIMITS, maxConcurrentRuns: 1 }, policyHash: "sha256:" + "ef".repeat(32) };
+  const sandbox = fakeSandbox();
+  const owner = ownerActivation(join(base, "owner"));
+  let admin: ReturnType<typeof workspaceAdmin> | undefined;
+  let svc: ReturnType<typeof workspaceService> | undefined;
+  const script: { steps: ReturnType<typeof say>[] } = { steps: [say("ok")] };
+  let i = 0;
+  const model = scripted(() => script.steps[Math.min(i++, script.steps.length - 1)]!);
+  const h = rig({
+    model,
+    extra: ({ proposals }) => {
+      svc = workspaceService({ activation: { state: "enabled", config }, sandbox, stateDir: join(base, "state"), proposals, active: () => owner.mode() === "enabled" });
+      admin = workspaceAdmin({ env: {}, activation: { state: "enabled", config }, service: svc, sandbox, owner, stateDir: join(base, "state"), proposals, smoke: async () => ({ passed: true, workspaceIdentity: val.identity, checks: SMOKE_STEPS.map((s) => ({ id: s.id, title: s.title, required: s.required, result: "pass" as const, detail: "scripted" })) }) });
+      return { workspace: svc, workspaceAdmin: admin };
+    },
+  });
+  const t = await h.create();
+  script.steps = [{ text: "", calls: [call("workspace_admin_propose", { action: "validate" })] }, say("proposed")];
+  i = 0;
+  await h.send(t.id, "please");
+  assert.ok(!model.seen[0]!.tools.includes("fs_write"), "the owner switch is off: no workspace tool is offered");
+  assert.ok(model.seen[0]!.tools.includes("workspace_preflight"));
+  const card = (await cardsOf(h as never, t.id))[0];
+  assert.equal(card.kind, "workspace_op");
+  assert.equal(card.action, "ws_validate");
+  h.caller.who = "someone@example.com";
+  const stranger = await h.api(`/chat/proposals/${card.id}/confirm`, "POST", { digest: card.digest });
+  assert.ok(stranger.status === 403 || stranger.status === 401, String(stranger.status));
+  h.caller.who = OWNER;
+  assert.equal((await h.api(`/chat/proposals/${card.id}/confirm`, "POST", { digest: "sha256:" + "0".repeat(64) })).status, 409);
+  assert.equal(owner.validation(), undefined, "nothing ran before the owner's confirmation");
+  const ok = await h.api(`/chat/proposals/${card.id}/confirm`, "POST", { digest: card.digest });
+  assert.equal(ok.status, 202, JSON.stringify(ok.data));
+  await admin!.validating();
+  assert.equal(owner.validation()!.state, "passed");
+  assert.equal((await h.api(`/chat/proposals/${card.id}/confirm`, "POST", { digest: card.digest })).status, 409, "single use");
+  const after = (await cardsOf(h as never, t.id))[0];
+  assert.equal(after.live.source, "workspace-admin");
+  assert.equal(after.live.state, "passed");
+  assert.equal(owner.mode(), "off", "validation never enables");
 });

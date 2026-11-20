@@ -1,0 +1,35 @@
+[Unit]
+Description=ORBIT workspace host-setup package step %i (apt-get install bubblewrap only)
+
+[Service]
+# Started (and waited for) by orbit-ops-ws-run@<op>.service when the confirmed plan includes installing bubblewrap. It runs
+# `apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends bubblewrap` at most once, and only while the operation record
+# says the runner asked for it a moment ago. It never removes a package, never kills or unlocks a package manager, never reboots.
+# This is the ONLY orbit-ops-ws unit with general network access: apt-get must reach the package mirrors. Keeping it separate means
+# the runner, which writes /etc and restarts ORBIT, can reach only localhost and the tailnet.
+Type=oneshot
+ExecStart=/usr/local/bin/node --max-old-space-size=64 /usr/local/lib/orbit/ops/ws-run.ts %i pkg
+# Lock wait (120 s) + download + install, bounded. When this limit hits, systemd (not ORBIT) stops the unit with SIGTERM only.
+TimeoutStartSec=1800
+# Never SIGKILL apt/dpkg: a hard-killed dpkg leaves a half-configured system.
+SendSIGKILL=no
+# Bounded, but large enough for dpkg and maintainer scripts.
+MemoryMax=1G
+TasksMax=256
+# The record of the operation lives here.
+StateDirectory=orbit-ops-ws
+StateDirectoryMode=0700
+# dpkg must write /usr, /etc and /var and run maintainer scripts, so the file system is not made read-only here (as for tier 3's
+# update unit). Home directories are hidden.
+ProtectHome=yes
+# Private /tmp and device nodes; maintainer scripts of bubblewrap need neither.
+PrivateTmp=yes
+PrivateDevices=yes
+# No clock changes, kernel log access or module loading.
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+# No personality changes.
+LockPersonality=yes
+# Installed package files need normal permissions.
+UMask=0022

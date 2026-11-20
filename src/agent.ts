@@ -720,7 +720,8 @@ export type ProposalAction =
   | { kind: "vault_edit"; action: string; summary: string; display: Record<string, string>; digest: string; reasons: string[] }
   // A workspace write, patch or sandboxed command (src/workspace/service.ts, docs/workspace-tools.md). The exact canonical operation stays
   // with the workspace service; the proposal carries the complete card and a digest of that operation.
-  | { kind: "workspace_op"; action: "fs_write" | "fs_patch" | "exec"; summary: string; display: Record<string, string>; warnings: string[]; digest: string };
+  // ws_* actions are the named activation operations (src/workspace/admin.ts): host setup/revoke, validation, enable, disable.
+  | { kind: "workspace_op"; action: "fs_write" | "fs_patch" | "exec" | "ws_setup" | "ws_validate" | "ws_enable" | "ws_disable" | "ws_revoke"; summary: string; display: Record<string, string>; warnings: string[]; digest: string };
 // `origin`: the conversation (session id, `chat:<uuid>` or `assistant:assistant`) whose turn made the proposal, bound by the thread service
 // from the server's own turn context when the card is stored (src/work-sessions.ts). Never taken from a tool's arguments: propose()
 // drops any `origin` an action carries. Absent: not known (for example the legacy /chat route, which stores no card).

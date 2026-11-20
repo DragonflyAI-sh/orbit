@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mock, test } from "node:test";
 import { DEFAULT_LIMITS, parseConfig } from "../src/workspace/config.ts";
 import type { Limits, SandboxConfig } from "../src/workspace/config.ts";
-import { openRoot, search } from "../src/workspace/fsops.ts";
-import { bwrapSandbox, REQUIRED_FLAGS } from "../src/workspace/sandbox.ts";
+import { listDir, LIST_SCAN_MAX, openRoot, search, snapshot, SNAPSHOT_LIMITS, WorkspaceFsError } from "../src/workspace/fsops.ts";
+import { bwrapSandbox, childPath, REQUIRED_FLAGS } from "../src/workspace/sandbox.ts";
 import type { RunSpec, Sandbox } from "../src/workspace/sandbox.ts";
-import { opLedger } from "../src/workspace/ledger.ts";
+import { LedgerError, opLedger } from "../src/workspace/ledger.ts";
 import { workspaceService } from "../src/workspace/service.ts";
 import { maskVaultText } from "../src/vault/filter.ts";
 import { proposals as newProposals } from "../src/agent.ts";
@@ -21,13 +23,15 @@ import { fakeSandbox, tick, wsRig } from "./workspace-fixture.ts";
 //     probe's own self-test may launch, until a self-test has passed). They drive the PRODUCTION launcher (bwrapSandbox) with stub
 //     bubblewrap/prlimit binaries and a plain directory standing in for the cgroup, so they are deterministic on any Linux runner.
 //     They test ORBIT's gating and supervision logic only. They are NOT evidence of OS isolation.
-//   * Reproducers for findings of this review, marked `todo`. Each asserts the behaviour the review recommends, so it FAILS today
-//     (reported as todo, not as a suite failure) and starts passing once the finding is fixed. Remove the todo marker then.
+//   * Reproducers for findings of this review. They were `todo` (failing by design) until the findings were fixed; they are now
+//     ordinary regression tests (docs/reviews/workspace-tools-security-review.md, section 9).
 // Synthetic temporary directories only; nothing outside the test's own temp tree is read or written.
 
-const GOOD_PROBE_OUTPUT = "uid=1000\nifaces=lo,\nprocs=2\nenv=HOME,LANG,LOGNAME,PATH,PWD,SHLVL,TMPDIR,USER,\nworkspace_writable\n";
+const GOOD_PROBE_OUTPUT = "uid=1000\nifaces=lo,\nprocs=2\ncapeff=0000000000000000\ncapbnd=0000000000000000\nnnp=1\ncgroup=0::/\nenv=HOME,LANG,LOGNAME,PATH,PWD,SHLVL,TMPDIR,USER,\nworkspace_writable\n";
 
 type Rig = { base: string; sb: Sandbox; state: string; cg: string; setMode(mode: string): void; launches(): string[]; ws: string; spec(runId: string): RunSpec };
+// Run ids must be ORBIT's own shape (WS-R4): readable names map to a fixed 16-hex suffix.
+const rid = (name: string) => `ws-${createHash("sha256").update(name).digest("hex").slice(0, 16)}`;
 
 // A stub bubblewrap. `--version`/`--help` advertise every required option. Any other call is a launch: it reads the behaviour for this
 // launch from the control file (the test writes it before each launch), logs "<mode> <runId>" and then:
@@ -84,7 +88,7 @@ function rig(): Rig {
     ws,
     setMode: (m) => writeFileSync(ctl, `${m}\n`),
     launches: () => readFileSync(log, "utf8").split("\n").filter(Boolean),
-    spec: (runId) => ({ runId, workspace: { id: "w", root: ws, exec: true, dev: st.dev, ino: st.ino, identity: "w" }, cwd: [], argv: ["true"], limits: { ...DEFAULT_LIMITS, timeoutSec: 30 } as Limits }),
+    spec: (name) => ({ runId: rid(name), workspace: { id: "w", root: ws, exec: true, dev: st.dev, ino: st.ino, identity: "w" }, cwd: [], argv: ["true"], limits: { ...DEFAULT_LIMITS, timeoutSec: 30 } as Limits }),
   };
 }
 
@@ -138,7 +142,7 @@ test("race R2: during a slow PASSING self-test the public state stays 'unknown',
   assert.notEqual(h.pid, undefined);
   const exit = await h.done;
   assert.equal(exit.code, 0);
-  assert.deepEqual(nonProbe(r.launches()), ["run after"]);
+  assert.deepEqual(nonProbe(r.launches()), [`run ${rid("after")}`]);
 });
 
 test("race R3: a self-test killed by the probe's timeout ends 'unsupported', never 'supported'", async () => {
@@ -207,7 +211,8 @@ test("race R6: a run queued before a re-probe and dequeued during it is refused 
   const e2 = rr.svc.ledger.get(String(c2.body.opId))!;
   assert.equal(e1.state, "completed");
   assert.equal(e2.state, "failed");
-  assert.match(String(e2.reason), /^not_started: The sandbox is not available/);
+  // Since WS-R11's fix the sandbox state and policy are compared again at dequeue, so the run is refused before any start attempt.
+  assert.match(String(e2.reason), /^sandbox_changed: /);
   await reprobe;
   assert.deepEqual(nonProbe(r.launches()).map((l) => l.split(" ")[1]), [String(c1.body.opId)], "only the first run was launched");
 });
@@ -241,21 +246,28 @@ test("race R9: service level: exec_start is refused while the sandbox is 'unknow
   assert.equal(rr.proposals.list().length, 0);
 });
 
-// ---- Findings of this review (todo: they fail until fixed) ---------------------------------------------------------------------
+// ---- Findings of this review (fixed; regression tests) --------------------------------------------------------------------------
 
-test("finding WS-R1: overlapping probes: an older passing self-test must not overwrite a newer failing verdict", { todo: "WS-R1: probe() has no generation guard; last finisher wins" }, async () => {
+// The findings below were `todo` reproducers in the review; they are fixed (docs/reviews/workspace-tools-security-review.md, section 9)
+// and are now ordinary regression tests.
+
+test("finding WS-R1 (fixed): overlapping probes: an older passing self-test does not overwrite a newer failing verdict", async () => {
   const r = rig();
   r.setMode("pass-slow");
   const first = r.sb.probe();
   await until(() => r.launches().length === 1, "the first self-test to start");
-  await new Promise((res) => setTimeout(res, 5)); // distinct probe run id (it is derived from the clock)
+  const second = r.sb.probe(); // queued behind the first (probes are serialized)
+  // The control file is read when a self-test launches; switch it once the first one is running so the second one fails.
   r.setMode("fail");
-  const second = r.sb.probe();
-  await Promise.all([first, second]);
+  const [v1, v2] = await Promise.all([first, second]);
+  assert.equal(v1.state, "supported", "the first self-test itself passed");
+  assert.equal(v2.state, "unsupported");
   assert.equal(r.sb.status().state, "unsupported", "the most recent self-test failed, so the sandbox must not be supported");
+  const probes = r.launches().filter((l) => / probe-/.test(l)).map((l) => l.split(" ")[1]);
+  assert.equal(new Set(probes).size, 2, "each self-test has its own run id");
 });
 
-test("finding WS-R1b: overlapping probes: the state must not be 'supported' while a newer self-test is still running", { todo: "WS-R1: probe() has no generation guard" }, async () => {
+test("finding WS-R1b (fixed): overlapping probes: the state is never 'supported' while a newer self-test is still running", async () => {
   const r = rig();
   r.setMode("pass-slow");
   const first = r.sb.probe();
@@ -269,6 +281,7 @@ test("finding WS-R1b: overlapping probes: the state must not be 'supported' whil
     const during = r.sb.status().state;
     const h = r.sb.start(r.spec("during-second-probe"));
     if (h.pid !== undefined) h.kill("cancel");
+    await until(() => r.launches().length === 2, "the second self-test to start");
     mock.timers.tick(20_000);
     await second;
     assert.notEqual(during, "supported", "a self-test was still running");
@@ -278,7 +291,7 @@ test("finding WS-R1b: overlapping probes: the state must not be 'supported' whil
   }
 });
 
-test("finding WS-R2: a probe that throws must not leave the stale reason 'the sandbox self-test is running'", { todo: "WS-R2: probe exceptions are swallowed (select.ts) and the reason stays stale" }, async () => {
+test("finding WS-R2 (fixed): a probe that throws ends 'unsupported' with the error, not the stale reason 'the sandbox self-test is running'", async () => {
   const r = rig();
   r.setMode("pass");
   const file = join(r.base, "not-a-dir");
@@ -289,9 +302,10 @@ test("finding WS-R2: a probe that throws must not leave the stale reason 'the sa
   assert.notEqual(sb.status().state, "supported"); // fail closed holds today
   assert.equal(sb.status().state, "unsupported", "a probe that could not complete is a failed probe");
   assert.doesNotMatch(sb.status().reasons.join(" "), /self-test is running/);
+  assert.match(sb.status().reasons.join(" "), /failed with an error/);
 });
 
-test("finding WS-R3: fs_search must bound the number of entries it visits, not only regular files", { todo: "WS-R3: links, special files and directories do not count toward any limit" }, () => {
+test("finding WS-R3 (fixed): fs_search bounds the number of entries it visits, not only regular files", () => {
   const base = mkdtempSync(join(tmpdir(), "orbit-wsreview-search-"));
   const root = join(base, "ws");
   mkdirSync(root, { mode: 0o700 });
@@ -303,12 +317,47 @@ test("finding WS-R3: fs_search must bound the number of entries it visits, not o
     const out = search(r, [], "needle");
     const visited = Object.values(out.skipped as Record<string, number>).reduce((a, b) => a + b, 0) + out.filesSearched;
     assert.ok(visited <= 2000 && !out.complete, `visited ${visited} entries and reported complete=${out.complete}`);
+    assert.match(String(out.stoppedBecause), /entries/);
   } finally {
     r.close();
   }
 });
 
-test("finding WS-R4: restart recovery must not act on ledger opIds outside its own namespace (path traversal in reap)", { todo: "WS-R4: ledger opIds are not validated before reap() joins them into paths" }, async () => {
+test("finding WS-R3 (fixed): fs_list reads a bounded number of names and says the total is a lower bound", () => {
+  const base = mkdtempSync(join(tmpdir(), "orbit-wsreview-list-"));
+  const root = join(base, "ws");
+  mkdirSync(root, { mode: 0o700 });
+  for (let i = 0; i < LIST_SCAN_MAX + 5; i++) writeFileSync(join(root, `f${i}`), "");
+  const st = statSync(root);
+  const r = openRoot(root, { dev: st.dev, ino: st.ino });
+  try {
+    const out = listDir(r, [], { limit: 10 });
+    assert.equal(out.total, LIST_SCAN_MAX);
+    assert.equal(out.totalIsLowerBound, true);
+    assert.equal(out.entries.length, 10);
+  } finally {
+    r.close();
+  }
+});
+
+test("finding WS-R3 (fixed): walks stop at their time budget and say so (snapshot refuses; search reports incomplete)", () => {
+  const base = mkdtempSync(join(tmpdir(), "orbit-wsreview-time-"));
+  const root = join(base, "ws");
+  mkdirSync(root, { mode: 0o700 });
+  for (let i = 0; i < 50; i++) writeFileSync(join(root, `f${i}`), "x");
+  const st = statSync(root);
+  const r = openRoot(root, { dev: st.dev, ino: st.ino });
+  try {
+    assert.throws(() => snapshot(r, { ...SNAPSHOT_LIMITS, ms: -1 }), (e: unknown) => e instanceof WorkspaceFsError && e.code === "snapshot_too_large" && /time/.test(e.message));
+    const out = search(r, [], "needle", { ms: -1 });
+    assert.equal(out.complete, false);
+    assert.match(String(out.stoppedBecause), /time/);
+  } finally {
+    r.close();
+  }
+});
+
+test("finding WS-R4 (fixed): a ledger with an opId ORBIT did not issue is refused at load, and reap() never turns a foreign id into a path", async () => {
   const r = rig();
   const victim = join(r.state, "victim");
   mkdirSync(victim);
@@ -318,26 +367,39 @@ test("finding WS-R4: restart recovery must not act on ledger opIds outside its o
   mkdirSync(ledgerDir, { mode: 0o700 });
   const at = "2026-11-19T00:00:00.000Z";
   writeFileSync(join(ledgerDir, "ledger.json"), JSON.stringify({ schema: 1, entries: [{ opId: "../victim", proposalId: "p", kind: "exec", workspace: "w", digest: "sha256:x", state: "running", createdAt: at, updatedAt: at, events: [{ at, state: "starting" }], summary: "s" }] }));
-  const svc = workspaceService({ activation: { state: "enabled", config: { workspaces: [], sandbox: { bwrap: "", prlimit: "", shell: "", runtime: [], cgroupParent: r.cg, limits: DEFAULT_LIMITS, maxConcurrentRuns: 1 }, policyHash: "sha256:x" } }, sandbox: r.sb, ledger: opLedger(ledgerDir), proposals: newProposals() });
-  svc.recover();
+  // Fail closed: the whole ledger is untrusted (the tools turn off with the reason; src/workspace/select.ts), nothing is cleaned up.
+  assert.throws(() => opLedger(ledgerDir), LedgerError);
+  assert.ok(existsSync(join(victim, "keep.txt")));
+  // Defense in depth: even called directly, reap() refuses ids that are not ORBIT's, touching neither <state> nor the cgroup tree.
+  mkdirSync(join(r.cg, "sibling"));
+  writeFileSync(join(r.cg, "sibling", "cgroup.procs"), `${process.pid}\n`);
+  const out = await r.sb.reap(["../victim", "../../x", "ws-../../sibling", "orbit-run-x/../../sibling"]);
+  assert.ok(Object.values(out).every((x) => x.error && !x.gone && !x.killed), JSON.stringify(out));
   assert.ok(existsSync(join(victim, "keep.txt")), "a directory outside <state>/runs was deleted by restart recovery");
+  assert.ok(existsSync(join(r.cg, "sibling")), "a sibling cgroup was touched");
+  assert.throws(() => childPath("/sys/fs/cgroup/x", "../y"));
+  assert.throws(() => childPath("/sys/fs/cgroup/x", "a/b"));
+  assert.equal(childPath("/sys/fs/cgroup/x", "orbit-run-ws-0123456789abcdef"), "/sys/fs/cgroup/x/orbit-run-ws-0123456789abcdef");
 });
 
-test("finding WS-R5: an approval card must not render bidi/invisible control characters raw (they can disguise what runs)", { todo: "WS-R5: card fields are shown verbatim; Trojan-Source style text is accepted" }, async () => {
+test("finding WS-R5 (fixed): an approval card never renders bidi/invisible control characters raw (they can disguise what runs)", async () => {
   const rr = wsRig();
   const script = `echo safe # ‮;rm -rf data⁦\n`;
   let proposed = false;
   try {
     const p = (await rr.call("exec_start", { workspace: "alpha", argv: ["sh", "/run/orbit/script"], script })).value;
     proposed = true;
-    const shown = Object.values(rr.proposal(p.proposalId).display).join("\n");
+    const card = rr.proposal(p.proposalId);
+    const shown = [card.summary, ...Object.values(card.display), ...card.warnings].join("\n");
     assert.ok(!/[‪-‮⁦-⁩​-‏]/.test(shown), "bidi/zero-width characters reach the card unescaped");
+    assert.match(shown, /⟨U\+202E⟩/, "the hidden character is shown as a visible marker");
+    assert.match(shown, /┌ begin \(2 lines/, "a multi-line script is fenced");
   } catch (e) {
     if (proposed) throw e; // refusing the proposal outright is an acceptable fix
   }
 });
 
-test("finding WS-R6: audit lines must not carry model-chosen path text unmasked (journal privacy)", { todo: "WS-R6: denial details include the error message, which echoes the path" }, async () => {
+test("finding WS-R6 (fixed): audit lines carry no model-chosen path text (journal privacy)", async () => {
   const rr = wsRig();
   const secretShaped = "ghp_" + "Ab1".repeat(12); // built at runtime; credential-shaped only
   assert.notEqual(maskVaultText(secretShaped), secretShaped, "precondition: the vault filter masks this shape");
@@ -347,7 +409,7 @@ test("finding WS-R6: audit lines must not carry model-chosen path text unmasked 
   assert.ok(!lines.some((l) => l.includes(secretShaped)), "an audit line carries the credential-shaped path verbatim");
 });
 
-test("finding WS-R7: workspace roots under /proc (or /sys, /dev, /etc, /run, /boot) must be refused, not only those exact paths", { todo: "WS-R7: FORBIDDEN_ROOTS is an equality check" }, () => {
+test("finding WS-R7 (fixed): workspace roots under /proc (or /sys, /dev, /etc, /run, /boot) are refused, not only those exact paths", () => {
   const fdDir = `/proc/${process.pid}/fd`;
   const owner = statSync(fdDir).uid;
   assert.throws(() => parseConfig(JSON.stringify({ workspaces: [{ id: "procfd", root: fdDir, exec: false }] }), { uid: () => owner, protectedPaths: [] }), /cannot be a workspace root|not allowed|refused/);
@@ -364,4 +426,147 @@ test("review check: a held write proposal is refused when the file changed after
   const out = await rr.svc.confirm(rr.proposals.take(w.proposalId) as never);
   assert.equal(out.code, 409);
   assert.equal(readFileSync(join(rr.a.root, "notes.txt"), "utf8"), "changed by a command\n");
+});
+
+// ---- Hardening regressions for the remaining findings (WS-R8 to WS-R14) --------------------------------------------------------
+
+test("finding WS-R8 (fixed): a run whose process tree was not confirmed gone pauses exec until a reap finds its cgroup gone or empty", async () => {
+  const sb = fakeSandbox();
+  const rr = wsRig({ sandbox: sb });
+  const p = (await rr.call("exec_start", { workspace: "alpha", argv: ["true"] })).value;
+  const c = await rr.svc.confirm(rr.proposals.take(p.proposalId) as never);
+  await tick();
+  sb.reapGone = false;
+  sb.runs[0]!.finish(0, "", "", { treeGone: false });
+  await rr.svc.idle();
+  const opId = String(c.body.opId);
+  assert.equal(rr.svc.ledger.get(opId)!.treeGone, false);
+  assert.deepEqual(rr.svc.quarantined(), [opId]);
+  await assert.rejects(rr.call("exec_start", { workspace: "beta", argv: ["true"] }), /cleanup_unverified/);
+  // A re-check that still finds processes keeps the pause; one that finds the cgroup gone lifts it, and says so in the record.
+  await rr.svc.verifyCleanup([opId]);
+  assert.deepEqual(rr.svc.quarantined(), [opId]);
+  sb.reapGone = true;
+  await rr.svc.verifyCleanup([opId]);
+  assert.deepEqual(rr.svc.quarantined(), []);
+  assert.ok(rr.svc.ledger.get(opId)!.cleanupVerifiedAt);
+  assert.match(JSON.stringify(rr.svc.ledger.get(opId)!.events), /cleanup verified later/);
+  assert.equal((await rr.call("exec_start", { workspace: "beta", argv: ["true"] })).value.status, "pending-confirmation");
+});
+
+test("finding WS-R8 (fixed): a launched run with NO cleanup evidence counts as unverified; a run queued behind it does not start", async () => {
+  const sb = fakeSandbox();
+  const rr = wsRig({ sandbox: sb, maxConcurrentRuns: 1 });
+  const p1 = (await rr.call("exec_start", { workspace: "alpha", argv: ["true"] })).value;
+  const p2 = (await rr.call("exec_start", { workspace: "beta", argv: ["true"] })).value;
+  const c1 = await rr.svc.confirm(rr.proposals.take(p1.proposalId) as never);
+  const c2 = await rr.svc.confirm(rr.proposals.take(p2.proposalId) as never);
+  assert.equal(c2.body.state, "queued");
+  sb.reapGone = false;
+  sb.runs[0]!.finish(0, "", "", { treeGone: undefined });
+  await rr.svc.idle();
+  assert.equal(rr.svc.ledger.get(String(c1.body.opId))!.treeGone, false, "no evidence is recorded as not confirmed");
+  assert.equal(rr.svc.ledger.get(String(c2.body.opId))!.state, "failed");
+  assert.match(String(rr.svc.ledger.get(String(c2.body.opId))!.reason), /^cleanup_unverified/);
+  assert.equal(sb.runs.length, 1, "the queued run never started");
+});
+
+test("finding WS-R8 (fixed): restart recovery clears the pause only on evidence, and an in-flight run's tree is 'gone' only if the reap found it so", async () => {
+  const sb = fakeSandbox();
+  const rr = wsRig({ sandbox: sb });
+  const p = (await rr.call("exec_start", { workspace: "alpha", argv: ["sleep", "100"] })).value;
+  const c = await rr.svc.confirm(rr.proposals.take(p.proposalId) as never);
+  await tick();
+  sb.reapGone = false;
+  const after = rr.make();
+  await after.recover();
+  const opId = String(c.body.opId);
+  assert.equal(after.ledger.get(opId)!.state, "uncertain");
+  assert.equal(after.ledger.get(opId)!.treeGone, false);
+  assert.match(String(after.ledger.get(opId)!.reason), /cleanup NOT verified/);
+  assert.deepEqual(after.quarantined(), [opId]);
+  sb.reapGone = true;
+  const again = rr.make();
+  await again.recover();
+  assert.deepEqual(again.quarantined(), [], "a later start whose reap finds the cgroup gone lifts the pause");
+});
+
+test("finding WS-R9 (fixed): the launcher re-checks the workspace root (device and inode) immediately before spawning", async () => {
+  const r = rig();
+  r.setMode("pass");
+  assert.equal((await r.sb.probe()).state, "supported");
+  r.setMode("run");
+  const spec = r.spec("moved-root");
+  const h = r.sb.start({ ...spec, workspace: { ...spec.workspace, ino: spec.workspace.ino + 1 } });
+  assert.equal(h.pid, undefined);
+  assert.match(String((await h.done).startError), /no longer the configured directory/);
+  assert.deepEqual(nonProbe(r.launches()), []);
+});
+
+test("finding WS-R9 (fixed): a sandbox binary in a directory others can write is refused, even if the binary itself is root-owned", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orbit-wsreview-bin-")); // under /tmp (mode 1777)
+  const bin = join(dir, "bwrap");
+  writeFileSync(bin, "#!/bin/sh\n", { mode: 0o755 });
+  const isRoot = (process.getuid?.() ?? 0) === 0;
+  assert.throws(
+    () => parseConfig(JSON.stringify({ workspaces: [{ id: "s", root: dir, exec: true }], sandbox: { bwrap: bin, prlimit: "/bin/sh", cgroupParent: "/sys/fs/cgroup/x" } }), { uid: () => statSync(dir).uid, protectedPaths: [] }),
+    isRoot ? /directory .* not root-owned or is writable by group or others/ : /not owned by root/,
+  );
+});
+
+test("finding WS-R11 (fixed): the card shows the full identity and policy hash, and the snapshot covers the root's own mode", async () => {
+  const rr = wsRig();
+  const p = (await rr.call("exec_start", { workspace: "alpha", argv: ["true"] })).value;
+  const card = rr.proposal(p.proposalId);
+  assert.ok(card.display.workspace.includes(rr.a.identity), "full identity");
+  assert.ok(card.display.sandbox.includes(rr.config.policyHash), "full policy hash");
+  assert.doesNotMatch(card.display.workspace + card.display.sandbox, /…/);
+  const st = statSync(rr.a.root);
+  const r = openRoot(rr.a.root, { dev: st.dev, ino: st.ino });
+  try {
+    const before = snapshot(r).digest;
+    chmodSync(rr.a.root, 0o500);
+    assert.notEqual(snapshot(r).digest, before);
+  } finally {
+    chmodSync(rr.a.root, 0o700);
+    r.close();
+  }
+});
+
+test("finding WS-R12 (fixed): a run whose cgroup cannot be prepared leaves no run directory (no copy of the script)", async () => {
+  const r = rig();
+  r.setMode("pass");
+  assert.equal((await r.sb.probe()).state, "supported");
+  const spec = { ...r.spec("cg-fails"), script: "echo secret-free script\n" };
+  mkdirSync(join(r.cg, `orbit-run-${spec.runId}`)); // the run's cgroup already exists, so creating it fails
+  const h = r.sb.start(spec);
+  assert.equal(h.pid, undefined);
+  assert.match(String((await h.done).startError), /could not be prepared/);
+  assert.equal(existsSync(join(r.state, "runs", spec.runId)), false);
+});
+
+test("finding WS-R13 (fixed): bubblewrap must create a cgroup namespace (--unshare-cgroup), not 'try'", () => {
+  assert.ok(REQUIRED_FLAGS.includes("--unshare-cgroup"));
+  assert.ok(!REQUIRED_FLAGS.includes("--unshare-cgroup-try"));
+});
+
+test("finding WS-R14 (fixed): waiting for a run cgroup to empty does not block the event loop; a cgroup that keeps a live process is not 'gone'", async () => {
+  const r = rig();
+  const sleeper = spawn("sleep", ["5"], { stdio: "ignore" });
+  try {
+    const id = rid("busy-cgroup");
+    const dir = join(r.cg, `orbit-run-${id}`);
+    mkdirSync(dir);
+    // A plain directory standing in for a cgroup: writing cgroup.kill is a no-op here, so the sleeper stays alive and listed.
+    writeFileSync(join(dir, "cgroup.procs"), `${sleeper.pid}\n`);
+    let ticks = 0;
+    const iv = setInterval(() => ticks++, 10);
+    const out = await r.sb.reap([id]);
+    clearInterval(iv);
+    assert.equal(out[id]!.gone, false);
+    assert.equal(out[id]!.leftover, 1);
+    assert.ok(ticks >= 20, `the event loop ran ${ticks} times while waiting (it must not be blocked)`);
+  } finally {
+    sleeper.kill("SIGKILL");
+  }
 });
