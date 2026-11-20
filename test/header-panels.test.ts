@@ -59,7 +59,7 @@ test("the notification count label says how many, says none at zero, and never c
 
 test("the markup: page links in the header bar with no Status link; two toggle buttons; collapsed panels below the bar", () => {
   const header = html.match(/<header>[\s\S]*?<\/header>/)![0];
-  const bar = header.match(/<div class="bar">([\s\S]*?)<\/div><div id="statusline"/)![1]!;
+  const bar = header.match(/<div class="bar">([\s\S]*?)<\/div><div id="side">/)![1]!;
   assert.match(bar, /<nav id="tabs" aria-label="ORBIT pages">/, "the page links are in the bar");
   assert.equal(html.match(/<nav\b/g)?.length, 1, "one navigation, no duplicate");
   const nav = header.match(/<nav id="tabs"[^>]*>([\s\S]*?)<\/nav>/)![1]!;
@@ -71,8 +71,10 @@ test("the markup: page links in the header bar with no Status link; two toggle b
     assert.match(b, /aria-label="[^"]+"/, button);
     assert.match(header, new RegExp(`<div id="${panel}" role="region" aria-label="[^"]+" hidden>`), `${panel} starts collapsed`);
   }
-  // The status line holds the pills and the page link, and comes straight after the bar.
-  assert.match(header, /<\/div><\/div><div id="statusline"[^>]*><div id="ports"><\/div><a id="statusopen" href="\/status" target="_blank" rel="noopener noreferrer"/);
+  // The status line holds the overall summary (shown in the desktop side panel only), a read-error line, the pills (saying
+  // they are being read until the first answer) and the page link. It comes straight after the bar on phones: the side
+  // panel's head before it is not shown there (test/side-panel-browser.test.ts).
+  assert.match(header, /<\/div><\/div><div id="side"><div class="sidehead">[\s\S]*?<\/div><\/div><div id="statusline"[^>]*><div id="statussum">[\s\S]*?<div id="statuserr" role="alert" hidden><\/div><div id="ports"><span class="empty">Reading status…<\/span><\/div><a id="statusopen" href="\/status" target="_blank" rel="noopener noreferrer"/);
   // Before the first /status request the indicator says the status has not been read yet, not that reading it failed.
   const health = bar.match(/<button type="button" id="health"[^>]*>/)![0];
   assert.match(health, /title="ORBIT's status has not been read yet, so it is not known to be all live\. Show or hide the status line\."/);

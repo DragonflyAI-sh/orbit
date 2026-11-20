@@ -226,6 +226,68 @@
   .note button.x { color: var(--muted); font-size: 16px; line-height: 1; }
   .note a, .ev a, .latest a { color: var(--accent-2); }
   #inbox .showall { align-self: flex-start; background: none; border: 0; padding: 2px 0; color: var(--accent-2); font: inherit; font-size: var(--text-sm); cursor: pointer; }
+  /* The side panel (docs/design-system.md, "Side panel"). On laptops and desktops (1024px and wider) Notifications and Status
+     open in one panel on the right, under the header, instead of as cards inside the header: a heading, a close button and
+     two tabs (one view at a time), then the view, which scrolls on its own while the heading and tabs stay. The panel is not
+     modal: it never takes focus by itself, traps nothing, and the conversation, the Jobs list and the composer move left by
+     its width (they keep their centred reading column in the room that is left), so nothing is covered. Below 1024px the
+     wrapper does not exist for layout (display: contents) and the two panels show in the header exactly as before. */
+  #side { display: contents; }
+  #side > * { min-width: 0; }
+  .sidehead, #statussum { display: none; }
+  #ports .empty { color: var(--muted); font-size: var(--text-sm); font-style: italic; }
+  #statuserr { flex: 1 0 100%; color: var(--danger); font-size: var(--text-sm); background: var(--danger-soft); border-left: 3px solid var(--danger); padding: 4px 10px; border-radius: var(--radius-xs); overflow-wrap: anywhere; }
+  #statuserr[hidden] { display: none; }
+  @media (min-width: 1024px) {
+    :root { --side-w: clamp(320px, 30vw, 400px); }
+    #side { display: none; }
+    :root[data-side="open"] #side { display: flex; flex-direction: column; position: fixed; z-index: 1; right: 0; top: var(--side-top, 56px); bottom: var(--side-bottom, 0px);
+                                    width: var(--side-w); padding-right: var(--safe-r); background: var(--card); border-left: var(--border); box-shadow: -12px 0 28px -20px var(--header-shadow); }
+    :root[data-side="open"] :is(#log, #alog, .latestdock, #jobs, #astatus, #form, #aform) { margin-right: var(--side-w); }
+    /* Their column paddings are percentages of the shell's width, so the panel's width comes off before centring. The
+       panel itself keeps clear of the right safe area. */
+    :root[data-side="open"] :is(#log, #alog, #jobs, #astatus, #form, #aform) {
+      --col-l: max(calc(var(--gutter) + var(--safe-l)), calc((100% - var(--side-w) - var(--measure)) / 2));
+      --col-r: max(var(--gutter), calc((100% - var(--side-w) - var(--measure)) / 2)); }
+    .sidehead { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-2);
+                padding: var(--space-3) var(--space-4); border-bottom: var(--border); }
+    #sidetitle { margin: 0; font-size: var(--text-lg); line-height: var(--leading-tight); font-weight: var(--weight-strong); }
+    #sideclose { display: inline-flex; align-items: center; justify-content: center; width: var(--ctl-md); height: var(--ctl-md); padding: 0;
+                 border-radius: var(--radius-sm); background: none; color: var(--muted); }
+    #sideclose:not(:disabled):hover { filter: none; box-shadow: none; color: var(--fg); background: var(--surface-hover); }
+    #sideclose:not(:disabled):active { filter: none; transform: none; box-shadow: none; background: var(--press-bg); }
+    .sidetabs { grid-column: 1 / -1; display: flex; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--surface-2); }
+    .sidetab { flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: var(--btn-h); padding: 0 var(--space-3);
+               border-radius: calc(var(--radius-md) - 3px); background: none; color: var(--muted); font-size: var(--text-sm); font-weight: var(--weight-medium); white-space: nowrap; }
+    .sidetab:not(:disabled):hover { filter: none; box-shadow: none; color: var(--fg); background: var(--surface-hover); }
+    .sidetab:not(:disabled):active { filter: none; transform: none; box-shadow: none; }
+    .sidetab[aria-selected="true"], .sidetab[aria-selected="true"]:not(:disabled):hover { background: var(--card); color: var(--fg); font-weight: var(--weight-strong); box-shadow: 0 1px 2px var(--header-shadow); }
+    .sidetab:focus-visible { outline-offset: -2px; }
+    .sidetab .count { min-width: 1.5em; padding: 0 4px; border-radius: var(--radius-pill); text-align: center; font-size: var(--text-xs); font-weight: var(--weight-strong); line-height: 1.4; background: var(--surface-2); }
+    .sidetab.has .count { background: var(--attention); color: #1c1838; }
+    /* The views. Each fills the panel under the head and scrolls by itself. */
+    :root[data-side="open"] #side :is(#statusline, #inbox) { flex: 1 1 auto; min-height: 0; max-height: none; margin: 0; padding: var(--space-4); border: 0; border-radius: 0;
+                                                             background: none; overflow-y: auto; overscroll-behavior: contain; }
+    :root[data-side="open"] #side #inbox { gap: var(--space-2); }
+    :root[data-side="open"] #side .note { padding: var(--space-2) var(--space-1) var(--space-2) var(--space-3); border-radius: var(--radius-sm); box-shadow: none;
+                                          background: color-mix(in srgb, var(--attention) 6%, var(--card)); }
+    :root[data-side="open"] #side .note .first { font-weight: var(--weight-medium); }
+    :root[data-side="open"] #side #statusline { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-content: start; gap: var(--space-3); }
+    #side #statussum { grid-column: 1; grid-row: 1; display: flex; align-items: flex-start; gap: 10px; padding: 10px var(--space-3); border-radius: var(--radius-md);
+                       background: var(--surface-2); border-left: 3px solid var(--muted); }
+    #side #statussum.ok { border-left-color: var(--green-dot); } #side #statussum.degraded { border-left-color: var(--amber-dot); } #side #statussum.down { border-left-color: var(--red-dot); }
+    #statussum .dot { margin-top: 6px; }
+    #statuslabel { display: block; font-size: var(--text-md); line-height: var(--leading-tight); }
+    #statusdetail { margin: 4px 0 0; font-size: var(--text-sm); color: var(--muted); overflow-wrap: anywhere; }
+    #side #statusopen { grid-column: 2; grid-row: 1; align-self: start; min-width: var(--ctl-md); min-height: var(--ctl-md); }
+    #side #statuserr, #side #ports, #side #deployinfo { grid-column: 1 / -1; }
+    #side #ports { flex-direction: column; flex-wrap: nowrap; gap: 0; border: var(--border); border-radius: var(--radius-md); font-size: var(--text-sm); }
+    #side #ports .empty { padding: var(--space-2) var(--space-3); }
+    #side .pill { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 0; border-radius: 0; background: none; overflow-wrap: anywhere; }
+    #side .pill + .pill { border-top: var(--border); }
+    #side .pill::before { margin-right: 0; flex: none; }
+    #side #deployinfo { border-top: 0; padding: 0 var(--space-1); gap: 6px 14px; }
+  }
   /* Sessions: the open session's title and a chevron sit in the header bar (no row of their own). The title takes the room
      left between the page links and the toggles and is cut with an ellipsis; its full text is the button's hover text and
      accessible name. The button opens the session picker, which overlays the page under the header (it never pushes the
@@ -251,6 +313,20 @@
   #sesslist .sitem[aria-current="true"] { background: var(--press-bg); border-color: var(--accent-2); font-weight: 600; }
   #sesslist .sempty { padding: 6px 10px; font-size: var(--text-sm); color: var(--muted); }
   @media (pointer: coarse) { #sesslist .sitem, #sesspicker .prow button, .parch { min-height: var(--tap); } }
+  /* Laptops and desktops: the menu's sessions are plain aligned rows inside the one menu card. A row tints on hover and the
+     open session has a quiet tint, bold text and a 3px accent bar at its leading edge. No row draws its own outline: the
+     shared button hover ring (and the open session's border) read as a second box nested inside the card. Pressing does not
+     shrink the row. The keyboard focus ring is kept, drawn just inside the row so the list's edge never clips it. Phones keep
+     the look from #148 (docs/design-system.md, "Desktop menu"). */
+  @media (min-width: 900px) {
+    #sesslist { padding: 2px; gap: 1px; }
+    #sesslist .sitem { display: flex; align-items: center; min-height: 40px; padding: 6px var(--space-3); border: 0; border-radius: var(--radius-sm); }
+    #sesslist .sitem:not(:disabled):hover { filter: none; box-shadow: none; background: var(--surface-hover); }
+    #sesslist .sitem:not(:disabled):active { filter: none; transform: none; box-shadow: none; background: var(--press-bg); }
+    #sesslist .sitem[aria-current="true"] { background: var(--info-soft); box-shadow: inset 3px 0 0 var(--accent-2); }
+    #sesslist .sitem[aria-current="true"]:not(:disabled):hover { background: color-mix(in srgb, var(--info) 12%, var(--card)); box-shadow: inset 3px 0 0 var(--accent-2); }
+    #sesslist .sitem:focus-visible { outline-offset: -2px; }
+  }
   #tstatus { margin-top: 6px; font-size: var(--text-xs); color: var(--muted); overflow-wrap: anywhere; }
   #tstatus:empty { display: none; }
   #log[aria-busy="true"] { opacity: 0.6; }
@@ -363,10 +439,10 @@
   @media (min-width: 900px) { .hbtn .label { display: inline; } .hbtn { gap: 6px; } }
   .hbtn .count { min-width: 1.5em; padding: 0 4px; border-radius: var(--radius-pill); text-align: center; font-weight: 600; line-height: 1.4; }
   .hbtn.has .count { background: var(--attention); color: #1c1838; }
-  #health .dot { box-sizing: border-box; width: 10px; height: 10px; border-radius: 50%; flex: none; background: transparent; border: 2px solid var(--muted); }
-  #health.ok .dot { border: 0; background: var(--green-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--green-dot) 25%, transparent); }
-  #health.degraded .dot { border: 0; border-radius: 1px; transform: rotate(45deg) scale(.85); background: var(--amber-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber-dot) 25%, transparent); }
-  #health.down .dot { border: 0; border-radius: 2px; background: var(--red-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--red-dot) 25%, transparent); }
+  :is(#health, .sidetab, #statussum) .dot { box-sizing: border-box; width: 10px; height: 10px; border-radius: 50%; flex: none; background: transparent; border: 2px solid var(--muted); }
+  :is(#health, .sidetab, #statussum).ok .dot { border: 0; background: var(--green-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--green-dot) 25%, transparent); }
+  :is(#health, .sidetab, #statussum).degraded .dot { border: 0; border-radius: 1px; transform: rotate(45deg) scale(.85); background: var(--amber-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber-dot) 25%, transparent); }
+  :is(#health, .sidetab, #statussum).down .dot { border: 0; border-radius: 2px; background: var(--red-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--red-dot) 25%, transparent); }
   :root { --green-dot: #1f9d55; --amber-dot: #d99a00; --red-dot: #d23c3c; }
   #alog .older { align-self: center; }
   .ctxline { align-self: stretch; font-size: var(--text-xs); color: var(--muted); border-top: 1px dashed var(--line); padding-top: 4px; overflow-wrap: anywhere; }
@@ -403,6 +479,9 @@
   nav a:not([aria-current="page"]):hover { background: var(--surface-hover); }
   nav a:active { transform: translateY(1px); }
   @media (min-width: 900px) { nav a { padding: 3px 14px; } }
+  /* Laptops and desktops: the same borderless track as on phones, and the current segment is raised by its card colour,
+     shadow and underline only, so the tabs no longer read as boxes inside a box. */
+  @media (min-width: 900px) { nav { border-color: transparent; } nav a[aria-current="page"] { border-color: transparent; } }
     #jobs h2 { margin: 6px 0 0; font-size: var(--text-sm); letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--muted); }
   .card { width: 100%; min-width: 0; padding: 10px var(--space-3); border-radius: var(--radius-lg); background: var(--card); border: var(--border); overflow-wrap: anywhere; }
   .card.bad { border-color: var(--danger); }
@@ -629,7 +708,7 @@
 </style>
 </head>
 <body>
-<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions</a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="themebtn" class="hbtn" data-mode="system" aria-expanded="false" aria-controls="themepicker" aria-label="Theme: System" title="Theme: System. Choose Light, Dark or System."><svg class="ico i-system" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 5h18v11H3z M8 20h8 M12 16v4"/></svg><svg class="ico i-light" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0z M12 2v2 M12 20v2 M4.9 4.9l1.4 1.4 M17.7 17.7l1.4 1.4 M2 12h2 M20 12h2 M4.9 19.1l1.4-1.4 M17.7 6.3l1.4-1.4"/></svg><svg class="ico i-dark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: not read yet" title="Notifications: not read yet. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span class="label" aria-hidden="true">Notifications</span><span id="notecount" class="count" aria-hidden="true">?</span></button><button type="button" id="health" class="unknown" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="ports"></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a><dl id="deployinfo" aria-label="Running release"><dt>Deployed</dt><dd id="deployedat"><span class="na">Not read yet</span></dd><dt>Commit</dt><dd id="deploycommit"><span class="na">Not read yet</span></dd></dl></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="themepicker" hidden><fieldset><legend>Theme</legend><label class="topt"><input type="radio" name="theme" value="system"><span>System<small>Follows this device</small></span></label><label class="topt"><input type="radio" name="theme" value="light"><span>Light</span></label><label class="topt"><input type="radio" name="theme" value="dark"><span>Dark</span></label></fieldset></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header>
+<header><div class="bar"><div class="brand"><img src="/avatar.png" alt=""><h1>ORBIT</h1></div><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions</a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="themebtn" class="hbtn" data-mode="system" aria-expanded="false" aria-controls="themepicker" aria-label="Theme: System" title="Theme: System. Choose Light, Dark or System."><svg class="ico i-system" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 5h18v11H3z M8 20h8 M12 16v4"/></svg><svg class="ico i-light" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0z M12 2v2 M12 20v2 M4.9 4.9l1.4 1.4 M17.7 17.7l1.4 1.4 M2 12h2 M20 12h2 M4.9 19.1l1.4-1.4 M17.7 6.3l1.4-1.4"/></svg><svg class="ico i-dark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: not read yet" title="Notifications: not read yet. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span class="label" aria-hidden="true">Notifications</span><span id="notecount" class="count" aria-hidden="true">?</span></button><button type="button" id="health" class="unknown" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status line." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span><span class="label">Status unknown</span></button></div></div><div id="side"><div class="sidehead"><h2 id="sidetitle">Notifications</h2><button type="button" id="sideclose" aria-label="Close the panel" title="Close the panel (Esc)"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12 M18 6L6 18"/></svg></button><div class="sidetabs" role="tablist" aria-label="Panel views"><button type="button" role="tab" id="sidetab-notes" class="sidetab" aria-selected="true" aria-controls="inbox">Notifications<span id="sidenotecount" class="count">?</span></button><button type="button" role="tab" id="sidetab-status" class="sidetab unknown" aria-selected="false" aria-controls="statusline" tabindex="-1"><span class="dot" aria-hidden="true"></span>Status</button></div></div><div id="statusline" role="region" aria-label="Status details" hidden><div id="statussum"><span class="dot" aria-hidden="true"></span><div><strong id="statuslabel">Status unknown</strong><p id="statusdetail">ORBIT's status has not been read yet.</p></div></div><div id="statuserr" role="alert" hidden></div><div id="ports"><span class="empty">Reading status…</span></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a><dl id="deployinfo" aria-label="Running release"><dt>Deployed</dt><dd id="deployedat"><span class="na">Not read yet</span></dd><dt>Commit</dt><dd id="deploycommit"><span class="na">Not read yet</span></dd></dl></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="themepicker" hidden><fieldset><legend>Theme</legend><label class="topt"><input type="radio" name="theme" value="system"><span>System<small>Follows this device</small></span></label><label class="topt"><input type="radio" name="theme" value="light"><span>Light</span></label><label class="topt"><input type="radio" name="theme" value="dark"><span>Dark</span></label></fieldset></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header>
 <main id="log" hidden></main>
 <div class="latestdock"><button type="button" class="tolatest" id="tolatest" title="Scroll to the latest message" hidden><span aria-hidden="true">↓</span> click to latest</button></div>
 <main id="alog" aria-label="Assistant conversation"></main>
@@ -763,15 +842,28 @@
     return { atLatest: () => jumping || !showing() || distanceOk(), update };
   }
 
+  // The status view says when the latest read failed (role="alert"), and keeps the last answer it had, saying so. Before
+  // any answer it says it is reading; a failure before any answer leaves no stale "Reading status…" behind.
+  let statusPills = false;
+  function showStatusError(why) {
+    const box = document.getElementById("statuserr");
+    const text = why === null ? "" : `${why === "network" ? "ORBIT could not be reached for its status." : typeof why === "number" ? `ORBIT's status could not be read (HTTP ${why}).` : "ORBIT's answer about its status could not be read."}${statusPills ? " Showing the last answer." : ""}`;
+    if (box.textContent !== text) box.textContent = text;
+    box.hidden = !text;
+    if (why !== null && !statusPills) document.getElementById("ports").replaceChildren();
+  }
   async function refreshStatus() {
     let res;
-    try { res = await fetch("/status"); } catch { renderHealth(null, "network"); if (!deployShown) showDeployInfo(null); return; }
+    try { res = await fetch("/status"); } catch { renderHealth(null, "network"); showStatusError("network"); if (!deployShown) showDeployInfo(null); return; }
     try {
       const s = res.ok ? await res.json() : null;
       renderHealth(s, res.ok ? "bad-body" : res.status);
-      if (!s) { if (!deployShown) showDeployInfo(null); return; }
+      if (!s) { showStatusError(res.ok ? "bad-body" : res.status); if (!deployShown) showDeployInfo(null); return; }
       showDeployInfo(s);
       const box = document.getElementById("ports");
+      if (!s.ports.length) { box.replaceChildren(el("span", { className: "empty", textContent: "ORBIT reported no status entries." })); statusPills = false; showStatusError(null); return; }
+      statusPills = true;
+      showStatusError(null);
       box.replaceChildren(...s.ports.map((p) => {
         const el = document.createElement("span");
         el.className = `pill ${p.state}`;
@@ -781,7 +873,7 @@
         el.title = c && typeof c.state === "string" ? `${p.detail}\nStartup check: ${c.state}${c.superseded ? " (newer real result shown above)" : ""}${c.reason ? `: ${c.reason}` : ""}` : p.detail;
         return el;
       }));
-    } catch { renderHealth(null, "bad-body"); if (!deployShown) showDeployInfo(null); /* the next refresh tries again */ }
+    } catch { renderHealth(null, "bad-body"); showStatusError("bad-body"); if (!deployShown) showDeployInfo(null); /* the next refresh tries again */ }
   }
   // The deployment rows keep the last release ORBIT reported (like the pills) when a later read fails; before any read
   // succeeds they say the status could not be read.
@@ -936,6 +1028,10 @@
     button.querySelector(".label").textContent = a.label;
     button.title = `${a.detail} Show or hide the status line.`;
     button.setAttribute("aria-label", `Overall status: ${STATUS_WORDS[a.level]}. ${a.label}. ${a.detail}`);
+    // The side panel's Status tab carries the same level (dot and accessible name), and its view leads with the same words.
+    const tab = document.getElementById("sidetab-status"), sum = document.getElementById("statussum");
+    if (tab) { tab.className = `sidetab ${a.level}`; tab.setAttribute("aria-label", `Status, ${STATUS_WORDS[a.level]}`); }
+    if (sum) { sum.className = a.level; document.getElementById("statuslabel").textContent = a.label; document.getElementById("statusdetail").textContent = a.detail; }
   }
   // </status-dot>
 
@@ -1563,9 +1659,48 @@
     }
   });
 
-  document.getElementById("input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.target.form.requestSubmit(); }
-  });
+  // <composer-keys>
+  // What Return/Enter does in a message box (Sessions #input, Assistant #ainput). docs/design-system.md, "Composer keys".
+  // - Touch-first devices (a phone or tablet with no mouse or trackpad): Return inserts a new line, as in a notes app, and
+  //   only the Send button sends. A message is never sent by a key the on-screen keyboard labels "return".
+  // - Everything else (a mouse or trackpad is present: laptops, desktops, touch laptops, a tablet with a trackpad): Enter
+  //   sends and Shift+Enter inserts a new line, as before.
+  // - Everywhere: Ctrl+Enter or Cmd+Enter sends (so a tablet with a hardware keyboard but no trackpad still has a key), and
+  //   no key sends while an input method is composing (Japanese, Chinese, Korean, dictation...): the Enter that confirms a
+  //   composition only confirms it. Safari reports that Enter after compositionend with keyCode 229, so 229 counts too.
+  // Device heuristic: "touch-first" is the primary pointer being coarse with no fine pointer anywhere, from the
+  // (pointer) and (any-pointer) media queries, read at each key press so plugging in a mouse changes it at once. It is not
+  // the viewport width (a narrow desktop window still has a hardware keyboard) and cannot see a hardware keyboard: a phone
+  // or tablet with a Bluetooth keyboard and no trackpad is treated as touch-first (Return adds a line; Cmd/Ctrl+Enter or
+  // Send sends). Tests load this block.
+  function touchFirst(mq) {
+    try { return mq("(pointer: coarse)").matches && !mq("(any-pointer: fine)").matches; } catch { return false; }
+  }
+  // "send" or null (null: leave the key alone, so the browser inserts a new line or the input method takes it).
+  function enterAction(k, touch) {
+    if (k.key !== "Enter") return null;
+    if (k.isComposing || k.keyCode === 229) return null;
+    if (k.ctrlKey || k.metaKey) return "send";
+    if (k.shiftKey || touch) return null;
+    return "send";
+  }
+  // </composer-keys>
+  const matchQuery = (q) => window.matchMedia(q);
+  // Wires one message box: the keys above, plus the on-screen keyboard's Return label ("send" where Enter sends, "enter"
+  // where it adds a line), kept current when a pointer is added or removed.
+  function composerKeys(box, submit) {
+    let composing = false;
+    box.addEventListener("compositionstart", () => { composing = true; });
+    box.addEventListener("compositionend", () => { composing = false; });
+    box.addEventListener("keydown", (e) => {
+      const k = { key: e.key, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, keyCode: e.keyCode, isComposing: e.isComposing || composing };
+      if (enterAction(k, touchFirst(matchQuery)) === "send") { e.preventDefault(); submit(); }
+    });
+    const hint = () => box.setAttribute("enterkeyhint", touchFirst(matchQuery) ? "enter" : "send");
+    for (const q of ["(pointer: coarse)", "(any-pointer: fine)"]) { try { matchQuery(q).addEventListener("change", hint); } catch { /* old browser: set once */ } }
+    hint();
+  }
+  composerKeys(document.getElementById("input"), () => document.getElementById("form").requestSubmit());
   // The notifications panel. The list is ORBIT's `current` notifications (due, not yet shown, or shown by this kind of page),
   // replaced on every refresh, so a reload or another tab or device gets the same notes back from the server. Each note shows
   // its first line with "more" and "×"; at most 3 show unless "show all".
@@ -1600,15 +1735,83 @@
   const sessionStore = (() => { try { return window.sessionStorage; } catch { return null; } })();
   const panels = readPanels(sessionStore);
   const panelParts = { status: ["health", "statusline"], notes: ["notesbtn", "inbox"] };
+  // Laptops and desktops (1024px and wider, the same query as the CSS) show the two panels as one side panel with a tab for
+  // each (docs/design-system.md, "Side panel"); narrower screens keep them in the header, each toggled on its own, as before.
+  // The stored state is the same pair of flags either way. In the side panel one view shows at a time: a header toggle opens
+  // the panel on its view, switches to it if the panel shows the other one, and closes the panel if it already shows it.
+  // The panel is not modal: opening it never moves focus. Escape inside it, or its close button, closes it and puts focus
+  // back on the header toggle for the view that was showing.
+  const sideQuery = window.matchMedia("(min-width: 1024px)");
+  const side = document.getElementById("side");
+  const sideTabs = { notes: document.getElementById("sidetab-notes"), status: document.getElementById("sidetab-status") };
+  const sideNames = ["notes", "status"];
+  let sideView = panels.notes || !panels.status ? "notes" : "status";
+  const asSide = () => sideQuery.matches;
+  const sideOpen = () => asSide() && (panels.notes || panels.status);
+  const shownView = () => (panels[sideView] ? sideView : panels.notes ? "notes" : panels.status ? "status" : sideView);
+  // Where the side panel goes: from the header's bottom edge to the shell's bottom edge (the shell follows the visible area).
+  function placeSide() {
+    if (!sideOpen()) return;
+    const root = document.documentElement;
+    const head = document.querySelector("header").getBoundingClientRect(), shell = document.body.getBoundingClientRect();
+    root.style.setProperty("--side-top", `${Math.round(head.bottom)}px`);
+    root.style.setProperty("--side-bottom", `${Math.max(0, Math.round(window.innerHeight - shell.bottom))}px`);
+  }
   function showPanels() {
+    const desk = asSide(), open = sideOpen(), view = shownView();
     for (const [name, [buttonId, panelId]] of Object.entries(panelParts)) {
-      document.getElementById(buttonId).setAttribute("aria-expanded", String(panels[name]));
-      document.getElementById(panelId).hidden = !panels[name];
+      const on = desk ? open && view === name : panels[name];
+      document.getElementById(buttonId).setAttribute("aria-expanded", String(on));
+      const box = document.getElementById(panelId);
+      box.hidden = !on;
+      if (desk) { box.setAttribute("role", "tabpanel"); box.setAttribute("aria-labelledby", sideTabs[name].id); }
+      else { box.setAttribute("role", "region"); box.removeAttribute("aria-labelledby"); }
+      sideTabs[name].setAttribute("aria-selected", String(view === name));
+      sideTabs[name].tabIndex = view === name ? 0 : -1;
     }
+    document.getElementById("sidetitle").textContent = view === "notes" ? "Notifications" : "Status";
+    if (desk) { side.setAttribute("role", "region"); side.setAttribute("aria-labelledby", "sidetitle"); }
+    else { side.removeAttribute("role"); side.removeAttribute("aria-labelledby"); }
+    if (open) document.documentElement.setAttribute("data-side", "open"); else document.documentElement.removeAttribute("data-side");
+    placeSide();
+  }
+  function setPanels(next) {
+    panels.notes = next.notes; panels.status = next.status;
+    writePanels(sessionStore, panels); showPanels(); ackListedNotes();
+  }
+  function togglePanel(name) {
+    if (!asSide()) { if (!panels[name]) sideView = name; return setPanels({ ...panels, [name]: !panels[name] }); }
+    if (sideOpen() && shownView() === name) return setPanels({ notes: false, status: false });
+    sideView = name;
+    setPanels({ notes: name === "notes", status: name === "status" });
+  }
+  function closeSide(restoreFocus) {
+    const was = shownView();
+    setPanels({ notes: false, status: false });
+    if (restoreFocus) document.getElementById(panelParts[was][0]).focus();
   }
   for (const [name, [buttonId]] of Object.entries(panelParts)) {
-    document.getElementById(buttonId).addEventListener("click", () => { panels[name] = !panels[name]; writePanels(sessionStore, panels); showPanels(); ackListedNotes(); });
+    document.getElementById(buttonId).addEventListener("click", () => togglePanel(name));
   }
+  for (const name of sideNames) {
+    sideTabs[name].addEventListener("click", () => { sideView = name; setPanels({ notes: name === "notes", status: name === "status" }); });
+  }
+  // The tabs: arrow keys, Home and End move between them and show that view (the tab pattern's automatic activation).
+  document.querySelector("#side .sidetabs").addEventListener("keydown", (e) => {
+    const at = sideNames.indexOf(shownView());
+    const n = sideNames.length;
+    const to = e.key === "ArrowRight" ? (at + 1) % n : e.key === "ArrowLeft" ? (at + n - 1) % n : e.key === "Home" ? 0 : e.key === "End" ? n - 1 : -1;
+    if (to < 0) return;
+    e.preventDefault();
+    sideView = sideNames[to];
+    setPanels({ notes: sideView === "notes", status: sideView === "status" });
+    sideTabs[sideView].focus();
+  });
+  document.getElementById("sideclose").addEventListener("click", () => closeSide(true));
+  side.addEventListener("keydown", (e) => { if (e.key === "Escape" && sideOpen()) { e.preventDefault(); closeSide(true); } });
+  sideQuery.addEventListener("change", () => { showPanels(); ackListedNotes(); });
+  window.addEventListener("resize", placeSide);
+  if (window.ResizeObserver) new ResizeObserver(placeSide).observe(document.querySelector("header"));
   showPanels();
   document.addEventListener("visibilitychange", () => ackListedNotes());
   themeChoice();
@@ -1675,6 +1878,9 @@
     const label = view.label;
     notesButton.classList.toggle("has", view.has);
     document.getElementById("notecount").textContent = view.text;
+    sideTabs.notes.classList.toggle("has", view.has);
+    document.getElementById("sidenotecount").textContent = view.text;
+    sideTabs.notes.setAttribute("aria-label", `Notifications, ${label.replace(/^Notifications: /, "")}`);
     notesButton.setAttribute("aria-label", label);
     notesButton.title = `${label}. Show or hide the notifications.`;
   }
@@ -3351,9 +3557,7 @@
     asendButton.disabled = true;
     try { await asend(text, photos ? atray.ids() : []); } finally { aBar(); }
   });
-  ainput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); aform.requestSubmit(); }
-  });
+  composerKeys(ainput, () => aform.requestSubmit());
   // Refreshes every 10 seconds while the Assistant is showing and the page is visible (another device's messages, a reply in
   // progress, card states). Never two at once, and never while this page's own send is waiting.
   assistantPoller = makePoller(() => aload(true), () => tab === "assistant" && !asending && document.visibilityState === "visible", setInterval, 10000);

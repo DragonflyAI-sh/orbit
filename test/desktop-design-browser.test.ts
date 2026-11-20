@@ -108,8 +108,10 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
   });
 }
 
-test("browser 1280px: both header panels hang side by side under their toggles, as cards, without hiding the conversation", { skip }, async () => {
-  const { page, ctx } = await open(1280, 800, "/#assistant");
+// From 1024px the two panels are one side panel instead (test/side-panel-browser.test.ts); between 900 and 1023px they
+// still hang in the header as cards.
+test("browser 960px: both header panels hang under their toggles, as cards, without hiding the conversation", { skip }, async () => {
+  const { page, ctx } = await open(960, 800, "/#assistant");
   await page.click("#notesbtn");
   await page.click("#health");
   await page.waitForFunction(() => document.querySelectorAll("#inbox .note").length > 0);
@@ -118,8 +120,8 @@ test("browser 1280px: both header panels hang side by side under their toggles, 
     return { inbox: r("inbox"), status: r("statusline"), health: r("health"), bar: document.querySelector("header .bar")!.getBoundingClientRect(), log: r("alog"),
       radius: getComputedStyle(document.getElementById("inbox")!).borderTopLeftRadius, vw: document.documentElement.clientWidth };
   });
-  assert.ok(Math.abs(g.inbox.top - g.status.top) <= 1, "side by side");
-  assert.ok(g.inbox.right <= g.status.left, "notifications first, then status, as the toggles are ordered");
+  // At this width two 520px cards do not fit in one row, so they wrap (as on main); they never overlap.
+  assert.ok(g.inbox.right <= g.status.left || g.inbox.bottom <= g.status.top, "notifications first, then status, as the toggles are ordered, never overlapping");
   assert.ok(Math.abs(g.status.right - g.health.right) <= 1, `right-aligned with the status toggle (${g.status.right} vs ${g.health.right})`);
   assert.ok(g.inbox.width <= 521 && g.status.width <= 521, "a readable panel width, not the whole page");
   assert.ok(g.inbox.top - g.bar.bottom >= 0 && g.inbox.top - g.bar.bottom <= 12, "directly under the bar");

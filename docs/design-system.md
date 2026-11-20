@@ -86,8 +86,8 @@ All tokens are on `:root`. The theme (dark media query or `data-theme`) changes 
 
 - **Header (900px and wider):** one row under 56px. The brand, a divider, the page tabs, the session switcher
   (Sessions only, capped at 520px), then the Notifications toggle (with a visible label) and the status toggle, both
-  on the right. The open panels hang under the toggles as cards, right-aligned and at most 520px wide, side by side
-  when both are open. They stay in the header's flow and keep their current behaviour: they persist for the tab's
+  on the right. From 900 to 1023px the open panels hang under the toggles as cards, right-aligned and at most 520px
+  wide (from 1024px they are the side panel, below). They stay in the header's flow and keep their current behaviour: they persist for the tab's
   session, open independently and never close themselves.
 - **Header (phones):** as in #148. The tabs sit on their own row as a borderless segmented track, and the header stays
   under 100px.
@@ -118,6 +118,63 @@ All tokens are on `:root`. The theme (dark media query or `data-theme`) changes 
 - **Empty, loading and error states:**
   - Empty and loading ("No notifications.", "Reading notifications…"): muted text.
   - Errors (`role="alert"`): danger text on `--danger-soft` with a danger edge.
+
+## Desktop menu, side panel and composer keys (November 2026, second pass)
+
+Rai's feedback after #149: the phone menu is liked; on the laptop the menu items had an extra border that looked off;
+Notifications and Status felt awkward as cards inside the header; and on a phone Return sent the message.
+
+- **Desktop menu.** The extra border was two things: the shared button hover ring (a 2px ring) drawn around each session
+  row as the mouse passed over it, and a 1px accent border around the open session. Both read as a box nested inside
+  the menu card. From 900px the rows are plain aligned rows (same left edge and padding, 40px tall); a row tints on hover
+  (`--surface-hover`), and the open session has the info tint, bold text and a 3px accent bar at its leading edge. Pressing
+  no longer shrinks the row. The 2px keyboard focus ring stays, drawn just inside the row (`outline-offset: -2px`) so the
+  list's edge cannot clip it. The page tabs lose their outline and the current tab its inner border (it stays raised by
+  its card colour, shadow and gradient underline), which is the borderless track phones already had. Phones (below 900px)
+  are unchanged: same picker rows, same tabs.
+- **Side panel (1024px and wider).** Notifications and Status open in one panel on the right, under the header and down
+  to the bottom of the screen, 320 to 400px wide (`--side-w: clamp(320px, 30vw, 400px)`), on the card surface with a
+  left border.
+  - Head: a heading naming the view, a close button (×, "Close the panel"), and two tabs (Notifications with the count,
+    Status with the level dot). One view shows at a time. The head stays put; the view under it scrolls on its own.
+  - The header toggles open the panel on their view, switch it if the panel shows the other view, and close it if it
+    already shows theirs (`aria-expanded` is true only on the toggle of the shown view).
+  - Not modal: opening never moves focus, nothing outside closes it, focus is not trapped (Tab goes from the toggles into
+    the panel and on out of it). Escape inside the panel, or the close button, closes it and puts focus back on the toggle
+    of the view that was showing. The tabs follow the ARIA tab pattern: one tab stop, arrow keys, Home and End switch
+    and show the view; the views are `tabpanel`s labelled by their tab, and the panel is a region labelled by its heading.
+  - Nothing is covered: the conversation, its status line, the Jobs list and the composer move left by the panel's width
+    and recentre their reading column in the room left (the column paddings subtract `--side-w`). At 1024px the column
+    is about 650px; at 1280 and wider the full 860px.
+  - Status view: the overall status first (the same label and detail as the header indicator, with a coloured edge and
+    the level dot), the link to the raw status page beside it, then the port states as a list of rows, then the running
+    release. Notifications view: the same notes, `more`, `×` and `show all` as before, as tinted rows.
+  - The open state is the same pair of flags kept for the tab's session as before (`orbit.header-panels`); the panel
+    shows the last chosen view. Below 1024px (phones, tablets in portrait, a narrow laptop window, 200% zoom) the header
+    panels are exactly as before: in the header, independent, both open at once if wanted. Resizing across 1024px
+    switches presentation without losing the open state.
+  - Semantics unchanged: a receipt is sent only for notes listed in a shown Notifications view of a visible tab (never
+    from the Status view or a closed panel); closing never dismisses; the count is every undismissed note; nothing opens
+    the panel by itself.
+- **States.** Notifications keep "Reading notifications…", "No notifications." and the read-error alert. Status now has
+  them too, on every width: "Reading status…" until the first answer, "ORBIT reported no status entries." for an empty
+  list, and an alert when a read fails ("ORBIT's status could not be read (HTTP 500).", "ORBIT could not be reached for
+  its status.") that adds "Showing the last answer." when older pills are kept.
+- **Composer keys** (`<composer-keys>` in the script):
+  - Touch-first devices (the primary pointer is coarse and there is no fine pointer anywhere: phones, tablets without a
+    trackpad or mouse): Return inserts a new line, and only Send sends. The on-screen key is labelled return
+    (`enterkeyhint="enter"`).
+  - Every other device (a mouse or trackpad is present: laptops, desktops, touch laptops, tablets with a trackpad): Enter
+    sends, Shift+Enter inserts a new line, as before (`enterkeyhint="send"`).
+  - Everywhere: Ctrl+Enter or Cmd+Enter sends; no key sends while an input method is composing (`isComposing`, a
+    composition seen between `compositionstart` and `compositionend`, or Safari's keyCode 229 after `compositionend`).
+  - Why not the viewport width: a narrow desktop window still has a hardware keyboard, and a large tablet still has a
+    touch keyboard. The pointer media queries are read at each key press, so attaching a mouse changes the behaviour at
+    once. Limitation: no browser reports a hardware keyboard. A phone or tablet with a Bluetooth keyboard and no
+    trackpad is treated as touch-first, so Return adds a line there and Cmd/Ctrl+Enter or Send sends. A desktop with a
+    touch screen as its only pointer would also be treated as touch-first.
+  - Drafts, multi-line text, photos and streaming are untouched: only which key calls the form's submit changed, and the
+    submit handlers are the same.
 
 ## Evidence
 
@@ -155,6 +212,19 @@ Chromium (Playwright) with synthetic content only. `test/desktop-design-browser.
   page or conversation overflows sideways, code and table regions stay inside the conversation, the composer is on the
   bottom edge and the header is within its cap.
 
+- **Side panel and desktop menu** (`test/side-panel-browser.test.ts`): at 1024, 1280 and 1440 the panel opens on the
+  right under the header, covers no message and not Send, leaves the column centred in the room left, and leaves focus
+  on the toggle; toggles and tabs switch views and close; arrow keys, Home and End; Tab passes through and out; Escape
+  and × restore focus; the view scrolls alone while the head and the conversation stay; receipts only from the shown
+  Notifications view; status loading, error, kept-answer and empty states; an empty notifications state; below 1024 (390
+  phone, 900) the header panels are unchanged and independent; resizing 1280 → 800 → 1280 keeps the open view; session
+  rows have no hover ring or border box on desktop, keep a 2px inset focus ring and line up; desktop tabs have no inner
+  borders while the phone's current tab keeps its edge; Light and Dark panel surfaces and AA contrast for the new pairs.
+- **Composer keys** (`test/composer-keys.test.ts`): the heuristic and key table as pure functions; on an emulated phone
+  Return adds lines and sends nothing (both boxes) and Send sends the whole multi-line draft; Ctrl/Cmd+Enter sends; on a
+  desktop Enter sends and Shift+Enter adds a line; a real Chromium input-method composition (CDP `imeSetComposition`)
+  and Safari-style keyCode 229 events never send.
+
 The existing shell, composer, header-panel, picker, Jobs and message tests all still pass. Three of them were changed
 on purpose:
 
@@ -164,6 +234,11 @@ on purpose:
 - **The composer resize check** goes from narrow to wide, because the box no longer grows past the column.
 
 **Not verified:**
+
+- Composer keys on real devices: the phone results are Chromium's touch emulation (`isMobile`, `hasTouch`), which sends
+  a hardware-style Enter key, not a real iOS or Android keyboard. iOS Safari, Gboard and Samsung Keyboard, a real
+  Japanese or Chinese input method, an iPad with a Magic Keyboard, and a Bluetooth keyboard on a phone were not tried.
+- The side panel with a screen reader (VoiceOver, NVDA) was not tried; the roles and names are checked in the DOM only.
 
 - Visual judgement: "easy on the eyes" was judged from the screenshots. The contrast is measured, but comfort over a
   long session was not tested with people.
@@ -192,14 +267,29 @@ git show origin/main:src/web/index.html > /tmp/before.html
 SHELL_SCREENS_SET=design SHELL_SCREENS_SMALL=1 node test/helpers/shell-screens.ts docs/design-system /tmp/before.html
 ```
 
+Side panel, desktop menu and composer keys (before on main, after on the right), in `docs/side-panel/`:
+
+- `1280-side-notes.jpg`, `1280-dark-side-notes.jpg`: 14 notifications with long ones, all shown, one opened.
+- `1440-side-status.jpg`, `1280-dark-side-status.jpg` (Sessions, a reply streaming): the Status view.
+- `1024-side-notes.jpg`: the narrowest side panel.
+- `1280-session-menu.jpg`, `1280-dark-session-menu.jpg`: the session menu with the mouse over the second row.
+- `390-panels.jpg`, `390-dark-panels.jpg`: the phone header panels, unchanged.
+- `390-composer-return.jpg`: "First line", Return, "Second line", Return, "Third line" typed on a phone. Before, the
+  first Return sent "First line"; after, all three lines are in the box and nothing was sent.
+
+```
+SHELL_SCREENS_SET=panel SHELL_SCREENS_SMALL=1 node test/helpers/shell-screens.ts docs/side-panel /tmp/before.html
+```
+
 ## Manual acceptance checklist (laptop)
 
 1. **Header.** At 1280 to 1440px wide, the header is one row: logo, tabs, then (on Sessions) the session title, with
    Notifications and the status on the right. The current page is bold and underlined.
 2. **Reading column.** Assistant and Sessions read in a centred column, and the message box lines up with the messages.
    Long code and tables scroll inside their own box.
-3. **Panels.** Open Notifications and the status. They appear as two cards under their buttons, on the right, and the
-   conversation stays usable. Reload the page: they are still open. Open a new tab: they start closed.
+3. **Panels.** Open Notifications and the status. From 1024px they are one side panel on the right with a tab each
+   (item 10); between 900 and 1023px they are two cards under their buttons. The conversation stays usable. Reload the
+   page: they are still open. Open a new tab: they start closed.
 4. **Session menu.** On Sessions, click the title. The menu opens under it, fully on screen. Arrow keys move through
    it, and Escape closes it with focus back on the title. Archive is red. Rename and New session still work.
 5. **Confirmation card.** On a real proposal, Confirm is the strong button and Cancel the quiet one. Pressing one shows
@@ -212,6 +302,13 @@ SHELL_SCREENS_SET=design SHELL_SCREENS_SMALL=1 node test/helpers/shell-screens.t
 8. **Zoom.** At 200% browser zoom, nothing scrolls sideways and the menu still fits.
 9. **Phone.** The #148 checklist in web-shell.md still passes. The tabs are a segmented row, and Send stays visible
    with the keyboard open.
+10. **Side panel.** At 1280px, click Notifications: a panel opens on the right and the conversation moves left, nothing
+   covered. Click the status toggle: the same panel shows Status. Press Escape: it closes, focus on the toggle. Arrow
+   keys switch the tabs. Scroll a long list inside it: the conversation does not move. Make the window narrower than
+   1024px: the panels go back into the header.
+11. **Menu.** Open the session menu and move the mouse over the rows: a quiet tint, no ring or box.
+12. **Phone composer.** On a real iPhone and Android phone, type two lines with Return: nothing is sent until Send.
+   With a Japanese keyboard, confirm a conversion with Return: it only confirms. On a laptop, Enter still sends.
 
 ## Follow-ups (prioritized)
 
