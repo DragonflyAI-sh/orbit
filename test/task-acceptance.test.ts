@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import type { TaskVaultPort } from "../src/task-vault.ts";
 import { TASK_ASSISTANT_TOOL_NAMES } from "../src/task-supervisor.ts";
 import { taskFile, taskStore } from "../src/tasks.ts";
@@ -221,4 +222,70 @@ test("acceptance (simulated): two tasks, sessions, direct and Assistant steering
   assert.equal((await x.api(`/tasks/${a.id}/complete`, "POST", { rev: (await x.inspect(a.id)).rev })).status, 409);
   assert.ok(join(x.dir, "tasks.json"));
   void lastUser;
+});
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+let playwright: any;
+try {
+  playwright = createRequire(import.meta.url)("playwright");
+} catch {
+  /* skipped below */
+}
+const skipBrowser = playwright ? false : "Playwright is not installed here; the banner page check is skipped";
+let browser: any;
+after(async () => {
+  await browser?.close();
+});
+
+// The task banner's attention rows, dependency links and Acknowledge control (Repair 3), in light and dark, at desktop and phone width.
+// ORBIT_TEST_SCREENSHOTS=<dir> saves one screenshot per case for a person to look at.
+test("page: the task banner shows attention items with their source, the dependency link opens that task's session, and Acknowledge works, in light/dark at desktop and phone width", { skip: skipBrowser }, async () => {
+  browser ??= await playwright.chromium.launch();
+  const x = stack({ taskVault: { read: async () => undefined, append: async () => ({ commit: "f".repeat(40) }) } });
+  const a = (await x.assistantTool("task_create", { ...A, vaultNote: "Tasks/garden.md", vaultHeading: "## Status" })).result.task;
+  const b = (await x.assistantTool("task_create", B)).result.task;
+  await x.api(`/tasks/${b.id}/update`, "POST", { rev: b.rev, dependsOn: [a.id] });
+  // Attention on B: a waiting blocker (from its turn) and a failed vault sync (the note does not exist: nothing written).
+  x.d.ctl.taskSteps.push({ calls: [call("task_request", { kind: "blocker", text: "Which chart library?" }, "b1")], reply: "Asked." });
+  await x.api(`/tasks/${b.id}/turn`, "POST", { rev: (await x.inspect(b.id)).rev });
+  await x.settled(b.id);
+  await x.api(`/tasks/${b.id}/update`, "POST", { rev: (await x.inspect(b.id)).rev, vaultNote: "Tasks/dashboard.md", vaultHeading: "## Status" });
+  assert.equal((await x.api(`/tasks/${b.id}/sync`, "POST", { rev: (await x.inspect(b.id)).rev })).status, 502);
+  const base = await x.api("/status").then(() => `http://127.0.0.1:${(x.server.address() as { port: number }).port}`);
+  const shots = process.env.ORBIT_TEST_SCREENSHOTS;
+  for (const [name, viewport] of [["desktop", { width: 1200, height: 900 }], ["phone", { width: 390, height: 844 }]] as const)
+    for (const scheme of ["light", "dark"] as const) {
+      const page = await browser.newPage({ viewport, colorScheme: scheme });
+      try {
+        await page.goto(`${base}${b.session.link}`);
+        await page.waitForFunction(() => document.querySelector("#log .banner.task")?.textContent?.includes("Needs attention"));
+        const text = await page.evaluate(() => document.querySelector("#log .banner.task")!.textContent!);
+        assert.match(text, /Needs attention: 2 open/);
+        assert.match(text, /blocker · open .*req-1/);
+        assert.match(text, /vault-sync · open .*vault attempt 1/);
+        assert.match(text, /Needs: answer, decline or link it with task_respond/);
+        assert.match(text, /Depends on \(waiting\): Garden sensor CSV \(active\)/);
+        // The banner fits the width: no horizontal scroll at phone width.
+        assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), `${name}/${scheme}: no horizontal overflow`);
+        // Only the vault item offers Acknowledge (a request is answered, never acknowledged).
+        assert.equal(await page.locator("#log .banner.task .att button:has-text('Acknowledge')").count(), 1);
+        if (shots) await page.screenshot({ path: join(shots, `task-banner-${name}-${scheme}.png`), fullPage: false });
+      } finally {
+        await page.close();
+      }
+    }
+  // Acknowledge from the banner (owner route), then follow the dependency link to A's session within the page.
+  const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+  try {
+    await page.goto(`${base}${b.session.link}`);
+    await page.waitForFunction(() => document.querySelector("#log .banner.task .att button"));
+    await page.click("#log .banner.task .att button:has-text('Acknowledge')");
+    await page.waitForFunction(() => document.querySelector("#log .banner.task")?.textContent?.includes("Acknowledged by Rai (task-panel)"));
+    assert.equal(x.tasks.get(b.id)!.attention!.find((i) => i.kind === "vault-sync")!.state, "acknowledged");
+    await page.click("#log .banner.task .deps a");
+    await page.waitForFunction((p: string) => location.pathname === p, a.session.link);
+    await page.waitForFunction(() => document.querySelector("#log .banner.task")?.textContent?.includes("Task: Garden sensor CSV"));
+  } finally {
+    await page.close();
+  }
 });
