@@ -1,4 +1,5 @@
 import type { Item, Message, ModelPort } from "./model.ts";
+import { detectProtocolText, REPLAY_PLACEHOLDER } from "./tool-protocol.ts";
 import { hasContent, maskContent, maskText, ThreadError } from "./threads.ts";
 import { carryGaps, mechanicalDigest, renderPage, renderSections, requestSummary, rollPrompt, sourceDigest, summaryBlock } from "./rolling-summary.ts";
 import type { Gap, PageEntry } from "./rolling-summary.ts";
@@ -63,6 +64,12 @@ export const callOutcome = (c: Pick<StoredCall, "ok" | "interrupted" | "outcomeU
   return f ? `${callState(c)}: ${f}` : callState(c);
 };
 
+// What a stored assistant reply contributes to a later model request. A reply that is tool-call markup written as text (stored before
+// ORBIT rejected such responses, src/tool-protocol.ts) is replaced by a short placeholder, so it can neither teach the model to write
+// calls as text nor be mistaken for a call. Only assistant text is checked: a user's message is always sent exactly as typed, even when
+// it quotes such markup. The stored message is never changed.
+export const replayText = (m: Pick<ThreadMessage, "role" | "text">): string => (m.role === "assistant" && detectProtocolText(m.text) ? REPLAY_PLACEHOLDER : m.text);
+
 export function buildItems(t: Thread): Item[] {
   const items: Item[] = [];
   const used = new Set<string>();
@@ -84,7 +91,7 @@ export function buildItems(t: Thread): Item[] {
       items.push({ type: "function_call", call_id: id, name: c.name, arguments: c.arguments });
       items.push({ type: "function_call_output", call_id: id, output: c.output });
     }
-    if (m.text.trim() && m.status !== "error") items.push({ role: "assistant", content: m.text });
+    if (m.text.trim() && m.status !== "error") items.push({ role: "assistant", content: replayText(m) });
   }
   return items;
 }
@@ -94,7 +101,7 @@ export function buildMessages(t: Thread): Message[] {
   return t.messages
     .slice(coveredCount(t))
     .filter((m) => m.status !== "pending" && (m.text.trim() || m.attachments?.length) && m.status !== "error")
-    .map((m) => ({ role: m.role, content: m.text, ...(m.role === "user" && m.attachments?.length ? { images: m.attachments.map((a) => ({ id: a.id })) } : {}) }));
+    .map((m) => ({ role: m.role, content: replayText(m), ...(m.role === "user" && m.attachments?.length ? { images: m.attachments.map((a) => ({ id: a.id })) } : {}) }));
 }
 
 // The summary as a data block for the model's reference material (empty when the thread has none). A rolling summary (one with a
