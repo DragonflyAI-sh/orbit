@@ -62,12 +62,14 @@ export const VAULT_PATH_MAX = 200;
 // - assistant: the Assistant model, in an owner turn of the Assistant; `userMessage` is the message of Rai's that turn answered.
 //   Its text was written by the model (for example a steer relaying what Rai asked), so it is labeled as the Assistant's, not Rai's.
 // - task: the task's own model turn `turn`.
-// - orbit: ORBIT's own code (restart recovery, sync bookkeeping).
+// - orbit: ORBIT's own code (restart recovery, sync bookkeeping), and (via "follow-up") the follow-up scheduler starting one automatic
+//   turn for the follow-up due at `dueAt`, which Rai opted the task into (src/task-scheduler.ts).
 export type Provenance =
   | { actor: "human"; via: "task-panel" | "sessions-ui" | "api"; message?: string }
   | { actor: "assistant"; via: "assistant-tool"; userMessage?: string; replyMessage?: string }
   | { actor: "task"; via: "task-turn"; turn: number }
-  | { actor: "orbit"; via: "system" };
+  | { actor: "orbit"; via: "system" }
+  | { actor: "orbit"; via: "follow-up"; dueAt: string };
 
 export type Lifecycle = "active" | "paused" | "done" | "cancelled";
 export const TERMINAL: readonly Lifecycle[] = ["done", "cancelled"];
@@ -149,6 +151,39 @@ export type VaultLink = {
   };
 };
 
+// Automatic follow-up (docs/adr/0003-supervised-tasks.md, "Automatic follow-up"). Off unless Rai turned it on for this task (and the
+// operator switched the scheduler on for this ORBIT). When on, the follow-up scheduler starts at most ONE bounded supervised turn per
+// follow-up due time (`followUp.at`), through the normal turn path. The claim of a due time is written in the SAME store change as the
+// turn record (beginTurn), so a repeated tick or a restart can never start a second turn for it.
+export const AUTO_PER_DAY_DEFAULT = 2;
+export const AUTO_PER_DAY_LIMIT = 6;
+export const AUTO_GLOBAL_PER_DAY_DEFAULT = 10;
+export const AUTO_WINDOW_MS = 24 * 60 * 60 * 1000;
+// Pre-dispatch failures (the global turn cap, the task's thread or turn busy) are retried at most this many times per due time, after
+// these waits. Nothing else is retried automatically.
+export const AUTO_RETRY_BACKOFF_MS: readonly number[] = [60_000, 5 * 60_000, 15 * 60_000];
+export const AUTO_ATTEMPTS_MAX = AUTO_RETRY_BACKOFF_MS.length + 1;
+// What the scheduler did for one due time:
+// - retry-wait: a pre-dispatch failure (nothing was sent to a model); tried again at `nextTryAt`, `attempts` so far;
+// - gave-up: pre-dispatch failures reached AUTO_ATTEMPTS_MAX, or a failure that is not transient; no further automatic attempt for
+//   this due time (a new follow-up time, or a turn Rai or the Assistant starts, is the explicit retry);
+// - started: turn `turn` was started (claimed and recorded in one store change);
+// - ended: that turn ended (`outcome`: done or error, from the turn record);
+// - interrupted: ORBIT stopped while that turn ran; whether the model request was made is unknown, so it is NEVER re-run automatically.
+export type AutoSlotState = "retry-wait" | "gave-up" | "started" | "ended" | "interrupted";
+export type AutoSlot = { dueAt: string; state: AutoSlotState; at: string; attempts: number; nextTryAt?: string; turn?: number; outcome?: string; error?: string };
+export type AutoFollowUp = {
+  enabled: boolean;
+  changedAt: string;
+  // Who turned it on (always Rai) or off (Rai or the Assistant).
+  changedBy: Provenance;
+  // Automatic turns this task may start in any 24 hours (1..AUTO_PER_DAY_LIMIT).
+  perDay: number;
+  // When automatic turns of this task started (newest last; only as many as the limit needs are kept).
+  started: string[];
+  slot?: AutoSlot;
+};
+
 export type Task = {
   id: string;
   createdAt: string;
@@ -163,8 +198,10 @@ export type Task = {
   lifecycle: Lifecycle;
   lifecycleHistory: { at: string; from: Lifecycle; to: Lifecycle; by: Provenance; reason?: string }[];
   nextAction?: { text: string; at: string; by: Provenance };
-  // Follow-up intent only. Nothing wakes a task up in this slice (`autonomous: "disabled"`); the due time is shown to the supervisor.
+  // Follow-up intent: the due time is shown to the supervisor. `autonomous: "disabled"` is kept for file compatibility and means the
+  // follow-up record itself grants nothing; whether a due follow-up starts a turn is `auto` (below), which only Rai turns on.
   followUp?: { at: string; note?: string; setAt: string; by: Provenance; autonomous: "disabled" };
+  auto?: AutoFollowUp;
   // The task session: a chat thread created for this task.
   session: { thread: string };
   createdBy: Provenance;
@@ -174,6 +211,10 @@ export type Task = {
   turns: TurnRecord[];
   // Turn numbers are never reused, even when old turn records are dropped.
   turnSeq: number;
+  // The highest instruction version ever given out (Repair 2). Instruction versions are never reused, even when an admission that
+  // could not be stored is undone, so a turn's `instructionsSeen` and an idempotency record never point at a different text later.
+  // Absent in older records: the newest version on record is used.
+  instructionSeq?: number;
   vault?: VaultLink;
   // Owner request ids already handled (steer, run-turn), per operation, with the payload they came with and what they produced, so a
   // repeated POST returns the same result and changes nothing, and a reused id with another payload is refused.
@@ -362,6 +403,8 @@ function bind(r: TaskRequest, p: LinkableProposal, by: Provenance, accept: unkno
 }
 
 export const currentInstructionVersion = (t: Task) => t.instructions.at(-1)?.v ?? 0;
+// The version a new instruction gets: one above any version ever given out on this task (never reused; see `instructionSeq`).
+const nextInstructionVersion = (t: Task) => Math.max(t.instructionSeq ?? 0, currentInstructionVersion(t)) + 1;
 // Instructions the task's model has not been given yet: newer than what its latest turn saw.
 export function unseenInstructions(t: Task): Instruction[] {
   const seen = t.turns.at(-1)?.instructionsSeen ?? 0;
@@ -373,6 +416,40 @@ export function blockerOf(t: Task): { request: string; text: string } | undefine
   const b = [...t.requests].reverse().find((r) => r.kind === "blocker" && r.state === "pending");
   return b ? { request: b.id, text: b.text } : undefined;
 }
+
+// Where a task stands with automatic follow-up at `at`, and whether the scheduler may start its turn now. Pure: the scheduler, the views
+// and the store's own recheck inside beginTurn use the same rule. `global`: automatic turns started across all tasks in the last 24h.
+export type AutoState = "off" | "no-follow-up" | "not-due" | "inactive" | "turn-running" | "due" | "retry-wait" | "gave-up" | "started" | "ended" | "interrupted" | "budget-task" | "budget-global";
+export type AutoEligibility = { eligible: boolean; state: AutoState; dueAt?: string; nextAt?: string; usedToday: number; detail: string };
+export function autoEligibility(t: Task, at: Date, global: { used: number; max: number }): AutoEligibility {
+  const a = t.auto;
+  const ms = at.getTime();
+  const used = (a?.started ?? []).filter((x) => ms - Date.parse(x) < AUTO_WINDOW_MS).length;
+  const base = { usedToday: used };
+  if (!a?.enabled) return { ...base, eligible: false, state: "off", detail: "automatic follow-up is off for this task; a due follow-up is only shown to the supervisor" };
+  if (!t.followUp) return { ...base, eligible: false, state: "no-follow-up", detail: "on, but no follow-up time is set" };
+  const dueAt = t.followUp.at;
+  const s = a.slot?.dueAt === dueAt ? a.slot : undefined;
+  if (s?.state === "started") return { ...base, eligible: false, state: "started", dueAt, detail: `turn ${s.turn} was started for this follow-up` };
+  if (s?.state === "ended") return { ...base, eligible: false, state: "ended", dueAt, detail: `turn ${s.turn} ran for this follow-up (${s.outcome}); set a new follow-up time for another` };
+  if (s?.state === "interrupted") return { ...base, eligible: false, state: "interrupted", dueAt, detail: `turn ${s.turn} was interrupted by an ORBIT restart; whether it reached the model is unknown, so it is not re-run automatically. Start a turn or set a new follow-up time to retry` };
+  if (s?.state === "gave-up") return { ...base, eligible: false, state: "gave-up", dueAt, detail: `no turn started after ${s.attempts} attempt(s): ${s.error ?? "unknown"}. Start a turn or set a new follow-up time to retry` };
+  if (TERMINAL.includes(t.lifecycle) || t.lifecycle === "paused") return { ...base, eligible: false, state: "inactive", dueAt, detail: `the task is ${t.lifecycle}; nothing starts` };
+  if (Date.parse(dueAt) > ms) return { ...base, eligible: false, state: "not-due", dueAt, nextAt: dueAt, detail: `next automatic turn at ${dueAt}` };
+  if (s?.state === "retry-wait" && s.nextTryAt && Date.parse(s.nextTryAt) > ms) return { ...base, eligible: false, state: "retry-wait", dueAt, nextAt: s.nextTryAt, detail: `attempt ${s.attempts} did not start (${s.error ?? "unknown"}); next attempt at ${s.nextTryAt}` };
+  if (runningTurn(t)) return { ...base, eligible: false, state: "turn-running", dueAt, detail: "a turn of this task is running; the follow-up waits for it" };
+  if (used >= a.perDay) {
+    const oldest = (a.started ?? []).filter((x) => ms - Date.parse(x) < AUTO_WINDOW_MS).sort()[0]!;
+    return { ...base, eligible: false, state: "budget-task", dueAt, nextAt: new Date(Date.parse(oldest) + AUTO_WINDOW_MS).toISOString(), detail: `this task's budget of ${a.perDay} automatic turn(s) per 24 hours is used` };
+  }
+  if (global.used >= global.max) return { ...base, eligible: false, state: "budget-global", dueAt, detail: `ORBIT's budget of ${global.max} automatic turn(s) per 24 hours across tasks is used` };
+  return { ...base, eligible: true, state: "due", dueAt, detail: `due since ${dueAt}; the next scheduler tick starts one turn` };
+}
+const autoStartedSince = (tasks: Task[], at: Date) => tasks.reduce((n, t) => n + (t.auto?.started ?? []).filter((x) => at.getTime() - Date.parse(x) < AUTO_WINDOW_MS).length, 0);
+
+// Thrown when the store's own recheck (inside the turn's store change) finds an automatic follow-up no longer eligible: the scheduler
+// skips it and records nothing.
+export class AutoNotEligible extends TaskError {}
 
 // ---- the store --------------------------------------------------------------------------------------------------------
 
@@ -397,8 +474,18 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       problem = "the task file has an unknown shape; it is left as it is";
       throw new TaskError(503, `Tasks are unavailable: ${problem}.`);
     }
-    if (raw.v > TASK_FILE_VERSION || !TASK_FILE_VERSIONS_READ.includes(raw.v)) {
+    // Three different refusals (Repair 2), each leaving the file as it is: a version that is not a positive whole number is malformed
+    // (not "newer"); a higher one is a newer schema; a lower one this build does not read is unsupported.
+    if (!Number.isSafeInteger(raw.v) || raw.v < 1) {
+      problem = `the task file's schema version (${JSON.stringify(raw.v).slice(0, 20)}) is not a valid version number, so the file is malformed or damaged; it is left as it is`;
+      throw new TaskError(503, `Tasks are unavailable: ${problem}.`);
+    }
+    if (raw.v > TASK_FILE_VERSION) {
       problem = `the task file has schema version ${raw.v}, newer than this build understands (${TASK_FILE_VERSION}); it is left as it is`;
+      throw new TaskError(503, `Tasks are unavailable: ${problem}.`);
+    }
+    if (!TASK_FILE_VERSIONS_READ.includes(raw.v)) {
+      problem = `the task file has schema version ${raw.v}, which this build does not read (it reads ${TASK_FILE_VERSIONS_READ.join(", ")}); it is left as it is`;
       throw new TaskError(503, `Tasks are unavailable: ${problem}.`);
     }
     problem = undefined;
@@ -453,13 +540,16 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     if (!key) return;
     t.idem = [...(t.idem ?? []), { op, key, digest, at: now().toISOString(), ...result }].slice(-TASK_IDEMPOTENCY_KEPT);
   };
-    // The turn an earlier identical owner request started, or undefined when this request is new. 409 for a reused id with another rev.
+  // The turn an earlier identical owner request started, or undefined when this request is new. 409 for a reused id with another rev.
+  // Repair 2: when that turn's record is no longer kept (only the newest TASK_TURNS_KEPT are), its outcome is not known here, so the
+  // repeat is refused (409, `expired`) with the turn number; nothing is started and no state is made up for it.
   function priorTurn(id: string, expectRev: number | undefined, key?: string): { task: Task; turn: TurnRecord } | undefined {
     const existing = get(id);
     if (!existing) return undefined;
     const again = prior(existing, "turn", key, digestOf({ rev: expectRev ?? null }));
     if (!again || again.turn === undefined) return undefined;
-    const turn = existing.turns.find((x) => x.n === again.turn) ?? ({ n: again.turn, startedAt: again.at, state: "done", trigger: { actor: "human", via: "api" }, instructionsSeen: 0, model: "unknown", error: "this turn's record is no longer kept (only the newest 50 are)" } satisfies TurnRecord);
+    const turn = existing.turns.find((x) => x.n === again.turn);
+    if (!turn) throw new TaskError(409, `This requestId already started turn ${again.turn} of this task (at ${again.at}), whose record is no longer kept (only the newest ${TASK_TURNS_KEPT} are), so its outcome is unknown here (expired). Nothing was started; use a new requestId to start another turn.`);
     return { task: structuredClone(existing), turn: structuredClone(turn) };
   }
   // Every link (current or previous) to a proposal id across all tasks: a proposal answers at most one request, ever.
@@ -484,7 +574,13 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     const ids = new Set(hit.map((t) => t.id));
     commit({
       ...f,
-      tasks: f.tasks.map((x) => (validTask(x) && ids.has(x.id) ? { ...x, rev: x.rev + 1, updatedAt: at, turns: x.turns.map((r) => (r.state === "running" ? { ...r, state: "interrupted" as const, endedAt: at, error: "ORBIT stopped while this turn was running. It was not re-run." } : r)) } : x)),
+      tasks: f.tasks.map((x) => {
+        if (!validTask(x) || !ids.has(x.id)) return x;
+        const cut = new Set(x.turns.filter((r) => r.state === "running").map((r) => r.n));
+        // An automatic follow-up whose turn was cut off: interrupted, never re-run (the model may or may not have been called).
+        const slot = x.auto?.slot && x.auto.slot.state === "started" && x.auto.slot.turn !== undefined && cut.has(x.auto.slot.turn) ? { ...x.auto.slot, state: "interrupted" as const, at, error: "ORBIT stopped while this turn was running" } : undefined;
+        return { ...x, rev: x.rev + 1, updatedAt: at, turns: x.turns.map((r) => (r.state === "running" ? { ...r, state: "interrupted" as const, endedAt: at, error: "ORBIT stopped while this turn was running. It was not re-run." } : r)), ...(slot ? { auto: { ...x.auto!, slot } } : {}) };
+      }),
     });
     return [...ids];
   }
@@ -568,8 +664,9 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       }
       const { task, result } = change(id, { expectRev }, (t) => {
         if (t.instructions.length >= TASK_INSTRUCTIONS_MAX) throw new TaskError(409, `This task already has ${TASK_INSTRUCTIONS_MAX} instruction versions.`);
-        const inst: Instruction = { v: currentInstructionVersion(t) + 1, at: now().toISOString(), text: clean, by };
+        const inst: Instruction = { v: nextInstructionVersion(t), at: now().toISOString(), text: clean, by };
         t.instructions.push(inst);
+        t.instructionSeq = inst.v;
         remember(t, "steer", key, digest, { instruction: inst.v });
         return inst;
       });
@@ -596,8 +693,9 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         let instruction: Instruction | undefined;
         if (clean) {
           if (t.instructions.length >= TASK_INSTRUCTIONS_MAX) throw new TaskError(409, `This task already has ${TASK_INSTRUCTIONS_MAX} instruction versions. Nothing was sent or recorded.`);
-          instruction = { v: currentInstructionVersion(t) + 1, at: now().toISOString(), text: clean, by };
+          instruction = { v: nextInstructionVersion(t), at: now().toISOString(), text: clean, by };
           t.instructions.push(instruction);
+          t.instructionSeq = instruction.v;
         }
         let turn: TurnRecord | undefined;
         if (expect === "active") {
@@ -610,12 +708,23 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       return { task, ...(result.instruction ? { instruction: structuredClone(result.instruction) } : {}), ...(result.turn ? { turn: structuredClone(result.turn) } : {}) };
     },
     // Undoes an admission whose message could not be stored in the thread: the instruction it added is removed (it was never sent) and
-    // its turn record ends as an error. Only the admission's own records are touched.
-    revertAdmission(id: string, a: { instruction?: number; turn?: number }, reason: string): Task {
+    // its turn record ends as an error. Only the admission's own records are touched (Repair 2):
+    // - the instruction is found by its identity (version, time and author, as admitHuman returned them), wherever it is: a steer the
+    //   Assistant or the task panel recorded after it (while the turn code was still preparing) stays, with its own version;
+    // - versions are never reused (`instructionSeq` keeps the removed one), so the next instruction does not take the removed number;
+    // - the turn never ran, so it is recorded as having seen only what the turn before it saw (nothing is marked seen that was not sent).
+    revertAdmission(id: string, a: { instruction?: number; instructionAt?: string; turn?: number }, reason: string): Task {
       return change(id, { allowTerminal: true }, (t) => {
-        if (a.instruction !== undefined && t.instructions.at(-1)?.v === a.instruction) t.instructions.pop();
-        const turn = a.turn === undefined ? undefined : t.turns.find((x) => x.n === a.turn);
-        if (turn && turn.state === "running") Object.assign(turn, { state: "error", endedAt: now().toISOString(), error: `Not run: ${reason}`.slice(0, 500) });
+        if (a.instruction !== undefined) {
+          const i = t.instructions.findIndex((x) => x.v === a.instruction && x.by.actor === "human" && x.by.via === "sessions-ui" && (a.instructionAt === undefined || x.at === a.instructionAt));
+          if (i >= 0) {
+            t.instructionSeq = Math.max(t.instructionSeq ?? 0, currentInstructionVersion(t), a.instruction);
+            t.instructions.splice(i, 1);
+          }
+        }
+        const k = a.turn === undefined ? -1 : t.turns.findIndex((x) => x.n === a.turn);
+        const turn = k >= 0 ? t.turns[k] : undefined;
+        if (turn && turn.state === "running") Object.assign(turn, { state: "error", endedAt: now().toISOString(), error: `Not run: ${reason}`.slice(0, 500), instructionsSeen: k > 0 ? t.turns[k - 1]!.instructionsSeen : 0 });
       }).task;
     },
 
@@ -678,26 +787,76 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
 
     // Starts a turn record. Refused unless the task is active and no turn of it is running: a task's turns are serialized.
     // A repeat of the same owner request (same `key` and rev) returns the turn it started (by number), and starts nothing.
-    beginTurn(id: string, expectRev: number | undefined, trigger: Provenance, model: string, key?: string): { task: Task; turn: TurnRecord; duplicate: boolean } {
+    // `auto`: the follow-up scheduler starting the automatic turn for the follow-up due at `dueAt`. Eligibility is checked again here,
+    // inside the same store change that records the turn and claims the due time, so the claim and the start are one durable fact:
+    // a second tick, a restart or a racing start finds the due time claimed (or a turn running) and starts nothing.
+    beginTurn(id: string, expectRev: number | undefined, trigger: Provenance, model: string, key?: string, auto?: { dueAt: string; globalMax: number }): { task: Task; turn: TurnRecord; duplicate: boolean } {
       const again = priorTurn(id, expectRev, key);
       if (again) return { ...again, duplicate: true };
       const digest = digestOf({ rev: expectRev ?? null });
       const { task, result } = change(id, { expectRev }, (t) => {
+        if (auto) {
+          const at = now();
+          const e = autoEligibility(t, at, { used: autoStartedSince(all(), at), max: auto.globalMax });
+          if (!e.eligible || e.dueAt !== auto.dueAt) throw new AutoNotEligible(409, `Automatic follow-up not started: ${e.detail}.`);
+        }
         if (t.lifecycle !== "active") throw new TaskError(409, `This task is ${t.lifecycle}: no turn is started.`);
         if (runningTurn(t)) throw new TaskError(409, "A turn of this task is already running. Turns of one task run one at a time.");
         t.turnSeq = (t.turnSeq ?? t.turns.length) + 1;
         const turn: TurnRecord = { n: t.turnSeq, startedAt: now().toISOString(), state: "running", trigger, instructionsSeen: currentInstructionVersion(t), model };
         t.turns = [...t.turns, turn].slice(-TASK_TURNS_KEPT);
         remember(t, "turn", key, digest, { turn: turn.n });
+        if (auto && t.auto) {
+          const prev = t.auto.slot?.dueAt === auto.dueAt ? t.auto.slot.attempts : 0;
+          t.auto.slot = { dueAt: auto.dueAt, state: "started", at: turn.startedAt, attempts: prev + 1, turn: turn.n };
+          t.auto.started = [...t.auto.started, turn.startedAt].slice(-AUTO_PER_DAY_LIMIT);
+        }
         return turn;
       });
       return { task, turn: result, duplicate: false };
     },
+    // The scheduler's record of an automatic attempt that did not start a turn (nothing was sent to a model). `transient`: the global
+    // turn cap or a busy turn/thread, retried after a backoff up to AUTO_ATTEMPTS_MAX attempts; anything else gives up at once. ORBIT's
+    // own bookkeeping: it does not bump rev, so it never makes Rai's or the Assistant's view stale.
+    recordAutoAttempt(id: string, dueAt: string, failure: { transient: boolean; error: string }): Task {
+      return change(id, { bump: false, allowTerminal: true }, (t) => {
+        if (!t.auto) return;
+        const cur = t.auto.slot?.dueAt === dueAt ? t.auto.slot : undefined;
+        if (cur && cur.state !== "retry-wait") return;
+        const attempts = (cur?.attempts ?? 0) + 1;
+        const at = now();
+        const error = cleanText(failure.error, 300);
+        t.auto.slot =
+          failure.transient && attempts < AUTO_ATTEMPTS_MAX
+            ? { dueAt, state: "retry-wait", at: at.toISOString(), attempts, nextTryAt: new Date(at.getTime() + AUTO_RETRY_BACKOFF_MS[attempts - 1]!).toISOString(), error }
+            : { dueAt, state: "gave-up", at: at.toISOString(), attempts, error: failure.transient ? `${error} (gave up after ${attempts} attempts)` : error };
+      }).task;
+    },
+    // Turning automatic follow-up on is Rai's alone (an owner route, never a model: not the Assistant, not the task). Turning it off is
+    // allowed to Rai and to the Assistant. Neither changes the follow-up time; turning it on again keeps the history and the budget.
+    setAuto(id: string, expectRev: number, enabled: boolean, by: Provenance, perDay?: unknown): Task {
+      if (enabled && (by.actor !== "human" || by.via === "sessions-ui")) throw new TaskError(403, "Only Rai can turn on automatic follow-up, from the task controls. Nothing was changed.");
+      if (!enabled && by.actor !== "human" && by.actor !== "assistant") throw new TaskError(403, "Automatic follow-up can be turned off only by Rai or the Assistant.");
+      let n = AUTO_PER_DAY_DEFAULT;
+      if (perDay !== undefined && perDay !== null) {
+        if (typeof perDay !== "number" || !Number.isSafeInteger(perDay) || perDay < 1 || perDay > AUTO_PER_DAY_LIMIT) throw new TaskError(400, `perDay must be a whole number from 1 to ${AUTO_PER_DAY_LIMIT}.`);
+        n = perDay;
+      }
+      return change(id, { expectRev }, (t) => {
+        const at = now().toISOString();
+        if (!enabled && !t.auto?.enabled) throw new TaskError(409, "Automatic follow-up is already off for this task.");
+        t.auto = { enabled, changedAt: at, changedBy: by, perDay: enabled ? n : (t.auto?.perDay ?? n), started: t.auto?.started ?? [], ...(t.auto?.slot ? { slot: t.auto.slot } : {}) };
+      }).task;
+    },
+    autoGlobalUsed: (at: Date) => autoStartedSince(all(), at),
     endTurn(id: string, n: number, outcome: { state: "done" | "error"; message?: string; reply?: string; error?: string; toolCalls?: number }): Task {
       return change(id, { allowTerminal: true }, (t) => {
         const turn = t.turns.find((x) => x.n === n);
         if (!turn || turn.state !== "running") return;
         Object.assign(turn, { state: outcome.state, endedAt: now().toISOString(), ...(outcome.message ? { message: outcome.message } : {}), ...(outcome.reply ? { reply: outcome.reply } : {}), ...(outcome.error ? { error: outcome.error.slice(0, 500) } : {}), ...(outcome.toolCalls !== undefined ? { toolCalls: outcome.toolCalls } : {}) });
+        // The automatic follow-up's outcome is the turn's, recorded in the same change.
+        const slot = t.auto?.slot;
+        if (slot && slot.state === "started" && slot.turn === n) Object.assign(slot, { state: "ended", at: turn.endedAt, outcome: outcome.state, ...(outcome.error ? { error: outcome.error.slice(0, 300) } : {}) });
       }).task;
     },
 

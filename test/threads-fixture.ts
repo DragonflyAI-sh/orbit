@@ -130,7 +130,7 @@ export function rig(opts: { dir?: string; model?: ModelPort; admin?: boolean; no
   };
   const send = async (id: string, text: string) => api(`/threads/${id}/messages`, "POST", { text });
   const create = async (title?: string) => (await api("/threads", "POST", title ? { title } : {})).data.thread;
-  const handle = { dir, api, send, create, caller, jobs, notify, threads, proposals, fired, helper, model, admin, server, close: () => (server.close(), server.closeAllConnections()), recentStore };
+  const handle = { dir, vaultRoot: vault, api, send, create, caller, jobs, notify, threads, proposals, fired, helper, model, admin, server, close: () => (server.close(), server.closeAllConnections()), recentStore };
   open.add(handle);
   return handle;
 }

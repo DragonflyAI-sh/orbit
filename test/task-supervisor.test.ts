@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { after, test } from "node:test";
 import { createRequire } from "node:module";
 import type { Item, ModelPort, Step } from "../src/model.ts";
 import { taskFile, taskStore } from "../src/tasks.ts";
+import type { TaskScheduler } from "../src/task-scheduler.ts";
+import { vaultMemory } from "../src/memory.ts";
 import type { Tasks } from "../src/tasks.ts";
 import { TASK_ASSISTANT_TOOL_NAMES, TASK_TURN_MAX_ROUNDS, TASK_TURN_TOOL_NAMES } from "../src/task-supervisor.ts";
 import { call, rig, say } from "./threads-fixture.ts";
@@ -67,12 +69,14 @@ function driver() {
   return { model, seen, outputs, ctl };
 }
 
-function stack(o: { dir?: string; turnsMax?: number; vault?: Record<string, string>; taskVault?: TaskVaultPort } = {}) {
+function stack(o: { dir?: string; turnsMax?: number; vault?: Record<string, string>; taskVault?: TaskVaultPort; followUps?: boolean } = {}) {
   const dir = o.dir ?? mkdtempSync(join(tmpdir(), "orbit-tasks-srv-"));
   const d = driver();
   const tasks: Tasks = taskStore(taskFile(dir));
   const attachments = attachmentStore(join(dir, "attachments"));
-  const x = rig({ dir, model: d.model, ...(o.vault ? { vault: o.vault } : {}), extra: () => ({ assistantDir: join(dir, "assistant"), tasks, attachments, ...(o.taskVault ? { taskVault: o.taskVault } : {}), ...(o.turnsMax ? { taskTurnsMax: o.turnsMax } : {}) }) });
+  // The follow-up scheduler, when switched on: never on a timer here (tickMs 0); the test ticks it.
+  const sched = { current: undefined as TaskScheduler | undefined };
+  const x = rig({ dir, model: d.model, ...(o.vault ? { vault: o.vault } : {}), extra: () => ({ assistantDir: join(dir, "assistant"), tasks, attachments, ...(o.taskVault ? { taskVault: o.taskVault } : {}), ...(o.turnsMax ? { taskTurnsMax: o.turnsMax } : {}), ...(o.followUps ? { taskFollowUps: { enabled: true, tickMs: 0, onScheduler: (s: TaskScheduler) => (sched.current = s) } } : {}) }) });
   const assistantTool = async (name: string, args: unknown) => {
     const before = d.outputs.length;
     const r = await x.api("/assistant/messages", "POST", { text: `tool: ${name} ${JSON.stringify(args)}` });
@@ -99,7 +103,7 @@ function stack(o: { dir?: string; turnsMax?: number; vault?: Record<string, stri
   };
   // The outputs of the task turn tools called in the last task turn, by name.
   const outputsOf = (name: string) => d.outputs.filter((p) => p.name === name).map((p) => p.out);
-  return { ...x, dir, d, tasks, assistantTool, inspect, settled, upload, outputsOf };
+  return { ...x, dir, d, tasks, assistantTool, inspect, settled, upload, outputsOf, sched };
 }
 
 const CREATE = { title: "Garden sensor CSV", goal: "A weekly CSV of synthetic garden sensor readings is produced by a tested exporter.", acceptance: ["The exporter writes one row per sensor per day", "Its tests pass in CI"], project: "example/garden" };
@@ -494,6 +498,14 @@ test("page: a task's session shows the task banner with Rai's controls, and the 
     assert.match(banner, /Last turn 1: done/);
     const names = await page.evaluate(() => [...document.querySelectorAll("#log .msg .mname")].map((n) => n.textContent));
     assert.deepEqual(names.slice(0, 2), ["ORBIT task supervisor", "ORBIT"]);
+    // Rai's automatic follow-up control (Repair 2): off by default; the banner's button turns it on through the owner route, and the
+    // banner then says it is on and that this ORBIT's scheduler is switched off (this server was built without it).
+    assert.ok(await page.$("#log .banner.task button:has-text('Allow automatic follow-up')"));
+    await page.click("#log .banner.task button:has-text('Allow automatic follow-up')");
+    await page.waitForFunction(() => document.querySelector("#log .banner.task")?.textContent?.includes("Automatic follow-up on"));
+    assert.match(await page.evaluate(() => document.querySelector("#log .banner.task")!.textContent!), /scheduler is switched off on this ORBIT/);
+    assert.deepEqual(x.tasks.get(t.id)!.auto!.changedBy, { actor: "human", via: "task-panel" });
+    assert.ok(await page.$("#log .banner.task button:has-text('Stop automatic follow-up')"));
     // Pause from the banner: the server records it (with the rev shown), and the banner offers Resume.
     await page.click("#log .banner.task button:has-text('Pause')");
     await page.waitForFunction(() => document.querySelector("#log .banner.task")?.textContent?.includes("paused"));
@@ -519,12 +531,18 @@ test("finding 1, context boundary: a task turn never gets the rolling recent-con
   const x = stack({ vault: BOUNDARY_VAULT });
   const t = (await x.assistantTool("task_create", CREATE)).result.task;
   const thread = t.session.link.slice("/sessions/".length);
+  // Repair 2: the spellings the memory port itself resolves to the note although they do not look like it: the absolute path under the
+  // vault root (with and without extra separators), and climbing out of the root and back in through its own directory name.
+  const absolute = join(x.vaultRoot, "Memory/recent-context.md");
+  const spellings = [...ROLLING_SPELLINGS, absolute, `${x.vaultRoot}//Memory/./recent-context.md`, `../${basename(x.vaultRoot)}/Memory/recent-context.md`];
+  assert.match(JSON.stringify(vaultMemory(x.vaultRoot).read(absolute)), /WALNUTLEDGER/, "the ordinary port does resolve the absolute spelling (the route Repair 2 closes)");
   // A supervised turn that searches for the note and tries to read it under every spelling, then reads the project note.
   x.d.ctl.taskSteps.push({
     calls: [
       call("memory_search", { query: "garden sensor CSV exporter WALNUTLEDGER recent context" }, "m0"),
-      ...ROLLING_SPELLINGS.map((p, i) => call("memory_read", { path: p }, `m${i + 1}`)),
+      ...spellings.map((p, i) => call("memory_read", { path: p }, `m${i + 1}`)),
       call("memory_read_page", { path: "Memory/../Memory/recent-context.md" }, "mp"),
+      call("memory_read_page", { path: absolute }, "mpa"),
       call("memory_read", { path: "Projects/garden-sensors.md" }, "mg"),
     ],
     reply: "Read the project note.",
@@ -542,20 +560,24 @@ test("finding 1, context boundary: a task turn never gets the rolling recent-con
   assert.ok(!/recent-context|WALNUTLEDGER/i.test(JSON.stringify(search)), JSON.stringify(search));
   // (Outputs of one round are collected newest first, so they are matched by content, not by order.)
   const reads = x.outputsOf("memory_read");
-  assert.equal(reads.length, ROLLING_SPELLINGS.length + 1);
+  assert.equal(reads.length, spellings.length + 1);
   const refusedReads = reads.filter((r) => r.ok === false);
-  assert.equal(refusedReads.length, ROLLING_SPELLINGS.length, JSON.stringify(reads));
-  // Every spelling resolves to the note and is refused by the task policy, never by accident of the file system.
+  assert.equal(refusedReads.length, spellings.length, JSON.stringify(reads));
+  // Every spelling is refused by the task policy (as the excluded note, or as a spelling a task turn does not accept), never by accident
+  // of the file system, and none returns the note's text.
   for (const r of refusedReads) {
-    assert.match(JSON.stringify(r), /not available in a task session/);
-    assert.doesNotMatch(JSON.stringify(r), /WALNUTLEDGER/);
+    assert.match(JSON.stringify(r), /not available in a task session|refused in a task session/);
+    assert.doesNotMatch(JSON.stringify(r), /WALNUTLEDGER|no such note|outside the vault/);
   }
   const project = reads.find((r) => r.ok === true);
   assert.match(JSON.stringify(project), /garden sensor CSV exporter project/);
-  const page = x.outputsOf("memory_read_page").at(-1)!;
-  assert.equal(page.ok, false);
-  assert.match(JSON.stringify(page), /denied/);
-  assert.doesNotMatch(JSON.stringify(page), /WALNUTLEDGER/);
+  const pages = x.outputsOf("memory_read_page");
+  assert.equal(pages.length, 2);
+  for (const page of pages) {
+    assert.equal(page.ok, false);
+    assert.match(JSON.stringify(page), /denied/);
+    assert.doesNotMatch(JSON.stringify(page), /WALNUTLEDGER/);
+  }
 
   // Rai writing in the task session (an interactive task turn): the same policy.
   const steer = await x.send(thread, "Check the garden sensor CSV exporter recent context notes.");
@@ -802,4 +824,68 @@ test("finding 7, idempotency: the same requestId for a steer and a turn are sepa
   assert.match(conflictTurn.data.error, /different turn/);
   assert.equal((await x.inspect(t.id)).rev, rev);
   assert.equal(x.tasks.get(t.id)!.instructions.length, 2);
+});
+
+// ---- automatic follow-up, end to end (docs/adr/0003-supervised-tasks.md, "Automatic follow-up") ---------------------------------
+
+test("automatic follow-up end to end: Rai opts in; a due follow-up starts one bounded turn; its job request reaches the Assistant as a durable request; the launch still needs Rai's Confirm", async () => {
+  const x = stack({ followUps: true });
+  // The Assistant creates the task with a follow-up time that is due now, and cannot turn automatic follow-up on.
+  const t = (await x.assistantTool("task_create", { ...CREATE, followUpAt: new Date().toISOString() })).result.task;
+  assert.equal(t.automaticFollowUp.optedIn, false);
+  assert.equal(t.automaticFollowUp.state, "off");
+  const self = await x.assistantTool("task_update", { id: t.id, rev: t.rev, autoFollowUp: "on" });
+  assert.equal(self.ok, false);
+  assert.match(JSON.stringify(self), /Only Rai can turn on automatic follow-up|must be equal to one of/);
+  // Off by default: a tick starts nothing.
+  assert.deepEqual((await x.sched.current!.tick()).started, []);
+  // Rai's control (owner route). A non-owner cannot.
+  x.caller.who = undefined;
+  assert.equal((await x.api(`/tasks/${t.id}/follow-up`, "POST", { rev: t.rev, enabled: true })).status, 403);
+  x.caller.who = "rai@example.com";
+  const on = await x.api(`/tasks/${t.id}/follow-up`, "POST", { rev: t.rev, enabled: true, perDay: 1 });
+  assert.equal(on.status, 200, JSON.stringify(on.data));
+  assert.equal(on.data.task.automaticFollowUp.optedIn, true);
+  assert.equal(on.data.task.automaticFollowUp.state, "due");
+  // The scheduled turn: a supervised turn like any other (read-only tools plus its own, bounded rounds, no fallback), and it files a job.
+  x.d.ctl.taskSteps.push({ calls: [call("task_request", { kind: "job", text: "Run the exporter build", brief: BRIEF, routine: "orbit" }, "fu1"), call("task_set_next_action", { text: "Wait for the build." }, "fu2")], reply: "Asked for the build." });
+  const rep = await x.sched.current!.tick();
+  assert.equal(rep.started.length, 1, JSON.stringify(rep));
+  const after = await x.settled(t.id);
+  assert.equal(after.lastTurn.state, "done");
+  const turnSeen = x.d.seen.find((s) => s.taskTurn)!;
+  assert.equal(turnSeen.fallback, false);
+  for (const n of ["job_launch", "vault_create_note", "sessions_list", "task_update", ...TASK_ASSISTANT_TOOL_NAMES]) assert.ok(!turnSeen.tools.includes(n), n);
+  const full = await x.inspect(t.id);
+  assert.match(full.turns.at(-1).trigger, /ORBIT \(automatic follow-up due .*which Rai turned on\)/);
+  assert.equal(full.automaticFollowUp.lastAttempt.state, "ended");
+  assert.equal(full.automaticFollowUp.lastAttempt.outcome, "done");
+  assert.equal(full.automaticFollowUp.budget.turnsLast24h, 1);
+  // Consumed: another tick starts nothing, and no Assistant turn was started by any of this.
+  const assistantTurnsBefore = x.d.seen.filter((s) => !s.taskTurn).length;
+  assert.deepEqual((await x.sched.current!.tick()).started, []);
+  assert.equal(x.d.seen.filter((s) => !s.taskTurn).length, assistantTurnsBefore, "the scheduler never starts Assistant thinking");
+  assert.equal(x.notify.recent().length, 0, "and notifies no one");
+  // The request is durable and waits for the Assistant: the next time Rai talks to it, the task-activity block shows it.
+  const listed = await x.assistantTool("tasks_list", {});
+  const step = [...x.d.seen].reverse().find((s) => !s.taskTurn && s.notes?.includes("task-activity"))!;
+  assert.match(step.notes!, /"requestsWaiting":\[\{"id":"req-1","kind":"job"\}\]/);
+  assert.match(step.notes!, /"automaticFollowUp":\{"state":"ended"/);
+  assert.equal(listed.result.tasks[0].automaticFollowUp.optedIn, true);
+  // The Assistant proposes and links; nothing launches until Rai confirms the card.
+  const proposed = await x.assistantTool("job_launch", { routine: "orbit", brief: BRIEF });
+  const pid = proposed.result.proposalId as string;
+  const linked = await x.assistantTool("task_respond", { id: t.id, rev: (await x.inspect(t.id)).rev, request: "req-1", action: "link_proposal", proposalId: pid });
+  assert.equal(linked.result.status, "awaiting-confirmation");
+  assert.equal(x.jobs.all().length, 0);
+  assert.deepEqual(x.fired, [], "no routine was fired by the scheduled turn, the request or the link");
+  const confirmed = await x.api(`/chat/proposals/${pid}/confirm`, "POST", {});
+  assert.equal(confirmed.status, 202);
+  assert.equal(x.fired.length, 1, "only Rai's Confirm launched it");
+  // The banner data says where it stands, and Rai can turn it off; the Assistant can also turn it off.
+  const view = (await x.api(`/threads/${t.session.link.slice("/sessions/".length)}`)).data.thread.task;
+  assert.equal(view.automaticFollowUp.optedIn, true);
+  const off = await x.assistantTool("task_update", { id: t.id, rev: (await x.inspect(t.id)).rev, autoFollowUp: "off" });
+  assert.equal(off.ok, true, JSON.stringify(off));
+  assert.equal((await x.inspect(t.id)).automaticFollowUp.optedIn, false);
 });

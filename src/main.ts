@@ -269,10 +269,12 @@ buildServer({
   smoke,
   // Work sessions and run links: <state>/work-sessions.json (docs/adr/0002-work-sessions.md).
   workSessions: workSessions(workFile(stateDir)),
-  // Supervised tasks: <state>/tasks.json (docs/adr/0003-supervised-tasks.md). Turns run only when the owner or the Assistant starts
-  // one; nothing wakes a task on a timer. Task turns use the same model as every other turn (no task-specific model is configured).
+  // Supervised tasks: <state>/tasks.json (docs/adr/0003-supervised-tasks.md). Turns run when the owner or the Assistant starts one,
+  // and (automatic follow-up) only if the operator sets ORBIT_TASK_FOLLOWUPS=on AND Rai opts a task in: off by default, and not set by
+  // any deploy file in this repository. Task turns use the same model as every other turn (no task-specific model is configured).
   // Task status lines reach the vault only through the existing write pipeline, and only when the vault clone exists.
   tasks: taskStore(taskFile(stateDir)),
+  taskFollowUps: { enabled: process.env.ORBIT_TASK_FOLLOWUPS === "on" },
   taskVault: vault ? cloneTaskVault(vault) : undefined,
   reconciliations,
   vaultEdits,

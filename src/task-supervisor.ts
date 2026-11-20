@@ -1,7 +1,7 @@
 import type { ChatTool, ToolContext, ToolResult } from "./agent.ts";
 import { dataBlock } from "./thread-context.ts";
 import type { ThreadView, TurnPrep } from "./thread-service.ts";
-import { blockerOf, currentInstructionVersion, evidenceStatus, isTaskId, openRequests, parseCreate, readiness, requestStatus, runningTurn, TaskError, TERMINAL, unseenInstructions } from "./tasks.ts";
+import { AUTO_ATTEMPTS_MAX, AUTO_GLOBAL_PER_DAY_DEFAULT, AUTO_PER_DAY_LIMIT, autoEligibility, blockerOf, currentInstructionVersion, evidenceStatus, isTaskId, openRequests, parseCreate, readiness, requestStatus, runningTurn, TaskError, TERMINAL, unseenInstructions } from "./tasks.ts";
 import type { Instruction, LinkableProposal, Observers, Provenance, Task, Tasks, TurnRecord } from "./tasks.ts";
 import type { TaskVaultSync } from "./task-vault.ts";
 
@@ -10,7 +10,9 @@ import type { TaskVaultSync } from "./task-vault.ts";
 // session (a chat thread) through the existing turn code (src/thread-service.ts) and tool dispatch (src/agent.ts runChat).
 //
 // Boundaries this module holds:
-// - Owner only. Every entry point needs the verified owner identity of the request that started it; nothing runs on a timer.
+// - Owner only. Every entry point needs the verified owner identity of the request that started it. The one timer-started turn is the
+//   automatic follow-up (src/task-scheduler.ts): off unless the operator switched the scheduler on AND Rai opted the task in from an
+//   owner route; it starts through startTurn below, with the same bounds and tools as any supervised turn.
 // - Neither the task nor the Assistant approves anything on Rai's behalf: a task asks for a job with task_request; the Assistant may
 //   propose a launch with its existing job_launch tool and link that proposal; only Rai's Confirm on the card launches anything.
 // - Task output (replies, request text, evidence notes, next actions) reaches the Assistant only as labeled, untrusted data.
@@ -60,6 +62,8 @@ export type SupervisorDeps = {
   now?: () => Date;
   maxConcurrent?: number;
   maxRounds?: number;
+  // The operator's switch for automatic follow-ups on this ORBIT (src/task-scheduler.ts) and the global budget. Absent: off.
+  followUps?: { enabled: boolean; globalPerDay: number };
   log?: (event: Record<string, unknown>) => void;
 };
 
@@ -72,7 +76,7 @@ const nullish = (v: unknown) => v === undefined || v === null;
 // Provenance of an Assistant tool call, from the turn's own identity (src/agent.ts Evidence), never from its arguments.
 const assistantBy = (ctx?: ToolContext): Provenance => ({ actor: "assistant", via: "assistant-tool", ...(ctx?.evidence?.turn.userMessage ? { userMessage: ctx.evidence.turn.userMessage } : {}), ...(ctx?.evidence?.turn.replyMessage ? { replyMessage: ctx.evidence.turn.replyMessage } : {}) });
 const byLabel = (p: Provenance): string =>
-  p.actor === "human" ? `Rai (${p.via})` : p.actor === "assistant" ? "the Assistant (supervisor; model-written)" : p.actor === "task" ? `the task's model (turn ${p.turn})` : "ORBIT";
+  p.actor === "human" ? `Rai (${p.via})` : p.actor === "assistant" ? "the Assistant (supervisor; model-written)" : p.actor === "task" ? `the task's model (turn ${p.turn})` : p.via === "follow-up" ? `ORBIT (automatic follow-up due ${p.dueAt}, which Rai turned on)` : "ORBIT";
 
 export function taskSupervisor(d: SupervisorDeps) {
   const { tasks, observers } = d;
@@ -92,6 +96,31 @@ export function taskSupervisor(d: SupervisorDeps) {
       : t.lifecycle === "paused"
         ? "Paused: no turn runs. Writing here records your message as a new instruction for when the task resumes; the reply cannot act on the task."
         : `This task is ${t.lifecycle}: writing here gets an ordinary reply and records nothing on the task.`;
+  // Automatic follow-up as the task store and the scheduler see it now: whether it is on (Rai's per-task opt-in, and the operator's
+  // switch), the next time a turn may start, the last attempt and its outcome, and what is blocking it (budget, retries, interruption).
+  const globalPerDay = d.followUps?.globalPerDay ?? AUTO_GLOBAL_PER_DAY_DEFAULT;
+  function autoView(t: Task) {
+    const at = now();
+    let used = 0;
+    try {
+      used = tasks.autoGlobalUsed(at);
+    } catch {
+      // the store is readable for this task; a global count failure only makes the view conservative
+    }
+    const e = autoEligibility(t, at, { used, max: globalPerDay });
+    const switchedOn = d.followUps?.enabled === true;
+    const slot = t.auto?.slot;
+    return {
+      optedIn: t.auto?.enabled === true,
+      schedulerOn: switchedOn,
+      state: t.auto?.enabled && !switchedOn ? "scheduler-off" : e.state,
+      detail: t.auto?.enabled && !switchedOn ? "Rai turned it on for this task, but the follow-up scheduler is switched off on this ORBIT, so nothing starts automatically" : e.detail,
+      nextAt: switchedOn && t.auto?.enabled ? (e.nextAt ?? (e.eligible ? e.dueAt : null) ?? null) : null,
+      lastAttempt: slot ? { dueAt: slot.dueAt, state: slot.state, at: slot.at, attempts: slot.attempts, maxAttempts: AUTO_ATTEMPTS_MAX, turn: slot.turn ?? null, outcome: slot.outcome ?? null, error: slot.error ?? null, nextTryAt: slot.nextTryAt ?? null } : null,
+      budget: { turnsLast24h: e.usedToday, perDay: t.auto?.perDay ?? null, perDayLimit: AUTO_PER_DAY_LIMIT, allTasksLast24h: used, allTasksPerDay: globalPerDay, counts: "automatic turns started, not model spend: each turn is bounded by its tool rounds and has no paid fallback, but provider cost per turn is not measured or capped here" },
+      changed: t.auto ? { at: t.auto.changedAt, by: byLabel(t.auto.changedBy) } : null,
+    };
+  }
   const instructionView = (i: Instruction) => ({ v: i.v, at: i.at, by: byLabel(i.by), provenance: i.by, text: i.text });
   function view(t: Task, detail: "summary" | "full" = "full") {
     const r = readiness(t, observers);
@@ -105,7 +134,8 @@ export function taskSupervisor(d: SupervisorDeps) {
       session: { id: `chat:${t.session.thread}`, link: sessionLink(t.session.thread) },
       nextAction: t.nextAction ? { text: t.nextAction.text, at: t.nextAction.at, by: byLabel(t.nextAction.by) } : null,
       blocker: blockerOf(t) ?? null,
-      followUp: t.followUp ? { at: t.followUp.at, note: t.followUp.note, due: Date.parse(t.followUp.at) <= now().getTime(), autonomous: "disabled: nothing wakes this task; it is shown to the supervisor when due" } : null,
+      followUp: t.followUp ? { at: t.followUp.at, note: t.followUp.note, due: Date.parse(t.followUp.at) <= now().getTime() } : null,
+      automaticFollowUp: autoView(t),
       requestsWaiting: openRequests(t).map((x) => ({ id: x.id, kind: x.kind })),
       instructions: { current: currentInstructionVersion(t), notSeenByTaskYet: unseen.length, notSeenFromRai: unseen.filter((i) => i.by.actor === "human").length },
       lastTurn: turn ? { n: turn.n, state: turn.state, startedAt: turn.startedAt, endedAt: turn.endedAt ?? null, instructionsSeen: turn.instructionsSeen, model: turn.model } : null,
@@ -232,7 +262,8 @@ export function taskSupervisor(d: SupervisorDeps) {
 
   // ---- turns ----
 
-  type TurnOpts = { trigger: Provenance; isOwner: boolean; expectRev?: number; key?: string };
+  // `auto`: the follow-up scheduler's start of the automatic turn for one due time (rechecked and claimed inside beginTurn).
+  type TurnOpts = { trigger: Provenance; isOwner: boolean; expectRev?: number; key?: string; auto?: { dueAt: string } };
 
   // One supervised, bounded turn. Returns once the turn has STARTED (the turn record exists); `done` settles when it ends.
   async function startTurn(taskId: string, o: TurnOpts): Promise<{ turn: TurnRecord; duplicate: boolean; done: Promise<TurnRecord | undefined> }> {
@@ -248,7 +279,7 @@ export function taskSupervisor(d: SupervisorDeps) {
     if (!d.threadExists(t.session.thread)) throw new TaskError(409, "This task's session (its chat thread) no longer exists. Nothing was started.");
     if (running.size >= maxConcurrent && !running.has(taskId)) throw new TaskError(429, `At most ${maxConcurrent} supervised task turns run at once and that many are running. Nothing was started or queued; try again when one ends.`);
     if (d.threadBusy(t.session.thread)) throw new TaskError(409, "This task's session already has a reply in progress. Nothing was started.");
-    const begun = tasks.beginTurn(taskId, o.expectRev, o.trigger, d.modelName(), o.key);
+    const begun = tasks.beginTurn(taskId, o.expectRev, o.trigger, d.modelName(), o.key, o.auto ? { dueAt: o.auto.dueAt, globalMax: globalPerDay } : undefined);
     if (begun.duplicate) return { turn: begun.turn, duplicate: true, done: Promise.resolve(begun.turn) };
     const n = begun.turn.n;
     const ctl = new AbortController();
@@ -257,8 +288,13 @@ export function taskSupervisor(d: SupervisorDeps) {
     const done = (async () => {
       let outcome: { state: "done" | "error"; error?: string; message?: string; reply?: string; toolCalls?: number } = { state: "error", error: "not run" };
       try {
-        const task = tasks.get(taskId)!;
-        const prep = await d.prepare(o.isOwner, `${task.title}\n${task.goal}`, task.session.thread);
+        const first = tasks.get(taskId)!;
+        const prep = await d.prepare(o.isOwner, `${first.title}\n${first.goal}`, first.session.thread);
+        // Rechecked just before the model is called (the prepare step awaits): a pause, cancel, or (for an automatic turn) follow-up
+        // turned off meanwhile means the turn is not sent at all.
+        const task = tasks.get(taskId);
+        if (!task || task.lifecycle !== "active" || ctl.signal.aborted) throw new Error(`Not run: the task became ${task?.lifecycle ?? "unavailable"} before the turn was sent to the model.`);
+        if (o.auto && !task.auto?.enabled) throw new Error("Not run: automatic follow-up was turned off before the turn was sent to the model.");
         // A supervised turn may use only read-only tools besides its own task tools: no proposals, no effects.
         const readOnly = prep.offered.filter((x) => x.readOnly === true && !isTaskToolName(x.name));
         const withheld = prep.offered.filter((x) => x.readOnly !== true && !isTaskToolName(x.name)).map((x) => x.name);
@@ -300,7 +336,10 @@ export function taskSupervisor(d: SupervisorDeps) {
   // - paused: the text is recorded as an instruction for when the task resumes; no task turn runs and the reply has the task's context
   //   read-only and no task tools. Photos alone record nothing.
   // - done or cancelled: an ordinary reply with the task's context read-only; nothing is recorded.
-  // If the user message then cannot be stored, the admission is undone (rollback). The thread route checks the caller is the owner.
+  // If the user message then cannot be stored, the admission is undone (rollback), by the admitted instruction's identity.
+  // Ownership is checked HERE, not by the thread route: the route (POST /threads/:id/messages) answers anyone the chat channel allows
+  // (a non-owner gets an ordinary tool-less chat reply in other threads), and only this check refuses a non-owner in a task's session
+  // (403, nothing recorded), whatever the task's lifecycle.
   async function humanTurn(taskId: string, text: string, base: TurnPrep): Promise<{ thread: ThreadView; error?: string; admitted?: { instruction?: number; turn?: number } }> {
     const t = tasks.get(taskId);
     if (!t) throw new TaskError(404, "No task with that id.");
@@ -318,6 +357,8 @@ export function taskSupervisor(d: SupervisorDeps) {
     }
     const mode = t.lifecycle === "active" ? "active" : "paused";
     let admitted: { instruction?: number; turn?: number } = {};
+    // The admitted instruction's identity (its time, with its version), so a rollback removes exactly it and nothing recorded after it.
+    let admittedAt: string | undefined;
     let n = 0;
     const tools = mode === "active" ? [...plain, ...turnTools(taskId, () => n)] : plain;
     const prep: TurnPrep = {
@@ -327,11 +368,12 @@ export function taskSupervisor(d: SupervisorDeps) {
       admit: () => {
         const a = tasks.admitHuman(taskId, { text, photos }, by, d.modelName(), mode);
         admitted = { ...(a.instruction ? { instruction: a.instruction.v } : {}), ...(a.turn ? { turn: a.turn.n } : {}) };
+        admittedAt = a.instruction?.at;
         n = a.turn?.n ?? 0;
         return {
           notes: contextBlock(a.task, n, mode === "active" ? "interactive" : "paused", { recorded: Boolean(a.instruction) }),
           rollback: (reason) => {
-            if (admitted.instruction !== undefined || admitted.turn !== undefined) tasks.revertAdmission(taskId, admitted, `the message could not be stored (${reason})`);
+            if (admitted.instruction !== undefined || admitted.turn !== undefined) tasks.revertAdmission(taskId, { ...admitted, ...(admittedAt ? { instructionAt: admittedAt } : {}) }, `the message could not be stored (${reason})`);
             admitted = {};
           },
         };
@@ -441,7 +483,7 @@ export function taskSupervisor(d: SupervisorDeps) {
             project: str("Optional: the project this belongs to (a repository name or a vault project note path)."),
             vaultNote: str("Optional: an existing vault note under Projects/ or Tasks/ that should get status lines."),
             vaultHeading: str("With vaultNote: the heading in that note to append status lines under, exactly as written there (for example ## Status)."),
-            followUpAt: str("Optional ISO time to look at this task again. Intent only: nothing wakes the task."),
+            followUpAt: str("Optional ISO time to look at this task again. Shown to you when due; it starts a turn by itself only if Rai later turns automatic follow-up on for this task."),
             followUpNote: str("Optional: why to follow up."),
           },
           ["title", "goal", "acceptance"],
@@ -496,12 +538,18 @@ export function taskSupervisor(d: SupervisorDeps) {
       },
       {
         name: "task_update",
-        description: "Change a task's next action, follow-up time (intent only), project reference, or linked vault note and heading. Needs the current rev.",
-        parameters: obj({ id: str("Task id."), rev: int("The task's current rev."), nextAction: str("New next action (empty to clear)."), followUpAt: str("ISO time, or empty to clear."), followUpNote: str("Optional."), project: str("Project reference (empty to clear)."), vaultNote: str("Existing note under Projects/ or Tasks/ (empty to unlink)."), vaultHeading: str("Heading in that note, exactly.") }, ["id", "rev"]),
+        description: "Change a task's next action, follow-up time, project reference, or linked vault note and heading, or turn its automatic follow-up OFF (autoFollowUp: \"off\"). A follow-up time starts a turn by itself only if Rai turned automatic follow-up on for that task; you cannot turn it on. Needs the current rev.",
+        parameters: obj({ id: str("Task id."), rev: int("The task's current rev."), nextAction: str("New next action (empty to clear)."), followUpAt: str("ISO time, or empty to clear."), followUpNote: str("Optional."), project: str("Project reference (empty to clear)."), vaultNote: str("Existing note under Projects/ or Tasks/ (empty to unlink)."), vaultHeading: str("Heading in that note, exactly."), autoFollowUp: { type: "string", enum: ["off"], description: "Optional: off turns automatic follow-up off for this task. Only Rai can turn it on." } }, ["id", "rev"]),
         run: (a, ctx) =>
           guard(() => {
             const pick = (k: string) => (nullish(a[k]) ? undefined : a[k]);
-            const t = tasks.update(idOf(a), tasks.requireRev(a.rev), { nextAction: pick("nextAction"), followUpAt: pick("followUpAt"), followUpNote: pick("followUpNote"), project: pick("project"), vaultNote: pick("vaultNote"), vaultHeading: pick("vaultHeading") }, assistantBy(ctx));
+            if (!nullish(a.autoFollowUp) && a.autoFollowUp !== "off") throw new TaskError(403, "Only Rai can turn on automatic follow-up, from the task controls. You can only turn it off (autoFollowUp: \"off\"). Nothing was changed.");
+            const id = idOf(a);
+            const rev = tasks.requireRev(a.rev);
+            const patch = { nextAction: pick("nextAction"), followUpAt: pick("followUpAt"), followUpNote: pick("followUpNote"), project: pick("project"), vaultNote: pick("vaultNote"), vaultHeading: pick("vaultHeading") };
+            const other = Object.values(patch).some((v) => v !== undefined);
+            let t = other ? tasks.update(id, rev, patch, assistantBy(ctx)) : tasks.get(id)!;
+            if (a.autoFollowUp === "off") t = tasks.setAuto(id, other ? t.rev : rev, false, assistantBy(ctx));
             return live({ task: view(t, "summary") });
           })(),
       },
@@ -534,14 +582,15 @@ export function taskSupervisor(d: SupervisorDeps) {
     }
     if (!open.length) return undefined;
     const at = now().getTime();
-    const score = (t: Task) => (runningTurn(t) ? 8 : 0) + (openRequests(t).length ? 4 : 0) + (unseenInstructions(t).some((i) => i.by.actor === "human") ? 2 : 0) + (t.followUp && Date.parse(t.followUp.at) <= at ? 1 : 0);
+    const autoBlocked = (t: Task) => ["gave-up", "interrupted", "budget-task", "budget-global"].includes(autoView(t).state);
+    const score = (t: Task) => (runningTurn(t) ? 8 : 0) + (openRequests(t).length ? 4 : 0) + (unseenInstructions(t).some((i) => i.by.actor === "human") ? 2 : 0) + (autoBlocked(t) ? 2 : 0) + (t.followUp && Date.parse(t.followUp.at) <= at ? 1 : 0);
     const rows = open.sort((x, y) => score(y) - score(x) || (y.updatedAt < x.updatedAt ? -1 : y.updatedAt > x.updatedAt ? 1 : x.id < y.id ? -1 : 1)).slice(0, TASK_ACTIVITY_ROWS_MAX);
     const data = {
       observedAt: now().toISOString(),
       openTasks: open.length,
       shown: rows.map((t) => {
         const v = view(t, "summary");
-        return { id: v.id, rev: v.rev, title: v.title.slice(0, 80), lifecycle: v.lifecycle, session: v.session.link, turnRunning: v.turnRunning, requestsWaiting: v.requestsWaiting, blocked: Boolean(v.blocker), raiInstructionsNotSeenByTask: v.instructions.notSeenFromRai, followUpDue: v.followUp?.due ?? false, lastTurn: v.lastTurn ? { n: v.lastTurn.n, state: v.lastTurn.state } : null, completionReady: v.completion.ready, vaultSync: v.vault?.sync.state ?? null };
+        return { id: v.id, rev: v.rev, title: v.title.slice(0, 80), lifecycle: v.lifecycle, session: v.session.link, turnRunning: v.turnRunning, requestsWaiting: v.requestsWaiting, blocked: Boolean(v.blocker), raiInstructionsNotSeenByTask: v.instructions.notSeenFromRai, followUpDue: v.followUp?.due ?? false, automaticFollowUp: v.automaticFollowUp.optedIn ? { state: v.automaticFollowUp.state, nextAt: v.automaticFollowUp.nextAt } : "off", lastTurn: v.lastTurn ? { n: v.lastTurn.n, state: v.lastTurn.state } : null, completionReady: v.completion.ready, vaultSync: v.vault?.sync.state ?? null };
       }),
     };
     let json = JSON.stringify(data).replace(/[<>&\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
