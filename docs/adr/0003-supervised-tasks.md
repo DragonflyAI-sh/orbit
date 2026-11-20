@@ -1,8 +1,8 @@
 # ADR 0003: Supervised tasks, first slice
 
-Status: accepted for the first slice, hardened by "Repair 1" (below) after review of PR #151. Background autonomy (wakeups, schedules, retries) is **not** part of it and stays off until budgets and activation are agreed (see "Next slice").
+Status: accepted for the first slice, hardened by "Repair 1" (below) after review of PR #151 and "Repair 2" after review of PR #153. Repair 2 also adds one bounded piece of background behaviour, **automatic follow-up** (below): off by default at two levels (the operator's switch and Rai's per-task opt-in), at most one bounded supervised turn per follow-up due time, budgeted, never re-run when its outcome is uncertain. It is not enabled on any host by this change. Other background autonomy (recurring supervision, self-scheduling, dependencies) is not built.
 
-Code: `src/tasks.ts` (record, store, derived views), `src/task-supervisor.ts` (the Assistant's task tools, the task's own tools, bounded turns, the activity block), `src/task-context.ts` (the task-scoped memory policy), `src/task-vault.ts` (status lines through the vault write pipeline), wiring in `src/server.ts` (routes, `prepare`/`allowAgent`, the task-session branch of the thread route, restart recovery), `src/main.ts` (`<state>/tasks.json`, the vault adapter), `src/policy.ts` (the `tasks` port), and hooks in the turn code: `src/thread-service.ts` (`TurnPrep.maxRounds`, `fallback`, `author`, `admit`) and `src/threads.ts` (`ThreadMessage.author`, `Thread.taskSession`). Page: `src/web/index.html` (task banner in a task's session, supervisor-authored messages labeled). Tests: `test/tasks.test.ts` (store, derived status, evidence gate, vault sync with a fake port and through the real pipeline on a temporary bare repository), `test/task-supervisor.test.ts` (real server: acceptance walkthrough, authorization, concurrency and pause, duplicates, restart, the page in Chromium, and one test per Repair 1 finding), `test/task-repair.test.ts` (Repair 1 at unit level: memory policy, admission races through the real thread store and turn code, links across restarts, version 1 files, vault bookkeeping failures).
+Code: `src/tasks.ts` (record, store, derived views), `src/task-supervisor.ts` (the Assistant's task tools, the task's own tools, bounded turns, the activity block), `src/task-context.ts` (the task-scoped memory policy), `src/task-vault.ts` (status lines through the vault write pipeline), `src/task-scheduler.ts` (the follow-up scheduler, Repair 2), wiring in `src/server.ts` (routes, `prepare`/`allowAgent`, the task-session branch of the thread route, restart recovery), `src/main.ts` (`<state>/tasks.json`, the vault adapter), `src/policy.ts` (the `tasks` port), and hooks in the turn code: `src/thread-service.ts` (`TurnPrep.maxRounds`, `fallback`, `author`, `admit`) and `src/threads.ts` (`ThreadMessage.author`, `Thread.taskSession`). Page: `src/web/index.html` (task banner in a task's session, supervisor-authored messages labeled). Tests: `test/tasks.test.ts` (store, derived status, evidence gate, vault sync with a fake port and through the real pipeline on a temporary bare repository), `test/task-supervisor.test.ts` (real server: acceptance walkthrough, authorization, concurrency and pause, duplicates, restart, the page in Chromium, and one test per Repair 1 finding), `test/task-repair.test.ts` (Repair 1 at unit level: memory policy, admission races through the real thread store and turn code, links across restarts, version 1 files, vault bookkeeping failures), `test/task-repair2.test.ts` (Repair 2 findings), `test/task-scheduler.test.ts` (automatic follow-up with a fake clock).
 
 Builds on ADR 0001 (session registry) and ADR 0002 (work sessions, run links, origin tracking). Nothing in either is removed or changed in meaning.
 
@@ -39,7 +39,9 @@ Builds on ADR 0001 (session registry) and ADR 0002 (work sessions, run links, or
 | `lifecycle`, `lifecycleHistory[]` | `active`, `paused`, `done`, `cancelled`, with who changed it, when and why. `done` and `cancelled` are terminal. |
 | `nextAction` | The next concrete step, with who set it. |
 | `blocker` (derived) | The newest pending `blocker` request. |
-| `followUp` | `{at, note, by, autonomous: "disabled"}`: intent only (below). |
+| `followUp` | `{at, note, by, autonomous: "disabled"}`: the follow-up time. `autonomous: "disabled"` is kept for file compatibility: the follow-up record itself grants nothing. |
+| `auto` | Automatic follow-up (Repair 2): `{enabled, changedAt, changedBy, perDay, started[], slot?}`. Absent on every task until Rai turns it on, so tasks that already had follow-up times stay off. |
+| `instructionSeq` | The highest instruction version ever given out (Repair 2): versions are never reused. |
 | `session.thread` | The task session's thread id. |
 | `instructions[]` | Versioned, append-only: `{v, at, text, by}`. Earlier versions are kept. |
 | `requests[]` | Task-to-supervisor requests (below). |
@@ -53,7 +55,7 @@ File version 2 (Repair 1) is read alongside version 1: a version 1 file is migra
 
 ### Provenance
 
-Filled by the server from the route or turn, never from model text: `human` (`task-panel`, `sessions-ui`, `api`), `assistant` (the Assistant's tool call, with the user message and reply it belongs to, from the turn identity `runChat` passes to tools), `task` (the task's own turn `n`), `orbit` (recovery). A steer the Assistant relays is labeled as the Assistant's (model-written), not Rai's. Rai's own steers come from the task banner (`POST /tasks/:id/steer`) or from writing in the task session.
+Filled by the server from the route or turn, never from model text: `human` (`task-panel`, `sessions-ui`, `api`), `assistant` (the Assistant's tool call, with the user message and reply it belongs to, from the turn identity `runChat` passes to tools), `task` (the task's own turn `n`), `orbit` (`system`: recovery; `follow-up`: the scheduler's automatic turn for one due time, labeled "ORBIT (automatic follow-up due ..., which Rai turned on)"). A steer the Assistant relays is labeled as the Assistant's (model-written), not Rai's. Rai's own steers come from the task banner (`POST /tasks/:id/steer`) or from writing in the task session.
 
 ### Requests: durable, deduplicated, explicit
 
@@ -96,7 +98,7 @@ Repair 1 separates two questions that the first slice merged. A job being done i
 
 | | Supervised turn | Interactive turn |
 |---|---|---|
-| Started by | the Assistant (`task_run_turn`) or Rai (banner, `POST /tasks/:id/turn`); never by a timer | Rai writing in the task session |
+| Started by | the Assistant (`task_run_turn`) or Rai (banner, `POST /tasks/:id/turn`); or the follow-up scheduler, only for a task Rai opted in and only when the operator switched it on (below) | Rai writing in the task session |
 | Prompt | a message authored `orbit-supervisor` (stored and shown as "ORBIT task supervisor", never as Rai) | Rai's message (text and/or photos), admitted atomically (below); its text is recorded as a new instruction version from Rai (`sessions-ui`), photos alone record none |
 | Tools | read-only chat tools plus the task's own (`task_request`, `task_add_evidence`, `task_set_next_action`); proposal and effect tools withheld and listed in the limits | the owner's chat tools as in any chat thread (proposals still need Rai's click) plus the task's own |
 | Bounds | at most `TASK_TURN_MAX_ROUNDS` (6) tool rounds; the paid fallback is off | the usual chat bounds |
@@ -184,10 +186,52 @@ The Assistant may read a task's session with its existing `session_read` (it is 
 - **Failures are visible**: `vault.sync = {state: never | synced | failed | blocked | unknown, attempts, lastAttemptAt, lastSuccessAt, lastError, commit, retry: "manual"}` on the task, in `task_inspect`, the activity block and the banner. A `#rai` or otherwise protected note is `blocked` (no proposal). Retry is manual; there is no automatic retry.
 - **Production**: `main.ts` passes the adapter only when the vault clone exists (the same condition as the vault write tools), so sync is inert on a host without the vault credential and reports "not enabled". It runs only when a person or the Assistant asks. **Coherence is not complete**: mapping task state to the vault's own task schema, reading human edits back into the task, and syncing on change are not built (see the matrix).
 
-### Follow-up intent and recovery
+### Follow-up and recovery
 
-- `followUp {at, note}` is stored and shown as due (`followUp.due`, activity block, banner) once its time passes. **Nothing wakes the task**: `autonomous: "disabled"`.
+- `followUp {at, note}` is stored and shown as due (`followUp.due`, activity block, banner) once its time passes. Without automatic follow-up (the default), that is all: nothing wakes the task.
 - At start, a turn left `running` by a stop is marked `interrupted` (with that reason) and is never re-run; the thread store already marks the interrupted reply. Proposals are in memory, so a launch card made before a restart shows `expired`; the request then derives `not-confirmed` and a new proposal may be linked.
+- Every supervised turn (manual or automatic) is rechecked just before the model is called (Repair 2): if the task was paused or cancelled while the turn prepared, or (automatic) the follow-up was turned off, the turn ends `error` "Not run: ..." and nothing is sent.
+
+### Automatic follow-up (Repair 2)
+
+**Activation contract.** Two switches, both off by default, both required:
+
+1. **Operator** (per ORBIT): `ORBIT_TASK_FOLLOWUPS=on` in the service environment (`src/main.ts`). No deploy file in this repository sets it, and this change enables it nowhere. Off: the scheduler never starts a turn, and an opted-in task shows `scheduler-off`.
+2. **Rai** (per task): `POST /tasks/:id/follow-up {rev, enabled: true, perDay?}` (owner route; the banner's "Allow automatic follow-up"). Only a human owner route can turn it on: the store refuses the Assistant, the task's model, ORBIT itself and a message written in the session (`sessions-ui`), and the Assistant's `task_update` accepts only `autoFollowUp: "off"`. The task's own tools have no follow-up or autonomy control and cannot set a follow-up time. Turning it off: Rai (route or banner) or the Assistant (`task_update autoFollowUp: "off"`).
+
+**What it does.** Every minute (`FOLLOW_UP_TICK_MS`; only while the server listens; one tick at a time), for each opted-in active task whose `followUp.at` has passed, it starts **one** supervised turn for that due time through `startTurn`: the same tools (read-only plus the task's own), the same `TASK_TURN_MAX_ROUNDS` (6), no paid fallback, the same per-task serialization (task record and thread lock) and global cap (`taskTurnsMax`, 2) as any turn. The turn consumes the due time; another automatic turn needs a new follow-up time, which only Rai or the Assistant (in an owner turn) can set. It never reschedules itself.
+
+**One durable fact for claim and start.** The due time is claimed inside the same store change that records the running turn (`tasks.beginTurn` with `auto`), after the store rechecks eligibility on the fresh record (enabled, active, this due time, not already claimed, no turn running, budgets). Nothing is persisted before that change and nothing is sent to a model before it is persisted. So repeated or overlapping ticks, a restart, or a manual start racing the scheduler start at most one turn (tested), and a write failure at the claim leaves the file unchanged and nothing dispatched.
+
+**States** (`automaticFollowUp` in `tasks_list`, `task_inspect`, the owner routes and the banner; `automaticFollowUp.state` in the Assistant's task-activity block):
+
+| State | Meaning | Next |
+|---|---|---|
+| `off` | not opted in (the default) | nothing starts |
+| `scheduler-off` | opted in, operator switch off | nothing starts |
+| `no-follow-up`, `not-due` | no time set / time not reached (`nextAt`) | waits |
+| `inactive` | paused, cancelled or done | nothing starts; on resume a due follow-up runs at the next tick |
+| `turn-running` | another turn of the task holds it (Rai's interactive turn, a manual turn) | waits; not counted as an attempt |
+| `due` | eligible now | the next tick starts one turn |
+| `retry-wait` | a pre-dispatch failure (global turn cap 429, the task's turn or thread busy 409); `attempts`, `nextTryAt` | retried after 1, 5, 15 minutes |
+| `gave-up` | 4 pre-dispatch attempts failed, or a failure that is not transient (missing session, model cannot call tools, policy) | no automatic attempt for this due time |
+| `started` | turn `n` was started for this due time | its outcome follows |
+| `ended` | that turn ended (`outcome` done or error, from the turn record, in the same store change) | consumed |
+| `interrupted` | ORBIT stopped while that turn ran: whether the model was called is unknown | **never re-run automatically** |
+| `budget-task`, `budget-global` | this task's `perDay` (default 2, at most 6) or ORBIT's 10 automatic turns in any 24 hours are used; `nextAt` says when the task's window frees | waits for the window |
+
+Retries happen only for failures before the claim (nothing dispatched); a turn that started and failed is its own outcome (`ended`, `error`), never retried automatically. Attempt bookkeeping does not bump `rev`.
+
+**Budgets: what they constrain.** They count **automatic turns started**, per task and across ORBIT, per rolling 24 hours. With the existing per-turn bounds (6 tool rounds, no paid fallback, 2 supervised turns at once) that bounds how many bounded model conversations the scheduler can cause. They do **not** measure or cap provider spend: the cost of a turn depends on the model port and context size, and no dollar figure is guaranteed.
+
+**What it does not do.** It notifies no one (no Discord, no notification) and starts no Assistant turn. What an automatic turn needs from anyone is a durable `task_request`, which the Assistant sees in its task-activity block the next time Rai talks to it and Rai sees in the banner; jobs still need the Assistant's proposal and Rai's Confirm (tested end to end). Vault sync stays manual (`task_vault_sync` is an Assistant tool, not offered in task turns). Human confirmations for jobs, steers and ops are unchanged.
+
+**Recovery procedure.**
+
+- `interrupted`: look at the task session (the reply may be partial or absent) and the turn's record in `task_inspect`. To retry, start one turn (banner "Run one turn", `task_run_turn`), or set a new follow-up time.
+- `gave-up`: the `lastAttempt.error` says why; fix that (free a turn slot, restore the session, model with tools), then start a turn or set a new follow-up time.
+- `budget-*`: wait for `nextAt`, start a turn manually (manual turns are not counted), or raise `perDay` (Rai: turn it on again with `perDay`, up to 6).
+- To stop everything at once: unset `ORBIT_TASK_FOLLOWUPS` and restart; or turn a task's follow-up off; or pause the task (a running turn is aborted).
 
 ## Flow
 
@@ -220,11 +264,11 @@ sequenceDiagram
 
 ## Routes (owner only; every POST takes `rev`)
 
-`GET /tasks`, `POST /tasks` (create), `GET /tasks/:id`, `POST /tasks/:id/steer {rev, text, requestId?}`, `/pause`, `/resume`, `/cancel {rev, reason?}`, `/turn {rev, requestId?}` (202, runs in the background), `/evidence {rev, criterion, kind, ref, note?}` (attested), `/respond {rev, request, action, text?, proposalId?, acceptBriefSha256?}` (`acceptBriefSha256`: Rai only, to link a proposal whose brief differs, naming its digest), `/sync` (200 for `synced`, `written-unrecorded`, `already-written`, `up-to-date`; 502 for `failed`, `blocked`, `unknown`), `/complete {rev}`. Errors: 400 bad input, 403 not owner, 404 unknown task, 409 stale rev / conflicting state / not ready / a requestId reused with another payload, 429 at the turn cap or the open-request cap, 503 store unavailable.
+`GET /tasks`, `POST /tasks` (create), `GET /tasks/:id`, `POST /tasks/:id/follow-up {rev, enabled, perDay?}` (Rai's opt-in; Repair 2), `POST /tasks/:id/steer {rev, text, requestId?}`, `/pause`, `/resume`, `/cancel {rev, reason?}`, `/turn {rev, requestId?}` (202, runs in the background; a repeat whose turn record is no longer kept is 409 `expired`), `/evidence {rev, criterion, kind, ref, note?}` (attested), `/respond {rev, request, action, text?, proposalId?, acceptBriefSha256?}` (`acceptBriefSha256`: Rai only, to link a proposal whose brief differs, naming its digest), `/sync` (200 for `synced`, `written-unrecorded`, `already-written`, `up-to-date`; 502 for `failed`, `blocked`, `unknown`), `/complete {rev}`. Errors: 400 bad input, 403 not owner, 404 unknown task, 409 stale rev / conflicting state / not ready / a requestId reused with another payload, 429 at the turn cap or the open-request cap, 503 store unavailable.
 
 ## Assistant tools (Assistant scope, owner only, `tasks` port)
 
-`tasks_list` and `task_inspect` (read-only), `task_create`, `task_steer`, `task_pause` (pause/resume), `task_run_turn`, `task_respond` (answer/decline/link_proposal), `task_update` (next action, follow-up, project, vault link), `task_vault_sync`. Not offered in chat threads; refused there by name. The task's own tools are offered only inside its turns and refused by name elsewhere. `src/chat-tools.ts` (pinned) is unchanged.
+`tasks_list` and `task_inspect` (read-only), `task_create`, `task_steer`, `task_pause` (pause/resume), `task_run_turn`, `task_respond` (answer/decline/link_proposal), `task_update` (next action, follow-up time, project, vault link; `autoFollowUp: "off"` only), `task_vault_sync`. Not offered in chat threads; refused there by name. The task's own tools are offered only inside its turns and refused by name elsewhere. `src/chat-tools.ts` (pinned) is unchanged.
 
 ## Implemented vs deferred
 
@@ -246,8 +290,9 @@ sequenceDiagram
 | Vault status lines through the pipeline, idempotent, failures visible, manual retry, human edits preserved, protected notes blocked; vault write and bookkeeping reported separately | Implemented, tested (fake port and temporary bare repo; Repair 1 with injected bookkeeping failure) |
 | Mapping task state to the vault's own task schema (front matter, checkboxes), reading human edits back, sync on change | **Deferred**: the schema was not read in this slice and must be reviewed first |
 | Session registry adapter for tasks (`task` kind), task rows in `sessions_list` | **Deferred**: tasks are reached through the task tools; their sessions already appear as chats |
-| Autonomous wakeups, follow-up scheduling, recurring supervision | **Deferred and disabled** until budgets and activation are agreed |
-| Dependencies between tasks, retry/backoff of turns, cost/time budgets per task, cancellation propagated to jobs | **Deferred** (next phase) |
+| Automatic follow-up: one bounded turn per due time, operator switch plus Rai's per-task opt-in, claim and start in one store change, restart-safe, bounded pre-dispatch retry, per-task and global turn budgets, visible state | Implemented, tested with a fake clock and end to end (Repair 2); **not enabled on any host** |
+| Recurring supervision, self-scheduling, Assistant wakeups or notifications on follow-up events | **Not built** |
+| Dependencies between tasks, wall-time and spend budgets per task, cancellation propagated to jobs | **Deferred** (next phase) |
 | Task-scoped job proposals made directly by a task, cards in the task session | **Not done on purpose**: jobs go through the Assistant |
 | Model routing for task turns | **Open**: a port exists (`taskModel`), no routing or evaluation |
 | Live host verification | **Not done**: offline tests only |
@@ -295,7 +340,7 @@ File version stays 2: `instructionSeq` is an optional field (absent means "the n
 
 ## Next slice (prioritized plan; not built here)
 
-Nothing below is implemented by Repair 1, and task powers were not widened. In order:
+Written after Repair 1. Repair 2 built a smaller version of items 1 and 2 (automatic follow-up, above): the claim lives in the task record's `auto.slot` instead of a separate wakeup table, an interrupted turn is never re-run (instead of retried once), and budgets count turns, not wall time or spend. What remains of items 1-2: wall-time and spend budgets, over-budget pausing, and a global daily cap shown on /status. Items 3 and 4 are unchanged.
 
 1. **Restart recovery and durable follow-up wakeups (first, together).** A durable wakeup table in `tasks.json` (`wakeups[]: {task, dueAt, reason, claim?: {by: processStart, until}}`), claimed with a lease before a turn starts, through the same `beginTurn` serialization, so a crash between claim and start is retried once and a duplicate start is refused. On start, expired claims are released and reported, never silently re-run; turns left running stay `interrupted` (as now). The scheduler only ever calls `startTurn` with an `orbit` provenance and the task's current rev; it is off by default behind an explicit setting and the wakeup is shown on the banner and in the activity block before it is enabled.
 2. **Budgets before any wakeup fires.** Per task: turns per day, wall time per turn, tool rounds per turn (exists: 6), model spend per day (the spend ledger for the fallback, an estimate for the primary); global: the supervised-turn cap (exists: 2) and a daily turn cap. Over budget pauses the task with the reason; nothing queues. Retries only for errors marked transient (model unavailable, timeout), at most N with 1/5/30 minute backoff; never for refusals, policy or protocol errors.
@@ -315,3 +360,4 @@ Nothing below is implemented by Repair 1, and task powers were not widened. In o
 - Briefs are compared after whitespace normalization only; a semantically equivalent brief worded differently is a mismatch (the Assistant re-proposes, or Rai accepts it by digest).
 - Execution verification needs the job store's work link (`job.work.proposal`); a job registered without one (an older job) is `unknown`, never verified.
 - No UI for Rai's brief-difference acceptance: it is an owner API field (`acceptBriefSha256`) only.
+- Automatic follow-up (Repair 2) was tested offline only (fake clock, scripted model); it has not run on a host. Budgets count turns, not spend. The scheduler's tick is per process; ORBIT is one process, and two processes over one state directory are not supported (as for every store here). The task banner shows the state and the on/off control; its phone layout was not checked.

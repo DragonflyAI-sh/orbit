@@ -74,9 +74,11 @@ import { WORKSPACE_TOOL_NAMES } from "./workspace/service.ts";
 import type { WorkspaceService } from "./workspace/service.ts";
 import { WORKSPACE_ADMIN_TOOL_NAMES } from "./workspace/admin.ts";
 import type { WorkspaceAdmin } from "./workspace/admin.ts";
-import { isTaskId, parseCreate, TaskError, taskFile, taskStore } from "./tasks.ts";
+import { AUTO_GLOBAL_PER_DAY_DEFAULT, isTaskId, parseCreate, TaskError, taskFile, taskStore } from "./tasks.ts";
 import type { Observers, Provenance, Tasks } from "./tasks.ts";
 import { isTaskToolName, TASK_ASSISTANT_TOOL_NAMES, TASK_TURNS_MAX_CONCURRENT, taskSupervisor } from "./task-supervisor.ts";
+import { taskScheduler } from "./task-scheduler.ts";
+import type { TaskScheduler } from "./task-scheduler.ts";
 import { taskVaultSync } from "./task-vault.ts";
 import type { TaskVaultPort } from "./task-vault.ts";
 
@@ -179,6 +181,11 @@ export type Deps = {
   taskVault?: TaskVaultPort;
   taskModel?: ModelPort;
   taskTurnsMax?: number;
+  // Automatic task follow-ups (src/task-scheduler.ts, docs/adr/0003-supervised-tasks.md "Automatic follow-up"). Absent or
+  // enabled: false means the scheduler never starts a turn (the per-task opt-in is then shown as having no effect). `tickMs`: how often
+  // it looks (0: never on a timer; tests tick it themselves through `onScheduler`). `globalPerDay`: automatic turns across tasks in any
+  // 24 hours.
+  taskFollowUps?: { enabled: boolean; tickMs?: number; globalPerDay?: number; onScheduler?: (s: TaskScheduler) => void };
   // The clock for thread cards and the recent-context note. Tests inject one; it must be the clock the proposals use.
   now?: () => Date;
   // Chat tool execution deadline and abort grace period (docs/tool-deadlines.md). Tests lower them; production uses the defaults.
@@ -279,6 +286,7 @@ export function buildServer({
   taskVault,
   taskModel,
   taskTurnsMax = TASK_TURNS_MAX_CONCURRENT,
+  taskFollowUps,
   now,
   toolDeadlineMs,
   abortGraceMs,
@@ -481,13 +489,18 @@ export function buildServer({
     canUseTools: () => Boolean((taskModel ?? model).step),
     now: clock,
     maxConcurrent: taskTurnsMax,
+    followUps: { enabled: taskFollowUps?.enabled === true, globalPerDay: taskFollowUps?.globalPerDay ?? AUTO_GLOBAL_PER_DAY_DEFAULT },
   });
-  // Restart recovery: a task turn recorded as running when ORBIT stopped is marked interrupted (never re-run).
+  // Restart recovery: a task turn recorded as running when ORBIT stopped is marked interrupted (never re-run), and so is an automatic
+  // follow-up whose turn it was.
   try {
     for (const id of tasks.recover()) console.log(JSON.stringify({ at: clock().toISOString(), event: "task_turn_interrupted_by_restart", task: id }));
   } catch (e) {
     console.log(JSON.stringify({ at: clock().toISOString(), event: "task_recover_failed", detail: e instanceof Error ? e.message.slice(0, 200) : "error" }));
   }
+  // The follow-up scheduler: created after recovery, so it never sees a turn the stop cut off as running. Off unless switched on.
+  const followUps = taskScheduler({ tasks, supervisor, enabled: taskFollowUps?.enabled === true, globalPerDay: taskFollowUps?.globalPerDay ?? AUTO_GLOBAL_PER_DAY_DEFAULT, now: clock });
+  taskFollowUps?.onScheduler?.(followUps);
   const taskOfThread = (tid: string) => {
     try {
       const t = tasks.byThread(tid);
@@ -1009,7 +1022,7 @@ export function buildServer({
     // ---- Supervised tasks (owner only, every route; docs/adr/0003-supervised-tasks.md). Rai's own actions: list, inspect, create,
     // steer, pause, resume, cancel, run one turn, attest evidence, answer a request, sync to the vault, and mark done (evidence-gated).
     // Every mutation names the rev it was based on; a stale one is refused (409) and changes nothing.
-    const taskMatch = url.pathname.match(/^\/tasks\/([^/]{1,80})(?:\/(steer|pause|resume|cancel|turn|complete|evidence|respond|sync))?$/);
+    const taskMatch = url.pathname.match(/^\/tasks\/([^/]{1,80})(?:\/(steer|pause|resume|cancel|turn|complete|evidence|respond|sync|follow-up))?$/);
     if (url.pathname === "/tasks" || taskMatch) {
       const action = taskMatch ? (taskMatch[2] ?? "inspect") : req.method === "POST" ? "create" : "list";
       const method = action === "list" || action === "inspect" ? "GET" : "POST";
@@ -1045,6 +1058,11 @@ export function buildServer({
           return send(res, r.duplicate ? 200 : 202, { task: supervisor.view(tasks.get(id)!), turn: r.turn.n, duplicate: r.duplicate, note: "The turn runs in the task's session; its outcome is not known yet." });
         }
         if (action === "complete") return send(res, 200, { task: supervisor.view(tasks.complete(id, rev, human, taskObservers)) });
+        // Rai's per-task opt-in to automatic follow-up (on or off). Only this owner route can turn it on.
+        if (action === "follow-up") {
+          if (typeof input.enabled !== "boolean") return send(res, 400, { error: "Send {rev, enabled: true|false, perDay?}." });
+          return send(res, 200, { task: supervisor.view(tasks.setAuto(id, rev, input.enabled, human, input.perDay)) });
+        }
         if (action === "evidence") {
           const r = tasks.addEvidence(id, input as { criterion: unknown; kind: unknown; ref: unknown }, human, rev);
           return send(res, r.duplicate ? 200 : 201, { task: supervisor.view(r.task), evidence: r.evidence.id, duplicate: r.duplicate });
@@ -1554,6 +1572,9 @@ export function buildServer({
   // Post-deploy smoke checks start as soon as the service can accept requests, with no user activity. Not awaited: the suite has its
   // own deadlines and never holds up listening or any request. start() is single-flight, so a second "listening" runs nothing new.
   if (smoke) server.once("listening", () => void smoke.start());
+  // The follow-up scheduler ticks only while the server listens, and only when switched on.
+  server.once("listening", () => followUps.start(taskFollowUps?.tickMs));
+  server.once("close", () => followUps.stop());
   return server;
 }
 
