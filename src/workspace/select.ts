@@ -6,7 +6,8 @@ import type { Activation } from "./config.ts";
 import { checkPlatform } from "./fsops.ts";
 import { bwrapSandbox } from "./sandbox.ts";
 import type { Sandbox } from "./sandbox.ts";
-import { LedgerError } from "./ledger.ts";
+import { LedgerError, ledgerQuarantine } from "./ledger.ts";
+import { proposals as newProposals } from "../agent.ts";
 import { workspaceService } from "./service.ts";
 import { ownerActivation } from "./activation.ts";
 import type { CurrentEvidence } from "./activation.ts";
@@ -65,7 +66,10 @@ export function selectWorkspace(
   const owner = ownerActivation(activation.state === "enabled" ? dir : undefined, current);
   let service: ReturnType<typeof workspaceService>;
   try {
-    service = workspaceService({ activation, sandbox, stateDir: activation.state === "enabled" ? dir : undefined, proposals: d.proposals, audit: d.audit, active: () => owner.mode() === "enabled" });
+    // The validation runs keep their own ledger; an unverified cleanup there pauses exec and blocks enable here too (finding 7). A
+    // validation interrupted by a restart left its runs "in flight": they count until the startup recovery below verifies them.
+    const vdir = activation.state === "enabled" && dir ? join(dir, "validation-runs") : undefined;
+    service = workspaceService({ activation, sandbox, stateDir: activation.state === "enabled" ? dir : undefined, proposals: d.proposals, audit: d.audit, active: () => owner.mode() === "enabled", ...(vdir ? { foreignQuarantine: () => ledgerQuarantine(vdir, { inFlight: owner.validation()?.state !== "running" }) } : {}) });
   } catch (e) {
     // The ledger could not be loaded: the tools stay off (and say why) rather than run without their records, and ORBIT still starts.
     if (!(e instanceof LedgerError)) throw e;
@@ -101,6 +105,16 @@ export function selectWorkspace(
         await svc.recover();
       } catch (e) {
         log(`workspace-recovery: failed (${e instanceof Error ? e.message.slice(0, 200) : "error"})`);
+      }
+      // The validation runs' ledger gets the same recovery (reap leftovers, verify cleanups) before anything can start; no validation
+      // can be running yet (it needs the self-test below). Its instance is used only here and then dropped.
+      if (activation.state === "enabled" && dir && existsSync(join(dir, "validation-runs", "ledger.json"))) {
+        try {
+          const vcfg = activation.config;
+          await workspaceService({ activation: { state: "enabled", config: vcfg }, sandbox, stateDir: join(dir, "validation-runs"), proposals: newProposals(), audit: d.audit, active: () => false }).recover();
+        } catch (e) {
+          log(`workspace-recovery: validation runs not recovered (${e instanceof Error ? e.message.slice(0, 200) : "error"}); exec stays paused`);
+        }
       }
       if (sandbox) {
         const v = await sandbox.probe();

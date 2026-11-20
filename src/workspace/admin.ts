@@ -299,6 +299,8 @@ export function workspaceAdmin(d: {
       const sb = d.sandbox?.status();
       if (sb?.state !== "supported") throw new Error(`The sandbox self-test has not passed (${sb?.state ?? "no sandbox"}${sb?.reasons.length ? `: ${sb.reasons.join("; ")}` : ""}), so a validation cannot pass. No proposal was made.`);
       if (validating) throw new Error("A validation is already running. No proposal was made.");
+      const q = d.service.quarantined();
+      if (q.length) throw new Error(`An earlier run's process tree is not confirmed gone (${q.join(", ")}); a validation cannot pass until a reap verifies it (restart ORBIT to re-check). No proposal was made.`);
       const display: Record<string, string> = {
         workspace: `${valWs.id} (${valWs.identity}) only`,
         sandbox: `${d.sandbox!.policyId()}, policy ${config.policyHash}`,
@@ -386,6 +388,7 @@ export function workspaceAdmin(d: {
       if (!config || !d.sandbox || !valWs) return deny(409, "the host no longer permits workspace tools or has no validation workspace.");
       if (d.owner.mode() === "enabled") return deny(409, "the tools were enabled meanwhile; validation runs only while they are off.");
       if (validating) return deny(409, "a validation is already running.");
+      if (d.service.quarantined().length) return deny(409, "an earlier run's process tree is not confirmed gone; exec is paused.");
       if (config.policyHash !== held.binding.policyHash || d.sandbox.policyId() !== held.binding.sandboxPolicy || valWs.identity !== held.binding.workspace) return deny(409, "the sandbox policy changed since the card was shown. Ask again.");
       const id = `val-${randomBytes(8).toString("hex")}`;
       const rec: ValidationRecord = { id, state: "running", startedAt: iso(), proposalId: p.id, policyHash: config.policyHash, sandboxPolicy: d.sandbox.policyId(), workspaceIdentity: valWs.identity, checks: [] };
@@ -394,7 +397,7 @@ export function workspaceAdmin(d: {
       validating = (async () => {
         let final: ValidationRecord;
         try {
-          const out = await (d.smoke ?? runSmoke)({ config, sandbox, stateDir: d.stateDir ?? "", audit: (e) => audit({ ...e, validation: id }), onCheck: (c) => d.owner.saveValidation(keepInvalidation({ ...rec, checks: [...(d.owner.validation()?.checks ?? []), c] })) });
+          const out = await (d.smoke ?? runSmoke)({ config, sandbox, stateDir: d.stateDir ?? "", outsideQuarantine: () => d.service.quarantined(), audit: (e) => audit({ ...e, validation: id }), onCheck: (c) => d.owner.saveValidation(keepInvalidation({ ...rec, checks: [...(d.owner.validation()?.checks ?? []), c] })) });
           const failed = out.checks.filter((c) => c.required && c.result !== "pass");
           final = { ...rec, state: out.passed ? "passed" : "failed", finishedAt: iso(), checks: out.checks, summary: out.passed ? `All ${out.checks.filter((c) => c.required).length} required checks passed.` : `${failed.length} required check(s) failed: ${failed.map((c) => c.id).join(", ")}.` };
         } catch (e) {

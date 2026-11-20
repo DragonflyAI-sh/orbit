@@ -363,7 +363,7 @@ test("model paths: the admin tools only propose; unknown actions and extra argum
 // ---- the smoke harness (driven by a SCRIPTED launcher: logic only, no isolation claimed) ---------------------------------------------
 
 // A launcher double that behaves like a correctly isolated sandbox for the fixed smoke commands, or like a leaky one.
-function scriptedLauncher(o: { leaky?: boolean; state?: "supported" | "unsupported" } = {}): Sandbox & { started: RunSpec[] } {
+function scriptedLauncher(o: { leaky?: boolean; state?: "supported" | "unsupported"; cleanupTreeGone?: boolean; timeoutTreeGone?: boolean; reapGone?: boolean } = {}): Sandbox & { started: RunSpec[] } {
   const started: RunSpec[] = [];
   const exit = (x: Partial<RunExit>): RunExit => ({ code: 0, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: { stdout: false, stderr: false }, treeGone: true, ...x });
   const transcript = (leaky: boolean) =>
@@ -383,7 +383,7 @@ function scriptedLauncher(o: { leaky?: boolean; state?: "supported" | "unsupport
     probe: async () => ({ state: o.state ?? "supported", reasons: [] }),
     status: () => ({ state: o.state ?? "supported", reasons: o.state === "unsupported" ? ["scripted"] : [] }),
     policyId: () => "bwrap:scripted",
-    reap: async (ids) => Object.fromEntries(ids.map((id) => [id, { leftover: 0, killed: false, gone: true }])),
+    reap: async (ids) => Object.fromEntries(ids.map((id) => [id, { leftover: o.reapGone === false ? 1 : 0, killed: false, gone: o.reapGone !== false }])),
     start(spec: RunSpec): RunHandle {
       started.push(spec);
       const cmd = spec.argv.join(" ");
@@ -394,7 +394,7 @@ function scriptedLauncher(o: { leaky?: boolean; state?: "supported" | "unsupport
         writeFileSync(join(root, m[1]!), "smoke-exec\n");
         return { pid: 1, kill: () => {}, done: Promise.resolve(exit({ stdout: Buffer.from("1000\n") })) };
       }
-      if (cmd === "sleep 30" && spec.limits.timeoutSec === 3) return { pid: 1, kill: () => {}, done: Promise.resolve(exit({ code: null, signal: "SIGKILL", killedBy: "timeout" })) };
+      if (cmd === "sleep 30" && spec.limits.timeoutSec === 3) return { pid: 1, kill: () => {}, done: Promise.resolve(exit({ code: null, signal: "SIGKILL", killedBy: "timeout", treeGone: o.timeoutTreeGone !== false })) };
       if (cmd === "sleep 60") {
         let resolve!: (r: RunExit) => void;
         const done = new Promise<RunExit>((r) => (resolve = r));
@@ -402,7 +402,7 @@ function scriptedLauncher(o: { leaky?: boolean; state?: "supported" | "unsupport
       }
       const rm = /^\/bin\/sh -c rm -f (smoke-[0-9a-f]+)-\*$/.exec(cmd);
       if (rm) for (const f of readdirSync(root)) if (f.startsWith(`${rm[1]}-`)) rmSync(join(root, f));
-      return { pid: 1, kill: () => {}, done: Promise.resolve(exit({})) };
+      return { pid: 1, kill: () => {}, done: Promise.resolve(exit(rm ? { treeGone: o.cleanupTreeGone !== false } : {})) };
     },
   };
 }
@@ -411,7 +411,7 @@ function smokeRig(launcher: Sandbox, withValidationWs = true) {
   const r = wsRig();
   if (withValidationWs) r.config.workspaces.push(makeWorkspace(r.base, VALIDATION_WORKSPACE));
   const stateDir = mkdtempSync(join(tmpdir(), "orbit-wssmoke-"));
-  return { r, stateDir, run: () => runSmoke({ config: r.config, sandbox: launcher, stateDir, timeouts: { runMs: 2000, startMs: 2000 } }) };
+  return { r, stateDir, run: (outside?: () => string[]) => runSmoke({ config: r.config, sandbox: launcher, stateDir, timeouts: { runMs: 2000, startMs: 2000, recheckMs: 10 }, ...(outside ? { outsideQuarantine: outside } : {}) }) };
 }
 
 test("smoke: against a launcher that behaves like the isolated sandbox, every required check passes, nothing is left behind, and nothing outside the validation workspace is touched", async () => {
@@ -709,4 +709,91 @@ test("host operation records: unfinished or unreported entries are never pruned"
   const kept = (mem as { opId: string; state: string }[]);
   assert.ok(kept.some((e) => e.opId === many[0]!.opId), "the running entry is kept");
   assert.ok(kept.length <= 52);
+});
+
+// ---- PR #147 review, finding 7: every validation run's cleanup is covered, and the evidence is shared -----------------------------
+
+const check = (out: { checks: { id: string; result: string; detail: string }[] }, id: string) => out.checks.find((c) => c.id === id)!;
+
+test("smoke: an unverified cleanup of the FINAL cleanup run fails the validation, and the main service sees it (exec paused, enable blocked)", async () => {
+  const l = scriptedLauncher({ cleanupTreeGone: false, reapGone: false });
+  const s = smokeRig(l);
+  const out = await s.run();
+  assert.equal(out.passed, false);
+  assert.equal(check(out, "no_cleanup_quarantine").result, "fail");
+  const { ledgerQuarantine } = await import("../src/workspace/ledger.ts");
+  const seen = ledgerQuarantine(join(s.stateDir, "validation-runs"));
+  assert.equal(seen.length, 1, "the main service's view of the validation ledger names the run");
+  const main = workspaceService({ activation: { state: "enabled", config: s.r.config }, sandbox: l, stateDir: mkdtempSync(join(tmpdir(), "orbit-wsmain-")), proposals: s.r.proposals, foreignQuarantine: () => ledgerQuarantine(join(s.stateDir, "validation-runs")) });
+  assert.deepEqual(main.quarantined(), seen);
+  await assert.rejects(main.tools.find((t) => t.name === "exec_start")!.run({ workspace: "alpha", argv: ["true"] }), /paused/);
+  assert.match(enableBlockers({ configured: true, sandboxState: "supported", sandboxPolicy: "S", policyHash: "P", validationIdentity: "W", quarantined: main.quarantined(), validation: passed(), now: T0 }).join(), /not confirmed gone/);
+});
+
+test("smoke: the launcher's direct wall-clock run is recorded; an unverified cleanup of it fails the validation and is shared", async () => {
+  const l = scriptedLauncher({ timeoutTreeGone: false, reapGone: false });
+  const s = smokeRig(l);
+  const out = await s.run();
+  assert.equal(check(out, "timeout_enforced").result, "fail");
+  assert.equal(check(out, "no_cleanup_quarantine").result, "fail");
+  const { ledgerQuarantine } = await import("../src/workspace/ledger.ts");
+  assert.equal(ledgerQuarantine(join(s.stateDir, "validation-runs")).length, 1);
+});
+
+test("smoke: a later reap that finds the tree gone lifts it (positive evidence only)", async () => {
+  const l = scriptedLauncher({ cleanupTreeGone: false, reapGone: true });
+  const s = smokeRig(l);
+  const out = await s.run();
+  assert.equal(check(out, "no_cleanup_quarantine").result, "pass", check(out, "no_cleanup_quarantine").detail);
+  assert.equal(out.passed, true);
+});
+
+test("smoke: an unverified cleanup in ORBIT's main ledger pauses the validation's commands and fails it", async () => {
+  const s = smokeRig(scriptedLauncher());
+  const out = await s.run(() => ["ws-00000000000000aa"]);
+  assert.equal(out.passed, false);
+  assert.equal(check(out, "exec_confirmed").result, "fail");
+  assert.match(check(out, "no_cleanup_quarantine").detail, /ws-00000000000000aa/);
+});
+
+test("validate: refused (no proposal) while any cleanup is unverified", async () => {
+  const q = rig();
+  q.svc.ledger.put({ opId: "ws-00000000000000f2", proposalId: "x", kind: "exec", workspace: "alpha", digest: "d", state: "completed", createdAt: "t", updatedAt: "t", events: [{ at: "t", state: "running" }], summary: "s", treeGone: false });
+  await assert.rejects(q.propose("validate"), /not confirmed gone/);
+});
+
+test("a validation interrupted by a restart: its in-flight runs count as unverified until the startup recovery verifies them", async () => {
+  const { ledgerQuarantine, opLedger } = await import("../src/workspace/ledger.ts");
+  const dir = mkdtempSync(join(tmpdir(), "orbit-wsvr-"));
+  const led = opLedger(dir);
+  led.put({ opId: "ws-00000000000000b1", proposalId: "v", kind: "exec", workspace: VALIDATION_WORKSPACE, digest: "-", state: "running", createdAt: "t", updatedAt: "t", events: [{ at: "t", state: "accepted" }, { at: "t", state: "running" }], summary: "s" });
+  assert.deepEqual(ledgerQuarantine(dir, { inFlight: false }), [], "while a validation runs in this process, its live runs are its own business");
+  assert.deepEqual(ledgerQuarantine(dir, { inFlight: true }), ["ws-00000000000000b1"]);
+  const r = wsRig();
+  r.config.workspaces.push(makeWorkspace(r.base, VALIDATION_WORKSPACE));
+  const rec = workspaceService({ activation: { state: "enabled", config: r.config }, sandbox: scriptedLauncher(), stateDir: dir, proposals: r.proposals, active: () => false });
+  await rec.recover();
+  assert.deepEqual(ledgerQuarantine(dir, { inFlight: true }), [], "recovery reaped it and recorded the evidence");
+  writeFileSync(join(dir, "ledger.json"), "{broken");
+  assert.deepEqual(ledgerQuarantine(dir), ["validation-ledger-unreadable"], "an unreadable ledger is never 'clean'");
+});
+
+// ---- PR #147 review, finding 6: model-controlled display fields are escaped consistently --------------------------------------
+
+test("exec card: the working directory is escaped like argv (bidi, C1, U+2028/2029), while the run gets the exact text", async () => {
+  const r = wsRig();
+  const nasty = "d\u202Eir\u0085x\u2028y\u2029z\u2066";
+  const cwd = JSON.parse(`"${nasty}"`) as string;
+  mkdirSync(join(r.a.root, cwd));
+  const p = await r.call("exec_start", { workspace: "alpha", argv: ["pwd"], cwd });
+  const card = r.proposal(p.value.proposalId);
+  const shown = card.display["working directory"]!;
+  assert.equal(shown, "/workspace/d⟨U+202E⟩ir⟨U+0085⟩x⟨U+2028⟩y⟨U+2029⟩z⟨U+2066⟩");
+  assert.doesNotMatch(Object.values(card.display).join("\n") + card.summary, /[\u0080-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/);
+  const out = await r.svc.confirm(r.proposals.take(p.value.proposalId) as never);
+  assert.equal(out.code, 202);
+  await tick();
+  assert.deepEqual(r.sandbox.runs[0]!.spec.cwd, [cwd], "execution gets the exact directory name, not its display form");
+  r.sandbox.runs[0]!.finish(0);
+  await r.svc.idle();
 });

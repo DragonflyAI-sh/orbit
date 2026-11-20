@@ -4,7 +4,7 @@ import { hasVaultFindings, maskVaultText } from "../vault/filter.ts";
 import type { Activation, Workspace, WorkspaceConfig } from "./config.ts";
 import { applyPatch, atomicWrite, currentVersion, listDir, openRoot, parseRelPath, PATCH_EDITS_MAX, readPage, READ_PAGE_DEFAULT, READ_PAGE_MAX, search, snapshot, statPath, WorkspaceFsError, WRITE_MAX_BYTES } from "./fsops.ts";
 import type { RootHandle, Snapshot } from "./fsops.ts";
-import { ACTIVE, opLedger } from "./ledger.ts";
+import { ACTIVE, opLedger, unverifiedCleanups } from "./ledger.ts";
 import type { OpEntry, OpKind, OpLedger } from "./ledger.ts";
 import { CLEAN_ENV, SANDBOX_HOME, SCRIPT_PATH } from "./sandbox.ts";
 import type { ReapResult, RunHandle, Sandbox } from "./sandbox.ts";
@@ -133,7 +133,9 @@ export type WorkspaceService = ReturnType<typeof workspaceService>;
 
 // `active`: the owner's switch (src/workspace/activation.ts). With a valid host configuration but the switch off, the service exists
 // (status, recovery, validation and disable need it) yet offers no tool to the model and refuses every confirmation.
-export function workspaceService(d: { activation: Activation; sandbox?: Sandbox; stateDir?: string; proposals: Proposals; audit?: (e: WorkspaceAudit) => void; now?: () => Date; ledger?: OpLedger; active?: () => boolean }) {
+// `foreignQuarantine`: unverified cleanups recorded in ANOTHER ledger (the validation runs'), which pause exec here exactly like this
+// service's own (finding 7 of the PR #147 review).
+export function workspaceService(d: { activation: Activation; sandbox?: Sandbox; stateDir?: string; proposals: Proposals; audit?: (e: WorkspaceAudit) => void; now?: () => Date; ledger?: OpLedger; active?: () => boolean; foreignQuarantine?: () => string[] }) {
   const active = () => (d.active ? d.active() : true);
   const now = d.now ?? (() => new Date());
   const iso = () => now().toISOString();
@@ -617,8 +619,17 @@ export function workspaceService(d: { activation: Activation; sandbox?: Sandbox;
   }
 
   // WS-R8: exec runs whose process tree was not confirmed gone, and not verified clean since. While any exists, nothing starts.
+  function ownQuarantined(): string[] {
+    return unverifiedCleanups(ledger.list());
+  }
   function quarantined(): string[] {
-    return ledger.list().filter((e) => e.kind === "exec" && !ACTIVE.includes(e.state) && e.events.some((x) => x.state === "running") && e.treeGone !== true && !e.cleanupVerifiedAt).map((e) => e.opId);
+    let foreign: string[] = [];
+    try {
+      foreign = d.foreignQuarantine?.() ?? [];
+    } catch {
+      foreign = ["foreign-ledger-unreadable"];
+    }
+    return [...new Set([...ownQuarantined(), ...foreign])];
   }
 
   // Asks the sandbox to kill and remove whatever is left of these runs, and records positive evidence only.
@@ -679,7 +690,7 @@ export function workspaceService(d: { activation: Activation; sandbox?: Sandbox;
       audit({ event: "recovery", kind: e.kind, workspace: e.workspace, opId: e.opId, detail: String(patch.state) });
       return { opId: e.opId, state: patch.state };
     });
-    await verifyCleanup(quarantined());
+    await verifyCleanup(ownQuarantined());
     return settled;
   }
 
