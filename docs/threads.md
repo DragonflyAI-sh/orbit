@@ -12,7 +12,8 @@ One JSON file per thread in `<STATE_DIRECTORY>/threads/<id>.json` (id is a UUID)
 
 ```
 Thread   { schema, id, title, titleSet, createdAt, updatedAt, archived, archivedAt?, rev,
-           messages: Message[], cards: Card[], summary?: Summary, compaction?: { lastError? } }
+           messages: Message[], cards: Card[], summary?: Summary, compaction?: { lastError? },
+           taskSession?: true (created as a supervised task's session; docs/adr/0003-supervised-tasks.md) }
 Message  { id, role: "user"|"assistant", at, text, status?: pending|done|error|interrupted, error?,
            calls?: Call[], cards?: string[] (card ids), memory?: string[], provenance?, source?, capped?,
            author?: "orbit-supervisor" (a user-role prompt ORBIT's task supervisor wrote; shown as "ORBIT task supervisor", never as Rai) }
@@ -39,7 +40,7 @@ Every route is owner only (`decide("threads", ...)`, 403 for anyone else, checke
 | `GET /threads/:id` | Open: messages (tool results are summarised, not sent in full), cards with `live`, `summary`, `busy`; `task` when the thread is a task's session (docs/adr/0003-supervised-tasks.md) |
 | `POST /threads/:id/rename {title}` | Rename (1-100 chars, masked) |
 | `POST /threads/:id/archive {archived?}` | Archive (default) or restore with `archived:false`; data is untouched |
-| `POST /threads/:id/messages {text, attachments?}` | Continue: runs one turn and returns the thread (502 plus the thread if the model failed). `attachments`: up to 10 photo ids of this thread; `text` may then be empty (docs/photos.md). In a task's session the text is also recorded as a new instruction version from Rai and the turn gets the task's context (docs/adr/0003-supervised-tasks.md) |
+| `POST /threads/:id/messages {text, attachments?}` | Continue: runs one turn and returns the thread (502 plus the thread if the model failed). `attachments`: up to 10 photo ids of this thread; `text` may then be empty (docs/photos.md). In a task's session the message is admitted by the task record while the reply lock is held (docs/adr/0003-supervised-tasks.md, "Direct steering in the task session"): active, the text becomes a new instruction version from Rai and an interactive task turn answers it, or 409 with nothing recorded while another turn of the task runs; photos alone start the turn and record no instruction; paused, the text is recorded for resume and no turn runs; done or cancelled, nothing is recorded. A task's session uses the task-scoped memory policy (no rolling recent-context note). If the task store cannot be read, a task's session answers 503 and sends nothing |
 | `POST /threads/:id/attachments`, `GET /threads/:id/attachments/:aid` | Upload a processed JPEG into this thread; read one of this thread's photos (docs/photos.md) |
 | `GET /threads/:id/photos/:ref` | A photo shown in one of this thread's galleries (`photos_show`); only this thread's own photos, re-authorized on every request (docs/photo-recall.md) |
 | `POST /threads/notice/ack` | Dismiss the one-time notice for every device |
