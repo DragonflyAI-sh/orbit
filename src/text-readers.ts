@@ -1,6 +1,7 @@
 import type { ChatTool } from "./agent.ts";
 import type { Jobs } from "./jobs.ts";
 import type { MemoryPort } from "./memory.ts";
+import { TaskNoteRefused } from "./task-context.ts";
 import type { Result } from "./ports.ts";
 import { CURSOR_PARAM, PAGING_CONTRACT, PageError, pageArgs, pageId, pagePath, textPage } from "./text-pages.ts";
 
@@ -33,6 +34,7 @@ export function textReaderTools(d: { memory: MemoryPort; jobs?: Jobs }): ChatToo
           read = d.memory.read(path);
         } catch (err) {
           const m = err instanceof Error ? err.message : String(err);
+          if (err instanceof TaskNoteRefused) throw new PageError("denied", m);
           if (m === "no such note") throw new PageError("not-found", "there is no note at that path in the vault copy that answered. Nothing was read. Find the path with memory_search.");
           if (m === "path is outside the vault") throw new PageError("denied", "the path is outside the vault, or is not a .md note. Nothing was read.");
           throw new PageError("unavailable", `the vault could not be read now (${m.slice(0, 300)}). Nothing was read; do not treat the note as missing or empty.`);

@@ -68,55 +68,88 @@ export function statusLine(t: Task, f: ReturnType<typeof statusFacts>, key: stri
   return `- ${day} ${parts.join("; ")} (${marker(t.id, key)})`;
 }
 
-export type SyncOutcome = { state: "synced" | "up-to-date" | "already-written" | "failed" | "blocked"; commit?: string; error?: string; key: string };
+// What a sync did, as far as ORBIT can prove it. Two facts are kept apart: the vault write (`written`: the pipeline committed, pushed
+// and verified the line; `already-written`/`up-to-date`: nothing needed writing; `failed`/`blocked`: nothing was written; `unknown`: the
+// pipeline could not confirm either way) and ORBIT's own bookkeeping on the task (`recorded`: whether the outcome was saved on the task
+// record). A write that succeeded is never reported as not saved because the bookkeeping after it failed.
+// - synced: written and recorded.
+// - written-unrecorded: the line IS in the vault (commit given), but the task record could not be updated. Retrying the sync finds the
+//   line by its key and records it without writing a second line.
+// - unknown: the vault pipeline could not confirm whether the push landed. Not saved as far as anyone can tell; retrying is safe (the
+//   key check finds the line if it did land).
+export type SyncState = "synced" | "written-unrecorded" | "up-to-date" | "already-written" | "failed" | "blocked" | "unknown";
+export type SyncOutcome = { state: SyncState; commit?: string; error?: string; key: string; written: boolean; recorded: boolean; retry?: string };
+// The pipeline errors that leave the push outcome open. Everything else from the pipeline is raised before any push (nothing written).
+const OPEN_ENDED: readonly string[] = ["unverified", "push_failed"];
 
 export function taskVaultSync(deps: { tasks: Tasks; port: TaskVaultPort | undefined; observers: Observers; now?: () => Date }) {
   const { tasks, port, observers } = deps;
   const now = deps.now ?? (() => new Date());
   const inFlight = new Set<string>();
 
+  // Bookkeeping that never decides the outcome: returns whether the task record took it.
+  const record = (id: string, patch: Parameters<Tasks["recordSync"]>[1]): boolean => {
+    try {
+      tasks.recordSync(id, patch);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const RETRY_RECORD = "Run the sync again: it finds the line by its key and records it on the task without writing another line.";
+
   async function sync(id: string): Promise<SyncOutcome> {
     const t = tasks.get(id);
     if (!t) throw new TaskError(404, "No task with that id.");
     if (!t.vault) throw new TaskError(400, "This task has no linked vault note. Link one with vaultNote and vaultHeading first.");
     if (!port) {
-      tasks.recordSync(id, { state: "failed", lastAttemptAt: now().toISOString(), attempts: t.vault.sync.attempts + 1, lastError: "Vault writes are not enabled on this ORBIT (no vault clone or credential). Nothing was written." });
-      return { state: "failed", error: "vault writes are not enabled", key: "" };
+      const recorded = record(id, { state: "failed", lastAttemptAt: now().toISOString(), attempts: t.vault.sync.attempts + 1, lastError: "Vault writes are not enabled on this ORBIT (no vault clone or credential). Nothing was written." });
+      return { state: "failed", error: "vault writes are not enabled; nothing was written", key: "", written: false, recorded };
     }
     if (inFlight.has(id)) throw new TaskError(409, "A vault sync of this task is already running.");
     const f = statusFacts(t, observers);
     const key = factsKey(f);
-    if (t.vault.sync.state === "synced" && t.vault.sync.syncedKey === key) return { state: "up-to-date", key, commit: t.vault.sync.commit };
+    if (t.vault.sync.state === "synced" && t.vault.sync.syncedKey === key) return { state: "up-to-date", key, commit: t.vault.sync.commit, written: false, recorded: true };
     inFlight.add(id);
     const at = now();
     const attempt = { lastAttemptAt: at.toISOString(), attempts: t.vault.sync.attempts + 1 };
     try {
-      const text = await port.read(t.vault.note);
+      let text: string | undefined;
+      try {
+        text = await port.read(t.vault.note);
+      } catch (e) {
+        const error = `NOT saved: the note could not be read before writing (${e instanceof VaultError ? `${e.code}: ` : ""}${e instanceof Error ? e.message.slice(0, 300) : "error"}). Nothing was written.`;
+        const recorded = record(id, { ...attempt, state: "failed", lastError: error.slice(0, 500) });
+        return { state: "failed", error, key, written: false, recorded };
+      }
       if (text === undefined) {
-        const error = `${t.vault.note} does not exist in the vault. ORBIT never creates task notes; create it (with the heading ${t.vault.heading}) or link another note.`;
-        tasks.recordSync(id, { ...attempt, state: "failed", lastError: error });
-        return { state: "failed", error, key };
+        const error = `${t.vault.note} does not exist in the vault. ORBIT never creates task notes; create it (with the heading ${t.vault.heading}) or link another note. Nothing was written.`;
+        const recorded = record(id, { ...attempt, state: "failed", lastError: error });
+        return { state: "failed", error, key, written: false, recorded };
       }
       if (text.includes(marker(t.id, key))) {
-        tasks.recordSync(id, { ...attempt, state: "synced", syncedKey: key, lastSuccessAt: at.toISOString(), lastError: undefined });
-        return { state: "already-written", key };
+        const recorded = record(id, { ...attempt, state: "synced", syncedKey: key, lastSuccessAt: at.toISOString(), lastError: undefined });
+        return { state: "already-written", key, written: false, recorded, ...(recorded ? {} : { error: "The line is already in the vault, but ORBIT could not record that on the task.", retry: RETRY_RECORD }) };
       }
-      const r = await port.append(t.vault.note, t.vault.heading, statusLine(t, f, key, at), `task status for ${oneLine(t.title, 60)}`);
-      tasks.recordSync(id, { ...attempt, state: "synced", syncedKey: key, commit: r.commit, lastSuccessAt: now().toISOString(), lastError: undefined });
-      return { state: "synced", commit: r.commit, key };
-    } catch (e) {
-      const blocked = e instanceof VaultError && e.code === "needs_confirmation";
-      const error = blocked
-        ? `The vault policy protects this note (${e.message}). Task sync never makes proposals; nothing was written.`
-        : e instanceof VaultError
-          ? `NOT saved (${e.code}): ${e.message}`
-          : `NOT saved: ${e instanceof Error ? e.message.slice(0, 300) : "error"}`;
+      let commit: string;
       try {
-        tasks.recordSync(id, { ...attempt, state: blocked ? "blocked" : "failed", lastError: error.slice(0, 500) });
-      } catch {
-        // The task file could not be written: the outcome is still returned to the caller.
+        commit = (await port.append(t.vault.note, t.vault.heading, statusLine(t, f, key, at), `task status for ${oneLine(t.title, 60)}`)).commit;
+      } catch (e) {
+        const blocked = e instanceof VaultError && e.code === "needs_confirmation";
+        const open = !(e instanceof VaultError) || OPEN_ENDED.includes(e.code);
+        const error = blocked
+          ? `The vault policy protects this note (${e.message}). Task sync never makes proposals; nothing was written.`
+          : open
+            ? `NOT confirmed saved: the vault pipeline could not confirm whether the line reached the vault (${e instanceof VaultError ? `${e.code}: ` : ""}${e instanceof Error ? e.message.slice(0, 300) : "error"}). Treat it as not saved; a retry is safe, since it finds the line by its key if it did land.`
+            : `NOT saved (${(e as VaultError).code}): ${(e as VaultError).message} Nothing was written.`;
+        const state = blocked ? "blocked" : open ? "unknown" : "failed";
+        const recorded = record(id, { ...attempt, state, lastError: error.slice(0, 500) });
+        return { state, error, key, written: false, recorded, ...(open ? { retry: "Run the sync again." } : {}) };
       }
-      return { state: blocked ? "blocked" : "failed", error, key };
+      // The pipeline committed, pushed and verified the line. From here on the vault write is a fact, whatever the bookkeeping does.
+      const recorded = record(id, { ...attempt, state: "synced", syncedKey: key, commit, lastSuccessAt: now().toISOString(), lastError: undefined });
+      if (recorded) return { state: "synced", commit, key, written: true, recorded: true };
+      return { state: "written-unrecorded", commit, key, written: true, recorded: false, error: `The status line WAS committed and pushed (commit ${commit.slice(0, 12)}), but ORBIT could not record that on the task, so the task still shows its previous sync state.`, retry: RETRY_RECORD };
     } finally {
       inFlight.delete(id);
     }

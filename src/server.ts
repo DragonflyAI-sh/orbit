@@ -25,6 +25,7 @@ import { proposals as newProposals, runChat, screenReply } from "./agent.ts";
 import type { ChatTool, Proposals } from "./agent.ts";
 import { chatTools } from "./chat-tools.ts";
 import { textReaderTools } from "./text-readers.ts";
+import { taskMemory, taskScopedTools } from "./task-context.ts";
 import { PR_INSPECT_TOOL_NAMES } from "./pr-inspect.ts";
 import type { VaultEdits } from "./vault/tools.ts";
 import type { Nodes } from "./nodes.ts";
@@ -442,21 +443,22 @@ export function buildServer({
       if (!jobs) return { found: false, why: "jobs are not enabled" };
       try {
         const j = jobs.get(id);
-        return j ? { found: true, state: j.state, health: jobs.health(j) } : { found: false, why: "not in the job store (it keeps the newest 200)" };
+        return j ? { found: true, state: j.state, health: jobs.health(j), ...(j.work?.proposal ? { proposal: j.work.proposal } : {}) } : { found: false, why: "not in the job store (it keeps the newest 200)" };
       } catch {
         return { found: false, why: "the job store is unavailable" };
       }
     },
+    links: (pid) => tasks.proposalLinks(pid).length,
   };
   const tasksVault = taskVaultSync({ tasks, port: taskVault, observers: taskObservers, now });
   const supervisor = taskSupervisor({
     tasks,
-    createThread: (title) => threads.create(title).id,
+    createThread: (title) => threads.create(title, { taskSession: true }).id,
     threadBusy: (tid) => threads.isBusy(tid),
     threadExists: (tid) => Boolean(threads.get(tid)),
     turn: (tid, text, prep, opts) => tsvc.turn(tid, text, prep, opts),
     prepare: async (isOwner, query, tid) => {
-      const p = await prepare(isOwner, query, "chat", chatSessionId(tid));
+      const p = await prepare(isOwner, query, "chat", chatSessionId(tid), { taskSession: true });
       return { notes: p.notes, used: p.used, current: p.current, offered: p.offered };
     },
     allowChat: (isOwner) => allowAgent(isOwner, "chat"),
@@ -472,7 +474,7 @@ export function buildServer({
       if (!p) return { ok: false, why: "no open proposal has that id (it was never made, already used, or expired)" };
       if (p.kind !== "job_launch") return { ok: false, why: "that proposal is not a job launch" };
       if (p.origin !== assistantSessionId()) return { ok: false, why: "that proposal was not made in the Assistant" };
-      return { ok: true };
+      return { ok: true, proposal: { id: p.id, kind: "job_launch", routine: p.routine, brief: p.brief, origin: p.origin, createdAt: p.createdAt } };
     },
     vault: tasksVault,
     modelName: () => (taskModel ?? model).status().impl,
@@ -582,7 +584,12 @@ export function buildServer({
   // session discovery is offered only in the Assistant (policy decision, docs/adr/0001-session-registry.md).
   // `conversation`: the session id of the conversation the turn runs in (chat:<uuid> or assistant:assistant), from the route, never
   // from model text. The photo tools are offered only with one, and only reach what src/photo-access.ts photoPolicy allows it.
-  const prepare = async (isOwner: boolean, query: string, scope: "chat" | "assistant" = "chat", conversation?: string) => {
+  const baseMemory = memory;
+  // `taskSession`: the turn runs in a task's session (supervised or interactive). Memory then goes through the task-scoped policy
+  // (src/task-context.ts): the rolling recent-context note is never an automatic excerpt, a search hit or a readable note, and the vault
+  // write tools refuse it as a target. Nothing else about the turn's tools or vault access changes.
+  const prepare = async (isOwner: boolean, query: string, scope: "chat" | "assistant" = "chat", conversation?: string, o: { taskSession?: boolean } = {}) => {
+    const memory = o.taskSession ? taskMemory(baseMemory) : baseMemory;
     let notes: string | undefined;
     let used: string[] = [];
     const memoryDecision = decide("memory", "search", isOwner);
@@ -604,6 +611,7 @@ export function buildServer({
     const offered = isOwner && model.step
       ? [...refuseLegacyContext(withDuplicateWarning([...withLaneGuard(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), () => researchLane().names, () => [...routines.keys()]), ...textReaderTools({ memory, jobs }), ...laneTools()], proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(hostInventory ?? []), ...(workspace?.tools ?? []), ...(workspaceAdmin?.tools ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? [...photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...observationTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE, onChange: semantic ? (ref) => semantic.invalidate(ref) : undefined }), ...(semantic ? [photoSearchTool({ semantic, attachments, caller: conversation, isOwner, zone: ZONE })] : [])] : [])]
       : [];
+    if (o.taskSession) offered.splice(0, offered.length, ...taskScopedTools(offered));
     if (!offered.length) {
       current.push(
         !isOwner
@@ -966,19 +974,23 @@ export function buildServer({
         if (!decision.allow) return send(res, 403, { error: decision.reason });
         if (threads.isBusy(id)) return send(res, 409, { error: "A reply is already in progress in this thread." });
         if (threads.get(id)?.archived) return send(res, 409, { error: "This thread is archived. Restore it to continue." });
-        const prep = await prepare(callerIsOwner, text, "chat", chatSessionId(id));
+        // A task's session: Rai's message is admitted by the task record and answered with the task's context (src/task-supervisor.ts
+        // humanTurn), with the task-scoped memory policy (src/task-context.ts). Any other thread: an ordinary chat turn, unchanged. A task
+        // store that cannot be read makes a task's session fail closed rather than answer as an ordinary chat without the policy.
+        let task: ReturnType<typeof tasks.byThread>;
+        try {
+          task = tasks.byThread(id);
+        } catch (err) {
+          const th = threads.get(id);
+          const taskSession = th?.taskSession === true || /^Task: /.test(th?.title ?? "");
+          if (!taskSession) task = undefined;
+          else if (err instanceof TaskError) return send(res, err.code, { error: `This is a task's session and ${err.message.charAt(0).toLowerCase()}${err.message.slice(1)} Nothing was sent.` });
+          else throw err;
+        }
+        const prep = await prepare(callerIsOwner, text, "chat", chatSessionId(id), { taskSession: Boolean(task) });
         const photos = photosOf(input, chatScope(id));
         if (!photos) return;
         let out;
-        // A task's session: Rai's message is recorded as a new instruction version from Rai and answered with the task's context
-        // (src/task-supervisor.ts humanTurn). Any other thread: an ordinary chat turn, unchanged.
-        const task = (() => {
-          try {
-            return tasks.byThread(id);
-          } catch {
-            return undefined;
-          }
-        })();
         try {
           const base = { notes: prep.notes, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner), isOwner: callerIsOwner, ...(photos.refs.length ? { attachments: photos.refs } : {}) };
           out = task ? await supervisor.humanTurn(task.id, text, base) : await svc.turn(id, text, base);
@@ -1010,7 +1022,7 @@ export function buildServer({
           const input = await body();
           if (!input) return;
           const parsed = parseCreate(input as never, clock());
-          const r = tasks.create(parsed, { actor: "human", via: "api" }, () => threads.create(`Task: ${parsed.title}`).id);
+          const r = tasks.create(parsed, { actor: "human", via: "api" }, () => threads.create(`Task: ${parsed.title}`, { taskSession: true }).id);
           return send(res, r.duplicate ? 200 : 201, { task: supervisor.view(r.task), duplicate: r.duplicate });
         }
         const id = taskMatch![1]!;
@@ -1039,10 +1051,10 @@ export function buildServer({
         }
         if (action === "respond") {
           const r = supervisor.respond(id, rev, input, human);
-          return send(res, 200, { task: supervisor.view(r.task), request: r.request.id });
+          return send(res, 200, { task: supervisor.view(r.task), request: r.request.id, duplicate: Boolean(r.duplicate) });
         }
         const r = await tasksVault.sync(id);
-        return send(res, r.state === "failed" || r.state === "blocked" ? 502 : 200, { task: supervisor.view(tasks.get(id)!), sync: r });
+        return send(res, r.state === "failed" || r.state === "blocked" || r.state === "unknown" ? 502 : 200, { task: supervisor.view(tasks.get(id)!), sync: r });
       } catch (err) {
         if (err instanceof TaskError) return send(res, err.code, { error: err.message });
         throw err;

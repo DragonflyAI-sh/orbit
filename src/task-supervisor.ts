@@ -2,7 +2,7 @@ import type { ChatTool, ToolContext, ToolResult } from "./agent.ts";
 import { dataBlock } from "./thread-context.ts";
 import type { ThreadView, TurnPrep } from "./thread-service.ts";
 import { blockerOf, currentInstructionVersion, evidenceStatus, isTaskId, openRequests, parseCreate, readiness, requestStatus, runningTurn, TaskError, TERMINAL, unseenInstructions } from "./tasks.ts";
-import type { Instruction, Observers, Provenance, Task, Tasks, TurnRecord } from "./tasks.ts";
+import type { Instruction, LinkableProposal, Observers, Provenance, Task, Tasks, TurnRecord } from "./tasks.ts";
 import type { TaskVaultSync } from "./task-vault.ts";
 
 // The task supervisor (docs/adr/0003-supervised-tasks.md). The Assistant is the supervisor: it creates, lists, inspects, steers, pauses
@@ -50,8 +50,9 @@ export type SupervisorDeps = {
   // The policy decision for the tasks port (owner only).
   decide(action: string, isOwner: boolean): { allow: boolean; reason: string };
   observers: Observers;
-  // Whether a proposal id names an open job_launch proposal made in the Assistant, so a job request may be linked to it.
-  linkable(proposalId: string): { ok: true } | { ok: false; why: string };
+  // Whether a proposal id names an open job_launch proposal made in the Assistant, so a job request may be linked to it; with what the
+  // proposal store holds for it (routine, brief, origin), which the task store compares with the request.
+  linkable(proposalId: string): { ok: true; proposal: LinkableProposal } | { ok: false; why: string };
   vault?: TaskVaultSync;
   // The model port supervised turns run on: its `impl` string is recorded on each turn. Which model that is, is configuration.
   modelName(): string;
@@ -85,6 +86,12 @@ export function taskSupervisor(d: SupervisorDeps) {
 
   // ---- views ----
 
+  const sessionWriting = (t: Task): string =>
+    t.lifecycle === "active"
+      ? "Writing here records your message as a new instruction and starts an interactive task turn (refused, with nothing recorded, while another turn of this task runs)."
+      : t.lifecycle === "paused"
+        ? "Paused: no turn runs. Writing here records your message as a new instruction for when the task resumes; the reply cannot act on the task."
+        : `This task is ${t.lifecycle}: writing here gets an ordinary reply and records nothing on the task.`;
   const instructionView = (i: Instruction) => ({ v: i.v, at: i.at, by: byLabel(i.by), provenance: i.by, text: i.text });
   function view(t: Task, detail: "summary" | "full" = "full") {
     const r = readiness(t, observers);
@@ -103,7 +110,9 @@ export function taskSupervisor(d: SupervisorDeps) {
       instructions: { current: currentInstructionVersion(t), notSeenByTaskYet: unseen.length, notSeenFromRai: unseen.filter((i) => i.by.actor === "human").length },
       lastTurn: turn ? { n: turn.n, state: turn.state, startedAt: turn.startedAt, endedAt: turn.endedAt ?? null, instructionsSeen: turn.instructionsSeen, model: turn.model } : null,
       turnRunning: Boolean(runningTurn(t)),
-      completion: { ready: r.ready, missing: r.missing, note: "Only Rai marks a task done, and only when every criterion has attested or verified evidence." },
+      completion: { ready: r.ready, missing: r.missing, note: "Only Rai marks a task done, and only when he has attested every criterion. ORBIT can verify that a job this task requested ran; that is not proof a criterion is met." },
+      // What writing in this task's session does now (the banner shows it), so the page and the model say the same thing.
+      sessionWriting: sessionWriting(t),
       vault: t.vault ? { note: t.vault.note, heading: t.vault.heading, sync: t.vault.sync } : null,
       updatedAt: t.updatedAt,
     };
@@ -117,7 +126,7 @@ export function taskSupervisor(d: SupervisorDeps) {
       createdAt: t.createdAt,
       createdBy: byLabel(t.createdBy),
       instructionHistory: t.instructions.slice(-10).map(instructionView),
-      requests: t.requests.slice(-20).map((x) => ({ id: x.id, kind: x.kind, text: x.text, by: byLabel(x.by), createdAt: x.createdAt, ...(x.job ? { job: x.job } : {}), recorded: x.state, ...requestStatus(x, observers), ...(x.duplicates ? { duplicatesIgnored: x.duplicates } : {}), ...(x.response ? { response: { at: x.response.at, by: byLabel(x.response.by), text: x.response.text ?? null } } : {}), ...(x.proposal ? { proposal: x.proposal.id } : {}), ...(x.previous?.length ? { previousProposals: x.previous } : {}) })),
+      requests: t.requests.slice(-20).map((x) => ({ id: x.id, kind: x.kind, text: x.text, by: byLabel(x.by), createdAt: x.createdAt, ...(x.job ? { job: x.job } : {}), recorded: x.state, ...requestStatus(x, observers), ...(x.duplicates ? { duplicatesIgnored: x.duplicates } : {}), ...(x.response ? { response: { at: x.response.at, by: byLabel(x.response.by), text: x.response.text ?? null } } : {}), ...(x.proposal ? { proposal: x.proposal.id, binding: x.proposal.binding ? { match: x.proposal.binding.match, routine: x.proposal.binding.routine, briefSha256: x.proposal.binding.briefSha256, requestBriefSha256: x.proposal.binding.requestBriefSha256, linkedBy: byLabel(x.proposal.by) } : { match: "legacy-unbound", note: "linked by an earlier build without comparing the proposal with this request" } } : {}), ...(x.previous?.length ? { previousProposals: x.previous } : {}) })),
       evidence: t.evidence.slice(-30).map((e) => ({ id: e.id, criterion: e.criterion, kind: e.kind, ref: e.ref, note: e.note ?? null, by: byLabel(e.by), at: e.at, ...evidenceStatus(t, e, observers) })),
       turns: t.turns.slice(-5).map((x) => ({ n: x.n, state: x.state, trigger: byLabel(x.trigger), startedAt: x.startedAt, endedAt: x.endedAt ?? null, instructionsSeen: x.instructionsSeen, model: x.model, toolCalls: x.toolCalls ?? null, error: x.error ?? null, replyExcerpt: x.reply ?? null })),
       lifecycleHistory: t.lifecycleHistory.slice(-10).map((h) => ({ ...h, by: byLabel(h.by) })),
@@ -125,7 +134,7 @@ export function taskSupervisor(d: SupervisorDeps) {
   }
 
   // The task's own context for its turn: ORBIT's record of the task, as a data block. Instructions carry who wrote them.
-  function contextBlock(t: Task, turnN: number, mode: "supervised" | "interactive" | "inactive"): string {
+  function contextBlock(t: Task, turnN: number, mode: "supervised" | "interactive" | "paused" | "inactive", o: { recorded?: boolean } = {}): string {
     const r = readiness(t, observers);
     const record = {
       task: t.id,
@@ -140,17 +149,22 @@ export function taskSupervisor(d: SupervisorDeps) {
       nextAction: t.nextAction?.text ?? null,
       instructions: t.instructions.slice(-20).map((i) => ({ v: i.v, from: byLabel(i.by), text: i.text })),
       requests: t.requests.slice(-10).map((x) => ({ id: x.id, kind: x.kind, text: x.text, status: requestStatus(x, observers).status, ...(x.response?.text ? { answer: x.response.text, answeredBy: byLabel(x.response.by) } : {}) })),
-      evidence: t.evidence.slice(-20).map((e) => ({ id: e.id, criterion: e.criterion, kind: e.kind, ref: e.ref, status: evidenceStatus(t, e, observers).status })),
+      evidence: t.evidence.slice(-20).map((e) => {
+        const s = evidenceStatus(t, e, observers);
+        return { id: e.id, criterion: e.criterion, kind: e.kind, ref: e.ref, status: s.status, ...(s.execution ? { execution: s.execution.state } : {}) };
+      }),
     };
     const rules =
       mode === "inactive"
-        ? `This conversation is the session of an ORBIT task that is ${t.lifecycle}. Its task tools are withheld; nothing you say here changes the task.`
-        : [
+        ? `This conversation is the session of an ORBIT task that is ${t.lifecycle}. Its task tools are withheld; nothing said here is recorded on the task or changes it.`
+        : mode === "paused"
+          ? `This conversation is the session of an ORBIT task that is paused. No task turn runs and its task tools are withheld, so you cannot file requests, record evidence or set its next action. ${o.recorded ? "Rai's message here was recorded on the task as a new instruction (shown in the record below) for when the task is resumed; nothing else about the task changed." : "Nothing from this message was recorded on the task (it carried no text)."} Answer Rai directly and do not claim to have acted on the task.`
+          : [
             "This conversation is the session of an ORBIT task. Work toward its goal within its scope.",
             mode === "supervised" ? `This is supervised task turn ${turnN}: ORBIT started it for the task's supervisor; Rai is not typing here. Use at most a few tool rounds, then reply with what you did, what you found and what should happen next.` : "Rai is writing in this task's session now; answer Rai directly.",
             "Instructions from Rai outrank instructions relayed by the Assistant; follow the newest of each where they differ, and say so.",
             "You cannot confirm, approve or launch anything. To ask for something (a clarification, a decision on a blocker, or a job to be run), call task_request; the Assistant decides what to do and Rai confirms any launch.",
-            "Record evidence for an acceptance criterion with task_add_evidence. Evidence you add is shown as claimed: only Rai's own attestation or ORBIT's job record counts toward completion. Never say the task is done; only Rai marks it done.",
+            "Record evidence for an acceptance criterion with task_add_evidence. Evidence you add is shown as claimed: only Rai's own attestation counts toward a criterion. ORBIT can verify that a job this task requested ran, which is not proof that a criterion is met. Never say the task is done; only Rai marks it done.",
             "Set the next concrete step with task_set_next_action before you end.",
           ].join(" ");
     return dataBlock("task", `${rules}\nORBIT's record of the task (instructions and answers are labeled with who wrote them):\n${JSON.stringify(record)}`);
@@ -177,12 +191,12 @@ export function taskSupervisor(d: SupervisorDeps) {
       },
       {
         name: "task_add_evidence",
-        description: "Record a reference that supports one acceptance criterion of this task (a job id, commit, pull request, URL, vault note path, or a short note). It is recorded as claimed by you; it does not complete the task.",
+        description: "Record a reference that supports one acceptance criterion of this task (a job id, commit, pull request, URL, vault note path, or a short note). It is recorded as claimed by you and never counts toward the criterion by itself (only Rai's attestation does); for a job, ORBIT shows separately whether its records prove this task's request launched it and how it ended.",
         parameters: obj({ criterion: str("The criterion id, for example ac1."), kind: { type: "string", enum: ["job", "commit", "pull-request", "url", "vault-note", "note"] }, ref: str("The reference itself."), note: str("Optional: why it shows the criterion is met.") }, ["criterion", "kind", "ref"]),
         run: async (a) => {
           try {
             const r = tasks.addEvidence(taskId, a as { criterion: unknown; kind: unknown; ref: unknown }, by());
-            return live({ evidence: r.evidence.id, criterion: r.evidence.criterion, duplicate: r.duplicate, status: "claimed", note: "Recorded as claimed. Only Rai's attestation or ORBIT's job record makes it count toward completion." });
+            return live({ evidence: r.evidence.id, criterion: r.evidence.criterion, duplicate: r.duplicate, status: "claimed", note: "Recorded as claimed. Only Rai's attestation makes a criterion count toward completion." });
           } catch (e) {
             throw fail(e);
           }
@@ -227,8 +241,10 @@ export function taskSupervisor(d: SupervisorDeps) {
     if (!d.canUseTools()) throw new TaskError(503, "The connected model cannot call tools, so no task turn can run.");
     const t = tasks.get(taskId);
     if (!t) throw new TaskError(404, "No task with that id.");
-    // The same owner request again (a repeated POST): answered from the record, before any busy check, and nothing starts.
-    if (o.key && t.seen?.includes(o.key) && t.turns.length) return { turn: t.turns.at(-1)!, duplicate: true, done: Promise.resolve(t.turns.at(-1)) };
+    // The same owner request again (a repeated POST: same requestId and rev): answered with the turn it started, before any busy check,
+    // and nothing starts. A requestId used for another operation (a steer) is a different request; one reused with another rev is 409.
+    const again = tasks.priorTurn(taskId, o.expectRev, o.key);
+    if (again) return { turn: again.turn, duplicate: true, done: Promise.resolve(again.turn) };
     if (!d.threadExists(t.session.thread)) throw new TaskError(409, "This task's session (its chat thread) no longer exists. Nothing was started.");
     if (running.size >= maxConcurrent && !running.has(taskId)) throw new TaskError(429, `At most ${maxConcurrent} supervised task turns run at once and that many are running. Nothing was started or queued; try again when one ends.`);
     if (d.threadBusy(t.session.thread)) throw new TaskError(409, "This task's session already has a reply in progress. Nothing was started.");
@@ -274,31 +290,65 @@ export function taskSupervisor(d: SupervisorDeps) {
     return { turn: begun.turn, duplicate: false, done };
   }
 
-  // Rai writes in a task's session (Sessions view). The message is recorded as a new instruction version from Rai (provenance
-  // sessions-ui) before the turn starts, then answered in that thread with the task's context. An active task's turn is a task turn
-  // (serialized with supervised turns, task tools offered, full chat tool parity for the owner since Rai is present). A paused, done or
-  // cancelled task gets an ordinary reply with its context read-only and no task tools.
-  async function humanTurn(taskId: string, text: string, base: TurnPrep): Promise<{ thread: ThreadView; error?: string }> {
+  // Rai writes in a task's session (Sessions view). What happens depends on the task's lifecycle, decided and recorded atomically by the
+  // task store while the thread's reply lock is held (TurnPrep.admit, tasks.admitHuman), so a message that is refused records nothing
+  // and one that is accepted is recorded once:
+  // - active: refused (409) while any turn of the task runs, including a supervised turn still preparing before it takes the thread
+  //   lock. Otherwise the text becomes instruction v(n+1) from Rai (sessions-ui) and an interactive task turn answers it (serialized
+  //   with supervised turns, task tools offered, the owner's chat tools since Rai is present). Photos alone start the turn and record no
+  //   instruction (nothing is made up from them).
+  // - paused: the text is recorded as an instruction for when the task resumes; no task turn runs and the reply has the task's context
+  //   read-only and no task tools. Photos alone record nothing.
+  // - done or cancelled: an ordinary reply with the task's context read-only; nothing is recorded.
+  // If the user message then cannot be stored, the admission is undone (rollback). The thread route checks the caller is the owner.
+  async function humanTurn(taskId: string, text: string, base: TurnPrep): Promise<{ thread: ThreadView; error?: string; admitted?: { instruction?: number; turn?: number } }> {
     const t = tasks.get(taskId);
     if (!t) throw new TaskError(404, "No task with that id.");
-    if (!base.isOwner) return d.turn(t.session.thread, text, base, {});
-    if (TERMINAL.includes(t.lifecycle)) return d.turn(t.session.thread, text, { ...base, notes: [base.notes, contextBlock(t, 0, "inactive")].filter(Boolean).join("\n\n") }, {});
-    tasks.steer(taskId, undefined, text, { actor: "human", via: "sessions-ui" });
-    const after = tasks.get(taskId)!;
-    if (after.lifecycle !== "active") return d.turn(t.session.thread, text, { ...base, notes: [base.notes, contextBlock(after, 0, "inactive")].filter(Boolean).join("\n\n") }, {});
-    const begun = tasks.beginTurn(taskId, undefined, { actor: "human", via: "sessions-ui" }, d.modelName());
-    const n = begun.turn.n;
-    const tools = [...base.tools.filter((x) => !isTaskToolName(x.name)), ...turnTools(taskId, () => n)];
+    if (!base.isOwner) throw new TaskError(403, "Only Rai can write in a task's session.");
+    const photos = base.attachments?.length ?? 0;
+    const by: Provenance = { actor: "human", via: "sessions-ui" };
+    const plain = base.tools.filter((x) => !isTaskToolName(x.name));
+    if (TERMINAL.includes(t.lifecycle)) {
+      const prep: TurnPrep = { ...base, tools: plain, allow: turnAllow(true, new Set(plain.map((x) => x.name))), admit: () => {
+        const now = tasks.get(taskId);
+        if (now && !TERMINAL.includes(now.lifecycle)) throw new TaskError(409, `This task became ${now.lifecycle} while your message was being prepared. Nothing was sent; send it again.`);
+        return { notes: contextBlock(now ?? t, 0, "inactive") };
+      } };
+      return d.turn(t.session.thread, text, prep, {});
+    }
+    const mode = t.lifecycle === "active" ? "active" : "paused";
+    let admitted: { instruction?: number; turn?: number } = {};
+    let n = 0;
+    const tools = mode === "active" ? [...plain, ...turnTools(taskId, () => n)] : plain;
+    const prep: TurnPrep = {
+      ...base,
+      tools,
+      allow: turnAllow(true, new Set(tools.map((x) => x.name))),
+      admit: () => {
+        const a = tasks.admitHuman(taskId, { text, photos }, by, d.modelName(), mode);
+        admitted = { ...(a.instruction ? { instruction: a.instruction.v } : {}), ...(a.turn ? { turn: a.turn.n } : {}) };
+        n = a.turn?.n ?? 0;
+        return {
+          notes: contextBlock(a.task, n, mode === "active" ? "interactive" : "paused", { recorded: Boolean(a.instruction) }),
+          rollback: (reason) => {
+            if (admitted.instruction !== undefined || admitted.turn !== undefined) tasks.revertAdmission(taskId, admitted, `the message could not be stored (${reason})`);
+            admitted = {};
+          },
+        };
+      },
+    };
     let out: { thread: ThreadView; error?: string } | undefined;
     try {
-      out = await d.turn(after.session.thread, text, { ...base, tools, allow: turnAllow(true, new Set(tools.map((x) => x.name))), notes: [base.notes, contextBlock(after, n, "interactive")].filter(Boolean).join("\n\n") }, {});
-      return out;
+      out = await d.turn(t.session.thread, text, prep, {});
+      return { ...out, admitted };
     } finally {
-      const reply = out ? [...out.thread.messages].reverse().find((m) => m.role === "assistant") : undefined;
-      try {
-        tasks.endTurn(taskId, n, { state: out && !out.error ? "done" : "error", ...(out?.error ? { error: out.error } : !out ? { error: "the turn failed" } : {}), ...(reply ? { message: reply.id, reply: (reply.text ?? "").slice(0, TASK_REPLY_EXCERPT), toolCalls: reply.calls?.length ?? 0 } : {}) });
-      } catch {
-        // Reported by the next view (the turn stays running until restart recovery marks it interrupted).
+      if (admitted.turn !== undefined) {
+        const reply = out ? [...out.thread.messages].reverse().find((m) => m.role === "assistant") : undefined;
+        try {
+          tasks.endTurn(taskId, admitted.turn, { state: out && !out.error ? "done" : "error", ...(out?.error ? { error: out.error } : !out ? { error: "the turn failed" } : {}), ...(reply ? { message: reply.id, reply: (reply.text ?? "").slice(0, TASK_REPLY_EXCERPT), toolCalls: reply.calls?.length ?? 0 } : {}) });
+        } catch {
+          // Reported by the next view (the turn stays running until restart recovery marks it interrupted).
+        }
       }
     }
   }
@@ -324,9 +374,14 @@ export function taskSupervisor(d: SupervisorDeps) {
     if (action === "withdraw" && by.actor !== "human") throw new TaskError(403, "Only the task itself or Rai can withdraw a request.");
     if (action === "link_proposal") {
       const pid = typeof a.proposalId === "string" ? a.proposalId : "";
+      if (!pid) throw new TaskError(400, "link_proposal needs proposalId.");
+      // A repeat of a link already made is answered from the record (the proposal may no longer be open by then).
+      const cur = tasks.get(taskId);
+      const same = cur?.requests.find((x) => x.id === a.request);
+      if (cur && same?.proposal?.id === pid) return { task: cur, request: same, duplicate: true };
       const ok = d.linkable(pid);
       if (!ok.ok) throw new TaskError(409, `Not linked: ${ok.why}`);
-      return tasks.respond(taskId, expectRev, a.request, "link", by, { text: a.text, proposal: pid, observe: observers.proposal });
+      return tasks.respond(taskId, expectRev, a.request, "link", by, { text: a.text, proposal: ok.proposal, acceptBriefSha256: a.acceptBriefSha256, observe: observers.proposal });
     }
     return tasks.respond(taskId, expectRev, a.request, action === "answer" ? "answer" : action === "decline" ? "decline" : "withdraw", by, { text: a.text });
   }
@@ -436,7 +491,7 @@ export function taskSupervisor(d: SupervisorDeps) {
         run: (a, ctx) =>
           guard(() => {
             const r = respond(idOf(a), tasks.requireRev(a.rev), a, assistantBy(ctx));
-            return live({ task: r.task.id, rev: r.task.rev, request: r.request.id, recorded: r.request.state, ...requestStatus(r.request, observers), note: r.request.state === "proposed" ? "Linked. Nothing is launched until Rai confirms the card." : "Recorded; the task sees it at its next turn." });
+            return live({ task: r.task.id, rev: r.task.rev, request: r.request.id, recorded: r.request.state, duplicate: Boolean(r.duplicate), ...requestStatus(r.request, observers), note: r.duplicate ? "This proposal was already linked to this request; nothing changed." : r.request.state === "proposed" ? "Linked. Nothing is launched until Rai confirms the card." : "Recorded; the task sees it at its next turn." });
           })(),
       },
       {
@@ -452,13 +507,15 @@ export function taskSupervisor(d: SupervisorDeps) {
       },
       {
         name: "task_vault_sync",
-        description: "Append the task's current status line to its linked vault note, through ORBIT's vault write pipeline (policy, secret check, commit, push, verification). Writes nothing when the status is unchanged or the line is already there. Failures are recorded on the task; retry is manual. Say it was saved only if the state is synced or already-written.",
+        description: "Append the task's current status line to its linked vault note, through ORBIT's vault write pipeline (policy, secret check, commit, push, verification). Writes nothing when the status is unchanged or the line is already there. Failures are recorded on the task; retry is manual. Say it was saved only if inVault is true; if recordedOnTask is false, say the line is in the vault but the task record was not updated, and that running the sync again records it without a second line. State unknown means it is not confirmed saved.",
         parameters: obj({ id: str("Task id.") }, ["id"]),
         run: (a) =>
           guard(async () => {
             if (!d.vault) throw new TaskError(503, "Task vault sync is not available on this ORBIT.");
             const r = await d.vault.sync(idOf(a));
-            return live({ task: a.id, ...r, saved: r.state === "synced" || r.state === "already-written" || r.state === "up-to-date" }, r.commit ? `vault/clone@${r.commit.slice(0, 7)}` : "tasks");
+            // `inVault`: the line is in the vault as far as ORBIT's pipeline proved it; `recordedOnTask`: the task record says so too.
+            const inVault = r.state === "synced" || r.state === "written-unrecorded" || r.state === "already-written" || r.state === "up-to-date";
+            return live({ task: a.id, ...r, inVault, recordedOnTask: r.recorded, saved: inVault }, r.commit ? `vault/clone@${r.commit.slice(0, 7)}` : "tasks");
           })(),
       },
     ];

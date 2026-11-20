@@ -200,7 +200,8 @@ test("acceptance walkthrough: create, linked session, a bounded supervised turn,
   assert.equal(inspected.result.task.instructionHistory.at(-1).by, "Rai (sessions-ui)");
   assert.match(inspected.result.notice, /untrusted data/);
 
-  // 6. Evidence-gated completion: the task's claims are not enough; a job its own request produced, now done, verifies ac2; Rai attests ac1.
+  // 6. Evidence-gated completion: the task's claims are not enough. A job its own request produced, now done, has its EXECUTION
+  // verified by ORBIT's records, which is not proof a criterion passed: Rai attests each criterion (ac2 citing that job).
   current = await x.inspect(task.id);
   let r = await x.api(`/tasks/${task.id}/complete`, "POST", { rev: current.rev });
   assert.equal(r.status, 409);
@@ -210,8 +211,13 @@ test("acceptance walkthrough: create, linked session, a bounded supervised turn,
   assert.equal((await x.api(`/tasks/${task.id}/turn`, "POST", { rev: current.rev })).status, 202);
   current = await x.settled(task.id);
   const ev = (await x.inspect(task.id)).evidence.find((e: { ref: string }) => e.ref === jobId);
-  assert.equal(ev.status, "verified");
-  r = await x.api(`/tasks/${task.id}/evidence`, "POST", { rev: current.rev, criterion: "ac1", kind: "url", ref: "https://example.invalid/garden.csv", note: "checked by hand" });
+  assert.equal(ev.status, "claimed");
+  assert.equal(ev.execution.state, "verified");
+  assert.equal((await x.inspect(task.id)).completion.ready, false);
+  r = await x.api(`/tasks/${task.id}/evidence`, "POST", { rev: current.rev, criterion: "ac2", kind: "job", ref: jobId, note: "read the job's test results" });
+  assert.equal(r.status, 201);
+  assert.equal(r.data.task.completion.ready, false);
+  r = await x.api(`/tasks/${task.id}/evidence`, "POST", { rev: r.data.task.rev, criterion: "ac1", kind: "url", ref: "https://example.invalid/garden.csv", note: "checked by hand" });
   assert.equal(r.status, 201);
   assert.equal(r.data.task.completion.ready, true);
   r = await x.api(`/tasks/${task.id}/complete`, "POST", { rev: r.data.task.rev });
@@ -372,8 +378,12 @@ test("duplicate requests and callbacks: a task asking twice files one request; a
   const pid = (await x.assistantTool("job_launch", { routine: "orbit", brief: BRIEF })).result.proposalId;
   cur = await x.inspect(t.id);
   assert.equal((await x.assistantTool("task_respond", { id: t.id, rev: cur.rev, request: "req-2", action: "link_proposal", proposalId: pid })).ok, true);
-  cur = await x.inspect(t.id);
-  assert.equal((await x.assistantTool("task_respond", { id: t.id, rev: cur.rev, request: "req-2", action: "link_proposal", proposalId: pid })).ok, false);
+  const linkedRev = (await x.inspect(t.id)).rev;
+  // The same link again (a retried call, even with the old rev) is answered from the record as a duplicate and changes nothing.
+  const relink = await x.assistantTool("task_respond", { id: t.id, rev: cur.rev, request: "req-2", action: "link_proposal", proposalId: pid });
+  assert.equal(relink.ok, true, JSON.stringify(relink));
+  assert.equal(relink.result.duplicate, true);
+  assert.equal((await x.inspect(t.id)).rev, linkedRev);
   assert.equal((await x.api(`/chat/proposals/${pid}/confirm`, "POST", {})).status, 202);
   assert.equal((await x.api(`/chat/proposals/${pid}/confirm`, "POST", {})).status, 409);
   assert.equal(x.jobs.all().length, 1);

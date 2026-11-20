@@ -1268,6 +1268,7 @@
       unseen ? `${unseen} instruction${unseen === 1 ? "" : "s"} not seen by the task yet` : "",
       t.lastTurn ? `Last turn ${t.lastTurn.n}: ${t.lastTurn.state}` : "No turn has run yet",
       t.vault ? `Vault note ${t.vault.note}: ${t.vault.sync.state}${t.vault.sync.lastError ? ` (${t.vault.sync.lastError})` : ""}` : "",
+      t.sessionWriting || "",  // what writing in this session does now, in the server's words (the model is told the same)
     ].filter(Boolean);
     const act = async (action) => {
       const r = await tapi(`/tasks/${encodeURIComponent(t.id)}/${action}`, "POST", { rev: t.rev });

@@ -22,7 +22,12 @@ import { maskContent } from "./threads.ts";
 // Mutations made for a person or the Assistant carry the `rev` they were based on and are refused (409) when it is stale; the task's own
 // turn writes (requests, evidence, next action) are not rev-checked but are refused when the task is no longer active.
 
-export const TASK_FILE_VERSION = 1;
+// Version 2 (this repair): owner idempotency records are namespaced by operation and carry their payload digest (`idem`); proposal links
+// carry an immutable binding to the request's brief; turn records may count photos. A version 1 file is read and migrated in memory
+// (its `seen` keys are kept as legacy keys that are refused, never guessed); the file is written as version 2 at the next change, so an
+// older build then refuses it (newer schema) instead of misreading it.
+export const TASK_FILE_VERSION = 2;
+const TASK_FILE_VERSIONS_READ = [1, 2];
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const TASK_ID = new RegExp(`^task-${UUID}$`);
 const THREAD_ID = new RegExp(`^${UUID}$`);
@@ -87,11 +92,20 @@ export type TaskRequest = {
   duplicates?: number;
   lastDuplicateAt?: string;
   response?: { at: string; by: Provenance; text?: string };
-  // The launch proposal the Assistant made for a job request (verified by the server to be an open job_launch proposal made in the
-  // Assistant). Earlier links whose proposals expired, were cancelled or refused are kept in `previous`.
-  proposal?: { id: string; linkedAt: string; by: Provenance };
-  previous?: { id: string; linkedAt: string; endedAs: string }[];
+  // The launch proposal linked to a job request (verified by the server to be an open job_launch proposal made in the Assistant, and
+  // bound to this request: `binding`). Earlier links whose proposals expired, were cancelled or refused are kept in `previous`; their ids
+  // stay reserved, so no other request can ever take them. A link without `binding` was made by an earlier build (legacy): it is shown,
+  // but ORBIT never treats a job from it as verified, since what the proposal launched was not compared with this request.
+  proposal?: { id: string; linkedAt: string; by: Provenance; binding?: ProposalBinding };
+  previous?: { id: string; linkedAt: string; endedAs: string; binding?: ProposalBinding }[];
 };
+// What ORBIT checked when it linked a proposal to a request, copied from the proposal store at that moment and never changed after.
+// - match "exact": the proposal's routine and brief are the request's (whitespace-normalized brief text, same routine when the request
+//   named one).
+// - match "accepted-by-rai": the briefs differ and Rai himself linked it, naming the proposal brief's digest he compared.
+export type ProposalBinding = { kind: "job_launch"; routine: string; briefSha256: string; requestBriefSha256: string; origin: string; proposedAt: string; requestKey: string; match: "exact" | "accepted-by-rai" };
+// The proposal as the proposal store has it, for linking (src/server.ts reads it; the task store never sees the proposal store itself).
+export type LinkableProposal = { id: string; kind: "job_launch"; routine: string; brief: string; origin: string; createdAt: string };
 export type EvidenceKind = "job" | "commit" | "pull-request" | "url" | "vault-note" | "note";
 export type Evidence = { id: string; criterion: string; kind: EvidenceKind; ref: string; note?: string; at: string; by: Provenance };
 export type TurnState = "running" | "done" | "error" | "interrupted";
@@ -110,8 +124,12 @@ export type TurnRecord = {
   reply?: string;
   error?: string;
   toolCalls?: number;
+  // Photos Rai sent with the message that started an interactive turn (a photo-only message records a turn but no instruction).
+  photos?: number;
 };
-export type VaultSyncState = "never" | "synced" | "failed" | "blocked";
+// "unknown": the vault pipeline could not confirm whether the line reached the remote (a push that may or may not have landed). Never
+// reported as saved; the next sync finds the line by its key if it did land.
+export type VaultSyncState = "never" | "synced" | "failed" | "blocked" | "unknown";
 export type VaultLink = {
   // A note Rai linked to this task (vault-relative, under Projects/ or Tasks/). ORBIT never creates it.
   note: string;
@@ -157,10 +175,16 @@ export type Task = {
   // Turn numbers are never reused, even when old turn records are dropped.
   turnSeq: number;
   vault?: VaultLink;
-  // Idempotency keys of recent owner requests (steer, run-turn), so a repeated POST changes nothing.
+  // Owner request ids already handled (steer, run-turn), per operation, with the payload they came with and what they produced, so a
+  // repeated POST returns the same result and changes nothing, and a reused id with another payload is refused.
+  idem?: IdemRecord[];
+  // Version 1 kept request ids without saying which operation they were for. Kept (never extended): such an id is refused if reused.
   seen?: string[];
   completedAt?: string;
 };
+
+export type IdemOp = "steer" | "turn";
+export type IdemRecord = { op: IdemOp; key: string; digest: string; at: string; instruction?: number; turn?: number };
 
 type TaskFile = { v: number; tasks: unknown[] };
 export type TaskBackend = { persisted: boolean; load(): TaskFile | undefined; save(file: TaskFile): void };
@@ -252,8 +276,11 @@ export function parseFollowUp(at: unknown, note: unknown, now: Date): { at: stri
 // What a linked launch proposal became, from the proposal store and its card (src/server.ts provides it). `confirmed` with a job id
 // is then followed into the job store.
 export type ProposalObservation = { state: "awaiting-confirmation" | "confirmed" | "expired" | "cancelled" | "refused" | "unknown"; job?: string; detail?: string };
-export type JobObservation = { found: true; state: string; health?: string } | { found: false; why: string };
-export type Observers = { proposal(id: string): ProposalObservation; job(id: string): JobObservation };
+// `proposal`: the proposal the job store says this job was launched from (its work link, written at registration from the confirmed
+// card); absent for a job launched any other way, or registered before work links existed.
+export type JobObservation = { found: true; state: string; health?: string; proposal?: string } | { found: false; why: string };
+// `links`: how many requests (across all tasks, current or earlier links) name a proposal id; more than one is an ambiguous legacy record.
+export type Observers = { proposal(id: string): ProposalObservation; job(id: string): JobObservation; links?(proposalId: string): number };
 
 // The explicit status of a request, at observation time. For job requests:
 //   pending (waiting for the Assistant) -> awaiting-confirmation (a launch card waits for Rai) -> confirmed (Rai confirmed; job registered)
@@ -273,32 +300,65 @@ export function requestStatus(r: TaskRequest, obs: Observers): { status: Request
   return { status: "result", job: p.job, jobState: j.state, detail: "the job ended; this is the run's result, not task completion" };
 }
 
-// Evidence status. Only two kinds count toward completion:
-// - attested: added by Rai himself (human provenance);
-// - verified: a job evidence whose job the job store shows `done` AND that this task's own request produced (its request's proposal
-//   card names that job), so the chain from the task to the run is ORBIT's own record, not a model's claim.
-// Everything else a model added is `claimed`: shown, never enough.
-export type EvidenceStatus = "attested" | "verified" | "claimed" | "not-verified";
-export function evidenceStatus(task: Task, e: Evidence, obs: Observers): { status: EvidenceStatus; detail: string } {
-  if (e.by.actor === "human") return { status: "attested", detail: "added by Rai" };
-  if (e.kind === "job") {
-    const ours = task.requests.some((r) => r.kind === "job" && r.proposal && obs.proposal(r.proposal.id).job === e.ref);
-    if (!ours) return { status: "claimed", detail: "this job was not produced by one of this task's own requests, so the link is a model's claim" };
-    const j = obs.job(e.ref);
-    if (!j.found) return { status: "not-verified", detail: `the job's state is unknown (${j.why})` };
-    return j.state === "done" ? { status: "verified", detail: "the job store shows this task's job done" } : { status: "not-verified", detail: `the job store shows the job ${j.state}` };
-  }
-  return { status: "claimed", detail: `added by ${e.by.actor === "assistant" ? "the Assistant" : e.by.actor === "task" ? "the task's model" : "ORBIT"}; not verified by ORBIT` };
+// Evidence has two separate questions, answered separately:
+// - Acceptance (`status`): does this evidence count toward a criterion? Only Rai's own attestation does (`attested`). Everything a
+//   model added is `claimed`: shown, never enough. A job that ran is NOT proof that an arbitrary criterion passed, so no job result,
+//   however well verified, satisfies a criterion by itself; Rai attests it (he may cite the job).
+// - Execution (`execution`, job evidence only): did ORBIT's own records show that this task's request launched this job, and how did
+//   it end? `verified` only when a request of this task holds a bound link (the brief was compared at link time) to a proposal that no
+//   other request ever claimed, the job store's work link names that same proposal, and the job is `done`. Anything less is said
+//   exactly: `not-done`, `unlinked` (no request of this task produced it), `legacy-unbound` (linked by an earlier build without a
+//   binding), `ambiguous` (the proposal is linked to more than one request), `unknown` (the job's state cannot be read).
+export type EvidenceStatus = "attested" | "claimed";
+export type ExecutionState = "verified" | "not-done" | "unlinked" | "legacy-unbound" | "ambiguous" | "unknown";
+export type ExecutionCheck = { state: ExecutionState; request?: string; jobState?: string; detail: string };
+export function executionOf(task: Task, jobId: string, obs: Observers): ExecutionCheck {
+  const j = obs.job(jobId);
+  const viaJob = j.found ? j.proposal : undefined;
+  const r = task.requests.find((x) => x.kind === "job" && x.proposal && (x.proposal.id === viaJob || (!viaJob && obs.proposal(x.proposal.id).job === jobId)));
+  if (!r || !r.proposal) return { state: "unlinked", detail: "no request of this task produced this job (ORBIT's job record does not name one of this task's linked proposals)" };
+  if (!r.proposal.binding) return { state: "legacy-unbound", request: r.id, detail: "this request's proposal was linked by an earlier build that did not compare the proposal with the request, so ORBIT does not treat the job as this request's" };
+  if ((obs.links?.(r.proposal.id) ?? 1) > 1) return { state: "ambiguous", request: r.id, detail: "the proposal is linked to more than one request, so the job cannot be attributed to this one" };
+  if (!j.found) return { state: "unknown", request: r.id, detail: `the job's record cannot be read (${j.why})` };
+  if (j.proposal !== r.proposal.id) return { state: "unknown", request: r.id, detail: "the job store does not record which proposal launched this job, so the link from this request to it is not ORBIT's own record" };
+  if (j.state !== "done") return { state: "not-done", request: r.id, jobState: j.state, detail: `ORBIT's records link this job to ${r.id}; the job store shows it ${j.state}` };
+  return { state: "verified", request: r.id, jobState: j.state, detail: `ORBIT's records show ${r.id} launched this job (bound proposal, confirmed by Rai) and the job store shows it done. This says the job ran, not that any criterion is met.` };
+}
+export function evidenceStatus(task: Task, e: Evidence, obs: Observers): { status: EvidenceStatus; detail: string; execution?: ExecutionCheck } {
+  const execution = e.kind === "job" ? executionOf(task, e.ref, obs) : undefined;
+  const ex = execution ? { execution } : {};
+  if (e.by.actor === "human") return { status: "attested", detail: "attested by Rai", ...ex };
+  return { status: "claimed", detail: `added by ${e.by.actor === "assistant" ? "the Assistant" : e.by.actor === "task" ? "the task's model" : "ORBIT"}; only Rai's attestation counts toward a criterion`, ...ex };
 }
 
-export type Readiness = { ready: boolean; criteria: { id: string; text: string; satisfiedBy: string[]; evidence: { id: string; status: EvidenceStatus }[] }[]; missing: string[] };
+export type Readiness = { ready: boolean; criteria: { id: string; text: string; satisfiedBy: string[]; evidence: { id: string; status: EvidenceStatus; execution?: ExecutionState }[] }[]; missing: string[] };
 export function readiness(task: Task, obs: Observers): Readiness {
   const criteria = task.acceptance.map((c) => {
-    const evidence = task.evidence.filter((e) => e.criterion === c.id).map((e) => ({ id: e.id, status: evidenceStatus(task, e, obs).status }));
-    return { id: c.id, text: c.text, evidence, satisfiedBy: evidence.filter((e) => e.status === "attested" || e.status === "verified").map((e) => e.id) };
+    const evidence = task.evidence.filter((e) => e.criterion === c.id).map((e) => {
+      const s = evidenceStatus(task, e, obs);
+      return { id: e.id, status: s.status, ...(s.execution ? { execution: s.execution.state } : {}) };
+    });
+    return { id: c.id, text: c.text, evidence, satisfiedBy: evidence.filter((e) => e.status === "attested").map((e) => e.id) };
   });
   const missing = criteria.filter((c) => !c.satisfiedBy.length).map((c) => c.id);
   return { ready: missing.length === 0, criteria, missing };
+}
+
+// The binding of a proposal to a job request (see ProposalBinding). Refuses a proposal for another routine or another brief, unless Rai
+// himself names the digest of the different brief he compared.
+const briefDigest = (b: string) => createHash("sha256").update(oneLine(b)).digest("hex");
+function bind(r: TaskRequest, p: LinkableProposal, by: Provenance, accept: unknown): ProposalBinding {
+  if (p.kind !== "job_launch") throw new TaskError(409, "Not linked: that proposal is not a job launch. Nothing was changed.");
+  if (r.job!.routine && r.job!.routine !== p.routine) throw new TaskError(409, `Not linked: the request asked for routine ${r.job!.routine}; the proposal launches ${p.routine}. Nothing was changed.`);
+  const requestBriefSha256 = briefDigest(r.job!.brief);
+  const briefSha256 = briefDigest(cleanText(p.brief, Number.MAX_SAFE_INTEGER));
+  const base = { kind: "job_launch" as const, routine: p.routine, briefSha256, requestBriefSha256, origin: p.origin, proposedAt: p.createdAt, requestKey: r.key };
+  if (briefSha256 === requestBriefSha256) return { ...base, match: "exact" };
+  if (by.actor === "human" && accept === briefSha256) return { ...base, match: "accepted-by-rai" };
+  throw new TaskError(
+    409,
+    `Not linked: the proposal's brief is not this request's brief (request ${requestBriefSha256.slice(0, 12)}, proposal ${briefSha256.slice(0, 12)}). Propose the launch with the request's exact brief, or decline the request and say why.${by.actor === "human" ? ` To link it anyway after comparing the two, send acceptBriefSha256: "${briefSha256}".` : " Only Rai can link a proposal whose brief differs."} Nothing was changed.`,
+  );
 }
 
 export const currentInstructionVersion = (t: Task) => t.instructions.at(-1)?.v ?? 0;
@@ -337,7 +397,7 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       problem = "the task file has an unknown shape; it is left as it is";
       throw new TaskError(503, `Tasks are unavailable: ${problem}.`);
     }
-    if (raw.v > TASK_FILE_VERSION) {
+    if (raw.v > TASK_FILE_VERSION || !TASK_FILE_VERSIONS_READ.includes(raw.v)) {
       problem = `the task file has schema version ${raw.v}, newer than this build understands (${TASK_FILE_VERSION}); it is left as it is`;
       throw new TaskError(503, `Tasks are unavailable: ${problem}.`);
     }
@@ -345,10 +405,11 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     file = raw;
     return file;
   };
-  // Persist first, then change memory.
+  // Persist first, then change memory. Always written at the current version (a version 1 file is migrated by its first change).
   const commit = (next: TaskFile) => {
-    backend.save(next);
-    file = next;
+    const out = { ...next, v: TASK_FILE_VERSION };
+    backend.save(out);
+    file = out;
   };
   const all = (): Task[] => load().tasks.filter(validTask);
   const get = (id: string): Task | undefined => (isTaskId(id) ? all().find((t) => t.id === id) : undefined);
@@ -375,12 +436,42 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     if (typeof rev !== "number" || !Number.isSafeInteger(rev) || rev < 1) throw new TaskError(400, "rev is required: the task's current rev from tasks_list or task_inspect, so a change based on an old view is refused.");
     return rev;
   };
-  // An owner request id seen before on this task: the same POST again changes nothing.
-  const seenBefore = (t: Task, key: string | undefined) => Boolean(key && t.seen?.includes(key));
-  const remember = (t: Task, key: string | undefined) => {
+  // Owner request ids (idempotency), namespaced by operation. `prior` answers a repeat: the record when this id was used for this
+  // operation with the same payload; 409 when it was used with another payload, or by version 1 (which did not record the operation).
+  const digestOf = (o: unknown) => createHash("sha256").update(JSON.stringify(o)).digest("hex").slice(0, 32);
+  function prior(t: Task, op: IdemOp, key: string | undefined, digest: string): IdemRecord | undefined {
+    if (!key) return undefined;
+    const r = t.idem?.find((x) => x.op === op && x.key === key);
+    if (r) {
+      if (r.digest !== digest) throw new TaskError(409, `This requestId was already used for a different ${op} on this task. Nothing was changed; use a new requestId for a new request.`);
+      return r;
+    }
+    if (t.seen?.includes(key)) throw new TaskError(409, "This requestId was used on this task by an earlier ORBIT build, which did not record what it was for, so a repeat cannot be answered safely. Nothing was changed; use a new requestId.");
+    return undefined;
+  }
+  const remember = (t: Task, op: IdemOp, key: string | undefined, digest: string, result: { instruction?: number; turn?: number }) => {
     if (!key) return;
-    t.seen = [...(t.seen ?? []), key].slice(-TASK_IDEMPOTENCY_KEPT);
+    t.idem = [...(t.idem ?? []), { op, key, digest, at: now().toISOString(), ...result }].slice(-TASK_IDEMPOTENCY_KEPT);
   };
+    // The turn an earlier identical owner request started, or undefined when this request is new. 409 for a reused id with another rev.
+  function priorTurn(id: string, expectRev: number | undefined, key?: string): { task: Task; turn: TurnRecord } | undefined {
+    const existing = get(id);
+    if (!existing) return undefined;
+    const again = prior(existing, "turn", key, digestOf({ rev: expectRev ?? null }));
+    if (!again || again.turn === undefined) return undefined;
+    const turn = existing.turns.find((x) => x.n === again.turn) ?? ({ n: again.turn, startedAt: again.at, state: "done", trigger: { actor: "human", via: "api" }, instructionsSeen: 0, model: "unknown", error: "this turn's record is no longer kept (only the newest 50 are)" } satisfies TurnRecord);
+    return { task: structuredClone(existing), turn: structuredClone(turn) };
+  }
+  // Every link (current or previous) to a proposal id across all tasks: a proposal answers at most one request, ever.
+  function linksOf(pid: string): { task: string; request: string; current: boolean }[] {
+    const out: { task: string; request: string; current: boolean }[] = [];
+    for (const t of all())
+      for (const r of t.requests) {
+        if (r.proposal?.id === pid) out.push({ task: t.id, request: r.id, current: true });
+        for (const p of r.previous ?? []) if (p.id === pid) out.push({ task: t.id, request: r.id, current: false });
+      }
+    return out;
+  }
 
   // Restart recovery, once per load: a turn recorded as running was cut off by the stop. It is marked interrupted (never re-run).
   function recover(): string[] {
@@ -413,6 +504,9 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     problem: () => problem,
     requireRev,
     recover,
+    priorTurn,
+    // Every request (current or previous link) a proposal id was ever linked to, across all tasks.
+    proposalLinks: (pid: string) => linksOf(pid),
     all: () => all().map((t) => structuredClone(t)),
     get: (id: string) => {
       const t = get(id);
@@ -459,22 +553,70 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     },
 
     // A new version of the task's instructions, appended (earlier versions are kept). `key`: an owner request id for idempotency.
+    // A repeat of the same owner request (same `key`, same text and rev) returns the instruction it recorded, before any rev or
+    // lifecycle check, and changes nothing.
     steer(id: string, expectRev: number | undefined, text: unknown, by: Provenance, key?: string): { task: Task; instruction: Instruction; duplicate: boolean } {
       const clean = cleanText(text, TASK_INSTRUCTION_MAX);
       if (!clean) throw new TaskError(400, "A steer needs text.");
+      const digest = digestOf({ rev: expectRev ?? null, text: clean });
       const existing = get(id);
-      if (existing && seenBefore(existing, key)) {
-        const inst = existing.instructions.find((i) => i.text === clean) ?? existing.instructions.at(-1)!;
-        return { task: structuredClone(existing), instruction: inst, duplicate: true };
+      const again = existing ? prior(existing, "steer", key, digest) : undefined;
+      if (existing && again) {
+        const inst = existing.instructions.find((i) => i.v === again.instruction);
+        if (!inst) throw new TaskError(409, "This requestId was already used for a steer, but its instruction is no longer on record. Nothing was changed.");
+        return { task: structuredClone(existing), instruction: structuredClone(inst), duplicate: true };
       }
       const { task, result } = change(id, { expectRev }, (t) => {
         if (t.instructions.length >= TASK_INSTRUCTIONS_MAX) throw new TaskError(409, `This task already has ${TASK_INSTRUCTIONS_MAX} instruction versions.`);
         const inst: Instruction = { v: currentInstructionVersion(t) + 1, at: now().toISOString(), text: clean, by };
         t.instructions.push(inst);
-        remember(t, key);
+        remember(t, "steer", key, digest, { instruction: inst.v });
         return inst;
       });
       return { task, instruction: result, duplicate: false };
+    },
+
+    // Rai writing in the task's session (src/task-supervisor.ts humanTurn), admitted in ONE store change while the thread's reply lock is
+    // held, so it is all or nothing:
+    // - active: refused (409, nothing recorded) while a turn of this task runs; otherwise the text becomes instruction v(n+1) from Rai
+    //   and a turn record starts that has seen it. A photo-only message starts the turn and records no instruction.
+    // - paused: the text is recorded as instruction v(n+1) for when the task resumes; no turn starts. A photo-only message records nothing.
+    // `expect` is the lifecycle the reply was prepared for; if the task changed meanwhile, nothing is recorded (409; send again).
+    admitHuman(id: string, input: { text: string; photos: number }, by: Provenance, model: string, expect: "active" | "paused"): { task: Task; instruction?: Instruction; turn?: TurnRecord } {
+      const clean = cleanText(input.text, TASK_INSTRUCTION_MAX);
+      const cur = get(id);
+      if (!cur) throw new TaskError(404, "No task with that id.");
+      if (cur.lifecycle !== expect) throw new TaskError(409, `This task became ${cur.lifecycle} while your message was being prepared. Nothing was sent or recorded; send it again.`);
+      if (expect === "paused" && !clean) return { task: structuredClone(cur) };
+      const { task, result } = change(id, {}, (t) => {
+        if (expect === "active") {
+          const busy = runningTurn(t);
+          if (busy) throw new TaskError(409, `Turn ${busy.n} of this task (started by ${busy.trigger.actor === "human" ? "Rai" : busy.trigger.actor === "assistant" ? "the Assistant" : "ORBIT"}) is running. Your message was not sent or recorded; send it again when the turn ends.`);
+        }
+        let instruction: Instruction | undefined;
+        if (clean) {
+          if (t.instructions.length >= TASK_INSTRUCTIONS_MAX) throw new TaskError(409, `This task already has ${TASK_INSTRUCTIONS_MAX} instruction versions. Nothing was sent or recorded.`);
+          instruction = { v: currentInstructionVersion(t) + 1, at: now().toISOString(), text: clean, by };
+          t.instructions.push(instruction);
+        }
+        let turn: TurnRecord | undefined;
+        if (expect === "active") {
+          t.turnSeq = (t.turnSeq ?? t.turns.length) + 1;
+          turn = { n: t.turnSeq, startedAt: now().toISOString(), state: "running", trigger: by, instructionsSeen: currentInstructionVersion(t), model, ...(input.photos ? { photos: input.photos } : {}) };
+          t.turns = [...t.turns, turn].slice(-TASK_TURNS_KEPT);
+        }
+        return { instruction, turn };
+      });
+      return { task, ...(result.instruction ? { instruction: structuredClone(result.instruction) } : {}), ...(result.turn ? { turn: structuredClone(result.turn) } : {}) };
+    },
+    // Undoes an admission whose message could not be stored in the thread: the instruction it added is removed (it was never sent) and
+    // its turn record ends as an error. Only the admission's own records are touched.
+    revertAdmission(id: string, a: { instruction?: number; turn?: number }, reason: string): Task {
+      return change(id, { allowTerminal: true }, (t) => {
+        if (a.instruction !== undefined && t.instructions.at(-1)?.v === a.instruction) t.instructions.pop();
+        const turn = a.turn === undefined ? undefined : t.turns.find((x) => x.n === a.turn);
+        if (turn && turn.state === "running") Object.assign(turn, { state: "error", endedAt: now().toISOString(), error: `Not run: ${reason}`.slice(0, 500) });
+      }).task;
     },
 
     setLifecycle(id: string, expectRev: number, to: "active" | "paused" | "cancelled", by: Provenance, reason?: unknown): Task {
@@ -488,14 +630,14 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       }).task;
     },
 
-    // Rai marks the task done. Refused unless every acceptance criterion has attested or verified evidence (readiness), and only for a
+    // Rai marks the task done. Refused unless every acceptance criterion has Rai's attested evidence (readiness), and only for a
     // human: no model, tool, job result or turn can complete a task.
     complete(id: string, expectRev: number, by: Provenance, obs: Observers): Task {
       if (by.actor !== "human") throw new TaskError(403, "Only Rai can mark a task done.");
       return change(id, { expectRev }, (t) => {
         if (runningTurn(t)) throw new TaskError(409, "A task turn is running. Wait for it to end (or pause the task) before marking it done.");
         const r = readiness(t, obs);
-        if (!r.ready) throw new TaskError(409, `Not done: acceptance criteria without attested or verified evidence: ${r.missing.join(", ")}. A model saying it is done, or a job ending, is not evidence of acceptance.`);
+        if (!r.ready) throw new TaskError(409, `Not done: acceptance criteria without Rai's attestation: ${r.missing.join(", ")}. A model saying it is done, or a job ending (even one ORBIT verified ran), is not evidence that a criterion is met.`);
         const from = t.lifecycle;
         t.lifecycle = "done";
         t.completedAt = now().toISOString();
@@ -535,16 +677,18 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     // ---- the task's own turn ----
 
     // Starts a turn record. Refused unless the task is active and no turn of it is running: a task's turns are serialized.
+    // A repeat of the same owner request (same `key` and rev) returns the turn it started (by number), and starts nothing.
     beginTurn(id: string, expectRev: number | undefined, trigger: Provenance, model: string, key?: string): { task: Task; turn: TurnRecord; duplicate: boolean } {
-      const existing = get(id);
-      if (existing && seenBefore(existing, key)) return { task: structuredClone(existing), turn: existing.turns.at(-1)!, duplicate: true };
+      const again = priorTurn(id, expectRev, key);
+      if (again) return { ...again, duplicate: true };
+      const digest = digestOf({ rev: expectRev ?? null });
       const { task, result } = change(id, { expectRev }, (t) => {
         if (t.lifecycle !== "active") throw new TaskError(409, `This task is ${t.lifecycle}: no turn is started.`);
         if (runningTurn(t)) throw new TaskError(409, "A turn of this task is already running. Turns of one task run one at a time.");
         t.turnSeq = (t.turnSeq ?? t.turns.length) + 1;
         const turn: TurnRecord = { n: t.turnSeq, startedAt: now().toISOString(), state: "running", trigger, instructionsSeen: currentInstructionVersion(t), model };
         t.turns = [...t.turns, turn].slice(-TASK_TURNS_KEPT);
-        remember(t, key);
+        remember(t, "turn", key, digest, { turn: turn.n });
         return turn;
       });
       return { task, turn: result, duplicate: false };
@@ -589,25 +733,41 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       return { task, ...result };
     },
 
-    // The supervisor's (or Rai's) answer to a request. `link`: the launch proposal the Assistant made for a job request; the caller
-    // (src/task-supervisor.ts) has already verified it is an open job_launch proposal made in the Assistant.
-    respond(id: string, expectRev: number, requestId: unknown, action: "answer" | "decline" | "withdraw" | "link", by: Provenance, data: { text?: unknown; proposal?: string; observe?: (pid: string) => ProposalObservation }): { task: Task; request: TaskRequest } {
+    // The supervisor's (or Rai's) answer to a request. `link`: the launch proposal for a job request, as the proposal store has it; the
+    // caller (src/task-supervisor.ts) has already checked it is an open job_launch proposal made in the Assistant. Here, in one store
+    // change: the proposal must not be linked to any other request of any task (current or previous link: ids are never reused), and
+    // its routine and brief must be the request's (or Rai, and only Rai, accepts a different brief by naming its digest). A repeat of the
+    // same link is answered as a duplicate before the rev check, so a retried call changes nothing.
+    respond(id: string, expectRev: number, requestId: unknown, action: "answer" | "decline" | "withdraw" | "link", by: Provenance, data: { text?: unknown; proposal?: LinkableProposal; acceptBriefSha256?: unknown; observe?: (pid: string) => ProposalObservation }): { task: Task; request: TaskRequest; duplicate?: boolean } {
+      if (action === "link") {
+        const p = data.proposal;
+        if (!p || typeof p.id !== "string" || !p.id) throw new TaskError(400, "A proposal id is required.");
+        const cur = get(id);
+        const same = cur?.requests.find((x) => x.id === requestId);
+        if (cur && same?.proposal?.id === p.id) return { task: structuredClone(cur), request: structuredClone(same), duplicate: true };
+        const elsewhere = linksOf(p.id);
+        if (elsewhere.length) {
+          const w = elsewhere[0]!;
+          throw new TaskError(409, `Not linked: that proposal is already linked to ${w.task === id ? "" : `task ${w.task} `}request ${w.request}${w.current ? "" : " (as an earlier link)"}. A proposal answers one request only. Nothing was changed.`);
+        }
+      }
       const { task, result } = change(id, { expectRev }, (t) => {
         const r = t.requests.find((x) => x.id === requestId);
         if (!r) throw new TaskError(404, "No request with that id on this task.");
         const at = now().toISOString();
         const text = cleanText(data.text, TASK_REQUEST_TEXT_MAX) || undefined;
         if (action === "link") {
-          if (r.kind !== "job") throw new TaskError(400, "Only a job request can be linked to a launch proposal.");
-          if (!data.proposal) throw new TaskError(400, "A proposal id is required.");
-          if (t.requests.some((x) => x.proposal?.id === data.proposal)) throw new TaskError(409, "That proposal is already linked to a request.");
+          const p = data.proposal!;
+          if (r.kind !== "job" || !r.job) throw new TaskError(400, "Only a job request can be linked to a launch proposal.");
+          if (linksOf(p.id).length) throw new TaskError(409, "Not linked: that proposal is already linked to a request. Nothing was changed.");
+          const binding = bind(r, p, by, data.acceptBriefSha256);
           if (r.state === "proposed" && r.proposal) {
             const before = data.observe?.(r.proposal.id);
             if (!before || before.state === "awaiting-confirmation" || before.state === "confirmed" || before.state === "unknown") throw new TaskError(409, `This request already has a launch proposal that is ${before?.state ?? "unknown"}. Nothing was changed.`);
-            r.previous = [...(r.previous ?? []), { id: r.proposal.id, linkedAt: r.proposal.linkedAt, endedAs: before.state }];
+            r.previous = [...(r.previous ?? []), { id: r.proposal.id, linkedAt: r.proposal.linkedAt, endedAs: before.state, ...(r.proposal.binding ? { binding: r.proposal.binding } : {}) }];
           } else if (r.state !== "pending") throw new TaskError(409, `This request is ${r.state}. Nothing was changed.`);
           r.state = "proposed";
-          r.proposal = { id: data.proposal, linkedAt: at, by };
+          r.proposal = { id: p.id, linkedAt: at, by, binding };
           r.response = { at, by, ...(text ? { text } : {}) };
           return structuredClone(r);
         }
