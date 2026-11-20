@@ -40,6 +40,10 @@ export type TurnPrep = {
   maxRounds?: number;
   fallback?: boolean;
   author?: "orbit-supervisor";
+  // Admission (a task's session, src/task-supervisor.ts humanTurn): called synchronously right after the thread's reply lock is taken,
+  // before anything is stored or awaited. If it throws, the lock is freed and nothing is stored. What it returns: reference material
+  // to add for this turn, and `rollback`, called if the user message then cannot be stored (the admission is undone).
+  admit?: () => { notes?: string; rollback?: (reason: string) => void };
 };
 
 export type Live = { source: "jobs" | "ops-admin" | "ops-sys" | "workspace" | "workspace-admin"; found: boolean; state?: string; health?: string; detail?: string; url?: string; delivered?: boolean };
@@ -217,9 +221,18 @@ export function threadService(d: {
     if (!token) {
       throw new ThreadError(409, threads.get(id) ? "A reply is already in progress in this thread." : "No thread with that id.");
     }
+    // Admission runs in the same synchronous step as taking the lock: no other request can start, steer or take the lock between them.
+    let admitted: ReturnType<NonNullable<TurnPrep["admit"]>> | undefined;
+    try {
+      if (threads.get(id)?.archived) throw new ThreadError(409, "This thread is archived. Restore it to continue.");
+      admitted = prep.admit?.();
+    } catch (err) {
+      threads.end(id, token);
+      throw err;
+    }
     let outcome: { error?: string };
     try {
-      outcome = await held(id, text, prep, opts, token);
+      outcome = await held(id, text, admitted?.notes ? { ...prep, notes: [prep.notes, admitted.notes].filter(Boolean).join("\n\n") } : prep, opts, token, admitted?.rollback);
     } finally {
       threads.end(id, token);
     }
@@ -227,14 +240,25 @@ export function threadService(d: {
     return { thread: view(id)!, ...outcome };
   }
 
-  async function held(id: string, text: string, prep: TurnPrep, opts: { signal?: AbortSignal }, token: symbol): Promise<{ error?: string }> {
-    if (threads.get(id)!.archived) throw new ThreadError(409, "This thread is archived. Restore it to continue.");
-    reconcile(id);
-    // Older context is summarized first, so the model call below is within budget. A failure here never blocks the reply.
-    // Only a chat thread store compacts (the Assistant passes compact: false and never reaches this with its own store).
-    if (d.compact !== false) await compactThread({ threads: threads as Threads, model, id, now, budget: d.budget }).catch(() => {});
-    if (d.beforeTurn) await d.beforeTurn(id).catch(() => {});
-    const userMessage = (prep.author ? threads.appendUser(id, text, prep.attachments, prep.author) : threads.appendUser(id, text, prep.attachments)).id;
+  async function held(id: string, text: string, prep: TurnPrep, opts: { signal?: AbortSignal }, token: symbol, rollback?: (reason: string) => void): Promise<{ error?: string }> {
+    let userMessage: string;
+    try {
+      if (threads.get(id)!.archived) throw new ThreadError(409, "This thread is archived. Restore it to continue.");
+      reconcile(id);
+      // Older context is summarized first, so the model call below is within budget. A failure here never blocks the reply.
+      // Only a chat thread store compacts (the Assistant passes compact: false and never reaches this with its own store).
+      if (d.compact !== false) await compactThread({ threads: threads as Threads, model, id, now, budget: d.budget }).catch(() => {});
+      if (d.beforeTurn) await d.beforeTurn(id).catch(() => {});
+      userMessage = (prep.author ? threads.appendUser(id, text, prep.attachments, prep.author) : threads.appendUser(id, text, prep.attachments)).id;
+    } catch (err) {
+      // The message was not stored: an admission made for it is undone, so nothing records a message that was never sent.
+      try {
+        rollback?.(err instanceof Error ? err.message.slice(0, 200) : "the message could not be stored");
+      } catch {
+        // The undo could not be written either; the task's view shows the turn running until restart recovery marks it interrupted.
+      }
+      throw err;
+    }
     const mid = threads.beginAssistant(id);
     const t = threads.get(id)!;
     const notes = [prep.notes, await recent?.note(), d.summaryNote ? d.summaryNote(t) : summaryNote(t), t.cards.length ? dataBlock("proposal-cards", `Proposal cards in this thread, from ORBIT's records:\n${(d.maxCardLines ? cardLines(t).slice(-d.maxCardLines) : cardLines(t)).join("\n")}`) : undefined].filter(Boolean).join("\n\n") || undefined;

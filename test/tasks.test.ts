@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import { evidenceStatus, parseCreate, readiness, requestStatus, TASK_OPEN_REQUESTS_MAX, TaskError, taskFile, taskStore, unseenInstructions } from "../src/tasks.ts";
-import type { JobObservation, Observers, ProposalObservation, Provenance, Tasks } from "../src/tasks.ts";
+import type { JobObservation, LinkableProposal, Observers, ProposalObservation, Provenance, Tasks } from "../src/tasks.ts";
 import { cloneTaskVault, marker, taskVaultSync } from "../src/task-vault.ts";
 import type { TaskVaultPort } from "../src/task-vault.ts";
 import { VaultError } from "../src/vault/edit.ts";
@@ -23,6 +23,8 @@ const INPUT = { title: "Garden sensor report", goal: "A weekly CSV of synthetic 
 
 const fresh = (dir?: string) => taskStore(taskFile(dir ?? mkdtempSync(join(tmpdir(), "orbit-tasks-"))), clock);
 const make = (tasks: Tasks, input: Record<string, unknown> = INPUT) => tasks.create(parseCreate(input as never, NOW), ASSISTANT, () => randomUUID()).task;
+// A proposal as the proposal store would describe it for linking: an Assistant-made job_launch with this brief.
+const P = (id: string, brief: string, routine = "orbit"): LinkableProposal => ({ id, kind: "job_launch", routine, brief, origin: "assistant:assistant", createdAt: NOW.toISOString() });
 const noObs: Observers = { proposal: () => ({ state: "unknown" }), job: () => ({ found: false, why: "none" }) };
 const expectError = (fn: () => unknown, code: number, re?: RegExp) => {
   try {
@@ -184,12 +186,12 @@ test("request status is explicit and derived: pending -> awaiting-confirmation -
   // A clarification answer is not a way to resolve a job request.
   expectError(() => tasks.respond(t.id, tasks.get(t.id)!.rev, req.id, "answer", ASSISTANT, { text: "ok" }), 400, /job request/);
   props.set("p1", { state: "awaiting-confirmation" });
-  const linked = tasks.respond(t.id, tasks.get(t.id)!.rev, req.id, "link", ASSISTANT, { proposal: "p1", observe: obs.proposal }).request;
+  const linked = tasks.respond(t.id, tasks.get(t.id)!.rev, req.id, "link", ASSISTANT, { proposal: P("p1", "Build it."), observe: obs.proposal }).request;
   assert.equal(linked.state, "proposed");
   assert.equal(requestStatus(linked, obs).status, "awaiting-confirmation");
   // While the card waits, a second link is refused.
   props.set("p2", { state: "awaiting-confirmation" });
-  expectError(() => tasks.respond(t.id, tasks.get(t.id)!.rev, req.id, "link", ASSISTANT, { proposal: "p2", observe: obs.proposal }), 409, /awaiting-confirmation/);
+  expectError(() => tasks.respond(t.id, tasks.get(t.id)!.rev, req.id, "link", ASSISTANT, { proposal: P("p2", "Build it."), observe: obs.proposal }), 409, /awaiting-confirmation/);
   props.set("p1", { state: "confirmed", job: "orbit-202611201200-ab12" });
   assert.equal(requestStatus(linked, obs).status, "confirmed");
   jobsMap.set("orbit-202611201200-ab12", { found: true, state: "running" });
@@ -202,16 +204,16 @@ test("request status is explicit and derived: pending -> awaiting-confirmation -
   // An expired card: not confirmed, and a new proposal may be linked; the old one is kept in `previous`.
   const r2 = tasks.fileRequest(t.id, { kind: "job", text: "Run the docs build", brief: "Docs." }, TASK(1)).request;
   props.set("p3", { state: "awaiting-confirmation" });
-  tasks.respond(t.id, tasks.get(t.id)!.rev, r2.id, "link", ASSISTANT, { proposal: "p3", observe: obs.proposal });
+  tasks.respond(t.id, tasks.get(t.id)!.rev, r2.id, "link", ASSISTANT, { proposal: P("p3", "Docs."), observe: obs.proposal });
   props.set("p3", { state: "expired" });
   assert.equal(requestStatus(tasks.get(t.id)!.requests[1]!, obs).status, "not-confirmed");
   props.set("p4", { state: "awaiting-confirmation" });
-  const relinked = tasks.respond(t.id, tasks.get(t.id)!.rev, r2.id, "link", ASSISTANT, { proposal: "p4", observe: obs.proposal }).request;
+  const relinked = tasks.respond(t.id, tasks.get(t.id)!.rev, r2.id, "link", ASSISTANT, { proposal: P("p4", "Docs."), observe: obs.proposal }).request;
   assert.equal(relinked.proposal!.id, "p4");
   assert.deepEqual(relinked.previous!.map((p) => [p.id, p.endedAs]), [["p3", "expired"]]);
   // One proposal cannot answer two requests.
   const r3 = tasks.fileRequest(t.id, { kind: "job", text: "Third", brief: "Third." }, TASK(1)).request;
-  expectError(() => tasks.respond(t.id, tasks.get(t.id)!.rev, r3.id, "link", ASSISTANT, { proposal: "p4", observe: obs.proposal }), 409, /already linked/);
+  expectError(() => tasks.respond(t.id, tasks.get(t.id)!.rev, r3.id, "link", ASSISTANT, { proposal: P("p4", "Third."), observe: obs.proposal }), 409, /already linked/);
   // The Assistant cannot withdraw a task's request.
   expectError(() => tasks.respond(t.id, tasks.get(t.id)!.rev, r3.id, "withdraw", ASSISTANT, {}), 403);
 });
@@ -231,16 +233,28 @@ test("completion needs acceptance evidence: a model's claim or a job ending is n
   let task = tasks.get(t.id)!;
   assert.equal(evidenceStatus(task, task.evidence[1]!, obs).status, "claimed");
   expectError(() => tasks.complete(t.id, task.rev, HUMAN, obs), 409, /Not done/);
-  // A job this task's own request produced, that the job store shows done, verifies its criterion.
+  // A job this task's own request produced (bound link; the job store's work link names that proposal), done: its EXECUTION is
+  // verified, but that is not proof the criterion is met, so the criterion is still missing until Rai attests it.
   const req = tasks.fileRequest(t.id, { kind: "job", text: "Run the tests", brief: "Run them." }, TASK(1)).request;
   props.set("p9", { state: "awaiting-confirmation" });
-  tasks.respond(t.id, tasks.get(t.id)!.rev, req.id, "link", ASSISTANT, { proposal: "p9", observe: obs.proposal });
+  tasks.respond(t.id, tasks.get(t.id)!.rev, req.id, "link", ASSISTANT, { proposal: P("p9", "Run them."), observe: obs.proposal });
   props.set("p9", { state: "confirmed", job: JOB });
+  jobsMap.set(JOB, { found: true, state: "done", proposal: "p9" });
   task = tasks.get(t.id)!;
-  assert.equal(evidenceStatus(task, task.evidence[1]!, obs).status, "verified");
-  jobsMap.set(JOB, { found: true, state: "failed" });
-  assert.equal(evidenceStatus(task, task.evidence[1]!, obs).status, "not-verified");
-  jobsMap.set(JOB, { found: true, state: "done" });
+  let st = evidenceStatus(task, task.evidence[1]!, obs);
+  assert.equal(st.status, "claimed");
+  assert.equal(st.execution?.state, "verified");
+  assert.match(st.execution!.detail, /not that any criterion is met/);
+  jobsMap.set(JOB, { found: true, state: "failed", proposal: "p9" });
+  assert.equal(evidenceStatus(task, task.evidence[1]!, obs).execution?.state, "not-done");
+  jobsMap.set(JOB, { found: true, state: "done", proposal: "p9" });
+  assert.deepEqual(readiness(task, obs).missing, ["ac1", "ac2"]);
+  // Rai attests ac2, citing the job: attested, and the execution check is still shown beside it.
+  tasks.addEvidence(t.id, { criterion: "ac2", kind: "job", ref: JOB, note: "read the job's test output" }, HUMAN, tasks.get(t.id)!.rev);
+  task = tasks.get(t.id)!;
+  st = evidenceStatus(task, task.evidence[2]!, obs);
+  assert.equal(st.status, "attested");
+  assert.equal(st.execution?.state, "verified");
   assert.deepEqual(readiness(task, obs).missing, ["ac1"]);
   // Neither the Assistant nor the task can complete it, even when it is ready.
   tasks.addEvidence(t.id, { criterion: "ac1", kind: "url", ref: "https://example.invalid/report" }, HUMAN, tasks.get(t.id)!.rev);
@@ -254,7 +268,7 @@ test("completion needs acceptance evidence: a model's claim or a job ending is n
   tasks.endTurn(t.id, turn.n, { state: "done" });
   const done = tasks.complete(t.id, tasks.get(t.id)!.rev, HUMAN, obs);
   assert.equal(done.lifecycle, "done");
-  assert.match(done.lifecycleHistory.at(-1)!.reason!, /ac1=ev-3/);
+  assert.match(done.lifecycleHistory.at(-1)!.reason!, /ac1=ev-4, ac2=ev-3/);
 });
 
 test("stored text is masked for credential shapes and stripped of control characters", () => {

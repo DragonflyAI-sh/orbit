@@ -183,6 +183,10 @@ export type Thread = {
   // The previous summary versions (newest last, at most SUMMARY_HISTORY_MAX), so a replaced valid state is never lost.
   summaryHistory?: Summary[];
   compaction?: { lastError?: { at: string; detail: string } };
+  // Created as a supervised task's session (docs/adr/0003-supervised-tasks.md). Lets the message route fail closed for this thread when
+  // the task store cannot be read, instead of answering it as an ordinary chat. Absent on every other thread and on task sessions made
+  // before this field (those are recognized by their "Task: " title in that one case).
+  taskSession?: true;
 };
 export const SUMMARY_HISTORY_MAX = 4;
 
@@ -393,10 +397,10 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
     problems: () => [...problems],
     meta,
 
-    create(title?: string): Thread {
+    create(title?: string, o: { taskSession?: true } = {}): Thread {
       const at = now().toISOString();
       const given = typeof title === "string" ? clean(maskContent(title)).slice(0, MAX_TITLE) : "";
-      const t: Thread = { schema: THREAD_SCHEMA, id: randomUUID(), title: given || DEFAULT_TITLE, titleSet: Boolean(given), createdAt: at, updatedAt: at, archived: false, rev: 1, messages: [], cards: [] };
+      const t: Thread = { schema: THREAD_SCHEMA, id: randomUUID(), title: given || DEFAULT_TITLE, titleSet: Boolean(given), createdAt: at, updatedAt: at, archived: false, rev: 1, messages: [], cards: [], ...(o.taskSession ? { taskSession: true as const } : {}) };
       persist(t);
       threads.set(t.id, t);
       return structuredClone(t);
