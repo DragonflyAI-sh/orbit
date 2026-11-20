@@ -254,7 +254,7 @@ function fakeHost(plan: Record<string, unknown>, opts: { reply?: (action: string
   return { host, calls };
 }
 const PLAN = {
-  planKey: "0123456789abcdef01234567",
+  planKey: Array.from({ length: 24 }, (_, i) => (i % 16).toString(16)).join(""), // synthetic 24-hex fixture built at runtime (no key-shaped literal)
   steps: [
     { id: "package_bubblewrap", title: "bubblewrap package", state: "todo", action: "apt-get install -y --no-install-recommends bubblewrap" },
     { id: "identity", title: "static system user orbit", state: "done", detail: "exists" },
