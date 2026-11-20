@@ -693,8 +693,8 @@
   function writePanels(store, panels) {
     try { if (store) store.setItem(PANELS_KEY, JSON.stringify({ status: panels.status === true, notes: panels.notes === true })); } catch { /* private mode: this page only */ }
   }
-  // The count is of notifications not dismissed in this browser (all of them, not just the few listed). ORBIT does not track
-  // read or unread, so the label never says "unread".
+  // The count is of notifications not dismissed (all of them, not just the few listed). ORBIT does not track read or unread,
+  // so the label never says "unread".
   function noteCountLabel(total) {
     return total ? `Notifications: ${total}` : "Notifications: none";
   }
@@ -1301,7 +1301,10 @@
   //   note (retried after a failure; ORBIT keeps the first receipt), only for the notes actually listed: never while the panel
   //   is collapsed or the tab is hidden, and never for notes past the "show all" limit. It does not mean read, and a shown note
   //   stays in the list until dismissed. It is what moves a run from reviewed to delivered.
-  // - Dismissed (×): hides the note in this browser only (localStorage). It is not a receipt and ORBIT is not told.
+  // - Dismissed (×): ORBIT records it (POST /notifications/:id/dismiss) and leaves the note out of `current`, so no browser,
+  //   device or restart lists it again. The page also hides it at once in this browser (localStorage), which covers a failed
+  //   request until it is retried, and sends ORBIT any dismissal it holds that ORBIT still lists (a retry, or a dismissal
+  //   made by an older page that kept it in this browser only). It is not a receipt.
   // Collapsing the panel neither shows nor dismisses anything.
   const noteList = [];
   // Notes needing no ack from this page (ORBIT has a listing receipt, or does not know the id), and acks in flight.
@@ -1317,6 +1320,9 @@
   const loadDismissed = () => { try { return new Set(JSON.parse(localStorage.getItem(dismissedKey) || "[]")); } catch { return new Set(); } };
   const saveDismissed = (set) => { try { localStorage.setItem(dismissedKey, JSON.stringify([...set].slice(-200))); } catch { /* private mode: dismissed for this page only */ } };
   const dismissedNotes = loadDismissed();
+  // Dismissals ORBIT has recorded (or does not know the id of), and dismissals in flight.
+  const dismissDone = new Set();
+  const dismissPending = new Set();
   const notesButton = document.getElementById("notesbtn");
   const sessionStore = (() => { try { return window.sessionStorage; } catch { return null; } })();
   const panels = readPanels(sessionStore);
@@ -1358,6 +1364,19 @@
     if (was) (focusable.get(was) || box.querySelector("button") || notesButton).focus({ preventScroll: true });
     showNoteCount(total);
     ackListedNotes();
+    sendDismissals();
+  }
+  // Tells ORBIT about each dismissal in this browser for a note ORBIT still lists. One request per note at a time; a failure
+  // is retried at the next render (refreshes run every 30 s). A 404 means ORBIT no longer has the note, so it is not sent again.
+  function sendDismissals() {
+    for (const n of noteList) {
+      if (!dismissedNotes.has(n.id) || dismissDone.has(n.id) || dismissPending.has(n.id)) continue;
+      dismissPending.add(n.id);
+      fetch(`/notifications/${encodeURIComponent(n.id)}/dismiss`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
+        .then((res) => { if (res.ok || res.status === 404) dismissDone.add(n.id); })
+        .catch(() => { /* retried later */ })
+        .finally(() => dismissPending.delete(n.id));
+    }
   }
   // The notes the panel lists right now, if it is open in a visible tab; otherwise none.
   function listedNotes() {

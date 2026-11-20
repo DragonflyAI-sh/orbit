@@ -18,6 +18,9 @@ export type Notification = {
   // its open notifications panel in a visible tab (docs/assistant.md, "Notifications"). Without it, the receipt came from an
   // older page that acknowledged on arrival; what it means cannot be told afterwards, so such receipts are kept as written.
   shown?: Receipt & { listed?: true };
+  // Dismissed by Rai (× in the web page). Kept on the note in ORBIT's store, so a dismissal holds across reloads, other
+  // browsers and devices, and ORBIT restarts. It is not a delivery receipt: it never changes `shown` or `discord`.
+  dismissed?: Receipt;
   discord?: Receipt & { ok: boolean; messageId?: string };
 };
 
@@ -87,14 +90,14 @@ export function notifier(store: Store<Notification[]>, discord?: Sink, now: () =
     },
 
     // Due and not yet shown (unchanged, for older pages and callers).
-    inbox: (): Notification[] => list().filter((n) => due(n) && !n.shown),
+    inbox: (): Notification[] => list().filter((n) => due(n) && !n.shown && !n.dismissed),
 
     // What the web page lists until it is dismissed there: notes not yet shown, plus those shown under the listing receipt,
     // oldest first. Quiet hours hold only pushed delivery (Discord, `pump`): a held note is listed at once, because the page
     // is only read when someone opens it, so a job that finishes at 23:30 Pacific is on the page then, not at 08:00. Notes
     // acknowledged by an older page (a receipt without `listed`) are not included: their receipts may predate this rule, and
-    // nothing here claims to recover them.
-    current: (): Notification[] => list().filter((n) => !n.shown || n.shown.listed === true),
+    // nothing here claims to recover them. Notes dismissed in ORBIT (`dismiss`) are never included.
+    current: (): Notification[] => list().filter((n) => !n.dismissed && (!n.shown || n.shown.listed === true)),
 
     recent: (): Notification[] => list().slice(-50).reverse(),
 
@@ -111,6 +114,19 @@ export function notifier(store: Store<Notification[]>, discord?: Sink, now: () =
         : { at: now().toISOString(), detail: "Shown in the ORBIT web page" };
       let found: Notification | undefined;
       save(list().map((n) => (n.id === id && !n.shown ? (found = { ...n, shown }) : n)));
+      return found ?? list().find((n) => n.id === id);
+    },
+
+    // Records that Rai dismissed the note, so no page lists it again. Idempotent: a note already dismissed keeps its first
+    // dismissal and is returned unchanged (a retry, a second tab or a page syncing older browser-only dismissals never
+    // rewrites it). Delivery is untouched: `shown` and `discord` stay as they are, and `pump` still sends a due note to
+    // Discord. Undefined only for an unknown id.
+    dismiss(id: string): Notification | undefined {
+      const existing = list().find((n) => n.id === id);
+      if (!existing || existing.dismissed) return existing;
+      const dismissed: Receipt = { at: now().toISOString(), detail: "Dismissed in the ORBIT web page" };
+      let found: Notification | undefined;
+      save(list().map((n) => (n.id === id && !n.dismissed ? (found = { ...n, dismissed }) : n)));
       return found ?? list().find((n) => n.id === id);
     },
 

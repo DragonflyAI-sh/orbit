@@ -16,7 +16,8 @@ import { OWNER, rig } from "./threads-fixture.ts";
 // browser or a restart sees is whatever the server kept. Pins the semantics in docs/assistant.md ("Notifications"):
 // - shown: a receipt that the note was listed in the open notifications panel of a visible tab; never read; never sent for a
 //   collapsed panel, a hidden tab or a note past the list limit; idempotent; it is what moves a reviewed run to delivered;
-// - dismissed: this browser only; collapsing the panel is neither.
+// - dismissed: recorded by ORBIT, so no browser, device or restart lists the note again; not a receipt; collapsing the panel
+//   is neither.
 // The API tests always run. The browser tests use Playwright's Chromium and are skipped, saying so, where it cannot be loaded.
 // Offline: the model is the fixture's script, the vault a temp directory, no Discord.
 
@@ -143,6 +144,63 @@ test("API: a reviewed run is delivered only by a receipt; unshown and listed not
   assert.deepEqual(o2.notify.get(run.notification!)!.shown, shown, "the receipt is unchanged");
   assert.equal(o2.notify.get(x!.id)!.shown, undefined);
   assert.equal(o2.runs.get(run.id)!.state, "delivered");
+});
+
+test("API: a dismissal is kept by ORBIT: the note leaves `current` and `inbox` everywhere, idempotently, across a restart", async () => {
+  const dir = stateDir();
+  const o = orbit(dir);
+  const [a, b, c] = urgent(o, 3);
+  await o.r.api(`/notifications/${a!.id}/ack`, "POST", { listed: true });
+  const shown = receipt(o, a!.id);
+  const first = await o.r.api(`/notifications/${a!.id}/dismiss`, "POST", {});
+  assert.equal(first.status, 200);
+  assert.equal(first.data.dismissed.detail, "Dismissed in the ORBIT web page");
+  assert.deepEqual(first.data.shown, shown, "dismissing never touches the shown receipt");
+  // A note dismissed before it was ever listed is gone too, and still has no receipt.
+  assert.equal((await o.r.api(`/notifications/${b!.id}/dismiss`, "POST")).status, 200);
+  assert.equal(receipt(o, b!.id), undefined);
+  const body = (await o.r.api("/notifications")).data;
+  assert.deepEqual(body.current.map((n: Notification) => n.id), [c!.id]);
+  assert.deepEqual(body.inbox.map((n: Notification) => n.id), [c!.id]);
+  assert.ok(body.recent.some((n: Notification) => n.id === a!.id), "ORBIT still keeps the note in `recent`");
+  // Repeating it (a retry, a second tab) keeps the first dismissal.
+  clock.t += 60_000;
+  const again = await o.r.api(`/notifications/${a!.id}/dismiss`, "POST", {});
+  assert.equal(again.status, 200);
+  assert.deepEqual(again.data.dismissed, first.data.dismissed);
+  assert.equal((await o.r.api("/notifications/00000000-0000-4000-8000-000000000000/dismiss", "POST", {})).status, 404);
+  // Restart on the same state directory: the dismissals hold.
+  o.r.close();
+  const o2 = orbit(dir);
+  assert.deepEqual((await o2.r.api("/notifications")).data.current.map((n: Notification) => n.id), [c!.id]);
+  assert.deepEqual(o2.notify.get(a!.id)!.dismissed, first.data.dismissed);
+});
+
+test("API: dismissing is owner-only and a refused dismissal writes nothing; it never holds back Discord or run delivery", async () => {
+  const o = orbit(stateDir());
+  const run = await reviewedRun(o);
+  const [a] = urgent(o, 1);
+  o.r.caller.who = "someone@example.com";
+  try {
+    assert.equal((await o.r.api(`/notifications/${a!.id}/dismiss`, "POST", {})).status, 403);
+  } finally {
+    o.r.caller.who = OWNER;
+  }
+  assert.equal(o.notify.get(a!.id)!.dismissed, undefined);
+  // A dismissal is not a receipt: the run stays reviewed until a real one arrives.
+  await o.r.api(`/notifications/${run.notification}/dismiss`, "POST", {});
+  o.runs.pump();
+  assert.equal(o.runs.get(run.id)!.state, "reviewed");
+  // Delivery itself is unchanged: a dismissed due note still goes to Discord when it is connected.
+  const sent: string[] = [];
+  const store = jsonStore<Notification[]>(undefined, "n", []);
+  const withDiscord = notifier(store, { name: "discord", send: async (t) => (sent.push(t), "m1") }, now);
+  const n = withDiscord.send("dismissed early", true);
+  withDiscord.dismiss(n.id);
+  await withDiscord.pump();
+  assert.deepEqual(sent, ["dismissed early"]);
+  assert.equal(withDiscord.get(n.id)!.discord?.ok, true);
+  assert.deepEqual(withDiscord.current(), []);
 });
 
 // ---- the page in a real browser against the real server ---------------------------------------------------------------
@@ -287,8 +345,9 @@ test("browser: a failed ack is retried later, a sent one is not repeated, and a 
   }
 });
 
-test("browser: dismissing is per browser and explicit; collapsing is not dismissing; the unlisted remainder stays unshown", { skip }, async () => {
-  const o = orbit(stateDir());
+test("browser: dismissing is explicit and kept by ORBIT for every browser; collapsing is not dismissing; the unlisted remainder stays unshown", { skip }, async () => {
+  const dir = stateDir();
+  const o = orbit(dir);
   const notes = urgent(o, 5);
   const ids = notes.map((n) => n.id);
   const { page, context } = await openPage(await o.base());
@@ -308,14 +367,49 @@ test("browser: dismissing is per browser and explicit; collapsing is not dismiss
     await settle();
     assert.equal(receipt(o, ids[0]!), undefined, "the oldest was never listed: no receipt");
     assert.equal(await page.getAttribute("#notesbtn", "aria-label"), "Notifications: 4");
-    // ORBIT keeps every note, dismissed ones too.
-    assert.deepEqual((await o.r.api("/notifications")).data.current.map((n: Notification) => n.id), ids);
+    // ORBIT recorded the dismissal: it no longer lists the note, and still keeps it.
+    await until(() => o.notify.get(ids[4]!)?.dismissed !== undefined, "ORBIT recorded the dismissal");
+    assert.deepEqual((await o.r.api("/notifications")).data.current.map((n: Notification) => n.id), ids.slice(0, 4));
+    assert.ok(o.notify.get(ids[4]!), "the note is kept, only no longer listed");
     // This browser keeps its dismissal across a reload.
     await page.reload();
     await waitCount(page, 4);
-    // Another browser (another device) did not dismiss anything: it counts all five.
+    // Another browser (another device, or this one with its storage cleared) does not list it either.
     const other = await openPage(await o.base());
-    await waitCount(other.page, 5);
+    await waitCount(other.page, 4);
+    await other.context.close();
+    // So does an ORBIT restart on the same state directory.
+    o.r.close();
+    const o2 = orbit(dir);
+    const third = await openPage(await o2.base());
+    await waitCount(third.page, 4);
+    await third.context.close();
+  } finally {
+    await context.close();
+  }
+});
+
+test("browser: a dismissal an older page kept in this browser only is sent to ORBIT; a failed one is retried", { skip }, async () => {
+  const o = orbit(stateDir());
+  const ids = urgent(o, 3).map((n) => n.id);
+  // An older page dismissed the oldest note in this browser only.
+  const { page, context } = await openPage(await o.base(), { setup: (p) => p.addInitScript(`localStorage.setItem("orbit.dismissed-notes", ${JSON.stringify(JSON.stringify([ids[0]]))})`) });
+  try {
+    await waitCount(page, 2);
+    await until(() => o.notify.get(ids[0]!)?.dismissed !== undefined, "the browser-only dismissal reached ORBIT");
+    // A dismissal whose request fails is still hidden here, and reaches ORBIT on a later refresh.
+    let failing = true;
+    await page.route("**/notifications/*/dismiss", (route: any) => (failing ? route.fulfill({ status: 503, body: "{}" }) : route.continue()));
+    await page.click("#notesbtn");
+    await page.click("#inbox .note .x");
+    await waitCount(page, 1);
+    await settle();
+    assert.equal(o.notify.get(ids[2]!)!.dismissed, undefined, "the failed request wrote nothing");
+    failing = false;
+    await page.evaluate("refreshInbox()");
+    await until(() => o.notify.get(ids[2]!)?.dismissed !== undefined, "the retry reached ORBIT");
+    const other = await openPage(await o.base());
+    await waitCount(other.page, 1);
     await other.context.close();
   } finally {
     await context.close();
