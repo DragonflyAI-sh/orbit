@@ -1,8 +1,8 @@
 import type { AddressInfo } from "node:net";
 import { after } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { proposals as newProposals } from "../src/agent.ts";
 import { jobs as jobRegistry } from "../src/jobs.ts";
 import type { ControlRepo, Routine } from "../src/launcher.ts";
@@ -65,7 +65,10 @@ export function rig(opts: { dir?: string; model?: ModelPort; admin?: boolean; no
   const dir = opts.dir ?? mkdtempSync(join(tmpdir(), "orbit-threads-"));
   const vault = mkdtempSync(join(tmpdir(), "orbit-threads-vault-"));
   writeFileSync(join(vault, "now.md"), "Top priority: money noodle PR.\n");
-  for (const [name, text] of Object.entries(opts.vault ?? {})) writeFileSync(join(vault, name), text);
+  for (const [name, text] of Object.entries(opts.vault ?? {})) {
+    mkdirSync(dirname(join(vault, name)), { recursive: true });
+    writeFileSync(join(vault, name), text);
+  }
   const memory = vaultMemory(vault);
   const notify = notifier(jsonStore(undefined, "n", []));
   const proposals = newProposals(opts.now);

@@ -9,6 +9,10 @@ import { taskFile, taskStore } from "../src/tasks.ts";
 import type { Tasks } from "../src/tasks.ts";
 import { TASK_ASSISTANT_TOOL_NAMES, TASK_TURN_MAX_ROUNDS, TASK_TURN_TOOL_NAMES } from "../src/task-supervisor.ts";
 import { call, rig, say } from "./threads-fixture.ts";
+import type { AddressInfo } from "node:net";
+import { attachmentStore } from "../src/attachments.ts";
+import type { TaskVaultPort } from "../src/task-vault.ts";
+import { smallJpeg } from "./jpeg-fixture.ts";
 
 // Supervised tasks through the real server (docs/adr/0003-supervised-tasks.md): the Assistant's task tools, a task session in Sessions,
 // one bounded supervised turn, escalation to the Assistant, the owner's confirmation, direct steering, status retrieval and the
@@ -27,6 +31,7 @@ function driver() {
   const model: ModelPort & { seen: Seen[] } = {
     seen,
     status: () => ({ port: "model", state: "live", impl: "fake/scripted", detail: "test", verifiedAt: new Date().toISOString() }),
+    images: () => ({ ok: true, detail: "test model takes photos" }),
     reply: async () => ({ value: "plain reply", provenance: "live", source: "model/fake" }),
     step: async (input, limits, notes, tools, opts): Promise<Step> => {
       const taskTurn = Boolean(lastUser(input)?.content.startsWith(SUPERVISOR_PROMPT));
@@ -62,11 +67,12 @@ function driver() {
   return { model, seen, outputs, ctl };
 }
 
-function stack(o: { dir?: string; turnsMax?: number } = {}) {
+function stack(o: { dir?: string; turnsMax?: number; vault?: Record<string, string>; taskVault?: TaskVaultPort } = {}) {
   const dir = o.dir ?? mkdtempSync(join(tmpdir(), "orbit-tasks-srv-"));
   const d = driver();
   const tasks: Tasks = taskStore(taskFile(dir));
-  const x = rig({ dir, model: d.model, extra: () => ({ assistantDir: join(dir, "assistant"), tasks, ...(o.turnsMax ? { taskTurnsMax: o.turnsMax } : {}) }) });
+  const attachments = attachmentStore(join(dir, "attachments"));
+  const x = rig({ dir, model: d.model, ...(o.vault ? { vault: o.vault } : {}), extra: () => ({ assistantDir: join(dir, "assistant"), tasks, attachments, ...(o.taskVault ? { taskVault: o.taskVault } : {}), ...(o.turnsMax ? { taskTurnsMax: o.turnsMax } : {}) }) });
   const assistantTool = async (name: string, args: unknown) => {
     const before = d.outputs.length;
     const r = await x.api("/assistant/messages", "POST", { text: `tool: ${name} ${JSON.stringify(args)}` });
@@ -84,16 +90,27 @@ function stack(o: { dir?: string; turnsMax?: number } = {}) {
     }
     throw new Error("the task turn did not end");
   };
-  return { ...x, dir, d, tasks, assistantTool, inspect, settled };
+  const upload = async (threadId: string, seed = 1) => {
+    await x.api("/status");
+    const res = await fetch(`http://127.0.0.1:${(x.server.address() as AddressInfo).port}/threads/${threadId}/attachments`, { method: "POST", headers: { "content-type": "image/jpeg" }, body: new Uint8Array(smallJpeg(seed, 40, 30)) });
+    const data = (await res.json()) as { attachment: { id: string } };
+    assert.equal(res.status, 201, JSON.stringify(data));
+    return data.attachment.id;
+  };
+  // The outputs of the task turn tools called in the last task turn, by name.
+  const outputsOf = (name: string) => d.outputs.filter((p) => p.name === name).map((p) => p.out);
+  return { ...x, dir, d, tasks, assistantTool, inspect, settled, upload, outputsOf };
 }
 
 const CREATE = { title: "Garden sensor CSV", goal: "A weekly CSV of synthetic garden sensor readings is produced by a tested exporter.", acceptance: ["The exporter writes one row per sensor per day", "Its tests pass in CI"], project: "example/garden" };
 const BRIEF = "Build the garden sensor CSV exporter with tests, using synthetic readings only. Push only to orbit/<job-id>; end with PR title and PR body.";
 
-test("acceptance walkthrough: create, linked session, a bounded supervised turn, escalation, owner confirmation, direct steering, status and evidence-gated completion", async () => {
-  const x = stack();
+test("acceptance walkthrough: create, linked session, a bounded supervised turn, escalation, owner confirmation, accepted and refused direct steering, status, evidence-gated completion and an honest vault sync", async () => {
+  const vaultNote = { text: "# Garden sensor CSV\n\n## Status\n- started by Rai\n", appends: 0 };
+  const taskVault: TaskVaultPort = { read: async () => vaultNote.text, append: async (_p, _h, line) => ((vaultNote.appends += 1), (vaultNote.text += `${line}\n`), { commit: "b".repeat(40) }) };
+  const x = stack({ taskVault });
   // 1. The Assistant creates a task; it has its own task session, linked into Sessions.
-  const created = await x.assistantTool("task_create", CREATE);
+  const created = await x.assistantTool("task_create", { ...CREATE, vaultNote: "Tasks/garden-sensor-csv.md", vaultHeading: "## Status" });
   assert.equal(created.ok, true, JSON.stringify(created));
   const task = created.result.task;
   assert.match(task.id, /^task-/);
@@ -147,6 +164,24 @@ test("acceptance walkthrough: create, linked session, a bounded supervised turn,
   assert.equal(x.proposals.list().length, 0);
   assert.equal(x.jobs.all().length, 0);
   assert.equal(afterTurn.lifecycle, "active");
+
+  // 2b. Rai writes while a supervised turn holds the session: refused, and nothing is recorded (no instruction, no message).
+  x.d.ctl.gate = new Promise(() => {});
+  x.d.ctl.taskSteps.push({ calls: [], reply: "held" });
+  let held = await x.inspect(task.id);
+  assert.equal((await x.api(`/tasks/${task.id}/turn`, "POST", { rev: held.rev })).status, 202);
+  const before = (await x.api(`/threads/${thread}`)).data.thread.messages.length;
+  const refusedSteer = await x.send(thread, "Switch to hourly rows.");
+  assert.equal(refusedSteer.status, 409);
+  held = await x.inspect(task.id);
+  assert.equal(held.instructions.current, 0);
+  await x.api(`/tasks/${task.id}/pause`, "POST", { rev: held.rev });
+  x.d.ctl.gate = undefined;
+  await x.settled(task.id);
+  x.d.ctl.taskSteps.length = 0; // the paused turn never reached its scripted step
+  assert.equal((await x.api(`/threads/${thread}`)).data.thread.messages.filter((m: { text?: string }) => m.text === "Switch to hourly rows.").length, 0);
+  assert.ok((await x.api(`/threads/${thread}`)).data.thread.messages.length >= before);
+  await x.api(`/tasks/${task.id}/resume`, "POST", { rev: (await x.inspect(task.id)).rev });
 
   // 3. The supervisor sees the request in its next turn's task-activity block (metadata only) and escalates through the owner flow.
   const listed = await x.assistantTool("tasks_list", {});
@@ -225,6 +260,14 @@ test("acceptance walkthrough: create, linked session, a bounded supervised turn,
   assert.equal(r.data.task.lifecycle, "done");
   // Done is terminal: nothing more runs.
   assert.equal((await x.api(`/tasks/${task.id}/turn`, "POST", { rev: r.data.task.rev })).status, 409);
+  // 7. The status line goes to the linked vault note through the pipeline port; the answer says exactly what is in the vault.
+  const synced = await x.assistantTool("task_vault_sync", { id: task.id });
+  assert.equal(synced.result.state, "synced");
+  assert.equal(synced.result.inVault, true);
+  assert.equal(synced.result.recordedOnTask, true);
+  assert.match(vaultNote.text, /ORBIT task status: done; .*acceptance evidence: 2\/2 criteria/);
+  assert.equal((await x.assistantTool("task_vault_sync", { id: task.id })).result.state, "up-to-date");
+  assert.equal(vaultNote.appends, 1);
 });
 
 test("authorization: owner only; the supervisor's tools only in the Assistant; a task cannot approve, link or launch; fake proposals are refused", async () => {
@@ -460,4 +503,303 @@ test("page: a task's session shows the task banner with Rai's controls, and the 
   } finally {
     await page.close();
   }
+});
+
+// ---- Repair of the first slice's review findings (docs/adr/0003-supervised-tasks.md, "Repair 1"). Each test names its finding. ----
+
+// A vault where the rolling recent-context note and a project note both match the task's words.
+const ROLLING = "WALNUTLEDGER: Rai talked about his private budget in another conversation.";
+const BOUNDARY_VAULT = {
+  "Memory/recent-context.md": `---\nupdatedAt: 2026-11-20T00:00:00Z\nsources: [chat:x]\n---\nRecent work: garden sensor CSV exporter, synthetic garden sensor readings, weekly CSV. ${ROLLING}\n`,
+  "Projects/garden-sensors.md": "# Garden sensors\nThe garden sensor CSV exporter project: weekly CSV of synthetic garden sensor readings.\n",
+};
+const ROLLING_SPELLINGS = ["Memory/recent-context.md", "./Memory/recent-context.md", "Memory//recent-context.md", "Projects/../Memory/recent-context.md", "/Memory/recent-context.md", "memory/RECENT-context.md", "Memory/./recent-context.md"];
+
+test("finding 1, context boundary: a task turn never gets the rolling recent-context note, as an excerpt, a search hit or a direct or paged read; ordinary chats still do", async () => {
+  const x = stack({ vault: BOUNDARY_VAULT });
+  const t = (await x.assistantTool("task_create", CREATE)).result.task;
+  const thread = t.session.link.slice("/sessions/".length);
+  // A supervised turn that searches for the note and tries to read it under every spelling, then reads the project note.
+  x.d.ctl.taskSteps.push({
+    calls: [
+      call("memory_search", { query: "garden sensor CSV exporter WALNUTLEDGER recent context" }, "m0"),
+      ...ROLLING_SPELLINGS.map((p, i) => call("memory_read", { path: p }, `m${i + 1}`)),
+      call("memory_read_page", { path: "Memory/../Memory/recent-context.md" }, "mp"),
+      call("memory_read", { path: "Projects/garden-sensors.md" }, "mg"),
+    ],
+    reply: "Read the project note.",
+  });
+  await x.assistantTool("task_run_turn", { id: t.id, rev: t.rev });
+  await x.settled(t.id);
+  const first = x.d.seen.find((s) => s.taskTurn)!;
+  // Automatic excerpts: the project note is there, the rolling note is not (by path or by content).
+  assert.match(first.notes!, /### Projects\/garden-sensors\.md/);
+  assert.doesNotMatch(first.notes!, /WALNUTLEDGER|Memory\/recent-context\.md/);
+  // Explicit tool access: search never returns it; every spelling of a read is refused; the paged reader says denied; the project note reads.
+  const search = x.outputsOf("memory_search").at(-1)!;
+  assert.equal(search.ok, true, JSON.stringify(search));
+  assert.ok(JSON.stringify(search).includes("Projects/garden-sensors.md"));
+  assert.ok(!/recent-context|WALNUTLEDGER/i.test(JSON.stringify(search)), JSON.stringify(search));
+  // (Outputs of one round are collected newest first, so they are matched by content, not by order.)
+  const reads = x.outputsOf("memory_read");
+  assert.equal(reads.length, ROLLING_SPELLINGS.length + 1);
+  const refusedReads = reads.filter((r) => r.ok === false);
+  assert.equal(refusedReads.length, ROLLING_SPELLINGS.length, JSON.stringify(reads));
+  // Every spelling resolves to the note and is refused by the task policy, never by accident of the file system.
+  for (const r of refusedReads) {
+    assert.match(JSON.stringify(r), /not available in a task session/);
+    assert.doesNotMatch(JSON.stringify(r), /WALNUTLEDGER/);
+  }
+  const project = reads.find((r) => r.ok === true);
+  assert.match(JSON.stringify(project), /garden sensor CSV exporter project/);
+  const page = x.outputsOf("memory_read_page").at(-1)!;
+  assert.equal(page.ok, false);
+  assert.match(JSON.stringify(page), /denied/);
+  assert.doesNotMatch(JSON.stringify(page), /WALNUTLEDGER/);
+
+  // Rai writing in the task session (an interactive task turn): the same policy.
+  const steer = await x.send(thread, "Check the garden sensor CSV exporter recent context notes.");
+  assert.equal(steer.status, 200, JSON.stringify(steer.data).slice(0, 300));
+  const human = [...x.d.seen].reverse().find((s) => lastUser(s.input)?.content.startsWith("Check the garden sensor"))!;
+  assert.doesNotMatch(human.notes!, /WALNUTLEDGER|### Memory\/recent-context\.md/);
+  assert.match(human.notes!, /### Projects\/garden-sensors\.md/);
+  const beforeInteractive = x.d.outputs.length;
+  const interactive = await x.send(thread, `tool: memory_read ${JSON.stringify({ path: "Memory//recent-context.md" })}`);
+  assert.equal(interactive.status, 200);
+  const interactiveRead = x.d.outputs.slice(beforeInteractive).find((o) => o.name === "memory_read")!;
+  assert.equal(interactiveRead.out.ok, false);
+  assert.match(JSON.stringify(interactiveRead.out), /not available in a task session/);
+
+  // Ordinary access is unchanged: a plain chat thread gets the note as an excerpt and can read it.
+  const chat = await x.create("Plain chat");
+  await x.send(chat.id, "What about the garden sensor CSV exporter and WALNUTLEDGER?");
+  const plain = [...x.d.seen].reverse().find((s) => lastUser(s.input)?.content.startsWith("What about the garden sensor"))!;
+  assert.match(plain.notes!, /WALNUTLEDGER/);
+  const before = x.d.outputs.length;
+  await x.send(chat.id, `tool: memory_read ${JSON.stringify({ path: "Memory/recent-context.md" })}`);
+  const plainRead = x.d.outputs.slice(before).find((o) => o.name === "memory_read")!;
+  assert.equal(plainRead.out.ok, true);
+  assert.match(JSON.stringify(plainRead.out), /WALNUTLEDGER/);
+});
+
+test("finding 2, atomic admission: Rai's message refused while a supervised turn is recorded running (before it holds the thread lock) records nothing; a retry after it ends is recorded once", async () => {
+  const x = stack();
+  const t = (await x.assistantTool("task_create", CREATE)).result.task;
+  const thread = t.session.link.slice("/sessions/".length);
+  // The state the race produces: the supervised turn's record says running while it is still preparing, so the thread is not locked yet.
+  const supervised = x.tasks.beginTurn(t.id, undefined, { actor: "assistant", via: "assistant-tool" }, "fake/scripted").turn;
+  assert.equal((await x.api(`/threads/${thread}`)).data.thread.busy, false);
+  const refused = await x.send(thread, "Use the metric units, please.");
+  assert.equal(refused.status, 409, JSON.stringify(refused.data));
+  assert.match(refused.data.error, /not sent or recorded/);
+  let cur = x.tasks.get(t.id)!;
+  assert.equal(cur.instructions.length, 0, "a refused message is not an instruction");
+  assert.equal(cur.turns.length, 1);
+  assert.equal((await x.api(`/threads/${thread}`)).data.thread.messages.length, 0, "and it is not in the thread");
+  assert.equal((await x.api(`/threads/${thread}`)).data.thread.busy, false, "the lock was freed");
+  x.tasks.endTurn(t.id, supervised.n, { state: "done" });
+  // The retry is admitted: one instruction, one interactive turn that saw it.
+  const ok = await x.send(thread, "Use the metric units, please.");
+  assert.equal(ok.status, 200, JSON.stringify(ok.data).slice(0, 300));
+  cur = x.tasks.get(t.id)!;
+  assert.deepEqual(cur.instructions.map((i) => [i.v, i.text, i.by.actor]), [[1, "Use the metric units, please.", "human"]]);
+  assert.equal(cur.turns.at(-1)!.trigger.actor, "human");
+  assert.equal(cur.turns.at(-1)!.instructionsSeen, 1);
+  assert.equal(cur.turns.at(-1)!.state, "done");
+  // While Rai's turn holds the task, a supervised start is refused and changes nothing; the global cap is untouched by human turns.
+  x.d.ctl.gate = new Promise(() => {});
+  x.d.ctl.taskSteps.push({ calls: [], reply: "x" });
+  const rev = x.tasks.get(t.id)!.rev;
+  const started = await x.api(`/tasks/${t.id}/turn`, "POST", { rev });
+  assert.equal(started.status, 202);
+  const second = await x.send(thread, "Another message while the supervised turn runs.");
+  assert.equal(second.status, 409);
+  assert.equal(x.tasks.get(t.id)!.instructions.length, 1);
+  await x.api(`/tasks/${t.id}/pause`, "POST", { rev: x.tasks.get(t.id)!.rev });
+  x.d.ctl.gate = undefined;
+  await x.settled(t.id);
+});
+
+test("finding 3, photo-only messages: an active task session takes photos without text (a turn, no instruction made up); a paused one records nothing; photos stay bound to their own thread", async () => {
+  const x = stack();
+  const t = (await x.assistantTool("task_create", CREATE)).result.task;
+  const thread = t.session.link.slice("/sessions/".length);
+  const photo = await x.upload(thread, 3);
+  const r = await x.api(`/threads/${thread}/messages`, "POST", { text: "", attachments: [photo] });
+  assert.equal(r.status, 200, JSON.stringify(r.data).slice(0, 400));
+  let cur = x.tasks.get(t.id)!;
+  assert.equal(cur.instructions.length, 0, "no text: no instruction");
+  assert.equal(cur.turns.at(-1)!.trigger.actor, "human");
+  assert.equal(cur.turns.at(-1)!.photos, 1);
+  assert.equal(cur.turns.at(-1)!.state, "done");
+  const msgs = (await x.api(`/threads/${thread}`)).data.thread.messages;
+  assert.equal(msgs[0].attachments.length, 1);
+  assert.equal(msgs[0].attachments[0].id, photo);
+  // The model was offered the task's own tools for that turn.
+  const step = [...x.d.seen].reverse().find((s) => s.notes?.includes("Rai is writing in this task's session now"))!;
+  assert.ok(step.tools.includes("task_request"));
+  // A photo uploaded to another thread cannot be sent in the task session (ownership unchanged), and nothing is recorded.
+  const other = await x.create("Other");
+  const foreign = await x.upload(other.id, 4);
+  const refused = await x.api(`/threads/${thread}/messages`, "POST", { text: "", attachments: [foreign] });
+  assert.ok(refused.status >= 400 && refused.status < 500, String(refused.status));
+  assert.equal(x.tasks.get(t.id)!.turns.length, 1);
+  // Paused: a photo-only message gets a reply and records nothing on the task.
+  await x.api(`/tasks/${t.id}/pause`, "POST", { rev: x.tasks.get(t.id)!.rev });
+  const before = x.tasks.get(t.id)!;
+  const photo2 = await x.upload(thread, 5);
+  const paused = await x.api(`/threads/${thread}/messages`, "POST", { text: "", attachments: [photo2] });
+  assert.equal(paused.status, 200, JSON.stringify(paused.data).slice(0, 300));
+  cur = x.tasks.get(t.id)!;
+  assert.equal(cur.rev, before.rev);
+  assert.equal(cur.instructions.length, 0);
+  const pausedStep = [...x.d.seen].reverse().find((s) => s.notes?.includes("task that is paused"))!;
+  assert.match(pausedStep.notes!, /Nothing from this message was recorded on the task/);
+});
+
+test("finding 5, a paused task's session: Rai's text is recorded as an instruction for resume, no turn runs, and the prompt and the banner say exactly that", async () => {
+  const x = stack();
+  const t = (await x.assistantTool("task_create", CREATE)).result.task;
+  const thread = t.session.link.slice("/sessions/".length);
+  await x.api(`/tasks/${t.id}/pause`, "POST", { rev: t.rev });
+  const view = (await x.api(`/threads/${thread}`)).data.thread.task;
+  assert.match(view.sessionWriting, /Paused: no turn runs\. Writing here records your message as a new instruction for when the task resumes/);
+  const r = await x.send(thread, "When you resume, start with the CSV header.");
+  assert.equal(r.status, 200);
+  const cur = x.tasks.get(t.id)!;
+  assert.deepEqual(cur.instructions.map((i) => [i.v, i.text, i.by]), [[1, "When you resume, start with the CSV header.", { actor: "human", via: "sessions-ui" }]]);
+  assert.equal(cur.turns.length, 0, "no task turn ran");
+  const step = [...x.d.seen].reverse().find((s) => lastUser(s.input)?.content.startsWith("When you resume"))!;
+  assert.match(step.notes!, /task that is paused\. No task turn runs/);
+  assert.match(step.notes!, /recorded on the task as a new instruction .* for when the task is resumed/);
+  assert.doesNotMatch(step.notes!, /nothing you say here changes the task/i);
+  assert.ok(!step.tools.includes("task_request"));
+  // On resume, the next supervised turn is given it (it was unseen until then).
+  const resumed = (await x.api(`/tasks/${t.id}/resume`, "POST", { rev: cur.rev })).data.task;
+  assert.equal(resumed.instructions.notSeenFromRai, 1);
+  x.d.ctl.taskSteps.push({ calls: [], reply: "Starting with the header." });
+  await x.api(`/tasks/${t.id}/turn`, "POST", { rev: resumed.rev });
+  await x.settled(t.id);
+  assert.match([...x.d.seen].reverse().find((s) => s.taskTurn)!.notes!, /start with the CSV header/);
+  // Cancelled: an ordinary reply, nothing recorded, and the prompt says so.
+  await x.api(`/tasks/${t.id}/cancel`, "POST", { rev: x.tasks.get(t.id)!.rev });
+  const n = x.tasks.get(t.id)!.instructions.length;
+  assert.equal((await x.send(thread, "Anything else?")).status, 200);
+  assert.equal(x.tasks.get(t.id)!.instructions.length, n);
+  assert.match([...x.d.seen].reverse().find((s) => lastUser(s.input)?.content === "Anything else?")!.notes!, /nothing said here is recorded on the task/);
+  assert.match((await x.api(`/threads/${thread}`)).data.thread.task.sessionWriting, /cancelled: writing here gets an ordinary reply and records nothing/);
+});
+
+test("finding 4, proposal binding: a proposal for another brief is refused, a proposal links one request across all tasks, retries are idempotent, only Rai can accept a different brief, and unrelated job evidence is never verified", async () => {
+  const x = stack();
+  const a = (await x.assistantTool("task_create", CREATE)).result.task;
+  const b = (await x.assistantTool("task_create", { ...CREATE, title: "Garden sensor CSV, second" })).result.task;
+  for (const t of [a, b]) {
+    x.d.ctl.taskSteps.push({ calls: [call("task_request", { kind: "job", text: "Run the exporter build", brief: BRIEF }, `j-${t.id}`)], reply: "asked" });
+    await x.assistantTool("task_run_turn", { id: t.id, rev: (await x.inspect(t.id)).rev });
+    await x.settled(t.id);
+  }
+  // A proposal for an unrelated brief is refused, and nothing changes.
+  const unrelated = (await x.assistantTool("job_launch", { routine: "orbit", brief: "Delete the old garden photos from the shared drive." })).result.proposalId;
+  let cur = await x.inspect(a.id);
+  const wrong = await x.assistantTool("task_respond", { id: a.id, rev: cur.rev, request: "req-1", action: "link_proposal", proposalId: unrelated });
+  assert.equal(wrong.ok, false);
+  assert.match(wrong.error, /not this request's brief/);
+  assert.match(wrong.error, /Only Rai can link a proposal whose brief differs/);
+  assert.equal((await x.inspect(a.id)).rev, cur.rev);
+  // The Assistant cannot use the human acceptance path.
+  const sneaky = await x.assistantTool("task_respond", { id: a.id, rev: cur.rev, request: "req-1", action: "link_proposal", proposalId: unrelated, acceptBriefSha256: "0".repeat(64) });
+  assert.equal(sneaky.ok, false);
+  // The right proposal links task A's request (binding: exact) ...
+  const pid = (await x.assistantTool("job_launch", { routine: "orbit", brief: BRIEF })).result.proposalId;
+  const linked = await x.assistantTool("task_respond", { id: a.id, rev: cur.rev, request: "req-1", action: "link_proposal", proposalId: pid });
+  assert.equal(linked.ok, true, JSON.stringify(linked));
+  cur = await x.inspect(a.id);
+  assert.equal(cur.requests[0].binding.match, "exact");
+  // ... and cannot also answer task B's identical request (global exclusivity), however it is asked.
+  const curB = await x.inspect(b.id);
+  const cross = await x.assistantTool("task_respond", { id: b.id, rev: curB.rev, request: "req-1", action: "link_proposal", proposalId: pid });
+  assert.equal(cross.ok, false);
+  assert.match(cross.error, new RegExp(`already linked to task ${a.id} request req-1`));
+  const crossRai = await x.api(`/tasks/${b.id}/respond`, "POST", { rev: curB.rev, request: "req-1", action: "link_proposal", proposalId: pid });
+  assert.equal(crossRai.status, 409);
+  assert.equal((await x.inspect(b.id)).rev, curB.rev);
+  // A retry of A's link is a duplicate, changing nothing.
+  const retry = await x.assistantTool("task_respond", { id: a.id, rev: a.rev, request: "req-1", action: "link_proposal", proposalId: pid });
+  assert.equal(retry.result.duplicate, true);
+  // Rai can link B's request to a proposal whose brief differs, but only by naming the digest he compared.
+  const variant = (await x.assistantTool("job_launch", { routine: "orbit", brief: `${BRIEF} Also write a README.` })).result.proposalId;
+  const first = await x.api(`/tasks/${b.id}/respond`, "POST", { rev: curB.rev, request: "req-1", action: "link_proposal", proposalId: variant });
+  assert.equal(first.status, 409);
+  const sha = /acceptBriefSha256: "([0-9a-f]{64})"/.exec(first.data.error)![1]!;
+  const accepted = await x.api(`/tasks/${b.id}/respond`, "POST", { rev: curB.rev, request: "req-1", action: "link_proposal", proposalId: variant, acceptBriefSha256: sha });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  const reqB = (await x.inspect(b.id)).requests[0];
+  assert.equal(reqB.binding.match, "accepted-by-rai");
+  assert.equal(reqB.binding.briefSha256, sha);
+  // Confirmation lifecycle: only Rai's Confirm launches; the job's own work link names the proposal.
+  assert.equal(x.jobs.all().length, 0);
+  const job = (await x.api(`/chat/proposals/${pid}/confirm`, "POST", {})).data.id as string;
+  assert.equal(x.jobs.get(job)!.work?.proposal, pid);
+  x.jobs.record(job, { type: "summary", status: "done", text: "Built." });
+  // Task B claims A's job as its evidence: B's request did not produce it, so its execution is "unlinked", never verified.
+  x.d.ctl.taskSteps.push({ calls: [call("task_add_evidence", { criterion: "ac1", kind: "job", ref: job }, "eb")], reply: "claimed" });
+  await x.api(`/tasks/${b.id}/turn`, "POST", { rev: (await x.inspect(b.id)).rev });
+  await x.settled(b.id);
+  const evB = (await x.inspect(b.id)).evidence[0];
+  assert.equal(evB.status, "claimed");
+  assert.equal(evB.execution.state, "unlinked");
+  // For A, the same job is execution-verified, and it still satisfies no criterion until Rai attests one.
+  x.d.ctl.taskSteps.push({ calls: [call("task_add_evidence", { criterion: "ac1", kind: "job", ref: job }, "ea")], reply: "claimed" });
+  await x.api(`/tasks/${a.id}/turn`, "POST", { rev: (await x.inspect(a.id)).rev });
+  await x.settled(a.id);
+  const inspA = await x.inspect(a.id);
+  assert.equal(inspA.evidence[0].execution.state, "verified");
+  assert.equal(inspA.completion.ready, false);
+  assert.deepEqual(inspA.completion.missing, ["ac1", "ac2"]);
+});
+
+test("finding 7, idempotency: the same requestId for a steer and a turn are separate requests; genuine retries repeat their own result; a reused id with another payload is refused", async () => {
+  const x = stack();
+  const t = (await x.assistantTool("task_create", CREATE)).result.task;
+  // Same key across actions, with no previous turn: the steer records, then the turn really starts (it used to 500).
+  const K = "repeat-key-0001";
+  const s1 = await x.api(`/tasks/${t.id}/steer`, "POST", { rev: t.rev, text: "Prefer ISO weeks.", requestId: K });
+  assert.equal(s1.status, 201);
+  x.d.ctl.taskSteps.push({ calls: [], reply: "one" });
+  const t1 = await x.api(`/tasks/${t.id}/turn`, "POST", { rev: s1.data.task.rev, requestId: K });
+  assert.equal(t1.status, 202, JSON.stringify(t1.data));
+  assert.equal(t1.data.duplicate, false);
+  assert.equal(t1.data.turn, 1);
+  await x.settled(t.id);
+  // A genuine retry of each returns its own result and changes nothing.
+  const s1again = await x.api(`/tasks/${t.id}/steer`, "POST", { rev: t.rev, text: "Prefer ISO weeks.", requestId: K });
+  assert.equal(s1again.status, 200);
+  assert.equal(s1again.data.duplicate, true);
+  assert.equal(s1again.data.instruction, 1);
+  const t1again = await x.api(`/tasks/${t.id}/turn`, "POST", { rev: s1.data.task.rev, requestId: K });
+  assert.equal(t1again.status, 200);
+  assert.equal(t1again.data.duplicate, true);
+  assert.equal(t1again.data.turn, 1);
+  assert.equal(x.tasks.get(t.id)!.turns.length, 1);
+  // With previous turns: a steer with a new key, then a turn with that same key, starts turn 2 (not a false "started" for turn 1).
+  const K2 = "repeat-key-0002";
+  const cur = await x.inspect(t.id);
+  const s2 = await x.api(`/tasks/${t.id}/steer`, "POST", { rev: cur.rev, text: "Add a totals row.", requestId: K2 });
+  assert.equal(s2.status, 201);
+  x.d.ctl.taskSteps.push({ calls: [], reply: "two" });
+  const t2 = await x.api(`/tasks/${t.id}/turn`, "POST", { rev: s2.data.task.rev, requestId: K2 });
+  assert.equal(t2.status, 202);
+  assert.equal(t2.data.turn, 2);
+  await x.settled(t.id);
+  // Conflicting payloads under a used key are refused and change nothing.
+  const rev = (await x.inspect(t.id)).rev;
+  const conflictSteer = await x.api(`/tasks/${t.id}/steer`, "POST", { rev: t.rev, text: "Something else entirely.", requestId: K });
+  assert.equal(conflictSteer.status, 409);
+  assert.match(conflictSteer.data.error, /different steer/);
+  const conflictTurn = await x.api(`/tasks/${t.id}/turn`, "POST", { rev, requestId: K });
+  assert.equal(conflictTurn.status, 409);
+  assert.match(conflictTurn.data.error, /different turn/);
+  assert.equal((await x.inspect(t.id)).rev, rev);
+  assert.equal(x.tasks.get(t.id)!.instructions.length, 2);
 });
