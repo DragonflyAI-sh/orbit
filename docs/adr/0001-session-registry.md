@@ -175,7 +175,7 @@ First read and continuation (cursor contract), same setup, also not performed on
 - **Activity digest**: built in slice 3 as a per-turn digest inside the Assistant's reference material (below), not as a scheduled job. A scheduled digest delivered as a notification still needs the scheduler and its own decision.
 - **Run links**: built in slice 4 (ADR 0002): the job records the confirmed proposal, work session and origin (`Job.work`), and work sessions group runs.
 - **Workflow integration**: a workflow store with `workflow:<id>` sessions/definitions and a `producedBy` field on runs. The registry gains an adapter; ids and the run contract do not change. Recording the launching session on the job itself (instead of reading cards) would also cover archived Assistant turns.
-- **Other kinds** (`task`, `research`): only when a real store exists; an adapter is the only change needed.
+- **Other kinds** (`task`, `research`): only when a real store exists; an adapter is the only change needed. Supervised tasks (ADR 0003, `docs/adr/0003-supervised-tasks.md`) exist now but are not a session kind: a task's id is `task-<uuid>` and its session is an ordinary chat (`chat:<uuid>`), so `task` stays reserved and no adapter was added.
 
 ## Bounded reading (slice 2): `session_read`
 

@@ -33,6 +33,13 @@ export type TurnPrep = {
   isOwner: boolean;
   // Photos sent with this message, already bound to it in the attachment store (docs/photos.md). Stored on the user message as refs.
   attachments?: AttachmentRef[];
+  // Supervised task turns (src/task-supervisor.ts, docs/adr/0003-supervised-tasks.md). Absent: the defaults every chat turn had before.
+  // `maxRounds`: this reply's tool-round ceiling (lower than MAX_ROUNDS for a bounded task turn). `fallback`: whether the paid fallback
+  // may answer (default true: the owner's interactive chat; false for a supervised task turn nobody is typing in). `author`: the user
+  // message was written by ORBIT's task supervisor, not Rai, and is stored and shown as such.
+  maxRounds?: number;
+  fallback?: boolean;
+  author?: "orbit-supervisor";
 };
 
 export type Live = { source: "jobs" | "ops-admin" | "ops-sys" | "workspace" | "workspace-admin"; found: boolean; state?: string; health?: string; detail?: string; url?: string; delivered?: boolean };
@@ -227,7 +234,7 @@ export function threadService(d: {
     // Only a chat thread store compacts (the Assistant passes compact: false and never reaches this with its own store).
     if (d.compact !== false) await compactThread({ threads: threads as Threads, model, id, now, budget: d.budget }).catch(() => {});
     if (d.beforeTurn) await d.beforeTurn(id).catch(() => {});
-    const userMessage = threads.appendUser(id, text, prep.attachments).id;
+    const userMessage = (prep.author ? threads.appendUser(id, text, prep.attachments, prep.author) : threads.appendUser(id, text, prep.attachments)).id;
     const mid = threads.beginAssistant(id);
     const t = threads.get(id)!;
     const notes = [prep.notes, await recent?.note(), d.summaryNote ? d.summaryNote(t) : summaryNote(t), t.cards.length ? dataBlock("proposal-cards", `Proposal cards in this thread, from ORBIT's records:\n${(d.maxCardLines ? cardLines(t).slice(-d.maxCardLines) : cardLines(t)).join("\n")}`) : undefined].filter(Boolean).join("\n\n") || undefined;
@@ -286,8 +293,9 @@ export function threadService(d: {
           notes,
           tools: prep.tools,
           allow: prep.allow,
-          // The owner's interactive chat is the one place a tool-using turn may use the paid fallback.
-          fallback: true,
+          // The owner's interactive chat is the one place a tool-using turn may use the paid fallback. A supervised task turn says false.
+          fallback: prep.fallback ?? true,
+          ...(prep.maxRounds !== undefined ? { maxRounds: prep.maxRounds } : {}),
           toolDeadlineMs: d.toolDeadlineMs,
           abortGraceMs: d.abortGraceMs,
           signal: opts.signal,

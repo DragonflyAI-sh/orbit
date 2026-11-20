@@ -38,6 +38,8 @@ import { attachmentStore } from "./attachments.ts";
 import { observationStore } from "./photo-observations.ts";
 import { embeddingBudget, embeddingsConfig, embeddingsStatus, openaiEmbedder } from "./embeddings.ts";
 import { workFile, workSessions } from "./work-sessions.ts";
+import { taskFile, taskStore } from "./tasks.ts";
+import { cloneTaskVault } from "./task-vault.ts";
 import { launchReconciliations, reconFile } from "./launch-reconciliation.ts";
 import { join } from "node:path";
 import { watcher } from "./watch.ts";
@@ -267,6 +269,11 @@ buildServer({
   smoke,
   // Work sessions and run links: <state>/work-sessions.json (docs/adr/0002-work-sessions.md).
   workSessions: workSessions(workFile(stateDir)),
+  // Supervised tasks: <state>/tasks.json (docs/adr/0003-supervised-tasks.md). Turns run only when the owner or the Assistant starts
+  // one; nothing wakes a task on a timer. Task turns use the same model as every other turn (no task-specific model is configured).
+  // Task status lines reach the vault only through the existing write pipeline, and only when the vault clone exists.
+  tasks: taskStore(taskFile(stateDir)),
+  taskVault: vault ? cloneTaskVault(vault) : undefined,
   reconciliations,
   vaultEdits,
   configView: config,

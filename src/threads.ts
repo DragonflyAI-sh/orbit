@@ -117,6 +117,9 @@ export type ThreadMessage = {
   role: "user" | "assistant";
   at: string;
   text: string;
+  // Who wrote a user-role message when it was not Rai: "orbit-supervisor" is the prompt ORBIT's task supervisor writes to start a
+  // supervised task turn (src/task-supervisor.ts). Absent: Rai wrote it. The page labels it; it is never shown as Rai's.
+  author?: "orbit-supervisor";
   // Photos sent with a user message (docs/photos.md): ordered references into the private attachment store, never the bytes.
   attachments?: AttachmentRef[];
   // Galleries photos_show displayed under an assistant reply (docs/photo-recall.md): ordered photo refs only, resolved again under
@@ -449,10 +452,10 @@ export function threadStore(dir: string | undefined, now: () => Date = () => new
     holds: (id: string, token: symbol) => busy.get(id) === token,
     isBusy: (id: string) => busy.has(id),
 
-    appendUser(id: string, text: string, attachments?: AttachmentRef[]): ThreadMessage {
+    appendUser(id: string, text: string, attachments?: AttachmentRef[], author?: "orbit-supervisor"): ThreadMessage {
       return mutate(id, (t) => {
         const refs = safeAttachments(attachments);
-        const m: ThreadMessage = { id: randomUUID(), role: "user", at: now().toISOString(), text: maskContent(text).slice(0, MAX_MESSAGE_CHARS), ...(refs ? { attachments: refs } : {}) };
+        const m: ThreadMessage = { id: randomUUID(), role: "user", at: now().toISOString(), text: maskContent(text).slice(0, MAX_MESSAGE_CHARS), ...(author ? { author } : {}), ...(refs ? { attachments: refs } : {}) };
         t.messages.push(m);
         if (!t.titleSet && t.title === DEFAULT_TITLE) t.title = autoTitle(text);
         return m;
