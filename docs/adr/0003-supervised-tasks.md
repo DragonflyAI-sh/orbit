@@ -1,6 +1,6 @@
 # ADR 0003: Supervised tasks, first slice
 
-Status: accepted for the first slice, hardened by "Repair 1" (below) after review of PR #151 and "Repair 2" after review of PR #153. Repair 2 also adds one bounded piece of background behaviour, **automatic follow-up** (below): off by default at two levels (the operator's switch and Rai's per-task opt-in), at most one bounded supervised turn per follow-up due time, budgeted, never re-run when its outcome is uncertain. It is not enabled on any host by this change. Other background autonomy (recurring supervision, self-scheduling, dependencies) is not built.
+Status: accepted for the first slice, hardened by "Repair 1" (below) after review of PR #151, "Repair 2" after review of PR #153, and "Repair 3" after review of PR #154 (which also adds durable supervisor attention, research-lane requests, dependencies, vault coherence views and an offline model-evaluation harness; see "Repair 3"). Repair 2 also adds one bounded piece of background behaviour, **automatic follow-up** (below): off by default at two levels (the operator's switch and Rai's per-task opt-in), at most one bounded supervised turn per follow-up due time, budgeted, never re-run when its outcome is uncertain. It is not enabled on any host by this change. Other background autonomy (recurring supervision, self-scheduling, dependencies) is not built.
 
 Code: `src/tasks.ts` (record, store, derived views), `src/task-supervisor.ts` (the Assistant's task tools, the task's own tools, bounded turns, the activity block), `src/task-context.ts` (the task-scoped memory policy), `src/task-vault.ts` (status lines through the vault write pipeline), `src/task-scheduler.ts` (the follow-up scheduler, Repair 2), wiring in `src/server.ts` (routes, `prepare`/`allowAgent`, the task-session branch of the thread route, restart recovery), `src/main.ts` (`<state>/tasks.json`, the vault adapter), `src/policy.ts` (the `tasks` port), and hooks in the turn code: `src/thread-service.ts` (`TurnPrep.maxRounds`, `fallback`, `author`, `admit`) and `src/threads.ts` (`ThreadMessage.author`, `Thread.taskSession`). Page: `src/web/index.html` (task banner in a task's session, supervisor-authored messages labeled). Tests: `test/tasks.test.ts` (store, derived status, evidence gate, vault sync with a fake port and through the real pipeline on a temporary bare repository), `test/task-supervisor.test.ts` (real server: acceptance walkthrough, authorization, concurrency and pause, duplicates, restart, the page in Chromium, and one test per Repair 1 finding), `test/task-repair.test.ts` (Repair 1 at unit level: memory policy, admission races through the real thread store and turn code, links across restarts, version 1 files, vault bookkeeping failures), `test/task-repair2.test.ts` (Repair 2 findings), `test/task-scheduler.test.ts` (automatic follow-up with a fake clock).
 
@@ -213,14 +213,16 @@ The Assistant may read a task's session with its existing `session_read` (it is 
 | `inactive` | paused, cancelled or done | nothing starts; on resume a due follow-up runs at the next tick |
 | `turn-running` | another turn of the task holds it (Rai's interactive turn, a manual turn) | waits; not counted as an attempt |
 | `due` | eligible now | the next tick starts one turn |
-| `retry-wait` | a pre-dispatch failure (global turn cap 429, the task's turn or thread busy 409); `attempts`, `nextTryAt` | retried after 1, 5, 15 minutes |
-| `gave-up` | 4 pre-dispatch attempts failed, or a failure that is not transient (missing session, model cannot call tools, policy) | no automatic attempt for this due time |
+| `capacity-wait` (Repair 3) | every supervised turn slot was busy, or the task's session had a reply in progress: a **deferral**, `deferrals` and `deferredSince` | the next tick tries again, oldest due time first; uses no attempt, never gives up for capacity alone |
+| `dependency-wait` (Repair 3) | a dependency (`dependsOn`) is not done | waits; shown with the blocked reason |
+| `retry-wait` | a pre-dispatch failure that may clear (an unexpected error before the claim, such as a write failure); `attempts`, `nextTryAt` | retried after 1, 5, 15 minutes |
+| `gave-up` | 4 pre-dispatch attempts failed, or a failure that is not transient (missing session, model cannot call tools, policy); raises an attention item | no automatic attempt for this due time |
 | `started` | turn `n` was started for this due time | its outcome follows |
 | `ended` | that turn ended (`outcome` done or error, from the turn record, in the same store change) | consumed |
 | `interrupted` | ORBIT stopped while that turn ran: whether the model was called is unknown | **never re-run automatically** |
 | `budget-task`, `budget-global` | this task's `perDay` (default 2, at most 6) or ORBIT's 10 automatic turns in any 24 hours are used; `nextAt` says when the task's window frees | waits for the window |
 
-Retries happen only for failures before the claim (nothing dispatched); a turn that started and failed is its own outcome (`ended`, `error`), never retried automatically. Attempt bookkeeping does not bump `rev`.
+Retries happen only for failures before the claim (nothing dispatched); a turn that started and failed is its own outcome (`ended`, `error`), never retried automatically. Capacity is not a failure (Repair 3): it defers without using an attempt. Attempt and deferral bookkeeping does not bump `rev`.
 
 **Budgets: what they constrain.** They count **automatic turns started**, per task and across ORBIT, per rolling 24 hours. With the existing per-turn bounds (6 tool rounds, no paid fallback, 2 supervised turns at once) that bounds how many bounded model conversations the scheduler can cause. They do **not** measure or cap provider spend: the cost of a turn depends on the model port and context size, and no dollar figure is guaranteed.
 
@@ -262,13 +264,13 @@ sequenceDiagram
     A->>S: task_vault_sync -> status line through the vault pipeline (written / recorded reported separately)
 ```
 
-## Routes (owner only; every POST takes `rev`)
+## Routes (owner only; every POST takes `rev` except `/attention`)
 
-`GET /tasks`, `POST /tasks` (create), `GET /tasks/:id`, `POST /tasks/:id/follow-up {rev, enabled, perDay?}` (Rai's opt-in; Repair 2), `POST /tasks/:id/steer {rev, text, requestId?}`, `/pause`, `/resume`, `/cancel {rev, reason?}`, `/turn {rev, requestId?}` (202, runs in the background; a repeat whose turn record is no longer kept is 409 `expired`), `/evidence {rev, criterion, kind, ref, note?}` (attested), `/respond {rev, request, action, text?, proposalId?, acceptBriefSha256?}` (`acceptBriefSha256`: Rai only, to link a proposal whose brief differs, naming its digest), `/sync` (200 for `synced`, `written-unrecorded`, `already-written`, `up-to-date`; 502 for `failed`, `blocked`, `unknown`), `/complete {rev}`. Errors: 400 bad input, 403 not owner, 404 unknown task, 409 stale rev / conflicting state / not ready / a requestId reused with another payload, 429 at the turn cap or the open-request cap, 503 store unavailable.
+`GET /tasks`, `POST /tasks` (create), `GET /tasks/projects?project=&closed=1` (read-only reconciliation; Repair 3), `GET /tasks/:id`, `POST /tasks/:id/follow-up {rev, enabled, perDay?}` (Rai's opt-in; Repair 2; answers `changed`, and `ignored: ["perDay"]` when turning off), `POST /tasks/:id/update {rev, nextAction?, followUpAt?, followUpNote?, project?, vaultNote?, vaultHeading?, dependsOn?, autoFollowUp?: "off"}` (one atomic change; Repair 3), `POST /tasks/:id/attention {attention, note?}` (acknowledge a non-request attention item; Repair 3), `POST /tasks/:id/steer {rev, text, requestId?}`, `/pause`, `/resume`, `/cancel {rev, reason?}`, `/turn {rev, requestId?}` (202, runs in the background; a repeat whose turn record is no longer kept is 409 `expired`), `/evidence {rev, criterion, kind, ref, note?}` (attested), `/respond {rev, request, action, text?, proposalId?, acceptBriefSha256?}` (`acceptBriefSha256`: Rai only, to link a proposal whose brief differs, naming its digest), `/sync` (200 for `synced`, `written-unrecorded`, `already-written`, `up-to-date`; 502 for `failed`, `blocked`, `unknown`), `/complete {rev}`. Errors: 400 bad input, 403 not owner, 404 unknown task, 409 stale rev / conflicting state / not ready / a requestId reused with another payload, 429 at the turn cap or the open-request cap, 503 store unavailable.
 
 ## Assistant tools (Assistant scope, owner only, `tasks` port)
 
-`tasks_list` and `task_inspect` (read-only), `task_create`, `task_steer`, `task_pause` (pause/resume), `task_run_turn`, `task_respond` (answer/decline/link_proposal), `task_update` (next action, follow-up time, project, vault link; `autoFollowUp: "off"` only), `task_vault_sync`. Not offered in chat threads; refused there by name. The task's own tools are offered only inside its turns and refused by name elsewhere. `src/chat-tools.ts` (pinned) is unchanged.
+`tasks_list` and `task_inspect` (read-only), `task_create`, `task_steer`, `task_pause` (pause/resume), `task_run_turn`, `task_respond` (answer/decline/link_proposal), `task_update` (next action, follow-up time, project, vault link, dependencies; `autoFollowUp: "off"` only; one atomic change), `task_vault_sync`, `task_attention_ack` and `tasks_project_status` (read-only) (Repair 3). The task's own `task_request` takes `research` as a kind (Repair 3). Not offered in chat threads; refused there by name. The task's own tools are offered only inside its turns and refused by name elsewhere. `src/chat-tools.ts` (pinned) is unchanged.
 
 ## Implemented vs deferred
 
@@ -337,6 +339,141 @@ Each finding was reproduced against `main` at 0e8720f by running `test/task-repa
 | 5 | `humanTurn`'s comment said the thread route checks ownership; `humanTurn` itself does | the 403 already held (test passes on main); the comment was wrong | comment corrected (the route answers anyone the chat channel allows; only `humanTurn` refuses a non-owner in a task session) | `task-repair2` "finding 5" (non-owner, active and cancelled: 403, nothing recorded) |
 
 File version stays 2: `instructionSeq` is an optional field (absent means "the newest version on record"). An older build keeps it untouched but does not use it, so while that older build runs it can still reuse a removed version as before; this build then continues from the higher of the field and the newest version.
+
+## Repair 3: review findings on PR #154, supervisor escalation, and the next increment
+
+Code: `src/tasks.ts`, `src/task-attention.ts` (new), `src/task-scheduler.ts`, `src/task-supervisor.ts`, `src/task-eval.ts` (new), routes in `src/server.ts`, the banner in `src/web/index.html`. Tests: `test/task-repair3.test.ts` (findings), `test/task-attention.test.ts` (attention, research lane, dependencies, vault coherence), `test/task-acceptance.test.ts` (simulated end-to-end walkthrough and the banner in Chromium), `test/task-eval.test.ts` (harness), shared rigs `test/task-rig.ts` and `test/tasks-fixture.ts`. Model routing: `docs/task-model-routing.md`.
+
+### Priority 1: the four reported findings
+
+The findings were reports, not verified facts. Each was reproduced on `main` at 4b39cb4 with a scratch script against main's own store and scheduler before any change (output quoted), then fixed here with regression tests.
+
+| # | Finding | Observed on main | Fix | Tests (`test/task-repair3.test.ts` unless named) |
+|---|---|---|---|---|
+| a | `task_update` persisted its fields, then errored when automatic follow-up was already off | `nextAction` saved at rev 2, then "Automatic follow-up is already off for this task." | `tasks.updateDetailed`: every field, including `autoFollowUp: "off"`, validated and applied in ONE store change; off-when-off is a no-op; a patch that changes nothing writes nothing (`changed: false`, no rev bump, even from a stale view) | combined update, idempotent off (no write), one-rev combined change, refusal anywhere applies nothing, write failure mid-update, two racing updates from one view |
+| b | busy slots consumed the scheduler's retries | slot `gave-up` after 4 attempts: "At most 2 supervised task turns run at once (gave up after 4 attempts)" | capacity (global cap, task session busy) is a **deferral**: `capacity-wait`, no attempt used, retried at the next tick (no backoff, so no hot loop and no extra wait), the scheduler does not call `startTurn` while slots are full, and due tasks are taken **oldest due time first**. Only other pre-dispatch failures use attempts | `task-scheduler` (12 deferrals over hours, then started), no startTurn calls while full, fairness, session busy, real failure still backs off and gives up once, restart while deferred with two racing ticks |
+| c | off/on reset a custom daily budget | `perDay` 5 → 2 after off and on | turning on keeps the explicit `perDay` (and `perDaySetBy`); only a new `perDay` from Rai changes it; `started[]` (usage) is never reset | toggles by Rai and the Assistant and a restart; usage still counts after toggling |
+| d | turning off validated an irrelevant `perDay` | "perDay must be a whole number from 1 to 6." and still enabled | off ignores `perDay` entirely (`ignored: ["perDay"]`), never applies it; on validates it and changes nothing when it is bad | five junk values; junk while already off; bad value when turning on |
+
+Found while testing (not in the review): the first fairness order compared deferral times, which tie for tasks deferred at the same tick, so the order was random; it now compares due times first. File version stays 2: every new field is optional and an older build keeps unknown fields untouched.
+
+### Priority 2: supervisor attention, the escalation path
+
+**Audit before the change.** Requests (clarification, blocker, job) were durable and deduplicated, and the Assistant saw request ids each turn; but failures (errored or interrupted turns, a follow-up that gave up, a budget wait, a failed vault sync) were only visible as state on the task, nothing said "this needs you", and nothing distinguished "shown to the Assistant" from "dealt with".
+
+**Attention items** (`src/task-attention.ts`, stored as `task.attention[]`): raised by the task store **in the same store change** as their cause, so cause and item are one durable fact.
+
+| Kind | Raised when | Resolved when | Acknowledgeable |
+|---|---|---|---|
+| `clarification`, `blocker`, `job`, `research` | the task files a request (a repeat counts on the same item) | the request is answered, declined, withdrawn or linked to a proposal | **no**: only answering resolves it (shown is not answered) |
+| `turn-failed` | a supervised or automatic turn ends in error (including one a pause cut short); not Rai's own interactive turn | acknowledged | yes |
+| `turn-interrupted` | restart recovery marks a running turn interrupted | acknowledged | yes |
+| `follow-up-gave-up` | the scheduler gives up on a due time | the follow-up time is replaced | yes |
+| `budget` | a due follow-up waits on a turn budget (once per due time) | a turn starts for it, or the follow-up time is replaced | yes |
+| `vault-sync` | a sync ends failed, blocked or unknown (one item; repeats counted, an acknowledged one reopens) | a later sync saves, or the vault link changes | yes |
+| `launch-not-confirmed`, `dependency-blocked` | **derived** at view time (a linked card expired/cancelled/refused; a dependency cancelled or missing) | the cause clears | no (not stored) |
+
+Each item carries ORBIT's own one-line `summary` (never model text), a `source` (request id, turn number and who started it, follow-up due time, vault note and attempt) and the task `rev` when raised. Lifecycle: `open` → `acknowledged` (Rai or the Assistant, with a note; stays listed) → `resolved` (with why). `surfaced` records when the Assistant was shown an item; it changes nothing else. Unresolved items are never pruned; resolved history is capped at 100.
+
+**Next-turn delivery, and why nothing wakes the Assistant.** The Assistant's task-activity block is built from the store at every owner Assistant turn, so anything raised while it was busy is there next turn, marked `new` until shown once. **Automatic supervisor wake is deferred (not built):** nothing starts an Assistant turn, sends a notification, or pages anyone. Building it needs its own opt-in (default off), restart safety, a rate and budget limit, and no paid fallback; until then attention is durable next-turn context and the Sessions banner.
+
+**Rai's direct steering** is visible to the supervisor: the activity block carries each task's newest instruction from Rai (his own words, the route, whether the task has seen it). It goes to the Assistant only, never into another task's context.
+
+**Dependencies** (`dependsOn`, at most 5, set by Rai's update route or the Assistant's `task_update`): explicit, refused when they would close a cycle (the path is named), met **only** when the other task is `done` (Rai, with attested evidence); a job ending never meets one. An automatic follow-up waits (`dependency-wait`); manual turns still run (the task's context lists the dependency ids and lifecycles only, no other task's content).
+
+**Surfaces.** Assistant: `tasks_list` and `task_inspect` (`attention`, `dependencies`), the task-activity block, `task_attention_ack`, `task_update dependsOn`. Rai: the banner in the task session lists items with kind, state, source and rev, an Acknowledge button for non-request items, and dependency links to the other tasks' sessions; routes `POST /tasks/:id/attention {attention, note?}` (no rev: it is bookkeeping about the item), `POST /tasks/:id/update {rev, ...}`.
+
+### Priority 3: task requests to the Assistant, research lane
+
+Audited: job requests already had exact proposal binding, global exclusivity, rev checks, derived awaiting-confirmation/confirmed/running/result/not-confirmed statuses, and claimed-versus-verified evidence. Added:
+
+- **Research requests** (`task_request kind: research`): linked only to a **research-lane** proposal (`research_launch`, the proposal store's own `lane`), and a build request only to a build proposal; a research request cannot be answered by text either. Binding: the proposal's brief must be `Research question: <request text>` + the request's brief (what `research_launch` builds from those two fields), or exactly the request's brief; the binding records `lane`.
+- Unchanged and still tested: a task never launches, links, confirms or approves; duplicate links are refused across all tasks; stale revs are refused; a job's or research run's result is never task completion and model text never becomes verified evidence. When the research lane is not configured, `research_launch` refuses (as before) and the request stays pending for the Assistant to decline with that reason: no build is ever substituted.
+
+### Priority 4: vault coherence
+
+- Each linked note has a derived `coherence` state: `pending` (never synced), `current` (the last saved line states today's facts), `stale` (saved earlier, the task changed since), `failed`, `blocked`, `unknown`. Failures are attention items until a later sync saves.
+- `GET /tasks/projects` and the Assistant's `tasks_project_status`: read-only reconciliation per project (lifecycles, open attention, unmet dependencies, vault states, which tasks need a sync). It writes and syncs nothing.
+- Unchanged: sync is manual, through the existing policy-checked pipeline (secret refusal, AGENTS classification, protected notes blocked without proposals), idempotent by key, and reports the vault write and the bookkeeping separately. No automatic sync and no write loop were added. Tests use fake ports and temporary repositories only; no real vault was written.
+
+### Priority 5: model routing readiness
+
+`docs/task-model-routing.md`: current routing as read from the code (task turns use the same port as every turn; no paid fallback in task turns), requirements on any future routing, and `src/task-eval.ts`, an offline harness with six synthetic scenarios (planning, tool correctness, context isolation, interruption recovery, escalation, cost and latency) that fails closed on a model not in its allow list, not live, or without tools. No model is recommended; the questions and decision criteria for a separate evaluation are listed there.
+
+### The recurring bootstrap flake
+
+`test/research-bootstrap.test.ts` "connection reset during the TLS handshake" failed in the baseline full run. Reproduced: 0 of 30 runs alone, 26 of 36 with 12 copies in parallel. Cause: under load the test server's reset arrives before curl's non-blocking connect completes, and curl reports exit 7 (`connect-failed`) instead of 35/52/56. The bootstrap classifies exit 7 as a retried connect failure, so its behaviour was right and the expectation too narrow (the `orbit-research` tool test in the same file already accepts exit 7 for the same reason). The two reset tests now accept exit 7; 36 of 36 passed under the same load.
+
+### Acceptance matrix (Repair 3)
+
+Simulated means: the real server and stores over temporary directories, a scripted model, the fixture's fake routine, fake vault ports. **None of this is live production validation.**
+
+| Capability | State | Evidence |
+|---|---|---|
+| Findings a-d fixed, with race, retry and restart tests | Implemented, tested | `task-repair3`, `task-scheduler` |
+| Task creation and session navigation; two tasks | Implemented, tested (simulated) | `task-acceptance` steps 1, 2 |
+| Direct (Sessions) and Assistant steering, visible to the supervisor | Implemented, tested (simulated) | `task-acceptance` step 3 |
+| Two concurrent tasks, capacity deferral, then start | Implemented, tested (simulated) | `task-acceptance` step 4 |
+| Escalation round trip: request → attention (new) → shown, still open → link → resolved → Rai confirms → running → result | Implemented, tested (simulated, fake routine) | `task-acceptance` steps 6, 7 |
+| Refused launch (card cancelled) → not-confirmed, derived attention, nothing ran | Implemented, tested (simulated) | `task-acceptance` step 8 |
+| Vault sync failure (unknown), retry, idempotent, attention raised and resolved | Implemented, tested (fake port) | `task-acceptance` step 10, `task-attention` |
+| Due scheduled turn; budget exhaustion with attention | Implemented, tested (simulated, operator switch on in the test only) | `task-acceptance` steps 4, 5 |
+| Pause/resume; aborted turn as attention; acknowledgement | Implemented, tested (simulated) | `task-acceptance` step 11 |
+| Restart/unknown interruption recovery as attention | Implemented, tested | `task-acceptance` step 12, `task-repair3` |
+| No task can turn automatic follow-up on, approve, mark itself done, or have claims counted | Implemented, tested | `task-acceptance` step 13, `task-attention` |
+| Prior regressions: isolation absolute paths, atomic admission/rollback, photo-only input | Tested (unchanged suites pass) | `task-supervisor`, `task-repair`, `task-repair2` |
+| Banner attention, sources, Acknowledge, dependency links, light/dark, desktop/phone, no horizontal overflow | Implemented, tested (Chromium) | `task-acceptance` page test |
+| Research requests on the research lane only | Implemented, tested (unit, fake proposals) | `task-attention` |
+| Dependencies with cycle detection, done-only, dependency-wait | Implemented, tested | `task-attention`, `task-acceptance` step 2 |
+| Project reconciliation, read-only | Implemented, tested | `task-attention`, `task-acceptance` step 10 |
+| Evaluation harness, fail closed, no fallback | Implemented, tested (scripted ports) | `task-eval` |
+| Research request end to end through a configured research lane on the server | **Partial**: unit-tested binding with fake proposals; not run through `research_launch` on the server | |
+| Attention surfaced in the Sessions list (per-session badge) and the Assistant page | **Partial**: in the task banner and the Assistant's model context only | |
+| Automatic supervisor wake (an Assistant turn or notification on new attention) | **Deferred** (not built; see above) | |
+| Vault schema mapping, reading human edits back, sync on change | **Deferred** (unchanged) | |
+| Cancellation propagated to cards and jobs; wall-time and spend budgets | **Deferred** (unchanged) | |
+| Real model evaluation, routing changes | **Deferred**: separate, approved evaluation | |
+| Live host verification | **Not done** | |
+
+### Operator acceptance runbook (for later live testing; nothing here was run on a host)
+
+Preconditions: an ORBIT built from this change, the owner signed in, a model port that can call tools, `ORBIT_TASK_FOLLOWUPS` **unset** (automatic follow-up off) unless step 6 is being tested on purpose, and a throwaway vault note under `Tasks/` with a `## Status` heading for step 5.
+
+1. **Create and navigate.** Ask the Assistant to create two small synthetic tasks under one project. Open each session link; each banner says `active`, `No turn has run yet`.
+2. **Dependencies.** Ask the Assistant to make the second depend on the first. The second banner shows "Depends on (waiting)" with a link that opens the first. Ask for the reverse dependency: refused as a cycle, nothing changed.
+3. **Steering.** Write an instruction in the first task's session. Ask the Assistant "what's new on my tasks?": it should quote your instruction as yours and say whether the task has seen it.
+4. **Escalation.** Run one turn of the first task and get it to ask for a job (or a clarification). The banner shows "Needs attention" with the request; ask the Assistant: it names the request, and its next turn still shows it open until it answers. For a job: it proposes, links, and the card waits for your Confirm. Cancel one card and confirm another; the cancelled one shows not-confirmed, the confirmed one running, then result; the task stays active.
+5. **Vault.** Link the throwaway note and sync: `current`. Change the next action: `stale`. Unlink the note's heading in the vault (or point at a missing note) and sync: the banner shows a vault-sync attention item and nothing is written; fix it and sync: resolved, one new line.
+6. **Automatic follow-up (only with the operator switch on, on a test host).** Opt a task in from the banner with `perDay` 1, set a follow-up a minute ahead, keep the other task's turn running: the opted-in task shows `capacity-wait` with attempts 0, then starts once the slot frees. Set a second follow-up: `budget-task` and a budget attention item. Turn it off twice: the second is a no-op.
+7. **Pause and restart.** Pause during a running turn: the turn ends with an error and an attention item. Restart ORBIT during a running turn: the turn shows `interrupted` and an attention item; nothing re-runs.
+8. **Completion.** Attest each criterion yourself and mark done; the dependent task's dependency becomes met.
+
+Record for each step: what the banner showed, what the Assistant said, and the task's `GET /tasks/:id` excerpt. Any mismatch is a defect.
+
+### Activation prerequisites (none are changed by this work)
+
+- Automatic follow-up stays off: `ORBIT_TASK_FOLLOWUPS=on` on the host **and** Rai's per-task opt-in are both still required; no deploy file sets the first.
+- Vault sync needs the vault clone and its credential on the host (as before) and runs only when asked.
+- The research lane needs its own routine configuration (docs/research-lane.md); without it research requests can only be declined.
+- Automatic supervisor wake does not exist; activating one later needs a separate design and opt-in.
+- No new environment variables, providers, credentials or paid features are introduced.
+
+### Remaining work (exact)
+
+1. A server-level test of a research request through `research_launch` with a configured research lane, and a banner action to answer a request from Sessions (Rai can answer through the Assistant or `POST /tasks/:id/respond` today).
+2. A Sessions-list badge for task sessions with open attention, and an attention count on the Assistant page.
+3. The opt-in automatic supervisor wake (design first: default off, restart-safe claim, rate and budget limits, no paid fallback).
+4. Vault schema mapping and reading human edits back (needs the vault's task schema reviewed); cancellation propagated to open cards and running jobs as proposals Rai confirms.
+5. A recorded evaluation of candidate models with the harness, approved separately (docs/task-model-routing.md lists the questions).
+6. Live verification on a host with the runbook above.
+
+### Limits (Repair 3)
+
+- Simulated only: scripted models, fake routine, fake vault ports; nothing ran on a host or against a real model or vault.
+- `surfaced` is recorded when the activity block is built for an Assistant turn; if that turn then fails before the model reads it, the item still says surfaced (it stays open and listed, only the `new` marker is lost).
+- An older build (rollback) keeps the new fields but does not maintain them: it does not raise or resolve attention items. A request item whose request was answered meanwhile is not shown as waiting (derived), but other items may be left open until acknowledged.
+- Deferral bookkeeping writes the task file once per deferred task per tick (one minute) while slots stay full.
+- The page check covers the task banner only (two widths, two schemes); other pages were not changed.
 
 ## Next slice (prioritized plan; not built here)
 

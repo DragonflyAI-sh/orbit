@@ -84,7 +84,11 @@ function prune(t: Task): void {
   t.attention = list.filter((x) => keep.has(x));
 }
 
-export const unresolved = (t: Task): Attention[] => (t.attention ?? []).filter((x) => x.state !== "resolved");
-export const openAttention = (t: Task): Attention[] => (t.attention ?? []).filter((x) => x.state === "open");
+// A request item whose request is no longer pending is resolved in substance even if the record says otherwise (for example a request
+// answered by an older build that did not keep attention items, after a rollback): it is never shown as still waiting. The stored state
+// is corrected at the next change of the request; reading never writes.
+const stale = (t: Task, x: Attention): boolean => x.source.type === "request" && t.requests.find((r) => r.id === (x.source as { request: string }).request)?.state !== "pending";
+export const unresolved = (t: Task): Attention[] => (t.attention ?? []).filter((x) => x.state !== "resolved" && !stale(t, x));
+export const openAttention = (t: Task): Attention[] => unresolved(t).filter((x) => x.state === "open");
 // Shown to the Assistant at least once? Items it has never been shown are `new` in its next task-activity block.
 export const isNew = (a: Attention): boolean => a.state === "open" && !a.surfaced;

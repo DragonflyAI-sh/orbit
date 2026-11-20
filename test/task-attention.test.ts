@@ -211,3 +211,16 @@ test("no model can turn automatic follow-up on, acknowledge for Rai, or complete
   assert.throws(() => r.tasks.complete(t.id, t.rev, TASK_TURN(1), noObs), code(403));
   assert.equal(r.tasks.get(t.id)!.auto, undefined);
 });
+
+test("attention: a request answered without its item being resolved (an older build after a rollback) is never shown as waiting", () => {
+  const r = rig();
+  const t = r.create();
+  r.tasks.fileRequest(t.id, { kind: "blocker", text: "Which sensors?" }, TASK_TURN(1));
+  const cur = r.tasks.get(t.id)!;
+  assert.equal(r.sup.view(cur).attention.open, 1, "the real record waits until answered");
+  // The record an older build would leave: the request answered, the attention item untouched.
+  const older: Task = { ...cur, requests: [{ ...cur.requests[0]!, state: "answered" }] };
+  assert.equal(older.attention![0]!.state, "open");
+  assert.equal(r.sup.view(older).attention.open, 0);
+  assert.equal(r.sup.view(older).attention.items.length, 0);
+});
