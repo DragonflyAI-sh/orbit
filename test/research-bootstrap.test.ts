@@ -295,8 +295,12 @@ test("connection reset during the TLS handshake, then success: retried with 2 s 
     const res = await r.boot({ job: id, token });
     assert.equal(res.code, 0, res.out);
     const l = lines(res.out);
-    assert.match(l[0]!, /^orbit-research-bootstrap: attempt 1: (tls-connect \(curl exit 35|connection-reset \(curl exit (52|56)), HTTP 000\)$/);
-    assert.match(l[1]!, /attempt 2: (tls-connect|connection-reset)/);
+    // A reset that lands while curl is still completing its non-blocking connect is reported by curl as exit 7 (connect-failed) instead
+    // of 35/52/56. It is the same reset, classified as a retried connect failure; this was the recurring flake of this test under the
+    // parallel full suite (reproduced: 26 of 36 runs failed with 12 copies in parallel, 0 of 30 alone). Same rule as the orbit-research
+    // tool test below.
+    assert.match(l[0]!, /^orbit-research-bootstrap: attempt 1: (tls-connect \(curl exit 35|connection-reset \(curl exit (52|56)|connect-failed \(curl exit 7), HTTP 000\)$/);
+    assert.match(l[1]!, /attempt 2: (tls-connect|connection-reset|connect-failed)/);
     assert.equal(l[2], "orbit-research-bootstrap: attempt 3: ok (curl exit 0, HTTP 200)");
     assert.deepEqual(r.sleeps(), ["2", "4"]);
     assert.equal(readFileSync(r.installed, "utf8"), r.tool!.text);
@@ -318,9 +322,10 @@ test("resets that never stop: 4 attempts (2, 4, 8 s backoff), then FAILED with c
     const l = lines(res.out);
     assert.equal(l.filter((x) => / attempt \d: /.test(x)).length, 4);
     assert.deepEqual(r.sleeps(), ["2", "4", "8"]);
-    assert.match(res.out, /FAILED category=(tls-connect|connection-reset) attempts=4 curl_exit=(35|52|56) http=000/);
-    assert.match(res.out, /detail: curl: \((35|52|56)\) /, "curl's message is kept for diagnosis");
-    assert.match(res.out, /failure report: NOT delivered \(curl exit (35|52|56), HTTP 000\); ORBIT will show this job as not checked in/);
+    // Under load a reset can land before curl's connect completes: curl exit 7 (connect-failed), retried the same way (see above).
+    assert.match(res.out, /FAILED category=(tls-connect|connection-reset|connect-failed) attempts=4 curl_exit=(7|35|52|56) http=000/);
+    assert.match(res.out, /detail: curl: \((7|35|52|56)\) /, "curl's message is kept for diagnosis");
+    assert.match(res.out, /failure report: NOT delivered \(curl exit (7|35|52|56), HTTP 000\); ORBIT will show this job as not checked in/);
     assert.ok(!existsSync(r.installed));
     noSecrets(r, token, res.out);
     const job = r.jobs.get(id)!;
