@@ -628,6 +628,87 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     return out;
   }
 
+  function setAutoDetailed(id: string, expectRev: number, enabled: boolean, by: Provenance, perDay?: unknown): { task: Task; changed: boolean; ignored: string[] } {
+    if (enabled && (by.actor !== "human" || by.via === "sessions-ui")) throw new TaskError(403, "Only Rai can turn on automatic follow-up, from the task controls. Nothing was changed.");
+    if (!enabled && by.actor !== "human" && by.actor !== "assistant") throw new TaskError(403, "Automatic follow-up can be turned off only by Rai or the Assistant.");
+    const sent = perDay !== undefined && perDay !== null;
+    if (!enabled) {
+      const cur = get(id);
+      if (!cur) throw new TaskError(404, "No task with that id.");
+      const ignored = sent ? ["perDay"] : [];
+      if (!cur.auto?.enabled) return { task: structuredClone(cur), changed: false, ignored };
+      const { task } = change(id, { expectRev, allowTerminal: true }, (t) => {
+        t.auto = { ...t.auto!, enabled: false, changedAt: now().toISOString(), changedBy: by };
+      });
+      return { task, changed: true, ignored };
+    }
+    if (sent && (typeof perDay !== "number" || !Number.isSafeInteger(perDay) || perDay < 1 || perDay > AUTO_PER_DAY_LIMIT)) throw new TaskError(400, `perDay must be a whole number from 1 to ${AUTO_PER_DAY_LIMIT}. Nothing was changed.`);
+    const { task } = change(id, { expectRev }, (t) => {
+      const at = now().toISOString();
+      const keep = t.auto;
+      const n = sent ? (perDay as number) : (keep?.perDay ?? AUTO_PER_DAY_DEFAULT);
+      const setBy = sent ? by : keep?.perDaySetBy;
+      t.auto = { enabled: true, changedAt: at, changedBy: by, perDay: n, ...(setBy ? { perDaySetBy: setBy } : {}), started: keep?.started ?? [], ...(keep?.slot ? { slot: keep.slot } : {}) };
+    });
+    return { task, changed: true, ignored: [] };
+  }
+
+  function updateDetailed(id: string, expectRev: number, patch: UpdatePatch, by: Provenance): { task: Task; changed: boolean; notes: string[] } {
+    if (patch.autoFollowUp !== undefined && patch.autoFollowUp !== "off") throw new TaskError(403, "autoFollowUp can only be turned off here (\"off\"); only Rai turns it on, from the task controls. Nothing was changed.");
+    if (patch.autoFollowUp === "off" && by.actor !== "human" && by.actor !== "assistant") throw new TaskError(403, "Automatic follow-up can be turned off only by Rai or the Assistant.");
+    const cur = get(id);
+    if (!cur) throw new TaskError(404, "No task with that id.");
+    const fields = (["nextAction", "followUpAt", "project", "vaultNote", "dependsOn"] as const).filter((k) => patch[k] !== undefined);
+    const notes: string[] = [];
+    const offNoop = patch.autoFollowUp === "off" && !cur.auto?.enabled;
+    if (offNoop) notes.push("automatic follow-up was already off; nothing to change");
+    if (!fields.length && (patch.autoFollowUp === undefined || offNoop)) return { task: structuredClone(cur), changed: false, notes };
+    const { task } = change(id, { expectRev }, (t) => {
+      const at = now().toISOString();
+      if (patch.nextAction !== undefined) {
+        const n = cleanText(patch.nextAction, TASK_NOTE_MAX);
+        if (n) t.nextAction = { text: n, at, by };
+        else delete t.nextAction;
+      }
+      if (patch.followUpAt !== undefined) {
+        const before = t.followUp?.at;
+        const f = parseFollowUp(patch.followUpAt, patch.followUpNote, now());
+        if (f) t.followUp = { ...f, setAt: at, by, autonomous: "disabled" };
+        else delete t.followUp;
+        // Attention about the earlier due time (its budget wait, its give-up) no longer applies once it is replaced.
+        if (before && before !== t.followUp?.at) resolveWhere(t, at, (a) => a.source.type === "follow-up" && a.source.dueAt === before, "the follow-up time was replaced");
+      }
+      if (patch.project !== undefined) {
+        const p = cleanText(patch.project, PROJECT_REF_MAX);
+        if (p) t.project = p;
+        else delete t.project;
+      }
+      if (patch.vaultNote !== undefined) {
+        if (patch.vaultNote === null || patch.vaultNote === "") delete t.vault;
+        else {
+          if (!isTaskVaultNote(patch.vaultNote)) throw new TaskError(400, "vaultNote must be an existing Markdown note under Projects/ or Tasks/. Nothing was changed.");
+          if (!isTaskHeading(patch.vaultHeading)) throw new TaskError(400, "vaultHeading must be a heading that already exists in that note, written exactly (for example \"## Status\"). Nothing was changed.");
+          t.vault = { note: patch.vaultNote, heading: patch.vaultHeading, sync: { state: "never", attempts: 0, retry: "manual" } };
+        }
+        resolveWhere(t, at, (a) => a.kind === "vault-sync", "the vault link was changed");
+      }
+      if (patch.dependsOn !== undefined) {
+        const list = patch.dependsOn === null ? [] : patch.dependsOn;
+        if (!Array.isArray(list) || list.length > TASK_DEPENDENCIES_MAX || !list.every(isTaskId)) throw new TaskError(400, `dependsOn must be a list of at most ${TASK_DEPENDENCIES_MAX} task ids (task-<uuid>), or empty to clear. Nothing was changed.`);
+        const ids = [...new Set(list as string[])];
+        if (ids.includes(t.id)) throw new TaskError(400, "A task cannot depend on itself. Nothing was changed.");
+        for (const d of ids) if (!get(d)) throw new TaskError(404, `No task ${d}. Nothing was changed.`);
+        const cycle = wouldCycle(t.id, ids, (x) => (x === t.id ? t : get(x)));
+        if (cycle) throw new TaskError(409, `Refused: that would make a dependency cycle (${cycle.join(" -> ")}). Nothing was changed.`);
+        const old = new Map((t.dependsOn ?? []).map((d) => [d.task, d]));
+        t.dependsOn = ids.map((d) => old.get(d) ?? { task: d, at, by });
+        if (!t.dependsOn.length) delete t.dependsOn;
+      }
+      if (patch.autoFollowUp === "off" && t.auto?.enabled) t.auto = { ...t.auto, enabled: false, changedAt: at, changedBy: by };
+    });
+    return { task, changed: true, notes };
+  }
+
   // Restart recovery, once per load: a turn recorded as running was cut off by the stop. It is marked interrupted (never re-run).
   function recover(): string[] {
     if (recovered) return [];
@@ -826,63 +907,9 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     // or none of it (a refusal anywhere leaves the file and rev as they were). `autoFollowUp: "off"` is part of the same change; when it
     // is already off it is a no-op, and a patch that changes nothing else writes nothing and is answered with `changed: false`.
     update(id: string, expectRev: number, patch: UpdatePatch, by: Provenance): Task {
-      return this.updateDetailed(id, expectRev, patch, by).task;
+      return updateDetailed(id, expectRev, patch, by).task;
     },
-    updateDetailed(id: string, expectRev: number, patch: UpdatePatch, by: Provenance): { task: Task; changed: boolean; notes: string[] } {
-      if (patch.autoFollowUp !== undefined && patch.autoFollowUp !== "off") throw new TaskError(403, "autoFollowUp can only be turned off here (\"off\"); only Rai turns it on, from the task controls. Nothing was changed.");
-      if (patch.autoFollowUp === "off" && by.actor !== "human" && by.actor !== "assistant") throw new TaskError(403, "Automatic follow-up can be turned off only by Rai or the Assistant.");
-      const cur = get(id);
-      if (!cur) throw new TaskError(404, "No task with that id.");
-      const fields = (["nextAction", "followUpAt", "project", "vaultNote", "dependsOn"] as const).filter((k) => patch[k] !== undefined);
-      const notes: string[] = [];
-      const offNoop = patch.autoFollowUp === "off" && !cur.auto?.enabled;
-      if (offNoop) notes.push("automatic follow-up was already off; nothing to change");
-      if (!fields.length && (patch.autoFollowUp === undefined || offNoop)) return { task: structuredClone(cur), changed: false, notes };
-      const { task } = change(id, { expectRev }, (t) => {
-        const at = now().toISOString();
-        if (patch.nextAction !== undefined) {
-          const n = cleanText(patch.nextAction, TASK_NOTE_MAX);
-          if (n) t.nextAction = { text: n, at, by };
-          else delete t.nextAction;
-        }
-        if (patch.followUpAt !== undefined) {
-          const before = t.followUp?.at;
-          const f = parseFollowUp(patch.followUpAt, patch.followUpNote, now());
-          if (f) t.followUp = { ...f, setAt: at, by, autonomous: "disabled" };
-          else delete t.followUp;
-          // Attention about the earlier due time (its budget wait, its give-up) no longer applies once it is replaced.
-          if (before && before !== t.followUp?.at) resolveWhere(t, at, (a) => a.source.type === "follow-up" && a.source.dueAt === before, "the follow-up time was replaced");
-        }
-        if (patch.project !== undefined) {
-          const p = cleanText(patch.project, PROJECT_REF_MAX);
-          if (p) t.project = p;
-          else delete t.project;
-        }
-        if (patch.vaultNote !== undefined) {
-          if (patch.vaultNote === null || patch.vaultNote === "") delete t.vault;
-          else {
-            if (!isTaskVaultNote(patch.vaultNote)) throw new TaskError(400, "vaultNote must be an existing Markdown note under Projects/ or Tasks/. Nothing was changed.");
-            if (!isTaskHeading(patch.vaultHeading)) throw new TaskError(400, "vaultHeading must be a heading that already exists in that note, written exactly (for example \"## Status\"). Nothing was changed.");
-            t.vault = { note: patch.vaultNote, heading: patch.vaultHeading, sync: { state: "never", attempts: 0, retry: "manual" } };
-          }
-          resolveWhere(t, at, (a) => a.kind === "vault-sync", "the vault link was changed");
-        }
-        if (patch.dependsOn !== undefined) {
-          const list = patch.dependsOn === null ? [] : patch.dependsOn;
-          if (!Array.isArray(list) || list.length > TASK_DEPENDENCIES_MAX || !list.every(isTaskId)) throw new TaskError(400, `dependsOn must be a list of at most ${TASK_DEPENDENCIES_MAX} task ids (task-<uuid>), or empty to clear. Nothing was changed.`);
-          const ids = [...new Set(list as string[])];
-          if (ids.includes(t.id)) throw new TaskError(400, "A task cannot depend on itself. Nothing was changed.");
-          for (const d of ids) if (!get(d)) throw new TaskError(404, `No task ${d}. Nothing was changed.`);
-          const cycle = wouldCycle(t.id, ids, (x) => (x === t.id ? t : get(x)));
-          if (cycle) throw new TaskError(409, `Refused: that would make a dependency cycle (${cycle.join(" -> ")}). Nothing was changed.`);
-          const old = new Map((t.dependsOn ?? []).map((d) => [d.task, d]));
-          t.dependsOn = ids.map((d) => old.get(d) ?? { task: d, at, by });
-          if (!t.dependsOn.length) delete t.dependsOn;
-        }
-        if (patch.autoFollowUp === "off" && t.auto?.enabled) t.auto = { ...t.auto, enabled: false, changedAt: at, changedBy: by };
-      });
-      return { task, changed: true, notes };
-    },
+    updateDetailed,
 
     // ---- the task's own turn ----
 
@@ -961,32 +988,9 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     // - turning it ON keeps Rai's explicitly set perDay unless a new perDay is sent (only then is it validated and changed), and never
     //   resets the record of automatic turns already started, so toggling cannot buy more turns in the 24-hour window.
     setAuto(id: string, expectRev: number, enabled: boolean, by: Provenance, perDay?: unknown): Task {
-      return this.setAutoDetailed(id, expectRev, enabled, by, perDay).task;
+      return setAutoDetailed(id, expectRev, enabled, by, perDay).task;
     },
-    setAutoDetailed(id: string, expectRev: number, enabled: boolean, by: Provenance, perDay?: unknown): { task: Task; changed: boolean; ignored: string[] } {
-      if (enabled && (by.actor !== "human" || by.via === "sessions-ui")) throw new TaskError(403, "Only Rai can turn on automatic follow-up, from the task controls. Nothing was changed.");
-      if (!enabled && by.actor !== "human" && by.actor !== "assistant") throw new TaskError(403, "Automatic follow-up can be turned off only by Rai or the Assistant.");
-      const sent = perDay !== undefined && perDay !== null;
-      if (!enabled) {
-        const cur = get(id);
-        if (!cur) throw new TaskError(404, "No task with that id.");
-        const ignored = sent ? ["perDay"] : [];
-        if (!cur.auto?.enabled) return { task: structuredClone(cur), changed: false, ignored };
-        const { task } = change(id, { expectRev, allowTerminal: true }, (t) => {
-          t.auto = { ...t.auto!, enabled: false, changedAt: now().toISOString(), changedBy: by };
-        });
-        return { task, changed: true, ignored };
-      }
-      if (sent && (typeof perDay !== "number" || !Number.isSafeInteger(perDay) || perDay < 1 || perDay > AUTO_PER_DAY_LIMIT)) throw new TaskError(400, `perDay must be a whole number from 1 to ${AUTO_PER_DAY_LIMIT}. Nothing was changed.`);
-      const { task } = change(id, { expectRev }, (t) => {
-        const at = now().toISOString();
-        const keep = t.auto;
-        const n = sent ? (perDay as number) : (keep?.perDay ?? AUTO_PER_DAY_DEFAULT);
-        const setBy = sent ? by : keep?.perDaySetBy;
-        t.auto = { enabled: true, changedAt: at, changedBy: by, perDay: n, ...(setBy ? { perDaySetBy: setBy } : {}), started: keep?.started ?? [], ...(keep?.slot ? { slot: keep.slot } : {}) };
-      });
-      return { task, changed: true, ignored: [] };
-    },
+    setAutoDetailed,
     autoGlobalUsed: (at: Date) => autoStartedSince(all(), at),
     endTurn(id: string, n: number, outcome: { state: "done" | "error"; message?: string; reply?: string; error?: string; toolCalls?: number }): Task {
       return change(id, { allowTerminal: true }, (t) => {
