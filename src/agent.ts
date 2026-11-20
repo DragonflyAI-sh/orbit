@@ -5,6 +5,8 @@ import type { FallbackInfo, ImageSupport, Item, Message, ModelPort, ToolDef } fr
 import type { MutatingAction } from "./ops/admin-protocol.ts";
 import type { SysMutatingAction } from "./ops/sys-protocol.ts";
 import type { Result } from "./ports.ts";
+import { detectProtocolText, digestOf, PROTOCOL_REFUSED, PROTOCOL_RETRY_NOTE } from "./tool-protocol.ts";
+import type { ProtocolDiagnostic } from "./tool-protocol.ts";
 import { callItemBytes, fitOutput, NOT_RUN_ERROR, notRunOutput, outputItemBytes, REPLY_TOOL_RESULT_BUDGET_BYTES, RESULT_BUDGET_NOTE, TOOL_RESULT_MIN_BYTES, utf8Bytes } from "./tool-result-budget.ts";
 
 // Tool use inside a chat reply. The model may call ChatTools; every call is checked by `allow` (ORBIT's policy)
@@ -21,6 +23,40 @@ export const MAX_ROUNDS = 20;
 // The no-progress guard's threshold (defined beside ToolRounds in src/model.ts, which the instructions also read; re-exported here).
 export { REPEAT_FAILURES_MAX, REPEAT_RECOVERIES_MAX };
 export const MAX_OUTPUT_CHARS = 8000;
+// How many times one reply may ask the model again after a response that was tool-call markup written as text (src/tool-protocol.ts).
+// Nothing from the rejected response ran, so asking again repeats no effect; the bound keeps a model that keeps doing it (and a paid
+// fallback) from spending more than one extra request per reply.
+export const PROTOCOL_RETRIES_MAX = 1;
+
+// A reply ended because the model answered with tool-call markup written as text, and the bounded retry did not produce an answer or
+// a valid tool call. Nothing in the markup ran. Calls that ran in earlier rounds are already on record through onCall.
+// `diagnostics` is privacy-safe evidence (no model text); `accounting`/`incomplete` carry the notes of the rounds before it.
+export class ModelProtocolError extends Error {
+  readonly diagnostics: ProtocolDiagnostic[];
+  readonly accounting: string[];
+  readonly incomplete: string[];
+  constructor(message: string, diagnostics: ProtocolDiagnostic[], accounting: string[] = [], incomplete: string[] = []) {
+    super(accounting.length ? `${message} Spend accounting: ${accounting.join("; ")}.` : message);
+    this.name = "ModelProtocolError";
+    this.diagnostics = diagnostics;
+    this.accounting = accounting;
+    this.incomplete = incomplete;
+  }
+}
+
+// The check for a plain reply (no tools offered, no retry): a reply that is tool-call markup is refused with ModelProtocolError rather
+// than shown. `model` names who answered ("primary" or the fallback's model id) for the diagnostic.
+export function screenReply(text: string, model: string, onProtocol?: (d: ProtocolDiagnostic) => void): void {
+  const hit = detectProtocolText(text);
+  if (!hit) return;
+  const d: ProtocolDiagnostic = { family: hit.family, step: 0, attempt: 0, model, toolsOffered: false, chars: text.length, sha256: digestOf(text), structuredCalls: 0, action: "refused" };
+  try {
+    onProtocol?.(d);
+  } catch {
+    // Logging only.
+  }
+  throw new ModelProtocolError(PROTOCOL_REFUSED(hit.family, false), [d]);
+}
 
 // What a tool is given besides its arguments. `signal` is aborted when ORBIT stops waiting for the call (its deadline passed or the
 // turn was cancelled). A tool that passes it on stops its work where the operation supports it; a tool that ignores it keeps running.
@@ -151,6 +187,8 @@ export type ChatOutcome = {
   accounting?: string[];
   incomplete?: string[];
   resultBudget?: ResultBudgetOutcome;
+  // Responses this reply rejected or dropped as tool-call markup written as text (src/tool-protocol.ts). Evidence only, no model text.
+  protocol?: ProtocolDiagnostic[];
 };
 
 // The owner-visible note on a reply whose tool-round budget ran out. Never part of `text`, so no later model turn reads it as prose.
@@ -251,6 +289,9 @@ export async function runChat(options: {
   // reply's first request already carries as image input (the message's own photos), with the SHA-256 of the bytes sent.
   turn?: TurnIdentity;
   delivered?: { ref: string; sha256: string }[];
+  // Told about every model response that carried tool-call markup as text (src/tool-protocol.ts): privacy-safe evidence only, for
+  // logging. A throw is ignored.
+  onProtocol?: (d: ProtocolDiagnostic) => void;
 }): Promise<ChatOutcome> {
   const { model, limits, notes, tools, allow } = options;
   const maxRounds = options.maxRounds ?? MAX_ROUNDS;
@@ -274,6 +315,7 @@ export async function runChat(options: {
     ...(fallback ? { fallback, ...(primaryRounds ? { mixed: true } : {}) } : {}),
     ...(accounting.length ? { accounting: [...accounting] } : {}),
     ...(incomplete.length ? { incomplete: [...incomplete] } : {}),
+    ...(protocol.length ? { protocol: [...protocol] } : {}),
   });
 
   // The reply's image ledger: what tools supplied so far, in order. Checked again here whatever a tool says it did.
@@ -340,27 +382,68 @@ export async function runChat(options: {
   const retries = new Map<string, number>();
   // Set when every call of a round was a blocked repeat: the next step is the final one, without tools (unless the budget is out anyway).
   let stalled = false;
+  // Responses rejected as tool-call markup written as text, and how many times this reply asked again (at most PROTOCOL_RETRIES_MAX).
+  const protocol: ProtocolDiagnostic[] = [];
+  let protocolRetries = 0;
+  const tell = (d: ProtocolDiagnostic) => {
+    protocol.push(d);
+    try {
+      options.onProtocol?.(d);
+    } catch {
+      // Logging only.
+    }
+  };
 
   for (let round = 0; ; round++) {
     const capped = round >= maxRounds;
     // At the round cap, once the no-progress guard stopped the loop, or once the tool-result budget is spent, the model gets no tools,
     // so it has to answer with what it has.
     const stop = capped || stalled || spent;
-    let step;
-    try {
-      if (options.signal?.aborted) throw new TurnInterrupted("cancelled", undefined, 0, "The turn was cancelled before the next model request. Nothing further was run.");
-      // `rounds` lets the instructions say how many tool steps are left and, at the cap, that the tools are withheld, not missing.
-      const resultStop = spent ? { stop: { reason: "tool-results" as const, budgetBytes: budget, usedBytes: used, notRun: [...notRunNames] } } : {};
-      const rounds = { round, max: maxRounds, offered: tools.map((t) => t.name), ...(stalled && !capped ? { stalled: true } : {}), ...resultStop };
-      step = await model.step(input, limits, notes, stop ? [] : tools.map(def), { fallback: options.fallback === true, ...(options.signal ? { signal: options.signal } : {}), rounds });
-    } catch (err) {
-      // Diagnostics from earlier rounds are not lost because a later round failed.
-      throw withEarlierAccounting(err, accounting);
+    let step: Awaited<ReturnType<NonNullable<ModelPort["step"]>>>;
+    // One step, asked again at most PROTOCOL_RETRIES_MAX times per reply when its response is tool-call markup written as text. The
+    // rejected response added nothing to `input` and ran nothing, so the repeat is the same request plus one instruction line.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        if (options.signal?.aborted) throw new TurnInterrupted("cancelled", undefined, 0, "The turn was cancelled before the next model request. Nothing further was run.");
+        // `rounds` lets the instructions say how many tool steps are left and, at the cap, that the tools are withheld, not missing.
+        const resultStop = spent ? { stop: { reason: "tool-results" as const, budgetBytes: budget, usedBytes: used, notRun: [...notRunNames] } } : {};
+        const rounds = { round, max: maxRounds, offered: tools.map((t) => t.name), ...(stalled && !capped ? { stalled: true } : {}), ...resultStop, ...(attempt ? { protocolRetry: true } : {}) };
+        step = await model.step(input, limits, notes, stop ? [] : tools.map(def), { fallback: options.fallback === true, ...(options.signal ? { signal: options.signal } : {}), rounds });
+      } catch (err) {
+        // Diagnostics from earlier rounds are not lost because a later round failed.
+        throw withEarlierAccounting(err, accounting);
+      }
+      // Spend accounting is kept from every attempt, a rejected one included (it was billed). Completeness notes describe the response
+      // they came with, so a rejected response's notes are kept only when it ends the reply.
+      merge(accounting, step.accounting);
+      if (step.fallback) fallback = step.fallback;
+      else primaryRounds += 1;
+      // Tool-call markup in the text is never parsed or run, whatever it names. Only the step's structured calls can run, and only when
+      // tools were offered. When they run, the text is not used anyway (it is not shown and does not reach the model), so it is only
+      // recorded. When the text IS the answer (no structured calls, or a final step without tools), it is rejected: asked again once,
+      // then the reply ends with an honest error instead of showing markup as if it were an answer.
+      const hit = detectProtocolText(step.text);
+      if (!hit) {
+        merge(incomplete, step.incomplete);
+        break;
+      }
+      const answering = !step.calls.length || stop;
+      const facts = { family: hit.family, step: round, attempt, model: step.fallback ? step.fallback.model : "primary", toolsOffered: !stop, chars: step.text.length, sha256: digestOf(step.text), structuredCalls: step.calls.length };
+      if (!answering) {
+        tell({ ...facts, action: "dropped" });
+        merge(incomplete, step.incomplete);
+        break;
+      }
+      if (protocolRetries < PROTOCOL_RETRIES_MAX) {
+        protocolRetries++;
+        tell({ ...facts, action: "retried" });
+        merge(incomplete, [PROTOCOL_RETRY_NOTE(hit.family)]);
+        continue;
+      }
+      tell({ ...facts, action: "refused" });
+      merge(incomplete, step.incomplete);
+      throw new ModelProtocolError(`${PROTOCOL_REFUSED(hit.family, protocolRetries > 0)}${step.fallback ? ` It came from the OpenRouter fallback (${step.fallback.model}).` : ""}`, [...protocol], [...accounting], [...incomplete]);
     }
-    merge(accounting, step.accounting);
-    merge(incomplete, step.incomplete);
-    if (step.fallback) fallback = step.fallback;
-    else primaryRounds += 1;
     // Calls a step asks for when it was offered no tools are never run.
     if (!step.calls.length || stop) {
       const text =

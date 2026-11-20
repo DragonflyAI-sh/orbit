@@ -5,6 +5,7 @@ import type { PortStatus, Result } from "./ports.ts";
 import { deadline } from "./model-deadline.ts";
 import type { Bounds, Timers } from "./model-deadline.ts";
 import { redact } from "./ops/protocol.ts";
+import { PROTOCOL_RETRY_GUIDANCE } from "./tool-protocol.ts";
 import { bundledCapability, capabilityResolver, openaiDiscovery, operatorSource } from "./model-capability.ts";
 import type { Backend, ImageCapability, OperatorState, Resolution, ResolverOptions } from "./model-capability.ts";
 
@@ -58,12 +59,15 @@ export type Reply = Result<string> & { fallback?: FallbackInfo; accounting?: str
 // `stalled`: the no-progress guard (runChat) withheld the tools before the budget ran out; this step is the final one, with no tools.
 // `stop`: set when the reply's tool-result budget (src/tool-result-budget.ts) is spent: this step is then final and sent with no tools
 // even though `round` < `max`. `notRun`: names of the calls the model asked for that were never started (in request order).
+// `protocolRetry`: this request repeats the step because ORBIT rejected the previous response as tool-call markup written as text
+// (src/tool-protocol.ts); the instructions say so. Set at most once per reply.
 export type ToolRounds = {
   round: number;
   max: number;
   offered: string[];
   stalled?: boolean;
   stop?: { reason: "tool-results"; budgetBytes: number; usedBytes: number; notRun: string[] };
+  protocolRetry?: boolean;
 };
 
 // No-progress guard (runChat, src/agent.ts): an identical call (same tool, same arguments) that has failed with an identical result this
@@ -161,10 +165,17 @@ export function photoGuidance(tooling: string[]): string[] {
 
 // The tool-round lines (docs/assistant.md, "Tool rounds and capability claims"). Built from runChat's own counters and tool list.
 export function roundGuidance(rounds: ToolRounds | undefined, offeredNow: boolean): string[] {
-  if (!rounds || rounds.max < 1) return [];
+  if (!rounds) return [];
+  // Placed first, so it is the line the model reads right after the tool list, whatever else this step says.
+  const retry = rounds.protocolRetry ? ["", PROTOCOL_RETRY_GUIDANCE(offeredNow)] : [];
+  return [...retry, ...roundLines(rounds, offeredNow)];
+}
+
+function roundLines(rounds: ToolRounds, offeredNow: boolean): string[] {
+  if (rounds.max < 1) return [];
   const still = rounds.offered.length ? ` The tools offered earlier in this reply still exist and are only withheld for this step: ${rounds.offered.join(", ")}. Do not say that any of them is unavailable, missing or not connected.` : "";
   const honest =
-    "Report only what the tool results above show: summarize what was completed and what is still pending, and say plainly which requested actions were not done. A tool that was not called did nothing, a failed or refused call did nothing unless its result says otherwise, and a proposal is not a completed action.";
+    "Report only what the tool results above show: summarize what was completed and what is still pending, and say plainly which requested actions were not done. A tool that was not called did nothing, a failed or refused call did nothing unless its result says otherwise, and a proposal is not a completed action. Do not write a tool call as text (XML, DSML or JSON call markup): no tool can run in this step, and ORBIT rejects such a response.";
   // Calls the tool-result budget did not run (src/tool-result-budget.ts). Named whichever reason is reported for the final step.
   const notRun = rounds.stop?.notRun ?? [];
   const n = notRun.length;
@@ -217,6 +228,7 @@ export function instructions(limits: string[], notes?: string, tooling?: string[
           "When Rai clearly asks for something a listed tool does (for example saving a note to the vault), call that tool, after any policy check its description asks for, instead of saying you cannot or only handing him a draft. Never say a listed tool is unavailable. Never call a tool only to find out whether it works.",
           "Only say an action happened if its tool result says so. job_launch only proposes: Rai must click Confirm on the proposal before anything launches, so say it is waiting for his confirmation, never that it started. The same holds for every ops_propose_* tool (restart, deploy, rollback, config change, vault refresh): they only propose. After he confirms, an operation is only done when ops_admin_operations shows state verified; accepted or running is not verified, so never claim success on those. A pending-confirmation result means nothing was written or launched yet.",
           "If a tool returns an error or is refused, report that plainly and quote the reason: a refused or failed call is not the tool being absent, and it did nothing unless its result says otherwise.",
+          "Call a tool only through the tool-calling interface of this request. Never write a tool call as text (no XML, DSML or JSON call markup in your answer): ORBIT never runs text, and a response made of such markup is rejected. To show markup on purpose, put it in a Markdown code block.",
           "If text you need (an earlier draft, a policy document) is cut or omitted in your context, say so. Re-read it with a tool when one can return it; otherwise ask Rai. Never rebuild missing text from memory and present it as the original. When ORBIT cut a tool output it says so, and calling the same tool again with the same arguments returns the same cut.",
         ]
       : []),

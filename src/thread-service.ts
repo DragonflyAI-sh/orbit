@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { runChat, TurnInterrupted } from "./agent.ts";
+import { ModelProtocolError, runChat, screenReply, TurnInterrupted } from "./agent.ts";
 import type { ChatTool, Proposal, Proposals } from "./agent.ts";
 import type { Jobs } from "./jobs.ts";
 import { replySource } from "./model.ts";
 import type { FallbackInfo, Item, Message, ModelPort } from "./model.ts";
+import type { ProtocolDiagnostic } from "./tool-protocol.ts";
 import type { AdminOps } from "./ops-admin.ts";
 import type { SysOps } from "./ops-sys.ts";
 import type { RecentContextRefresher } from "./recent-context.ts";
@@ -71,6 +72,9 @@ export function threadService(d: {
   abortGraceMs?: number;
   // Where a tool call that ends after its turn stopped waiting is reported. Logging only; nothing is written to the thread.
   onLateTool?: (late: { thread: string; name: string; ok: boolean; error?: string }) => void;
+  // Where a model response rejected as tool-call markup written as text is reported (src/tool-protocol.ts). Privacy-safe evidence only:
+  // no model text. Default: one JSON log line.
+  onProtocol?: (d: ProtocolDiagnostic & { thread: string }) => void;
   // How the model input is built from the stored conversation. Absent: the whole thread after its summary (chat threads).
   // The Assistant passes its bounded chunk context (src/assistant-context.ts) and turns compaction off.
   context?: { items(t: Thread): Item[]; messages(t: Thread): Message[] };
@@ -191,6 +195,9 @@ export function threadService(d: {
     ((late: { thread: string; name: string; ok: boolean; error?: string }) =>
       console.log(JSON.stringify({ at: now().toISOString(), event: "chat_tool_late", thread: late.thread, tool: late.name, ok: late.ok, note: "ended after its turn stopped waiting; nothing was written to the thread" })));
 
+  const onProtocol =
+    d.onProtocol ?? ((p: ProtocolDiagnostic & { thread: string }) => console.log(JSON.stringify({ at: now().toISOString(), event: "model_protocol_text", ...p })));
+
   // `signal` cancels the turn (docs/tool-deadlines.md). No route passes one yet.
   async function turn(id: string, text: string, prep: TurnPrep, opts: { signal?: AbortSignal } = {}): Promise<{ thread: ThreadView; error?: string }> {
     const token = threads.tryBegin(id);
@@ -279,6 +286,7 @@ export function threadService(d: {
           abortGraceMs: d.abortGraceMs,
           signal: opts.signal,
           onLate: (late) => onLateTool({ thread: id, ...late }),
+          onProtocol: (p) => onProtocol({ thread: id, ...p }),
           // Photos a tool loads (photos_inspect, src/photo-access.ts) go through the same capability check and bounds as the turn's own.
           media: {
             support: () => model.images?.() ?? { ok: false, detail: "the connected model does not take photos" },
@@ -314,6 +322,8 @@ export function threadService(d: {
         incomplete = outcome.incomplete;
       } else {
         const r = await model.reply(photoInput(d.context ? d.context.messages(t) : buildMessages(t)), prep.limits, notes, opts.signal ? { signal: opts.signal } : undefined);
+        // A plain reply made of tool-call markup is refused, never stored as the answer (no tools were offered, so nothing could run).
+        screenReply(r.value, r.fallback ? r.fallback.model : "primary", (p) => onProtocol({ thread: id, ...p }));
         reply = r.value;
         provenance = r.provenance;
         source = r.source;
@@ -328,7 +338,7 @@ export function threadService(d: {
     } catch (err) {
       // A tool call cut off by its deadline or a cancellation is not a model failure: say exactly what is known about it.
       const error =
-        err instanceof TurnInterrupted || err instanceof PhotoRefusal
+        err instanceof TurnInterrupted || err instanceof PhotoRefusal || err instanceof ModelProtocolError
           ? err.message
           : `The model call failed${photosSent ? " after ORBIT's own photo check passed and the photos were sent to the provider (this is not ORBIT's local capability block)" : ""}: ${err instanceof Error ? err.message : String(err)}`;
       // The user's message and every call that completed (or was cut off) stay on record; the reply is marked as not completed.
