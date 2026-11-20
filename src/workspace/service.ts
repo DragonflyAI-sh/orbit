@@ -108,7 +108,8 @@ export function cardFor(op: HeldOp): { summary: string; display: Record<string, 
   const l = op.limits;
   const display: Record<string, string> = {
     workspace: ws,
-    "working directory": op.cwd ? `${SANDBOX_HOME}/${op.cwd}` : SANDBOX_HOME,
+    // WS-R5 / finding 6: the cwd is model-chosen text like argv and the script, so it is escaped the same way.
+    "working directory": op.cwd ? `${SANDBOX_HOME}/${showText(op.cwd)}` : SANDBOX_HOME,
     argv: showText(op.argv.map(quoteArg).join(" ")),
     ...(op.script !== null ? { [`script (read-only at ${SCRIPT_PATH})`]: showBlock(op.script) } : {}),
     environment: Object.entries(op.environment).map(([k, v]) => `${k}=${v}`).join(" "),
@@ -208,8 +209,14 @@ export function workspaceService(d: { activation: Activation; sandbox?: Sandbox;
     return v;
   };
   const wsParam = str("Workspace id (from workspace_list). Only operator-configured workspaces exist.");
+  // Checked again at DISPATCH, not only when the tool list is built: a reply that was offered the tools before the switch went off
+  // (disable, revoke, setup, or a binding that no longer holds) cannot use them afterwards.
+  const gate = () => {
+    if (config && !active()) refuse("disabled", "Workspace tools are switched off by the owner (or their activation no longer matches the validated policy). Nothing was done.");
+  };
   const run = (fn: (a: Record<string, unknown>) => unknown, source: string) => async (a: Record<string, unknown>) => {
     try {
+      gate();
       return result(fn(a), source);
     } catch (e) {
       throw asError(e);
@@ -217,6 +224,7 @@ export function workspaceService(d: { activation: Activation; sandbox?: Sandbox;
   };
   const runP = (kind: OpKind, fn: (a: Record<string, unknown>) => ReturnType<typeof propose>) => async (a: Record<string, unknown>) => {
     try {
+      gate();
       return fn(a);
     } catch (e) {
       const err = asError(e);

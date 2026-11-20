@@ -57,7 +57,18 @@ export type HostOpEntry = {
   reportedAt?: string;
   error?: string;
 };
-const HOST_ENDED = ["verified", "no_change", "failed", "interrupted", "not_dispatched"];
+const HOST_ENDED = ["verified", "no_change", "failed", "interrupted", "rejected", "not_dispatched"];
+// How long after a confirmation the helper's "no such operation" may still mean "not recorded YET" (finding 4 of the PR #147 review):
+// the dispatch call can still be in flight, queued behind other connections, or held by a front that is still checking the plan. The
+// front is stopped by systemd after 40 s (RuntimeMaxSec), and the client gives up before that, so after this grace "not found" is final.
+export const DISPATCH_GRACE_MS = 120_000;
+// Host-operation entries kept: every entry that has not ended or not been reported, plus the most recent ended ones.
+const HOST_OPS_KEEP = 50;
+const keepHostOps = (all: HostOpEntry[]) => {
+  const done = all.filter((e) => HOST_ENDED.includes(e.state) && e.reportedAt);
+  const drop = new Set(done.slice(0, Math.max(0, done.length - HOST_OPS_KEEP)));
+  return all.filter((e) => !drop.has(e));
+};
 export type HostOpStore = { read(): HostOpEntry[]; write(v: HostOpEntry[]): void };
 export const hostOpIdFor = (proposalId: string) => createHash("sha256").update(`orbit-ops-ws:${proposalId}`).digest("hex").slice(0, 40);
 
@@ -115,6 +126,8 @@ export function workspaceAdmin(d: {
   const store: HostOpStore = d.hostStore ?? { read: () => mem, write: (v) => (mem = v) };
   let validating: Promise<void> | undefined;
   let refreshing: Promise<void> | undefined;
+  // Host operations whose dispatch call this process is still awaiting: refresh never judges them (their confirm reports them).
+  const dispatching = new Set<string>();
   const audit = (e: Record<string, unknown>) => {
     try {
       d.audit?.({ at: iso(), port: "workspace", ...e });
@@ -136,6 +149,21 @@ export function workspaceAdmin(d: {
       validation: d.owner.validation(),
       now: now(),
     });
+
+  // A host change confirmed while a validation runs invalidates it; the validation's own later writes must not undo that.
+  const keepInvalidation = (v: ValidationRecord): ValidationRecord => {
+    const cur = d.owner.validation();
+    return cur?.id === v.id && cur.invalidatedAt ? { ...v, invalidatedAt: cur.invalidatedAt, invalidatedReason: cur.invalidatedReason } : v;
+  };
+  // Setup and revoke change the host: the switch goes off first (and stays off afterwards), every queued or running command is
+  // stopped, and the latest validation stops being evidence for enable.
+  const hostChanging = (proposalId: string, why: string) => {
+    const wasOn = d.owner.record().mode === "enabled";
+    d.owner.set("off", { at: iso(), proposalId, reason: why });
+    d.owner.invalidateValidation(iso(), why);
+    const drained = d.service.drain(why);
+    if (wasOn || drained.withdrawn.length || drained.killRequested.length) audit({ event: "result", kind: "ws_disable", workspace: "-", proposalId, detail: `off before host change; withdrawn ${drained.withdrawn.length}; killed ${drained.killRequested.length}` });
+  };
 
   // ---- preflight (read-only) --------------------------------------------------------------------------------------------
   type Check = { id: string; status: "ok" | "missing" | "blocked" | "unavailable" | "off" | "info"; detail: string };
@@ -342,9 +370,10 @@ export function workspaceAdmin(d: {
       const b = blockers();
       const v = d.owner.validation();
       if (b.length) return deny(409, `enable is refused now: ${b.join("; ")}.`);
-      if (v?.id !== held.binding.validationId || config?.policyHash !== held.binding.policyHash || (d.sandbox?.policyId() ?? "none") !== held.binding.sandboxPolicy) return deny(409, "the validation or the policy changed since the card was shown. Ask again.");
-      d.owner.set("enabled", { at: iso(), proposalId: p.id, validationId: v.id });
-      const on = d.service.active && d.service.tools.length > 0;
+      if (!v || !config || !valWs || v.id !== held.binding.validationId || config.policyHash !== held.binding.policyHash || (d.sandbox?.policyId() ?? "none") !== held.binding.sandboxPolicy) return deny(409, "the validation or the policy changed since the card was shown. Ask again.");
+      // Bound to exactly what the validation proved; the switch reads as off as soon as any of it differs (activation.ts).
+      d.owner.set("enabled", { at: iso(), proposalId: p.id, binding: { validationId: v.id, validatedAt: v.finishedAt ?? v.startedAt, policyHash: v.policyHash, sandboxPolicy: v.sandboxPolicy, validationIdentity: v.workspaceIdentity } });
+      const on = d.owner.mode() === "enabled" && d.service.active && d.service.tools.length > 0;
       audit({ event: "result", kind: "ws_enable", workspace: "-", proposalId: p.id, detail: on ? "enabled" : "enable_unverified" });
       if (!on) {
         d.owner.set("off", { at: iso(), reason: "enable could not be verified" });
@@ -365,12 +394,13 @@ export function workspaceAdmin(d: {
       validating = (async () => {
         let final: ValidationRecord;
         try {
-          const out = await (d.smoke ?? runSmoke)({ config, sandbox, stateDir: d.stateDir ?? "", audit: (e) => audit({ ...e, validation: id }), onCheck: (c) => d.owner.saveValidation({ ...rec, checks: [...(d.owner.validation()?.checks ?? []), c] }) });
+          const out = await (d.smoke ?? runSmoke)({ config, sandbox, stateDir: d.stateDir ?? "", audit: (e) => audit({ ...e, validation: id }), onCheck: (c) => d.owner.saveValidation(keepInvalidation({ ...rec, checks: [...(d.owner.validation()?.checks ?? []), c] })) });
           const failed = out.checks.filter((c) => c.required && c.result !== "pass");
           final = { ...rec, state: out.passed ? "passed" : "failed", finishedAt: iso(), checks: out.checks, summary: out.passed ? `All ${out.checks.filter((c) => c.required).length} required checks passed.` : `${failed.length} required check(s) failed: ${failed.map((c) => c.id).join(", ")}.` };
         } catch (e) {
           final = { ...rec, state: "failed", finishedAt: iso(), checks: d.owner.validation()?.checks ?? [], summary: `The validation stopped with an error: ${e instanceof Error ? e.message.slice(0, 200) : "error"}` };
         }
+        final = keepInvalidation(final);
         d.owner.saveValidation(final);
         audit({ event: "result", kind: "ws_validate", workspace: VALIDATION_WORKSPACE, proposalId: p.id, detail: final.state });
         d.notify?.(cap(`Workspace validation ${final.state}: ${final.summary}`, 600));
@@ -384,21 +414,26 @@ export function workspaceAdmin(d: {
     const all = store.read();
     if (all.some((e) => e.proposalId === p.id || e.opId === opId)) return deny(409, "this confirmation was already used.");
     const action = held.action as "ws_setup" | "ws_revoke";
-    store.write([...all, { opId, proposalId: p.id, action, ...(held.binding.planKey ? { planKey: held.binding.planKey } : {}), confirmedAt: iso(), state: "dispatching" }].slice(-50));
+    hostChanging(p.id, action === "ws_setup" ? "the host setup was confirmed (the host changes; validate again after it)" : "the host permission is being revoked");
+    store.write([...keepHostOps(all), { opId, proposalId: p.id, action, ...(held.binding.planKey ? { planKey: held.binding.planKey } : {}), confirmedAt: iso(), state: "dispatching" }]);
     const update = (patch: Partial<HostOpEntry>) => store.write(store.read().map((e) => (e.opId === opId ? { ...e, ...patch } : e)));
     let reply: WsReply;
+    dispatching.add(opId);
     try {
       reply = await d.host.call(action, opId, held.binding.planKey);
     } catch (e) {
       update({ error: cap(e instanceof Error ? e.message : "error", 200) });
+      dispatching.delete(opId);
       return { code: 502, body: { opId, error: `The host helper did not confirm the dispatch (${cap(e instanceof Error ? e.message : "error", 160)}). Nothing is verified; ORBIT will ask the helper and report.`, message: "Not confirmed by the helper; ORBIT will check and report." } };
     }
+    dispatching.delete(opId);
     if (!reply.ok) {
       update({ state: "not_dispatched", error: `${reply.code}: ${reply.message}`, finishedAt: iso(), reportedAt: iso() });
       return deny(reply.code === "busy" ? 409 : 502, `the host helper refused (${reply.code}: ${reply.message}).`);
     }
-    const op = (reply.data.operation ?? {}) as { state?: string };
-    update({ state: op.state ?? "accepted" });
+    const op = (reply.data.operation ?? {}) as { state?: string; summary?: string; finishedAt?: string };
+    // The helper's answer is the state (it may already have ended, e.g. no_change). It is reported once, by refresh, like any other.
+    update({ state: typeof op.state === "string" ? op.state : "accepted", ...(op.summary ? { result: cap(String(op.summary), 400) } : {}), ...(op.finishedAt ? { finishedAt: op.finishedAt } : {}) });
     audit({ event: "invocation", kind: action, workspace: "-", proposalId: p.id, opId: opId.slice(0, 12) });
     return { code: 202, body: { status: "dispatched", opId, verified: false, message: "Dispatched to the root helper's runner. Nothing is verified yet: ORBIT reports the verified result (ORBIT restarts during setup; the result is reported after the restart)." } };
   }
@@ -407,14 +442,19 @@ export function workspaceAdmin(d: {
   function refresh(): Promise<void> {
     refreshing ??= (async () => {
       if (!d.host) return;
-      for (const e of store.read().filter((x) => !HOST_ENDED.includes(x.state))) {
+      for (const e of store.read().filter((x) => !HOST_ENDED.includes(x.state) && !dispatching.has(x.opId))) {
         try {
           const r = await d.host.call("op_status", e.opId);
           const at = iso();
+          // Still within the dispatch grace (possibly from before a restart): "not found" may mean "not recorded yet". Wait.
+          const young = now().getTime() - Date.parse(e.confirmedAt) < DISPATCH_GRACE_MS;
+          if (dispatching.has(e.opId)) continue;
           const patch: Partial<HostOpEntry> = !r.ok
             ? r.code === "not_found"
               ? e.state === "dispatching"
-                ? { state: "not_dispatched", result: "The helper has no record of this operation: it never started, nothing was done.", finishedAt: at }
+                ? young
+                  ? { checkedAt: at }
+                  : { state: "not_dispatched", result: "The helper has no record of this operation (asked again after the dispatch window closed): it never started, nothing was done.", finishedAt: at }
                 : { state: "interrupted", result: "The helper lost this operation's record; the outcome is unknown.", finishedAt: at }
               : { checkedAt: at }
             : (() => {
