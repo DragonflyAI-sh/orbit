@@ -942,6 +942,14 @@ export function buildServer({
       const n = notify.ack(ack[1], { listed: input.listed === true });
       return n ? send(res, 200, n) : send(res, 404, { error: "No notification with that id." });
     }
+    const dismiss = url.pathname.match(/^\/notifications\/([0-9a-f-]+)\/dismiss$/);
+    if (dismiss && req.method === "POST") {
+      if (!(await owned("notify", "dismiss"))) return;
+      // Kept in ORBIT's notification store, so `current` leaves the note out on every page, device and restart.
+      // Repeating a dismissal is safe: the first one stands and the note is returned unchanged.
+      const n = notify.dismiss(dismiss[1]);
+      return n ? send(res, 200, n) : send(res, 404, { error: "No notification with that id." });
+    }
 
     if (url.pathname === "/schedule" && req.method === "GET") {
       if (!(await owned("schedule", "list"))) return;
