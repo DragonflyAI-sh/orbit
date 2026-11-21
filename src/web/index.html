@@ -3155,6 +3155,7 @@
   // `author`: a user-role message ORBIT's task supervisor wrote (it starts a supervised task turn); it is never shown as Rai's.
   function msgSender(role, owner, author) {
     if (role === "user" && author === "orbit-supervisor") return { name: "ORBIT task supervisor", initial: "" };
+    if (role === "user" && author === "orbit-wake") return { name: "ORBIT supervisor wake", initial: "" };
     return role === "user" ? { name: owner ? "Rai" : "You", initial: owner ? "R" : "Y" } : { name: "ORBIT", initial: "" };
   }
   // The icon: ORBIT's own avatar image, or the reader's initial. Decorative: the name beside it says who it is.

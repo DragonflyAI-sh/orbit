@@ -18,8 +18,13 @@ import type { Provenance, Task } from "./tasks.ts";
 //   A request item (clarification, blocker, job, research) can only be RESOLVED by answering the request (task_respond); it cannot be
 //   acknowledged away, so surfacing or acknowledging never counts as an answer.
 
-export type AttentionKind = "clarification" | "blocker" | "job" | "research" | "turn-failed" | "turn-interrupted" | "follow-up-gave-up" | "budget" | "vault-sync";
+export type AttentionKind = "clarification" | "blocker" | "job" | "research" | "turn-failed" | "turn-interrupted" | "follow-up-gave-up" | "budget" | "vault-sync" | "capacity-wait";
 export const REQUEST_ATTENTION: readonly AttentionKind[] = ["clarification", "blocker", "job", "research"];
+// Kinds whose cause is a past event that nothing later clears by itself (a turn that failed or was cut off). Repair 4 (review finding 1
+// on PR #155): acknowledging such an item RESOLVES it, as the ADR always said ("Resolved when: acknowledged"); before, it stayed
+// "acknowledged" forever, was never pruned, and five of them pushed newer items out of the Assistant's bounded task-activity block.
+// The acknowledgement is kept on the resolved item (who, when, note), so nothing of the audit history is lost.
+export const RESOLVED_BY_ACK: readonly AttentionKind[] = ["turn-failed", "turn-interrupted"];
 export type AttentionState = "open" | "acknowledged" | "resolved";
 export type AttentionSource =
   | { type: "request"; request: string }
@@ -39,12 +44,18 @@ export type Attention = {
   lastAt: string;
   occurrences: number;
   state: AttentionState;
+  // Delivery (Repair 4): `surfaced` records that the item was part of an Assistant turn that COMPLETED (its reply was stored without an
+  // error). An item put in front of a turn that then failed or was interrupted is not delivered: it stays `new` and is offered again,
+  // and the failure is counted in `undelivered`. Delivery is not acknowledgement and not resolution: a delivered item stays open.
   surfaced?: { first: string; last: string; count: number };
+  undelivered?: { count: number; last: string; why: string };
   ack?: { at: string; by: Provenance; note?: string };
   resolved?: { at: string; why: string };
 };
 
 export const ATTENTION_KEPT = 100;
+// Items shown per task in the Assistant's task-activity block (the rest are counted, never dropped from the store).
+export const ATTENTION_SHOWN_PER_TASK = 5;
 
 // Raise (or count again) the item for `key`. An unresolved item with the same key is counted, not duplicated; a resolved one is left as
 // history and a new item is raised (the cause came back).
@@ -74,21 +85,73 @@ export function resolveWhere(t: Task, at: string, pred: (a: Attention) => boolea
   for (const x of t.attention ?? []) if (x.state !== "resolved" && pred(x)) Object.assign(x, { state: "resolved", resolved: { at, why: why.slice(0, 300) } });
 }
 
-// Keeps every unresolved item and the newest resolved ones, up to ATTENTION_KEPT in all.
-function prune(t: Task): void {
+// Keeps every unresolved item and the newest resolved ones, up to ATTENTION_KEPT in all. What is dropped is counted on the task
+// (`attentionPruned`: how many resolved items, and the newest resolution time among them), so the history says items existed.
+export function prune(t: Task): void {
   const list = t.attention ?? [];
   if (list.length <= ATTENTION_KEPT) return;
   const unresolved = list.filter((x) => x.state !== "resolved");
   const resolved = list.filter((x) => x.state === "resolved").slice(-Math.max(0, ATTENTION_KEPT - unresolved.length));
   const keep = new Set([...unresolved, ...resolved]);
+  const dropped = list.filter((x) => !keep.has(x));
+  if (dropped.length) {
+    const last = dropped.map((x) => x.resolved?.at ?? x.lastAt).sort().at(-1)!;
+    t.attentionPruned = { count: (t.attentionPruned?.count ?? 0) + dropped.length, lastResolvedAt: t.attentionPruned && t.attentionPruned.lastResolvedAt > last ? t.attentionPruned.lastResolvedAt : last };
+  }
   t.attention = list.filter((x) => keep.has(x));
+}
+
+// Repair of stored records (Repair 4), applied by the store once at start (tasks.repairAttention) and, read-only, by every view, so a
+// record written by Repair 3 (or an older build after a rollback) is shown correctly even before the repair is written:
+// - an ACKNOWLEDGED turn-failed / turn-interrupted item is resolved (acknowledgement is its resolution), keeping its ack;
+// - a request item whose request is no longer pending is resolved (the request was answered, declined, withdrawn or linked by a build
+//   that did not maintain items);
+// - resolved history beyond ATTENTION_KEPT is pruned (counted in attentionPruned).
+// Returns how many items it changed. Idempotent: a second run changes nothing.
+export function repairItems(t: Task, at: string): number {
+  let n = 0;
+  for (const x of t.attention ?? []) {
+    if (x.state === "resolved") continue;
+    if (x.state === "acknowledged" && RESOLVED_BY_ACK.includes(x.kind)) {
+      Object.assign(x, { state: "resolved", resolved: { at: x.ack?.at ?? at, why: "acknowledged (a past turn outcome is resolved by its acknowledgement; repaired from a record that kept it acknowledged)" } });
+      n += 1;
+    } else if (stale(t, x)) {
+      const r = t.requests.find((q) => q.id === (x.source as { request: string }).request);
+      Object.assign(x, { state: "resolved", resolved: { at: r?.response?.at ?? at, why: r ? `the request is ${r.state} (repaired: the record still showed it waiting)` : "the request is no longer on record (repaired)" } });
+      n += 1;
+    }
+  }
+  const before = t.attention?.length ?? 0;
+  prune(t);
+  return n + (before - (t.attention?.length ?? 0));
+}
+
+// The order items are shown in (Repair 4): what someone must act on first, oldest first within each group, so a bounded list never
+// starves a newer request behind older, already-handled items, and never starves an older new item behind newer ones:
+//   0 open and not yet delivered, a request (only answering resolves it)
+//   1 open and not yet delivered, anything else
+//   2 open request, delivered before (still unanswered)
+//   3 open, delivered before
+//   4 derived (computed at view time: a launch not confirmed, a dependency that can never be met)
+//   5 acknowledged (waiting for its cause to clear; nothing to do now)
+export function rank(a: { state?: AttentionState; kind: string; new?: boolean; derived?: boolean; surfaced?: unknown }): number {
+  if (a.derived) return 4;
+  if (a.state === "acknowledged") return 5;
+  const isReq = (REQUEST_ATTENTION as readonly string[]).includes(a.kind);
+  const fresh = a.new ?? !a.surfaced;
+  return fresh ? (isReq ? 0 : 1) : isReq ? 2 : 3;
+}
+export function ordered<X extends { state?: AttentionState; kind: string; new?: boolean; derived?: boolean; createdAt?: string; id: string }>(items: X[]): X[] {
+  return [...items].sort((x, y) => rank(x) - rank(y) || (x.createdAt ?? "").localeCompare(y.createdAt ?? "") || x.id.localeCompare(y.id));
 }
 
 // A request item whose request is no longer pending is resolved in substance even if the record says otherwise (for example a request
 // answered by an older build that did not keep attention items, after a rollback): it is never shown as still waiting. The stored state
 // is corrected at the next change of the request; reading never writes.
 const stale = (t: Task, x: Attention): boolean => x.source.type === "request" && t.requests.find((r) => r.id === (x.source as { request: string }).request)?.state !== "pending";
-export const unresolved = (t: Task): Attention[] => (t.attention ?? []).filter((x) => x.state !== "resolved" && !stale(t, x));
+// Unresolved, as a view: stale request items and acknowledged turn items (Repair 4) are not counted, even before the stored record is
+// repaired.
+export const unresolved = (t: Task): Attention[] => (t.attention ?? []).filter((x) => x.state !== "resolved" && !stale(t, x) && !(x.state === "acknowledged" && RESOLVED_BY_ACK.includes(x.kind)));
 export const openAttention = (t: Task): Attention[] => unresolved(t).filter((x) => x.state === "open");
 // Shown to the Assistant at least once? Items it has never been shown are `new` in its next task-activity block.
 export const isNew = (a: Attention): boolean => a.state === "open" && !a.surfaced;

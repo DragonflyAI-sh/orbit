@@ -296,7 +296,12 @@ test("follow-up: the global turn cap is a capacity deferral: no attempt used how
   }
   assert.equal(r.tasks.get(t.id)!.turns.length, 0, "nothing was dispatched while every slot was busy");
   assert.equal(r.tasks.get(t.id)!.rev, rev, "deferral bookkeeping never makes a view stale");
-  assert.ok(!(r.tasks.get(t.id)!.attention ?? []).length, "capacity alone raises no attention item");
+  // Repair 4 (finding 2 on PR #155): a PROLONGED capacity wait is surfaced: exactly one attention item for this due time (however
+  // many ticks), raised once the wait passed AUTO_CAPACITY_ATTENTION_MS, still using no attempt.
+  const cap = (r.tasks.get(t.id)!.attention ?? []).filter((a) => a.kind === "capacity-wait");
+  assert.equal(cap.length, 1, "one capacity-wait item for the due time, not one per tick");
+  assert.equal(cap[0]!.state, "open");
+  assert.equal(cap[0]!.occurrences, 1);
   // A slot frees: the very next tick starts it, with its first attempt.
   r.gate.held = false;
   r.gate.release!();
@@ -308,6 +313,7 @@ test("follow-up: the global turn cap is a capacity deferral: no attempt used how
   assert.equal(slot.state, "ended");
   assert.equal(slot.attempts, 1);
   assert.equal(slot.deferrals, AUTO_ATTEMPTS_MAX * 3, "the deferrals stay on record");
+  assert.equal(r.tasks.get(t.id)!.attention!.find((a) => a.kind === "capacity-wait")!.state, "resolved", "the wait item resolves when the turn starts");
 });
 
 test("follow-up: a failure that is not transient (the session is gone, the model cannot call tools) gives up at once", async () => {

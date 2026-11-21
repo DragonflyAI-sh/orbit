@@ -10,9 +10,12 @@ import { ASSISTANT, code, HUMAN, INPUT, MIN, noObs, rig } from "./task-rig.ts";
 // lane binding, explicit dependencies, and vault coherence. Synthetic data only.
 
 const TASK_TURN = (n: number): Provenance => ({ actor: "task", via: "task-turn", turn: n });
+// One Assistant turn that COMPLETED: its block is built, then what it showed is delivered (Repair 4: delivery is recorded by the caller
+// only after the turn completes; src/server.ts).
 const activity = (r: ReturnType<typeof rig>) => {
-  const block = r.sup.activityBlock()!;
-  return JSON.parse(/\n(\{[\s\S]*\})\s*<\/orbit-data>/.exec(block)![1]!);
+  const a = r.sup.activity();
+  r.sup.delivered(a.shown);
+  return JSON.parse(/\n(\{[\s\S]*\})\s*<\/orbit-data>/.exec(a.block!)![1]!);
 };
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const full = (r: ReturnType<typeof rig>, id: string) => r.sup.view(r.tasks.get(id)!) as any;

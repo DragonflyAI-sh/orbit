@@ -40,6 +40,7 @@ import { embeddingBudget, embeddingsConfig, embeddingsStatus, openaiEmbedder } f
 import { workFile, workSessions } from "./work-sessions.ts";
 import { taskFile, taskStore } from "./tasks.ts";
 import { cloneTaskVault } from "./task-vault.ts";
+import { wakeFile } from "./task-wake.ts";
 import { launchReconciliations, reconFile } from "./launch-reconciliation.ts";
 import { join } from "node:path";
 import { watcher } from "./watch.ts";
@@ -275,6 +276,9 @@ buildServer({
   // Task status lines reach the vault only through the existing write pipeline, and only when the vault clone exists.
   tasks: taskStore(taskFile(stateDir)),
   taskFollowUps: { enabled: process.env.ORBIT_TASK_FOLLOWUPS === "on" },
+  // The opt-in supervisor wake (src/task-wake.ts): off unless the operator sets ORBIT_SUPERVISOR_WAKE=on (no deploy file sets it) AND Rai
+  // turns it on from the Assistant page. Its record is <state>/supervisor-wake.json.
+  supervisorWake: { enabled: process.env.ORBIT_SUPERVISOR_WAKE === "on", backend: wakeFile(stateDir) },
   taskVault: vault ? cloneTaskVault(vault) : undefined,
   reconciliations,
   vaultEdits,

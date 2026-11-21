@@ -22,16 +22,17 @@ test("finding a: task_update with other fields and autoFollowUp off, when it is 
   assert.equal(after.auto, undefined, "nothing about automatic follow-up was invented");
 });
 
-test("finding a: autoFollowUp off alone, when already off, is idempotent: no write, no rev bump, no error, even from a stale view", async () => {
+// Repair 4 (finding 3 on PR #155) tightened this: the no-op is still idempotent (no write, no rev bump) from the CURRENT rev, but a stale
+// rev is refused (409) even when nothing would change, so the optimistic check is the same on every path.
+test("finding a: autoFollowUp off alone, when already off, is idempotent: no write, no rev bump, no error from the current rev; a stale view is refused (Repair 4)", async () => {
   const r = rig();
   const t = r.create();
   const before = r.file();
   const saves = r.disk.saves;
-  for (const rev of [t.rev, t.rev + 7]) {
-    const u = r.tasks.updateDetailed(t.id, rev, { autoFollowUp: "off" }, ASSISTANT);
-    assert.equal(u.changed, false);
-    assert.equal(u.task.rev, t.rev);
-  }
+  const u = r.tasks.updateDetailed(t.id, t.rev, { autoFollowUp: "off" }, ASSISTANT);
+  assert.equal(u.changed, false);
+  assert.equal(u.task.rev, t.rev);
+  assert.throws(() => r.tasks.updateDetailed(t.id, t.rev + 7, { autoFollowUp: "off" }, ASSISTANT), code(409, /stale/));
   // The dedicated control is idempotent too, for Rai and for the Assistant.
   assert.equal(r.tasks.setAutoDetailed(t.id, t.rev, false, HUMAN).changed, false);
   assert.equal(r.tasks.setAutoDetailed(t.id, t.rev, false, ASSISTANT).changed, false);

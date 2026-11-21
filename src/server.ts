@@ -78,6 +78,8 @@ import { AUTO_GLOBAL_PER_DAY_DEFAULT, isTaskId, parseCreate, TaskError, taskFile
 import type { Observers, Provenance, Tasks } from "./tasks.ts";
 import { isTaskToolName, TASK_ASSISTANT_TOOL_NAMES, TASK_TURNS_MAX_CONCURRENT, taskSupervisor } from "./task-supervisor.ts";
 import { taskScheduler } from "./task-scheduler.ts";
+import { supervisorWake, WAKE_MAX_ROUNDS, wakeFile } from "./task-wake.ts";
+import type { SupervisorWake, WakeBackend, WakeTurn } from "./task-wake.ts";
 import type { TaskScheduler } from "./task-scheduler.ts";
 import { taskVaultSync } from "./task-vault.ts";
 import type { TaskVaultPort } from "./task-vault.ts";
@@ -186,6 +188,11 @@ export type Deps = {
   // it looks (0: never on a timer; tests tick it themselves through `onScheduler`). `globalPerDay`: automatic turns across tasks in any
   // 24 hours.
   taskFollowUps?: { enabled: boolean; tickMs?: number; globalPerDay?: number; onScheduler?: (s: TaskScheduler) => void };
+  // The opt-in supervisor wake (src/task-wake.ts, docs/adr/0003-supervised-tasks.md "Repair 4"). Absent or enabled: false (the
+  // default) means nothing ever starts an Assistant turn by itself. Enabled is the OPERATOR's switch only: Rai must still opt in from
+  // the Assistant page. `backend`: where its record lives (<state>/supervisor-wake.json in main.ts; memory when absent). `tickMs`: how
+  // often it looks (0: never on a timer; tests tick it through `onWake`).
+  supervisorWake?: { enabled: boolean; backend?: WakeBackend; tickMs?: number; minIntervalMs?: number; onWake?: (w: SupervisorWake) => void };
   // The clock for thread cards and the recent-context note. Tests inject one; it must be the clock the proposals use.
   now?: () => Date;
   // Chat tool execution deadline and abort grace period (docs/tool-deadlines.md). Tests lower them; production uses the defaults.
@@ -287,6 +294,7 @@ export function buildServer({
   taskModel,
   taskTurnsMax = TASK_TURNS_MAX_CONCURRENT,
   taskFollowUps,
+  supervisorWake: supervisorWakeArg,
   now,
   toolDeadlineMs,
   abortGraceMs,
@@ -499,6 +507,14 @@ export function buildServer({
   } catch (e) {
     console.log(JSON.stringify({ at: clock().toISOString(), event: "task_recover_failed", detail: e instanceof Error ? e.message.slice(0, 200) : "error" }));
   }
+  // Repair 4: stored attention records are repaired once (acknowledged turn items resolved, stale request items resolved, history
+  // pruned with a count). Idempotent; a failure changes nothing and every view applies the same rules read-only.
+  try {
+    const rep = tasks.repairAttention();
+    if (rep.items) console.log(JSON.stringify({ at: clock().toISOString(), event: "task_attention_repaired", tasks: rep.tasks.length, items: rep.items }));
+  } catch (e) {
+    console.log(JSON.stringify({ at: clock().toISOString(), event: "task_attention_repair_failed", detail: e instanceof Error ? e.message.slice(0, 200) : "error" }));
+  }
   // The follow-up scheduler: created after recovery, so it never sees a turn the stop cut off as running. Off unless switched on.
   const followUps = taskScheduler({ tasks, supervisor, enabled: taskFollowUps?.enabled === true, globalPerDay: taskFollowUps?.globalPerDay ?? AUTO_GLOBAL_PER_DAY_DEFAULT, now: clock });
   taskFollowUps?.onScheduler?.(followUps);
@@ -637,6 +653,8 @@ export function buildServer({
     // through the sessions policy port before the registry is touched. Kept apart from `notes` so the notes cap never cuts it and
     // it is never stored: it is built again for every turn and is not part of any chunk, memory or transcript.
     let digest: string | undefined;
+    // Task attention put in front of this Assistant turn (Repair 4): marked delivered only when the turn completes (see the route).
+    let taskDelivery: { task: string; ids: string[] }[] = [];
     if (scope === "assistant") {
       const d = decide("sessions", "digest", isOwner);
       if (d.allow) {
@@ -648,11 +666,12 @@ export function buildServer({
       if (td.allow) {
         audit("tasks", "supervise", td);
         if (offered.length) offered.push(...supervisor.assistantTools(isOwner));
-        const block = supervisor.activityBlock();
-        if (block) digest = [digest, block].filter(Boolean).join("\n\n");
+        const act = supervisor.activity();
+        taskDelivery = act.shown;
+        if (act.block) digest = [digest, act.block].filter(Boolean).join("\n\n");
       }
     }
-    return { notes, used, current, offered, digest };
+    return { notes, used, current, offered, digest, taskDelivery };
   };
   const allowAgent = (isOwner: boolean, scope: "chat" | "assistant" = "chat") => (tool: string) => {
     const decision = decide("agent", tool, isOwner);
@@ -697,6 +716,44 @@ export function buildServer({
     }
     return undefined;
   };
+
+  // ---- The opt-in supervisor wake (src/task-wake.ts; Repair 4). Off unless the operator switched it on AND Rai opted in. One wake runs
+  // one bounded Assistant turn as Rai's supervisor would: the same context (task-activity block, session digest), but only read-only
+  // tools, the supervisor's answering tools and the launch PROPOSAL tools (a card still waits for Rai's Confirm), at most WAKE_MAX_ROUNDS
+  // rounds, no paid fallback, its prompt stored and shown as "ORBIT supervisor wake", never as Rai. Attention it was shown is delivered
+  // only if the turn completes.
+  const WAKE_TOOL_NAMES: readonly string[] = ["task_respond", "task_attention_ack", "task_steer", "task_update", "job_launch", "research_launch"];
+  const wakeTurn: WakeTurn = async (text) => {
+    if (assistant.isBusy(ASSISTANT_ID)) return { notStarted: "the Assistant had a reply in progress" };
+    const prep = await prepare(true, text, "assistant", assistantSessionId());
+    if (assistant.isBusy(ASSISTANT_ID)) return { notStarted: "the Assistant had a reply in progress" };
+    const tools = prep.offered.filter((t) => (t.readOnly === true && !(isTaskToolName(t.name) && !(TASK_ASSISTANT_TOOL_NAMES as readonly string[]).includes(t.name))) || WAKE_TOOL_NAMES.includes(t.name));
+    const names = new Set(tools.map((t) => t.name));
+    const withheld = prep.offered.filter((t) => !names.has(t.name)).map((t) => t.name);
+    const base = allowAgent(true, "assistant");
+    const allow = (tool: string) => (names.has(tool) ? base(tool) : `${tool} is refused: it is not offered in a supervisor wake turn`);
+    const limits = [...prep.current, `supervisor wake turn (ORBIT started it, not Rai): at most ${WAKE_MAX_ROUNDS} tool rounds; no paid fallback; only read-only tools, the task answering tools and launch proposals are offered${withheld.length ? ` (withheld: ${withheld.slice(0, 30).join(", ")})` : ""}; you cannot approve, confirm or complete anything`];
+    let out: Awaited<ReturnType<typeof asvc.turn>>;
+    try {
+      out = await asvc.turn(ASSISTANT_ID, text, { notes: [boundNotes(prep.notes), prep.digest].filter(Boolean).join("\n\n") || undefined, memory: prep.used, limits, tools, allow, isOwner: true, maxRounds: WAKE_MAX_ROUNDS, fallback: false, author: "orbit-wake" });
+    } catch (e) {
+      if (e instanceof ThreadError && e.code === 409) return { notStarted: "the Assistant had a reply in progress" };
+      supervisor.undelivered(prep.taskDelivery, e instanceof Error ? e.message : "the wake turn failed");
+      return { error: e instanceof Error ? e.message : "the wake turn failed" };
+    }
+    if (out.error) supervisor.undelivered(prep.taskDelivery, out.error);
+    else supervisor.delivered(prep.taskDelivery);
+    void summaries.roll().catch(() => undefined);
+    const reply = [...(assistant.active().at(-1)?.messages ?? [])].reverse().find((m) => m.role === "assistant");
+    return { ...(out.error ? { error: out.error } : {}), ...(reply?.text ? { reply: reply.text } : {}) };
+  };
+  const wake = supervisorWake({ tasks, backend: supervisorWakeArg?.backend ?? wakeFile(undefined), enabled: supervisorWakeArg?.enabled === true, assistantBusy: () => assistant.isBusy(ASSISTANT_ID), turn: wakeTurn, now: clock, ...(supervisorWakeArg?.minIntervalMs !== undefined ? { minIntervalMs: supervisorWakeArg.minIntervalMs } : {}) });
+  try {
+    for (const n of wake.recover()) console.log(JSON.stringify({ at: clock().toISOString(), event: "supervisor_wake_interrupted_by_restart", wake: n }));
+  } catch (e) {
+    console.log(JSON.stringify({ at: clock().toISOString(), event: "supervisor_wake_recover_failed", detail: e instanceof Error ? e.message.slice(0, 200) : "error" }));
+  }
+  supervisorWakeArg?.onWake?.(wake);
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://orbit");
@@ -938,7 +995,18 @@ export function buildServer({
     if (url.pathname === "/threads" && req.method === "GET") {
       if (!(await owned("threads", "list"))) return;
       const all = url.searchParams.get("archived") === "1";
-      return send(res, 200, { threads: threads.list(all), notice: threads.notice() ?? null, persisted: threads.persisted, problems: threads.problems(), recentContext: recent.status() });
+      // Repair 4: a task session carries its task's attention counts, so the Sessions list can badge it (owner only: this route is).
+      let byThread: ReturnType<typeof supervisor.attentionByThread> | undefined;
+      try {
+        if (decide("tasks", "list", await isOwnerOf(req)).allow) byThread = supervisor.attentionByThread();
+      } catch {
+        byThread = undefined;
+      }
+      const list = threads.list(all).map((t) => {
+        const a = byThread?.get(t.id);
+        return a ? { ...t, task: a } : t;
+      });
+      return send(res, 200, { threads: list, notice: threads.notice() ?? null, persisted: threads.persisted, problems: threads.problems(), recentContext: recent.status() });
     }
     if (url.pathname === "/threads" && req.method === "POST") {
       if (!(await owned("threads", "create"))) return;
@@ -1023,6 +1091,27 @@ export function buildServer({
     // ---- Supervised tasks (owner only, every route; docs/adr/0003-supervised-tasks.md). Rai's own actions: list, inspect, create,
     // steer, pause, resume, cancel, run one turn, attest evidence, answer a request, sync to the vault, and mark done (evidence-gated).
     // Every mutation names the rev it was based on; a stale one is refused (409) and changes nothing.
+    // Repair 4: the attention summary for the pages (badges, the Assistant page's list), and Rai's controls for the supervisor wake.
+    if (url.pathname === "/tasks/attention" || url.pathname === "/tasks/wake" || url.pathname === "/tasks/wake/pause") {
+      const action = url.pathname === "/tasks/attention" ? "attention-summary" : url.pathname === "/tasks/wake" ? (req.method === "POST" ? "wake-set" : "wake") : "wake-pause";
+      const method = action === "attention-summary" || action === "wake" ? "GET" : "POST";
+      if (req.method !== method) return send(res, 405, { error: `Use ${method} for this route.` });
+      if (!(await owned("tasks", action))) return;
+      try {
+        if (action === "attention-summary") return send(res, 200, { ...supervisor.attentionSummary(), wake: wake.view() });
+        if (action === "wake") return send(res, 200, { wake: wake.view() });
+        const input = await body();
+        if (!input) return;
+        const human: Provenance = { actor: "human", via: "task-panel" };
+        if (typeof input.enabled !== "boolean" && action === "wake-set") return send(res, 400, { error: "Send {enabled: true|false, perDay?}." });
+        if (typeof input.paused !== "boolean" && action === "wake-pause") return send(res, 400, { error: "Send {paused: true|false, reason?}." });
+        const r = action === "wake-set" ? wake.setOptIn(input.enabled as boolean, human, input.perDay) : wake.setPaused(input.paused as boolean, human, input.reason);
+        return send(res, 200, { changed: r.changed, wake: r.view });
+      } catch (err) {
+        if (err instanceof TaskError) return send(res, err.code, { error: err.message });
+        throw err;
+      }
+    }
     const taskMatch = url.pathname === "/tasks/projects" ? null : url.pathname.match(/^\/tasks\/([^/]{1,80})(?:\/(steer|pause|resume|cancel|turn|complete|evidence|respond|sync|follow-up|update|attention))?$/);
     if (url.pathname === "/tasks" || url.pathname === "/tasks/projects" || taskMatch) {
       const action = url.pathname === "/tasks/projects" ? "projects" : taskMatch ? (taskMatch[2] ?? "inspect") : req.method === "POST" ? "create" : "list";
@@ -1137,7 +1226,16 @@ export function buildServer({
         // Set immediately before the turn, which takes the conversation at once; the only await before its first write (the rolling-summary
         // roll) runs while the turn holds it, so no other send can start a turn or take this id meanwhile.
         assistant.expectRequest(requestId);
-        const out = await asvc.turn(ASSISTANT_ID, text, { notes: [boundNotes(prep.notes), prep.digest].filter(Boolean).join("\n\n") || undefined, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner, "assistant"), isOwner: callerIsOwner, ...(photos.refs.length ? { attachments: photos.refs } : {}) });
+        let out: Awaited<ReturnType<typeof asvc.turn>>;
+        try {
+          out = await asvc.turn(ASSISTANT_ID, text, { notes: [boundNotes(prep.notes), prep.digest].filter(Boolean).join("\n\n") || undefined, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(callerIsOwner, "assistant"), isOwner: callerIsOwner, ...(photos.refs.length ? { attachments: photos.refs } : {}) });
+        } catch (e) {
+          supervisor.undelivered(prep.taskDelivery, e instanceof Error ? e.message : "the Assistant turn failed");
+          throw e;
+        }
+        // Repair 4: task attention counts as delivered only when the turn that carried it completed.
+        if (out.error) supervisor.undelivered(prep.taskDelivery, out.error);
+        else supervisor.delivered(prep.taskDelivery);
         // The turn's end may have rolled the page (archived chunks): summarize them now, in the background, so the next turn rarely waits.
         // The next turn's own roll waits for this one (rolls are serialized). Failures are reported in the summary block, never thrown.
         void summaries.roll().catch(() => undefined);
@@ -1589,8 +1687,14 @@ export function buildServer({
   // own deadlines and never holds up listening or any request. start() is single-flight, so a second "listening" runs nothing new.
   if (smoke) server.once("listening", () => void smoke.start());
   // The follow-up scheduler ticks only while the server listens, and only when switched on.
-  server.once("listening", () => followUps.start(taskFollowUps?.tickMs));
-  server.once("close", () => followUps.stop());
+  server.once("listening", () => {
+    followUps.start(taskFollowUps?.tickMs);
+    wake.start(supervisorWakeArg?.tickMs);
+  });
+  server.once("close", () => {
+    followUps.stop();
+    wake.stop();
+  });
   return server;
 }
 

@@ -39,7 +39,7 @@ export type TurnPrep = {
   // message was written by ORBIT's task supervisor, not Rai, and is stored and shown as such.
   maxRounds?: number;
   fallback?: boolean;
-  author?: "orbit-supervisor";
+  author?: "orbit-supervisor" | "orbit-wake";
   // Admission (a task's session, src/task-supervisor.ts humanTurn): called synchronously right after the thread's reply lock is taken,
   // before anything is stored or awaited. If it throws, the lock is freed and nothing is stored. What it returns: reference material
   // to add for this turn, and `rollback`, called if the user message then cannot be stored (the admission is undone).
