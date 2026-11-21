@@ -5,8 +5,9 @@ import { shellServer } from "./helpers/shell-fixture.ts";
 
 // The desktop menu and the side panel (docs/design-system.md, "Desktop menu" and "Side panel"):
 // - laptops and desktops (1024px and wider): Notifications and Status open in one non-modal panel on the right, with a
-//   heading, a close button and a tab per view; the conversation and composer move left and are never covered; each view
-//   scrolls on its own; Escape and the close button put focus back on the toggle; the tabs work by keyboard; receipts are
+//   tab per view (its heading is for assistive technology only) and an edge handle that collapses and expands it; the
+//   conversation and composer move left and are never covered; each view scrolls on its own; Escape puts focus back on the
+//   toggle; the tabs work by keyboard; receipts are
 //   sent only for notes actually listed; the status view has loading, empty and error states;
 // - narrower screens keep the header panels exactly as before (independent, in the header);
 // - the session menu's rows have no nested outline on desktop (no hover ring, no border on the open session) and keep the
@@ -55,6 +56,8 @@ for (const [width, height] of [[1024, 700], [1280, 800], [1440, 900]] as const) 
   test(`browser ${width}px: Notifications opens a side panel on the right that covers nothing and leaves focus on the toggle`, { skip }, async () => {
     const { page, ctx, errors } = await open(width, height);
     assert.equal(await shown(page, "#side"), false, "closed by default");
+    assert.equal(await shown(page, "#sidehandle"), true, "collapsed, the handle stays to open it again");
+    assert.equal(await page.getAttribute("#sidehandle", "aria-label"), "Expand the Notifications panel");
     await page.focus("#notesbtn");
     await page.keyboard.press("Enter");
     assert.equal(await shown(page, "#side"), true);
@@ -69,7 +72,12 @@ for (const [width, height] of [[1024, 700], [1280, 800], [1440, 900]] as const) 
     assert.equal(await page.getAttribute("#inbox", "role"), "tabpanel");
     assert.equal(await shown(page, "#inbox"), true);
     assert.equal(await shown(page, "#statusline"), false, "one view at a time");
-    assert.equal(await page.getAttribute("#sideclose", "aria-label"), "Close the panel");
+    // No visible heading and no close button: the heading names the region for assistive technology only, and the handle on
+    // the panel's edge collapses it (test/side-collapse-browser.test.ts).
+    assert.equal(await page.evaluate(() => document.getElementById("sidetitle")!.getBoundingClientRect().width <= 1), true, "the heading is not shown");
+    assert.equal(await page.$("#sideclose"), null, "no close button");
+    assert.equal(await page.getAttribute("#sidehandle", "aria-expanded"), "true");
+    assert.equal(await page.getAttribute("#sidehandle", "aria-label"), "Collapse the Notifications panel");
     const g = await geo(page);
     assert.ok(Math.abs(g.side.right - g.vw) <= 1, "on the right edge");
     assert.ok(Math.abs(g.side.top - g.header.bottom) <= 1, `under the header (${g.side.top} vs ${g.header.bottom})`);
@@ -133,13 +141,11 @@ test("browser 1280px: the toggles and tabs switch views, the toggle of the shown
   await ctx.close();
 });
 
-test("browser 1280px: tabs work by keyboard; Escape and the close button close the panel and put focus back on the toggle", { skip }, async () => {
+test("browser 1280px: tabs work by keyboard; Escape closes the panel and puts focus back on the toggle; the handle collapses it", { skip }, async () => {
   const { page, ctx } = await open(1280, 800);
   await page.click("#notesbtn");
-  // Tab from the toggles reaches the panel next (it follows them in the page order): close, then the selected tab only.
+  // Tab from the toggles reaches the panel next (it follows them in the page order): the selected tab only.
   await page.focus("#health");
-  await page.keyboard.press("Tab");
-  assert.equal(await active(page), "sideclose");
   await page.keyboard.press("Tab");
   assert.equal(await active(page), "sidetab-notes", "one tab stop for the tab list");
   await page.keyboard.press("ArrowRight");
@@ -167,17 +173,19 @@ test("browser 1280px: tabs work by keyboard; Escape and the close button close t
   await page.keyboard.press("Escape");
   assert.equal(await shown(page, "#side"), false);
   assert.equal(await active(page), "health");
-  // The close button does the same for Notifications.
+  // The same for Notifications.
   await page.click("#notesbtn");
   await page.focus("#inbox .note .x");
   await page.keyboard.press("Escape");
   assert.equal(await shown(page, "#side"), false);
   assert.equal(await active(page), "notesbtn");
+  // The handle collapses it and keeps focus, now saying it expands.
   await page.click("#notesbtn");
-  await page.click("#sideclose");
+  await page.click("#sidehandle");
   assert.equal(await shown(page, "#side"), false);
-  assert.equal(await active(page), "notesbtn");
+  assert.equal(await active(page), "sidehandle");
   assert.equal(await expanded(page, "#notesbtn"), "false");
+  assert.equal(await expanded(page, "#sidehandle"), "false");
   // Escape elsewhere (the message box) leaves the panel alone.
   await page.click("#notesbtn");
   await page.focus("#ainput");
@@ -220,8 +228,8 @@ test("browser 1280px: receipts are sent only for notes listed in the shown Notif
   await page.waitForTimeout(200);
   assert.deepEqual([...new Set(acks)].sort(), listed, "the ten listed (newest) notes only, not the two past the limit");
   const dismissed = await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes"));
-  await page.click("#sideclose");
-  assert.equal(await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")), dismissed, "closing is not dismissing");
+  await page.click("#sidehandle");
+  assert.equal(await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")), dismissed, "collapsing is not dismissing");
   assert.equal(await page.textContent("#notecount"), "12");
   await ctx.close();
 });

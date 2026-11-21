@@ -85,8 +85,9 @@ All tokens are on `:root`. The theme (dark media query or `data-theme`) changes 
 ## Components
 
 - **Header (900px and wider):** one row under 56px. The brand, a divider, the page tabs, the session switcher
-  (Sessions only, capped at 520px), then the Notifications toggle (with a visible label) and the status toggle, both
-  on the right. From 900 to 1023px the open panels hang under the toggles as cards, right-aligned and at most 520px
+  (Sessions only, capped at 520px), then the Notifications toggle (bell and count; no visible word, its name and count
+  are in its accessible name and hover text) and the status toggle (its dot, plus its words for any level but All live),
+  both on the right. From 900 to 1023px the open panels hang under the toggles as cards, right-aligned and at most 520px
   wide (from 1024px they are the side panel, below). They stay in the header's flow and keep their current behaviour: they persist for the tab's
   session, open independently and never close themselves.
 - **Header brand:** the logo and the ORBIT name are one quiet button (accessible name "ORBIT: Refresh page") that
@@ -139,14 +140,20 @@ Notifications and Status felt awkward as cards inside the header; and on a phone
 - **Side panel (1024px and wider).** Notifications and Status open in one panel on the right, under the header and down
   to the bottom of the screen, 320 to 400px wide (`--side-w: clamp(320px, 30vw, 400px)`), on the card surface with a
   left border.
-  - Head: a heading naming the view, a close button (×, "Close the panel"), and two tabs (Notifications with the count,
-    Status with the level dot). One view shows at a time. The head stays put; the view under it scrolls on its own.
+  - Head: two tabs (Notifications with the count, Status with the level dot). The heading naming the view is for
+    assistive technology only (visually hidden); there is no close button. One view shows at a time. The head stays put;
+    the view under it scrolls on its own.
+  - Collapse handle (`#sidehandle`): a button on the panel's left edge with `aria-expanded`, `aria-controls="side"` and a
+    name for what it will do ("Collapse the Status panel", "Expand the Notifications panel"); its chevron points right
+    when open and left when collapsed. Collapsed, the panel is gone, the page takes its width back, and the handle stays
+    at the screen's right edge under the header, so the panel can always be opened again on the view last shown. Focus
+    stays on the handle. It has a 44px hit area on touch screens. Below 1024px there is no handle.
   - The header toggles open the panel on their view, switch it if the panel shows the other view, and close it if it
     already shows theirs (`aria-expanded` is true only on the toggle of the shown view).
   - Not modal: opening never moves focus, nothing outside closes it, focus is not trapped (Tab goes from the toggles into
-    the panel and on out of it). Escape inside the panel, or the close button, closes it and puts focus back on the toggle
+    the panel and on out of it, to the handle). Escape inside the panel collapses it and puts focus back on the toggle
     of the view that was showing. The tabs follow the ARIA tab pattern: one tab stop, arrow keys, Home and End switch
-    and show the view; the views are `tabpanel`s labelled by their tab, and the panel is a region labelled by its heading.
+    and show the view; the views are `tabpanel`s labelled by their tab, and the panel is a region labelled by its (visually hidden) heading.
   - Nothing is covered: the conversation, its status line, the Jobs list and the composer move left by the panel's width
     and recentre their reading column in the room left (the column paddings subtract `--side-w`). At 1024px the column
     is about 650px; at 1280 and wider the full 860px.
@@ -219,7 +226,8 @@ Chromium (Playwright) with synthetic content only. `test/desktop-design-browser.
 - **Side panel and desktop menu** (`test/side-panel-browser.test.ts`): at 1024, 1280 and 1440 the panel opens on the
   right under the header, covers no message and not Send, leaves the column centred in the room left, and leaves focus
   on the toggle; toggles and tabs switch views and close; arrow keys, Home and End; Tab passes through and out; Escape
-  and × restore focus; the view scrolls alone while the head and the conversation stay; receipts only from the shown
+  restores focus and the edge handle collapses and expands the panel (`test/side-collapse-browser.test.ts` covers the
+  handle's keyboard use, ARIA, reclaimed width, tap area, the phone and tablet layouts and the icon-only header toggles); the view scrolls alone while the head and the conversation stay; receipts only from the shown
   Notifications view; status loading, error, kept-answer and empty states; an empty notifications state; below 1024 (390
   phone, 900) the header panels are unchanged and independent; resizing 1280 → 800 → 1280 keeps the open view; session
   rows have no hover ring or border box on desktop, keep a 2px inset focus ring and line up; desktop tabs have no inner

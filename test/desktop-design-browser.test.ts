@@ -55,7 +55,7 @@ async function open(width: number, height: number, route: string, opts: { phone?
 const sideways = (page: any) => page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
 
 for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
-  test(`browser ${width}px: one grouped header row, page tabs read as navigation, labelled toggles`, { skip }, async () => {
+  test(`browser ${width}px: one grouped header row, page tabs read as navigation, icon toggles with accessible names`, { skip }, async () => {
     const { page, ctx, errors } = await open(width, height, "/#assistant");
     const g = await page.evaluate(() => {
       const r = (e: Element) => e.getBoundingClientRect();
@@ -66,7 +66,7 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
       return {
         header: r(header).height, brand: r(brand), nav: r(nav), notes: r(document.getElementById("notesbtn")!), health: r(document.getElementById("health")!), vw: document.documentElement.clientWidth,
         divider: cs(brand).borderRightWidth, cur: { w: Number(cs(cur).fontWeight), bg: cs(cur).backgroundImage, shadow: cs(cur).boxShadow }, other: { w: Number(cs(other).fontWeight), bg: cs(other).backgroundImage },
-        track: cs(nav).backgroundColor, noteLabel: (document.querySelector("#notesbtn .label") as HTMLElement).offsetWidth > 0,
+        track: cs(nav).backgroundColor, noteText: (document.getElementById("notesbtn") as HTMLElement).innerText.trim(), noteName: document.getElementById("notesbtn")!.getAttribute("aria-label"),
       };
     });
     assert.ok(g.header <= 56, `the header stays compact (${g.header}px)`);
@@ -78,7 +78,9 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
     assert.ok(g.cur.w >= 600 && g.other.w < 600, `the current page is bold (${g.cur.w} vs ${g.other.w})`);
     assert.match(g.cur.bg, /linear-gradient/, "the current page carries ORBIT's gradient underline");
     assert.equal(g.other.bg, "none", "other tabs do not");
-    assert.equal(g.noteLabel, true, "the notifications toggle has a visible label on a laptop");
+    // The notifications toggle shows its bell and count only; its name and count are in its accessible name.
+    assert.match(g.noteText, /^(\d+|\?)$/, `no visible "Notifications" word on the toggle (${g.noteText})`);
+    assert.match(g.noteName ?? "", /^Notifications: /, "the toggle's accessible name says what it is");
     assert.equal(await sideways(page), false);
     assert.deepEqual(errors, []);
     await ctx.close();
