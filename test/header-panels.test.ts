@@ -71,10 +71,10 @@ test("the markup: page links in the header bar with no Status link; two toggle b
     assert.match(b, /aria-label="[^"]+"/, button);
     assert.match(header, new RegExp(`<div id="${panel}" role="region" aria-label="[^"]+" hidden>`), `${panel} starts collapsed`);
   }
-  // The status line holds the overall summary (shown in the desktop side panel only), a read-error line, the pills (saying
-  // they are being read until the first answer) and the page link. It comes straight after the bar on phones: the side
+  // The status line holds the running release (Deployed, then Commit) first, then the overall summary (shown in the desktop
+  // side panel only), a read-error line, the pills (saying they are being read until the first answer) and the page link. It comes straight after the bar on phones: the side
   // panel's head before it is not shown there (test/side-panel-browser.test.ts).
-  assert.match(header, /<\/div><\/div><div id="side"><div class="sidehead">[\s\S]*?<\/div><\/div><div id="statusline"[^>]*><div id="statussum">[\s\S]*?<div id="statuserr" role="alert" hidden><\/div><div id="ports"><span class="empty">Reading status…<\/span><\/div><a id="statusopen" href="\/status" target="_blank" rel="noopener noreferrer"/);
+  assert.match(header, /<\/div><\/div><div id="side"><div class="sidehead">[\s\S]*?<\/div><\/div><div id="statusline"[^>]*><dl id="deployinfo"[^>]*>[\s\S]*?<\/dl><div id="statussum">[\s\S]*?<div id="statuserr" role="alert" hidden><\/div><div id="ports"><span class="empty">Reading status…<\/span><\/div><a id="statusopen" href="\/status" target="_blank" rel="noopener noreferrer"/);
   // Before the first /status request the indicator says the status has not been read yet, not that reading it failed.
   const health = bar.match(/<button type="button" id="health"[^>]*>/)![0];
   assert.match(health, /title="ORBIT's status has not been read yet, so it is not known to be all live\. Show or hide the status line\."/);
@@ -149,9 +149,9 @@ test("browser: page links sit in the header bar beside the toggles, with no Stat
     assert.ok(box.notes.right <= box.health.left, `notifications button beside it at ${width}px`);
     // Open both panels with many notes and a long pill: still no sideways scroll.
     ports = [...ports, live("a-very-long-port-name-that-should-wrap-rather-than-overflow", "degraded")];
-    current = notes(5);
+    current = notes(11);
     await page.evaluate("refreshStatus(); refreshInbox()");
-    await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "5");
+    await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "11");
     await page.click("#health");
     await page.click("#notesbtn");
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `no horizontal overflow at ${width}px`);
@@ -213,66 +213,118 @@ test("browser: the notification count is every undismissed note, not just the fe
   await page.click("#notesbtn");
   assert.equal(await page.textContent("#inbox"), "No notifications.", "an empty state, not a blank box");
   await page.click("#notesbtn");
-  current = notes(5);
+  current = notes(12);
   await page.evaluate("refreshInbox()");
-  await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "5");
-  assert.equal(await page.getAttribute("#notesbtn", "aria-label"), "Notifications: 5");
+  await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "12");
+  assert.equal(await page.getAttribute("#notesbtn", "aria-label"), "Notifications: 12");
   assert.equal(await visible("#inbox"), false, "new notifications only change the count; the panel stays closed");
   assert.equal(await expanded("#notesbtn"), "false");
-  // The hidden panel was still rendered: three listed, the rest behind "show all (5)".
-  assert.equal(await page.$$eval("#inbox .note", (n: unknown[]) => n.length), 3);
-  assert.equal(await page.textContent("#inbox .showall"), "show all (5)");
+  // The hidden panel was still rendered: ten listed, the rest behind "show all (12)".
+  assert.equal(await page.$$eval("#inbox .note", (n: unknown[]) => n.length), 10);
+  assert.equal(await page.textContent("#inbox .showall"), "show all (12)");
   await page.click("#notesbtn");
   await page.click("#inbox .showall");
-  assert.equal(await page.$$eval("#inbox .note", (n: unknown[]) => n.length), 5);
-  assert.equal(await count(), "5");
+  assert.equal(await page.$$eval("#inbox .note", (n: unknown[]) => n.length), 12);
+  assert.equal(await count(), "12");
   await page.click("#inbox .note .x");
-  assert.equal(await count(), "4");
-  assert.equal(await page.getAttribute("#notesbtn", "aria-label"), "Notifications: 4");
+  assert.equal(await count(), "11");
+  assert.equal(await page.getAttribute("#notesbtn", "aria-label"), "Notifications: 11");
   // A keyboard user who dismissed a note stays in the panel.
   await page.focus("#inbox .note .x");
   await page.keyboard.press("Enter");
-  assert.equal(await count(), "3");
+  assert.equal(await count(), "10");
   assert.equal(await page.evaluate(() => document.getElementById("inbox")!.contains(document.activeElement)), true);
-  // Two more arrive; ORBIT still holds all seven, two of them dismissed here.
-  current = notes(5).concat(notes(2, 6));
+  // Two more arrive; ORBIT still holds all fourteen, two of them dismissed here.
+  current = notes(12).concat(notes(2, 13));
   await page.evaluate("refreshInbox()");
-  await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "5");
+  await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "12");
   // A repeated refresh with the same answer never doubles a note.
   await page.evaluate("refreshInbox()");
   await page.evaluate("refreshInbox()");
-  assert.equal(await count(), "5");
+  assert.equal(await count(), "12");
   // Dismissed notes stay dismissed across a reload (this browser's dismissals), and the count agrees. The notes come back
   // because the server still holds them; this fake re-adds nothing after the reload.
   await page.reload();
-  await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "5");
+  await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "12");
+});
+
+test("browser: the collapsed list shows the newest 10; show all appears only past 10, and a dismissal can cross that line", { skip }, async () => {
+  reset();
+  await open();
+  await page.click("#notesbtn");
+  const listed = () => page.$$eval("#inbox .note .first", (n: HTMLElement[]) => n.map((e) => e.textContent));
+  const showall = () => page.$$eval("#inbox .showall", (b: HTMLElement[]) => b.map((e) => e.textContent));
+  const newest = (from: number, to: number) => Array.from({ length: from - to + 1 }, (_, i) => `Note ${from - i}`);
+  const at = async (n: number) => {
+    current = notes(n);
+    await page.evaluate("refreshInbox()");
+    await page.waitForFunction((v: string) => document.getElementById("notecount")!.textContent === v, String(n));
+  };
+  // 0: the empty state, no show all.
+  assert.equal(await page.textContent("#inbox"), "No notifications.");
+  assert.deepEqual(await showall(), []);
+  // 3 and 10: every note listed, newest first, and no show all.
+  await at(3);
+  assert.deepEqual(await listed(), newest(3, 1));
+  assert.deepEqual(await showall(), []);
+  await at(10);
+  assert.deepEqual(await listed(), newest(10, 1));
+  assert.deepEqual(await showall(), [], "exactly 10: nothing is held back, so no show all");
+  // 11: the newest 10, the oldest behind "show all (11)", which counts every undismissed note.
+  await at(11);
+  assert.deepEqual(await listed(), newest(11, 2));
+  assert.deepEqual(await showall(), ["show all (11)"]);
+  assert.equal(await count(), "11");
+  // Expand and collapse.
+  await page.click("#inbox .showall");
+  assert.deepEqual(await listed(), newest(11, 1));
+  assert.deepEqual(await showall(), ["show fewer"]);
+  await page.click("#inbox .showall");
+  assert.deepEqual(await listed(), newest(11, 2));
+  assert.deepEqual(await showall(), ["show all (11)"]);
+  // "more" on one note still opens just that note.
+  await page.click("#inbox .note:nth-child(4) button:not(.x)");
+  assert.deepEqual(await page.$$eval("#inbox .note .rest", (n: HTMLElement[]) => n.map((e) => e.textContent)), ["more text 8"]);
+  // Dismissing one of 11 crosses the line: 10 left, all listed, show all gone; the open note stays open.
+  await page.click("#inbox .note .x");
+  await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "10");
+  assert.deepEqual(await listed(), newest(10, 1));
+  assert.deepEqual(await showall(), []);
+  assert.deepEqual(await page.$$eval("#inbox .note .rest", (n: HTMLElement[]) => n.map((e) => e.textContent)), ["more text 8"]);
+  // One more arrives: back over the line, the newest 10 listed and the oldest behind show all again.
+  current = notes(12);
+  await page.evaluate("refreshInbox()");
+  await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "11");
+  assert.deepEqual(await listed(), ["Note 12", ...newest(10, 2)]);
+  assert.deepEqual(await showall(), ["show all (11)"]);
 });
 
 test("browser: a collapsed panel sends no receipt; opening it sends one for each listed note only; hiding never dismisses", { skip }, async () => {
   reset();
   await open();
-  current = notes(4);
+  current = notes(11);
   await page.evaluate("refreshInbox()");
-  await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "4");
+  await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "11");
   await page.waitForTimeout(300);
   assert.deepEqual(acks, [], "a count change is not display evidence: no receipt while collapsed");
   const dismissed = await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes"));
   await page.click("#notesbtn");
-  for (let i = 0; acks.length < 3 && i < 100; i++) await page.waitForTimeout(20);
-  assert.deepEqual([...acks].sort(), ["n2", "n3", "n4"], "the three listed (newest) notes, not the one past the limit");
+  const listedIds = Array.from({ length: 10 }, (_, i) => `n${i + 2}`).sort();
+  for (let i = 0; acks.length < 10 && i < 100; i++) await page.waitForTimeout(20);
+  assert.deepEqual([...acks].sort(), listedIds, "the ten listed (newest) notes, not the one past the limit");
   for (let i = 0; i < 4; i++) await page.click("#notesbtn");
   await page.evaluate("refreshInbox()");
   await page.waitForTimeout(200);
-  assert.deepEqual([...acks].sort(), ["n2", "n3", "n4"], "toggling again sends nothing more and no duplicates");
+  assert.deepEqual([...acks].sort(), listedIds, "toggling again sends nothing more and no duplicates");
   assert.equal(await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")), dismissed, "hiding is not dismissing");
-  assert.equal(await count(), "4");
+  assert.equal(await count(), "11");
   // "more" still opens a note's rest, and says whether it is open (the panel is open again after the even number of toggles).
   assert.equal(await expanded("#notesbtn"), "true");
   const more = '#inbox .note button:not(.x)';
   assert.equal(await page.getAttribute(more, "aria-expanded"), "false");
   await page.click(more);
   assert.equal(await page.getAttribute(more, "aria-expanded"), "true");
-  assert.match(await page.textContent("#inbox .note .rest"), /more text 4/);
+  assert.match(await page.textContent("#inbox .note .rest"), /more text 11/);
   assert.equal(await page.getAttribute("#inbox .note .x", "aria-label"), "Dismiss this notification");
 });
 

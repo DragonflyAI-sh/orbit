@@ -103,7 +103,15 @@ test("browser 1280px: the toggles and tabs switch views, the toggle of the shown
   assert.equal(await expanded(page, "#notesbtn"), "false");
   assert.equal(await shown(page, "#statusline"), true);
   assert.equal(await shown(page, "#inbox"), false);
-  assert.equal(await shown(page, "#statussum"), true, "the status view leads with the overall status");
+  assert.equal(await shown(page, "#statussum"), true, "the status view shows the overall status");
+  // Order: the running release (Deployed, then Commit) first, then the overall status, then the pills; the /status link
+  // stays at the top right.
+  const order = await page.evaluate(() => {
+    const r = (sel: string) => document.querySelector(sel)!.getBoundingClientRect();
+    const dts = [...document.querySelectorAll("#deployinfo dt")].map((d) => d.textContent);
+    return { dts, release: r("#deployinfo").bottom <= r("#statussum").top, status: r("#statussum").bottom <= r("#ports").top, link: r("#statusopen").top < r("#statussum").top && r("#statusopen").left >= r("#deployinfo").right };
+  });
+  assert.deepEqual(order, { dts: ["Deployed", "Commit"], release: true, status: true, link: true });
   assert.equal(await page.textContent("#statuslabel"), await page.textContent("#health .label"), "the same words as the header indicator");
   assert.match(await page.textContent("#statusdetail"), /Not live: jobs: degraded/);
   assert.match(await page.getAttribute("#sidetab-status", "class"), /\bdegraded\b/);
@@ -202,17 +210,19 @@ test("browser 1280px: each view scrolls on its own; the head stays put and the c
 });
 
 test("browser 1280px: receipts are sent only for notes listed in the shown Notifications view, never from the Status view", { skip }, async () => {
-  const { page, ctx, acks } = await open(1280, 800, "/#assistant", { notes: 4 });
+  const { page, ctx, acks } = await open(1280, 800, "/#assistant", { notes: 12 });
   await page.click("#health");
   await page.waitForTimeout(300);
   assert.deepEqual(acks, [], "the Status view lists no notes, so it sends no receipt");
   await page.click("#sidetab-notes");
-  for (let i = 0; acks.length < 3 && i < 100; i++) await page.waitForTimeout(20);
-  assert.deepEqual([...new Set(acks)].sort(), ["n1", "n2", "n3"], "the three listed (newest) notes only");
+  const listed = Array.from({ length: 10 }, (_, i) => `n${i + 2}`).sort();
+  for (let i = 0; acks.length < 10 && i < 100; i++) await page.waitForTimeout(20);
+  await page.waitForTimeout(200);
+  assert.deepEqual([...new Set(acks)].sort(), listed, "the ten listed (newest) notes only, not the two past the limit");
   const dismissed = await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes"));
   await page.click("#sideclose");
   assert.equal(await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")), dismissed, "closing is not dismissing");
-  assert.equal(await page.textContent("#notecount"), "4");
+  assert.equal(await page.textContent("#notecount"), "12");
   await ctx.close();
 });
 
