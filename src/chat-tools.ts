@@ -6,7 +6,7 @@ import type { Notifier } from "./notify.ts";
 import type { AdminOps } from "./ops-admin.ts";
 import type { SysOps } from "./ops-sys.ts";
 import type { Ops } from "./ops-client.ts";
-import { CONFIG_KEYS, type MutatingAction } from "./ops/admin-protocol.ts";
+import { CONFIG_KEYS, INGRESS_PORT_MIN, type ConfigKey, type MutatingAction } from "./ops/admin-protocol.ts";
 import { PLAN_WAIT_MS, type SysMutatingAction } from "./ops/sys-protocol.ts";
 import { LOG_LINES_DEFAULT, LOG_LINES_MAX } from "./ops/protocol.ts";
 import type { Result } from "./ports.ts";
@@ -46,6 +46,16 @@ export type ChatToolDeps = {
 
 // Owner-only tools offered to the model during a chat reply. Reads and notify run directly;
 // job_launch and job_steer only create proposals, and nothing happens until Rai confirms on the page.
+// One model-facing schema per orbit.env setting ops_propose_config_change may change. Each is optional inside `changes` (not in its
+// `required`), so a caller names only what it changes. The formats are checked by validateConfigValue, the single authority.
+const CONFIG_SETTING_SCHEMA: Record<ConfigKey, Record<string, unknown>> = {
+  ORBIT_MODEL: { type: "string", description: "New model name, e.g. gpt-5 (letters, digits, . _ : -). Null or left out: unchanged." },
+  ORBIT_ROUTINES: { type: "string", description: "New full list name=trig_<id>,... (real ids, never the masked trig_… form). Null or left out: unchanged." },
+  ORBIT_ROUTINE_REPOS: { type: "string", description: "New full list name=owner/repo,... Null or left out: unchanged." },
+  ORBIT_PUBLIC_JOB_URL: { type: "string", description: "New https://<name>.ts.net URL. Null or left out: unchanged." },
+  ORBIT_INGRESS_PORT: { type: "integer", minimum: INGRESS_PORT_MIN, maximum: 65535, description: "New job listener port. Null or left out: unchanged." },
+};
+
 export function chatTools(d: ChatToolDeps): ChatTool[] {
   const tools: ChatTool[] = [
     {
@@ -132,7 +142,7 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
   if (admin) {
     // Every one of these only PROPOSES. The operation runs after Rai clicks Confirm on the page, and ORBIT reports what the
     // helper observed afterwards; "dispatched" is never "done".
-    const propose = (name: string, action: MutatingAction, description: string, parameters: Record<string, unknown> = obj({}, []), pick?: (a: Record<string, unknown>) => { changes?: unknown }): ChatTool => ({
+    const propose = (name: string, action: MutatingAction, description: string, parameters: Record<string, unknown> = obj({}, []), pick?: (a: Record<string, unknown>) => { changes?: unknown }, config = false): ChatTool => ({
       name,
       description: `${description} This does NOT do it: it creates a proposal that Rai must confirm with a button on the page, and the action is then carried out by a separate privileged helper. Never say it happened until ops_admin_operations shows a verified result.`,
       parameters,
@@ -141,7 +151,7 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
         if (!pick && Object.keys(a).length) throw new Error("This tool takes no arguments.");
         const p = admin.propose(action, input);
         return {
-          value: { status: "pending-confirmation", executed: false, proposalId: p.id, action, summary: p.summary, settings: p.display, digest: p.digest, expiresAt: p.expiresAt, note: "Nothing has been done. Rai must click Confirm on the page." },
+          value: { status: "pending-confirmation", executed: false, proposalId: p.id, action, summary: p.summary, settings: p.display, ...(config ? { unchanged: CONFIG_KEYS.filter((k) => !Object.hasOwn(p.display ?? {}, k)) } : {}), digest: p.digest, expiresAt: p.expiresAt, note: "Nothing has been done. Rai must click Confirm on the page." },
           provenance: "live",
           source: "chat/proposals",
         };
@@ -152,21 +162,36 @@ export function chatTools(d: ChatToolDeps): ChatTool[] {
       propose("ops_propose_deploy_now", "deploy_now", "Propose running the deploy now (the same service the deploy timer starts)."),
       propose("ops_propose_rollback", "rollback_release", "Propose rolling back to the previous known-good release."),
       propose("ops_propose_refresh_vault", "refresh_vault", "Propose refreshing the server's vault copy now."),
-      propose(
-        "ops_propose_config_change",
-        "apply_config",
-        "Propose changing orbit.env settings. Only these five can be changed, and unknown keys or invalid values are refused: ORBIT_MODEL (model name), ORBIT_ROUTINES (name=trig_<id>,...), ORBIT_ROUTINE_REPOS (name=owner/repo,...), ORBIT_PUBLIC_JOB_URL (https://<name>.ts.net), ORBIT_INGRESS_PORT (integer 1024-65535). ORBIT restarts to apply them, and the old file is restored if /status is not healthy within 60 seconds.",
-        {
-          type: "object",
-          properties: { changes: { type: "object", additionalProperties: false, properties: Object.fromEntries(CONFIG_KEYS.map((k) => [k, k === "ORBIT_INGRESS_PORT" ? { type: "integer", minimum: 1024, maximum: 65535 } : { type: "string" }])) } },
-          required: ["changes"],
-          additionalProperties: false,
-        },
-        (a) => {
-          if (Object.keys(a).some((k) => k !== "changes")) throw new Error("Only {changes: {...}} is accepted.");
-          return { changes: a.changes };
-        },
-      ),
+      {
+        ...propose(
+          "ops_propose_config_change",
+          "apply_config",
+          "Propose changing orbit.env settings. Name ONLY the settings to change: every setting left out or null stays exactly as it is, and so does every other line of orbit.env (for example, to change just the model send ORBIT_MODEL and null for the other four). Never send \"\" or a masked value (such as the trig_… form orbit_config_view shows) for a setting you are not changing: both are refused. Only these five can be changed, and unknown keys or invalid values refuse the whole request: ORBIT_MODEL (model name), ORBIT_ROUTINES (name=trig_<id>,...), ORBIT_ROUTINE_REPOS (name=owner/repo,...), ORBIT_PUBLIC_JOB_URL (https://<name>.ts.net), ORBIT_INGRESS_PORT (integer 1024-65535). A request that changes nothing is refused. ORBIT restarts to apply them, and the old file is restored if /status is not healthy within 60 seconds. A healthy /status shows ORBIT came back, not that a new ORBIT_MODEL can answer.",
+          {
+            type: "object",
+            properties: {
+              changes: {
+                type: "object",
+                description: "Only the settings to change. Leave a setting out, or null, to keep it as it is.",
+                properties: Object.fromEntries(CONFIG_KEYS.map((k) => [k, CONFIG_SETTING_SCHEMA[k]])),
+                required: [],
+                additionalProperties: false,
+              },
+            },
+            required: ["changes"],
+            additionalProperties: false,
+          },
+          (a) => {
+            if (Object.keys(a).some((k) => k !== "changes")) throw new Error("Only {changes: {...}} is accepted.");
+            return { changes: a.changes };
+          },
+          true,
+        ),
+        // Sent as a strict schema to the Responses API (src/model.ts strictSchema): there every setting inside `changes` is required
+        // and nullable, so null is how a model says "unchanged"; the canonical schema (OpenRouter) lets it leave settings out.
+        // proposedConfigChanges treats both the same and refuses "" and masked values.
+        strict: true,
+      },
       {
         name: "ops_admin_operations",
         readOnly: true,

@@ -2,11 +2,12 @@ import type { Proposal, Proposals } from "./agent.ts";
 import type { Notifier } from "./notify.ts";
 import type { AdminClient } from "./ops-admin-client.ts";
 import {
+  CONFIG_KEYS,
   displayConfig,
   digestOf,
   isTerminal,
   opIdFor,
-  validateConfigChanges,
+  proposedConfigChanges,
   cap,
   type AdminArgs,
   type ConfigChanges,
@@ -46,8 +47,20 @@ const SUMMARY: Record<MutatingAction, (a: AdminArgs) => string> = {
   restart_orbit: () => "Restart orbit.service (ORBIT is offline for a few seconds), then check that /status is healthy and serves the same commit.",
   deploy_now: () => "Run the deploy now by starting orbit-deploy.service, the unit the timer starts: it deploys the newest main commit whose checks are green (if there is one), rolls back if it fails, then I check /status and the commit.",
   rollback_release: () => "Roll back to the previous known-good release using the deploy script's rollback (restarts ORBIT), then check /status and that the commit really changed.",
-  apply_config: (a) =>
-    `Change orbit.env: ${Object.entries(displayConfig(a.changes ?? {})).map(([k, v]) => `${k}=${v}`).join(", ")}. The old file is backed up, ORBIT restarts, and /status must be healthy within 60 seconds or the backup is restored.`,
+  // The exact preview: what changes (masked as everywhere), which of the five settings stay as they are, and, for a model change,
+  // that a healthy restart is not evidence the model answers.
+  apply_config: (a) => {
+    const changes = a.changes ?? {};
+    const kept = CONFIG_KEYS.filter((k) => changes[k] === undefined);
+    return [
+      `Change orbit.env: ${Object.entries(displayConfig(changes)).map(([k, v]) => `${k}=${v}`).join(", ")}.`,
+      kept.length ? `Unchanged: ${kept.join(", ")}.` : "",
+      "Every other line of orbit.env is kept byte for byte. The old file is backed up, ORBIT restarts, and /status must be healthy within 60 seconds or the backup is restored.",
+      changes.ORBIT_MODEL !== undefined ? "A healthy /status shows ORBIT restarted, not that the new model answers: check that separately with a real reply." : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  },
   refresh_vault: () => "Refresh the server's read-only vault copy now (a fast-forward pull), then check the sync record was written.",
 };
 
@@ -73,10 +86,11 @@ export function adminOps(deps: { client?: AdminClient; store: Store<LedgerEntry[
   return {
     available: Boolean(client),
 
-    // Validates, then makes an owner-only proposal. Nothing is sent to the helper.
+    // Validates, then makes an owner-only proposal. Nothing is sent to the helper. A config change names only the settings it
+    // changes (proposedConfigChanges: null or left out is "unchanged"; empty and no-change requests are refused).
     propose(action: MutatingAction, input: { changes?: unknown } = {}): Proposal & { kind: "ops_admin" } {
       const args: AdminArgs = {};
-      if (action === "apply_config") args.changes = validateConfigChanges(input.changes);
+      if (action === "apply_config") args.changes = proposedConfigChanges(input.changes);
       else if (input.changes !== undefined) throw new Error(`${action} takes no arguments.`);
       const p = proposals.propose(
         { kind: "ops_admin", action, summary: SUMMARY[action](args), display: args.changes ? displayConfig(args.changes) : null, digest: digestOf(action, args) },

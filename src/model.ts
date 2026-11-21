@@ -280,21 +280,31 @@ export function parseOutput(output: OutputItem[]): Step {
 }
 
 // The canonical schema of a strict tool as the Responses API's strict mode takes it: every property listed in `required`, and each
-// property that was optional made nullable (its type gains "null"; an enum gains null). Only the flat object shape strict tools use is
-// accepted: an object with additionalProperties false whose properties each name a type. Anything else is a programming error, thrown
-// when the tool list is serialized, never sent half-converted.
+// property that was optional made nullable (its type gains "null"; an enum gains null). A property that is itself an object (for
+// example ops_propose_config_change's `changes`) is converted the same way, recursively: strict mode applies to nested objects too,
+// so an optional setting inside it becomes required-and-nullable, never required-and-non-null. Only objects with
+// additionalProperties false whose properties each name a type are accepted. Anything else is a programming error, thrown when the
+// tool list is serialized, never sent half-converted.
 export function strictSchema(name: string, parameters: Record<string, unknown>): Record<string, unknown> {
-  const p = parameters as { type?: unknown; properties?: Record<string, Record<string, unknown>>; required?: unknown; additionalProperties?: unknown };
-  if (p.type !== "object" || p.additionalProperties !== false || !p.properties || typeof p.properties !== "object") throw new Error(`Tool ${name}: a strict schema must be an object with additionalProperties false.`);
+  const p = parameters as { type?: unknown };
+  if (p.type !== "object") throw new Error(`Tool ${name}: a strict schema must be an object with additionalProperties false.`);
+  return strictObject(name, "", parameters);
+}
+
+function strictObject(name: string, path: string, parameters: Record<string, unknown>): Record<string, unknown> {
+  const p = parameters as { properties?: Record<string, Record<string, unknown>>; required?: unknown; additionalProperties?: unknown };
+  if (p.additionalProperties !== false || !p.properties || typeof p.properties !== "object") throw new Error(`Tool ${name}: ${path ? `property ${path}: ` : ""}a strict schema must be an object with additionalProperties false.`);
   const required = Array.isArray(p.required) ? (p.required as string[]) : [];
   const properties: Record<string, Record<string, unknown>> = {};
-  for (const [key, prop] of Object.entries(p.properties)) {
-    if (typeof prop.type !== "string" && !Array.isArray(prop.type)) throw new Error(`Tool ${name}: property ${key} has no type, so it cannot be sent in a strict schema.`);
+  for (const [key, raw] of Object.entries(p.properties)) {
+    const at = path ? `${path}.${key}` : key;
+    if (typeof raw.type !== "string" && !Array.isArray(raw.type)) throw new Error(`Tool ${name}: property ${at} has no type, so it cannot be sent in a strict schema.`);
+    const types = Array.isArray(raw.type) ? (raw.type as string[]) : [raw.type as string];
+    const prop = types.includes("object") ? strictObject(name, at, raw) : raw;
     if (required.includes(key)) {
       properties[key] = prop;
       continue;
     }
-    const types = Array.isArray(prop.type) ? (prop.type as string[]) : [prop.type as string];
     properties[key] = { ...prop, type: types.includes("null") ? types : [...types, "null"], ...(Array.isArray(prop.enum) && !prop.enum.includes(null) ? { enum: [...prop.enum, null] } : {}) };
   }
   return { ...p, properties, required: Object.keys(properties), additionalProperties: false };

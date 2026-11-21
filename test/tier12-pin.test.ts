@@ -7,6 +7,13 @@
 // docs/orbit-ops.md gains a pointer to it, and test/ops-admin.test.ts carries the same two new hashes. The seven existing actions,
 // their parsing, bounds, redaction and audit are unchanged, and test/ops.test.ts still passes byte-identical.
 //
+// Re-pinned for partial config proposals (docs/orbit-ops-admin.md, "Partial changes"): a deliberate tier 2 change. admin-protocol.ts
+// gains proposedConfigChanges, used only on ORBIT's side before a proposal exists (null or left out means unchanged; empty, blank,
+// masked, unknown and no-change requests are refused); the helper's parseAdminRequest and validateConfigChanges are unchanged and
+// still refuse nulls and empty values. ops-admin.ts uses it and its apply_config preview lists the unchanged settings and says a
+// healthy /status is not a model check; docs/orbit-ops-admin.md documents both. admin-helper.ts, admin-run.ts, admin-core.ts, the
+// client, units and installers are byte-identical.
+//
 // chat-tools.ts is shared with tier 3 (its tier 3 tools live in one block). That block is cut out (from "const sys = d.sys;" up to
 // "const jobs = d.jobs;") and everything else must still be byte-identical: tier 1 and 2's tools cannot be touched from there.
 import assert from "node:assert/strict";
@@ -20,13 +27,13 @@ const sha = (b: Buffer | string) => createHash("sha256").update(b).digest("hex")
 const PINNED: [string, string][] = [
   ["src/ops/helper.ts", "0e1b9ea5499ea3626265d9b0ad75dd203096c695d9a6876e2e7dcc846522c714"],
   ["src/ops/protocol.ts", "a23d17f22fbe0f44499595358a7c00e6cd9dd9e14b7edfa9504d060e033ad1b5"],
-  ["src/ops/admin-protocol.ts", "60fd390d9feba492ea131f8243644445de2b7fafadc21e2596ccb7e35e58ae1b"],
+  ["src/ops/admin-protocol.ts", "3663f168417354d2edae9b3c94f41a2eba235afc7abfca257360079357e4f00a"],
   ["src/ops/admin-core.ts", "4fbaa994ff3a5b71b404cdc5babcd1861017c3362c74a81fbf40b7a652537e46"],
   ["src/ops/admin-helper.ts", "28a6691caf6742e2eb7bc34551f123bcb2db2eb444d94e104f70d4fa442817e1"],
   ["src/ops/admin-run.ts", "e7e5358cacffed7fd214ef7a64caefaf4cfa862482711bc781fa7ad69dbcdc3d"],
   ["src/ops-client.ts", "e3a0190710bdf9648103810e8d9f9ca859e710bb8139830543dc08c747928d17"],
   ["src/ops-admin-client.ts", "e1ce686df6ccc744dcd1ac6c7caac21a25102952ae0e5a09f3d767cb004ff174"],
-  ["src/ops-admin.ts", "6350c26c207570e14e1af22040d15f4f62abfb03a149a42100bed2c5f9b1f5f6"],
+  ["src/ops-admin.ts", "45cca1b39e8fdc356828e4124833afd4bfb24d1740370939332d324cbc95d3e9"],
   ["deploy/systemd/orbit-ops@.service", "088be396050509047680bb157b625b19e11a6e25f0042e1753a4045765a86c63"],
   ["deploy/systemd/orbit-ops.socket", "9f2516a3337a99551b220d198c63b8b5dc100a0d0465fc6947d62add4d31c27e"],
   ["deploy/systemd/orbit.service", "1516761d0bda57cd699cf76e77108f079ac82185c267ea1920f3ab9b1b40d48e"],
@@ -38,7 +45,7 @@ const PINNED: [string, string][] = [
   ["deploy/install-admin.sh", "241f27a20667e1cc941d3a9fdf27ff6203556c07bad2fbc7b25a37b42d6bb6a9"],
   ["deploy/pull-deploy.sh", "4060cfbb675d1c682c9240270771e98c18194d0cc02d653e2bc3579a7e136ac4"],
   ["docs/orbit-ops.md", "4c8d67e513ed67d611d4d256212faff3c8f6e499902b1a694fe6a978ed259b0e"],
-  ["docs/orbit-ops-admin.md", "cd175ab463a5b4f26b24ca75996f237acea072a9eabf07b96b40e57c037ccf66"],
+  ["docs/orbit-ops-admin.md", "1a968401fe064b7391cf68ef099464f51597a185e3d388836d5cd35c6bb59ac8"],
   ["test/ops.test.ts", "04005e1ca72fa5b4ac537aacedaaf0d648fee03942948757ee8caa89b1e4823f"],
   ["test/ops-admin.test.ts", "98b929f7d07ae5ba179ff73f6398773ce0a609bc130d22e3d1bb702a336a1110"],
   ["test/ops-admin-helper.test.ts", "43e27bd683c1f32deef878bafb86056bc39989757e8379d05b5921ae4afcff00"],
@@ -54,12 +61,15 @@ test("tier 1 and tier 2 implementation, units, installers and docs are byte-iden
 // orbit_config_view are added after the memory tools. Nothing in the tier 1/2/3 tool blocks changed.
 // Re-pinned for chat tool deadlines (docs/tool-deadlines.md): the read-only tools are marked `readOnly: true` and github_repo_status
 // passes the call's abort signal to its requests. No tool's arguments, policy, proposal or confirmation path changed.
+// Re-pinned for partial config proposals: ops_propose_config_change is a strict tool whose settings are each optional (nullable in the
+// strict form), with a description and per-setting descriptions saying null or left out is unchanged, and its result lists the
+// unchanged settings. Its proposal and confirmation path, policy and the other tools are unchanged.
 test("shared integration: chat-tools.ts is identical to main outside the tier 3 block", () => {
   const lines = bytes("src/chat-tools.ts").toString("utf8").split("\n");
   const start = lines.indexOf("  const sys = d.sys;");
   const end = lines.indexOf("  const jobs = d.jobs;");
   assert.ok(start > 0 && end > start, "the tier 3 block is still delimited by the same two lines");
-  assert.equal(sha(lines.slice(0, start).concat(lines.slice(end)).join("\n")), "30d5f41930f0ce2d4cb7e99b14cc0cd208e5b316c763e3024579808a6f346c2f");
+  assert.equal(sha(lines.slice(0, start).concat(lines.slice(end)).join("\n")), "6f739822556e52814877bcf282baf05af353a90ff4e9f0ad20613dc43552d4ba");
 });
 
 test("the tier 1/2 admin action list gained nothing, and tier 3 actions never appear in tier 1/2 code", () => {
