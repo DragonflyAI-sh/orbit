@@ -89,6 +89,10 @@ All tokens are on `:root`. The theme (dark media query or `data-theme`) changes 
   on the right. From 900 to 1023px the open panels hang under the toggles as cards, right-aligned and at most 520px
   wide (from 1024px they are the side panel, below). They stay in the header's flow and keep their current behaviour: they persist for the tab's
   session, open independently and never close themselves.
+- **Header brand:** the logo and the ORBIT name are one quiet button (accessible name "ORBIT: Refresh page") that
+  reloads the current page at the same address, path, query and hash, as the browser's reload does; nothing is sent or
+  cleared. It has no button chrome at rest, only the shared hover ring, pressed look and focus ring, and a 44px tap area
+  on touch screens.
 - **Header (phones):** as in #148. The tabs sit on their own row as a borderless segmented track, and the header stays
   under 100px.
 - **Page tabs:** a segmented control. The current page is a raised segment in bold with ORBIT's gradient as a 2px
