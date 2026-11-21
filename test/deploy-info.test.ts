@@ -105,9 +105,10 @@ test("deploy info: absent or invalid metadata says Unavailable, with the reason,
   }
 });
 
-test("the markup: the deployment rows are a labelled list inside the status line, after the pills and the /status link", () => {
-  const line = html.match(/<div id="statusline"[^>]*>[\s\S]*?<\/dl><\/div>/)?.[0] ?? "";
-  assert.match(line, /<div id="ports"><span class="empty">Reading status…<\/span><\/div><a id="statusopen"[\s\S]*?<\/a><dl id="deployinfo" aria-label="Running release"><dt>Deployed<\/dt><dd id="deployedat">[\s\S]*?<\/dd><dt>Commit<\/dt><dd id="deploycommit">/);
+test("the markup: the deployment rows are a labelled list that leads the status line, before the status, the pills and the /status link", () => {
+  const line = html.match(/<div id="statusline"[^>]*>[\s\S]*?<\/a><\/div>/)?.[0] ?? "";
+  // Order: Deployed, then Commit, then the status (summary, read error, pills), then the /status link.
+  assert.match(line, /^<div id="statusline"[^>]*><dl id="deployinfo" aria-label="Running release"><dt>Deployed<\/dt><dd id="deployedat">[\s\S]*?<\/dd><dt>Commit<\/dt><dd id="deploycommit">[\s\S]*?<\/dd><\/dl><div id="statussum">[\s\S]*?<div id="statuserr" role="alert" hidden><\/div><div id="ports"><span class="empty">Reading status…<\/span><\/div><a id="statusopen"[\s\S]*?<\/a><\/div>$/);
   assert.doesNotMatch(grab("deployinfo"), /Date\.now|new Date\(\)|performance\.now|mtime|lastModified/, "no time from the page's clock or a file");
 });
 
@@ -158,7 +159,7 @@ const visible = (sel: string) => page.evaluate((s: string) => { const e = docume
 // What each row shows on screen.
 const rows = () => page.$$eval("#deployinfo > *", (es: HTMLElement[]) => es.map((e) => `${e.tagName}:${e.textContent}`));
 
-test("browser: collapsed shows only the indicator; expanded shows Deployed and Commit under the pills, in the configured zone", { skip }, async () => {
+test("browser: collapsed shows only the indicator; expanded shows Deployed and Commit above the pills, in the configured zone", { skip }, async () => {
   answer = { code: 200, body: good() };
   await open();
   assert.equal(await page.getAttribute("#health", "aria-expanded"), "false");
@@ -185,9 +186,12 @@ test("browser: collapsed shows only the indicator; expanded shows Deployed and C
   const x = await page.$$eval("#deployinfo dt, #deployinfo dd", (es: HTMLElement[]) => es.map((e) => Math.round(e.getBoundingClientRect().left)));
   assert.equal(x[0], x[2], "labels aligned");
   assert.equal(x[1], x[3], "values aligned");
-  // It sits below the pills, not beside them.
-  const below = await page.evaluate(() => document.getElementById("deployinfo")!.getBoundingClientRect().top >= document.getElementById("ports")!.getBoundingClientRect().bottom);
-  assert.equal(below, true);
+  // It comes first, on its own row above the pills (the status), not beside them; the /status link stays beside the pills.
+  const order = await page.evaluate(() => {
+    const r = (id: string) => document.getElementById(id)!.getBoundingClientRect();
+    return { above: r("deployinfo").bottom <= r("ports").top, first: document.getElementById("statusline")!.firstElementChild!.id, linkBeside: r("statusopen").top >= r("deployinfo").bottom };
+  });
+  assert.deepEqual(order, { above: true, first: "deployinfo", linkBeside: true });
   // Collapsing hides it again.
   await page.click("#health");
   assert.equal(await visible("#deployinfo"), false);

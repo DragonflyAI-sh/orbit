@@ -103,7 +103,15 @@ test("browser 1280px: the toggles and tabs switch views, the toggle of the shown
   assert.equal(await expanded(page, "#notesbtn"), "false");
   assert.equal(await shown(page, "#statusline"), true);
   assert.equal(await shown(page, "#inbox"), false);
-  assert.equal(await shown(page, "#statussum"), true, "the status view leads with the overall status");
+  assert.equal(await shown(page, "#statussum"), true, "the status view shows the overall status");
+  // Order: the running release (Deployed, then Commit) first, then the overall status, then the pills; the /status link
+  // stays at the top right.
+  const order = await page.evaluate(() => {
+    const r = (sel: string) => document.querySelector(sel)!.getBoundingClientRect();
+    const dts = [...document.querySelectorAll("#deployinfo dt")].map((d) => d.textContent);
+    return { dts, release: r("#deployinfo").bottom <= r("#statussum").top, status: r("#statussum").bottom <= r("#ports").top, link: r("#statusopen").top < r("#statussum").top && r("#statusopen").left >= r("#deployinfo").right };
+  });
+  assert.deepEqual(order, { dts: ["Deployed", "Commit"], release: true, status: true, link: true });
   assert.equal(await page.textContent("#statuslabel"), await page.textContent("#health .label"), "the same words as the header indicator");
   assert.match(await page.textContent("#statusdetail"), /Not live: jobs: degraded/);
   assert.match(await page.getAttribute("#sidetab-status", "class"), /\bdegraded\b/);
