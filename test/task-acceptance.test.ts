@@ -198,11 +198,14 @@ test("acceptance (simulated): two tasks, sessions, direct and Assistant steering
   assert.ok(cur.attention.items.some((i: { kind: string; source: { turn?: number } }) => i.kind === "turn-failed" && i.source.turn === cur.lastTurn.n));
   const resumed = await x.api(`/tasks/${a.id}/resume`, "POST", { rev: cur.rev });
   assert.equal(resumed.data.task.lifecycle, "active");
-  // The Assistant acknowledges the failed turn: it stays listed as acknowledged (not resolved, not hidden).
+  // The Assistant acknowledges the failed turn. Repair 4 (finding 1 on PR #155): a past turn outcome is RESOLVED by its acknowledgement
+  // (the ADR's rule), with the acknowledgement kept on the stored item for the record; it no longer lingers as "acknowledged".
   const tf = resumed.data.task.attention.items.find((i: { kind: string }) => i.kind === "turn-failed");
   const acked = await x.assistantTool("task_attention_ack", { id: a.id, attention: tf.id, note: "paused on purpose" });
-  assert.equal(acked.result.state, "acknowledged");
-  assert.equal((await x.inspect(a.id)).attention.acknowledged, 1);
+  assert.equal(acked.result.state, "resolved");
+  assert.equal((await x.inspect(a.id)).attention.acknowledged, 0);
+  const stored = x.tasks.get(a.id)!.attention!.find((i) => i.id === tf.id)!;
+  assert.deepEqual([stored.state, stored.ack?.note, stored.ack?.by.actor], ["resolved", "paused on purpose", "assistant"]);
 
   // 12. Restart with an interrupted turn: a turn left running is marked interrupted (never re-run) and becomes an attention item.
   x.d.ctl.gate = new Promise(() => {});

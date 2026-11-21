@@ -378,12 +378,13 @@ export function assistantStore(dir: string | undefined, opts: { now?: () => Date
     isBusy: (id: string) => id === ASSISTANT_ID && Boolean(busy),
 
     // A new turn: a new chunk, written before anything else happens, with the next sequence number.
-    appendUser(id: string, text: string, attachments?: AttachmentRef[]): ThreadMessage {
+    // `author` (Repair 4): "orbit-wake" when the opt-in supervisor wake started this turn; stored and shown as ORBIT's, never Rai's.
+    appendUser(id: string, text: string, attachments?: AttachmentRef[], author?: "orbit-supervisor" | "orbit-wake"): ThreadMessage {
       checkId(id);
       if (openChunk()) throw new ThreadError(409, "A reply is already in progress in the Assistant.");
       const at = now().toISOString();
       const refs = safeAttachments(attachments);
-      const m: ThreadMessage = { id: randomUUID(), role: "user", at, text: maskContent(text).slice(0, MAX_MESSAGE_CHARS), ...(refs ? { attachments: refs } : {}) };
+      const m: ThreadMessage = { id: randomUUID(), role: "user", at, text: maskContent(text).slice(0, MAX_MESSAGE_CHARS), ...(author ? { author } : {}), ...(refs ? { attachments: refs } : {}) };
       const c: Chunk = { schema: CHUNK_SCHEMA, id: randomUUID(), seq: nextSeq, createdAt: at, updatedAt: at, rev: 1, state: "open", messages: [m], cards: [], ...(nextRequest ? { requestId: nextRequest } : {}) };
       persist(c, "active");
       nextSeq++;

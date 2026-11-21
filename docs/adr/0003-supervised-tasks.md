@@ -1,6 +1,6 @@
 # ADR 0003: Supervised tasks, first slice
 
-Status: accepted for the first slice, hardened by "Repair 1" (below) after review of PR #151, "Repair 2" after review of PR #153, and "Repair 3" after review of PR #154 (which also adds durable supervisor attention, research-lane requests, dependencies, vault coherence views and an offline model-evaluation harness; see "Repair 3"). Repair 2 also adds one bounded piece of background behaviour, **automatic follow-up** (below): off by default at two levels (the operator's switch and Rai's per-task opt-in), at most one bounded supervised turn per follow-up due time, budgeted, never re-run when its outcome is uncertain. It is not enabled on any host by this change. Other background autonomy (recurring supervision, self-scheduling, dependencies) is not built.
+Status: accepted for the first slice, hardened by "Repair 1" (below) after review of PR #151, "Repair 2" after review of PR #153, "Repair 3" after review of PR #154 (which also adds durable supervisor attention, research-lane requests, dependencies, vault coherence views and an offline model-evaluation harness; see "Repair 3"), and "Repair 4" after review of PR #155 (which also adds attention delivery that only a completed Assistant turn records, attention counts in Sessions and on the Assistant page, an opt-in supervisor wake that is off by default at two levels, honest cancellation coordination, vault sync recovery and a fail-closed task-turn routing table; see "Repair 4"). Repair 2 also adds one bounded piece of background behaviour, **automatic follow-up** (below): off by default at two levels (the operator's switch and Rai's per-task opt-in), at most one bounded supervised turn per follow-up due time, budgeted, never re-run when its outcome is uncertain. It is not enabled on any host by this change. Other background autonomy (recurring supervision, self-scheduling, dependencies) is not built.
 
 Code: `src/tasks.ts` (record, store, derived views), `src/task-supervisor.ts` (the Assistant's task tools, the task's own tools, bounded turns, the activity block), `src/task-context.ts` (the task-scoped memory policy), `src/task-vault.ts` (status lines through the vault write pipeline), `src/task-scheduler.ts` (the follow-up scheduler, Repair 2), wiring in `src/server.ts` (routes, `prepare`/`allowAgent`, the task-session branch of the thread route, restart recovery), `src/main.ts` (`<state>/tasks.json`, the vault adapter), `src/policy.ts` (the `tasks` port), and hooks in the turn code: `src/thread-service.ts` (`TurnPrep.maxRounds`, `fallback`, `author`, `admit`) and `src/threads.ts` (`ThreadMessage.author`, `Thread.taskSession`). Page: `src/web/index.html` (task banner in a task's session, supervisor-authored messages labeled). Tests: `test/tasks.test.ts` (store, derived status, evidence gate, vault sync with a fake port and through the real pipeline on a temporary bare repository), `test/task-supervisor.test.ts` (real server: acceptance walkthrough, authorization, concurrency and pause, duplicates, restart, the page in Chromium, and one test per Repair 1 finding), `test/task-repair.test.ts` (Repair 1 at unit level: memory policy, admission races through the real thread store and turn code, links across restarts, version 1 files, vault bookkeeping failures), `test/task-repair2.test.ts` (Repair 2 findings), `test/task-scheduler.test.ts` (automatic follow-up with a fake clock).
 
@@ -264,7 +264,10 @@ sequenceDiagram
     A->>S: task_vault_sync -> status line through the vault pipeline (written / recorded reported separately)
 ```
 
-## Routes (owner only; every POST takes `rev` except `/attention`)
+## Routes (owner only; every POST takes `rev` except `/attention` and the wake controls)
+
+Repair 4 adds `GET /tasks/attention` (counts per task with session links, and the wake state), `GET /tasks/wake`, `POST /tasks/wake {enabled, perDay?}` and `POST /tasks/wake/pause {paused, reason?}` (Rai only); `GET /tasks` also reports `routing` and `wake`; `/cancel` answers `cancellation` (see "Repair 4"). No-op updates are rev-checked like every other mutation (Repair 4).
+
 
 `GET /tasks`, `POST /tasks` (create), `GET /tasks/projects?project=&closed=1` (read-only reconciliation; Repair 3), `GET /tasks/:id`, `POST /tasks/:id/follow-up {rev, enabled, perDay?}` (Rai's opt-in; Repair 2; answers `changed`, and `ignored: ["perDay"]` when turning off), `POST /tasks/:id/update {rev, nextAction?, followUpAt?, followUpNote?, project?, vaultNote?, vaultHeading?, dependsOn?, autoFollowUp?: "off"}` (one atomic change; Repair 3), `POST /tasks/:id/attention {attention, note?}` (acknowledge a non-request attention item; Repair 3), `POST /tasks/:id/steer {rev, text, requestId?}`, `/pause`, `/resume`, `/cancel {rev, reason?}`, `/turn {rev, requestId?}` (202, runs in the background; a repeat whose turn record is no longer kept is 409 `expired`), `/evidence {rev, criterion, kind, ref, note?}` (attested), `/respond {rev, request, action, text?, proposalId?, acceptBriefSha256?}` (`acceptBriefSha256`: Rai only, to link a proposal whose brief differs, naming its digest), `/sync` (200 for `synced`, `written-unrecorded`, `already-written`, `up-to-date`; 502 for `failed`, `blocked`, `unknown`), `/complete {rev}`. Errors: 400 bad input, 403 not owner, 404 unknown task, 409 stale rev / conflicting state / not ready / a requestId reused with another payload, 429 at the turn cap or the open-request cap, 503 store unavailable.
 
@@ -474,6 +477,108 @@ Record for each step: what the banner showed, what the Assistant said, and the t
 - An older build (rollback) keeps the new fields but does not maintain them: it does not raise or resolve attention items. A request item whose request was answered meanwhile is not shown as waiting (derived), but other items may be left open until acknowledged.
 - Deferral bookkeeping writes the task file once per deferred task per tick (one minute) while slots stay full.
 - The page check covers the task banner only (two widths, two schemes); other pages were not changed.
+
+## Repair 4: review findings on PR #155, attention delivery, supervisor wake, lifecycles, cancellation, routing
+
+Code: `src/task-attention.ts` (resolution by acknowledgement, ordering, record repair, delivery fields), `src/tasks.ts` (rev checks on no-ops, capacity-wait attention, `repairAttention`, `markUndelivered`, `recordCancellation`, `vault.sync.pending`, `TurnRecord.route`), `src/task-supervisor.ts` (`activity`/`delivered`/`undelivered`, ordered attention, `attentionSummary`, cancellation coordination, routed turns), `src/task-wake.ts` (new: the opt-in supervisor wake), `src/task-routing.ts` (new: the task-turn routing table), `src/task-vault.ts` (pending marker), `src/task-eval.ts` (path confinement), `src/server.ts` (delivery after the Assistant turn, wake turn and routes, `/tasks/attention`, Sessions-list counts, card withdrawal on cancel, routing), `src/assistant-store.ts`/`src/threads.ts` (`author: "orbit-wake"`), `src/main.ts` (`ORBIT_SUPERVISOR_WAKE`, `<state>/supervisor-wake.json`), `src/web/index.html` (Sessions list and tab counts, the Assistant page's task strip and wake control). Tests: `test/task-repair4.test.ts` (unit: findings, delivery, wake, routing, vault recovery), `test/task-repair4-server.test.ts` (server: research and build lifecycles, cancellation, delivery through the Assistant route, wake end to end, the pages in Chromium), `test/task-walkthrough4.test.ts` (the combined walkthrough with a restart), `test/task-eval.test.ts` (new fixtures).
+
+### Priority 1: the four reported findings
+
+Reports, not proven defects. Each was reproduced on `main` at 2eead11 (a scratch test against main's own store, scheduler and harness, run in a separate worktree; output quoted) before it was fixed.
+
+| # | Finding | Observed on main | Fix | Tests |
+|---|---|---|---|---|
+| 1 (blocking) | acknowledged `turn-failed`/`turn-interrupted` items were never resolved or pruned and, five of them, pushed newer attention out of the bounded activity block | five acknowledges each answered `acknowledged`; the block then showed `turn-failed:acknowledged` ×5 and not the new blocker, whose `surfaced` stayed `null` | acknowledging a past turn outcome **resolves** it (the ADR's own rule), keeping the `ack` (who, when, note) on the resolved item; items are shown **most actionable first** (undelivered requests, other undelivered items, delivered-but-open requests, other open items, derived, acknowledged; oldest first within each group) with `notShown` counting the rest; tasks with the same score are ordered by their oldest undelivered item; resolved history is pruned by resolution time with a count (`attentionPruned`); stored records are **repaired once at start** (`repairAttention`: acknowledged turn items and request items whose request is no longer pending are resolved; idempotent; no rev bump) and every view applies the same rules read-only, so a record is shown right even before (or without) the repair write | `task-repair4`: reproduction, ordering, no starvation with more than 5 items per task and more than 8 tasks, record repair (write failure, idempotency, ack kept); `task-acceptance` step 11 updated |
+| 2 | a capacity deferral never gave up and never raised attention | 180 ticks over 3 hours: `capacity-wait`, 180 deferrals, 0 attempts, 0 attention items, 180 file writes | still a deferral (no attempt, no backoff beyond the 1-minute tick, oldest due first, never gives up for capacity alone), but a wait longer than `AUTO_CAPACITY_ATTENTION_MS` (30 minutes) raises **one** `capacity-wait` item per due time (later deferrals only move its time; an acknowledged one is not reopened); it resolves when the turn starts or the follow-up time is replaced | `task-repair4` (session busy for 35+ ticks; short waits raise nothing), `task-scheduler` updated |
+| 3 | no-op paths skipped the rev check | `updateDetailed(rev+7, {})` and `setAutoDetailed(rev+7, off)` both answered `changed: false` | the same `staleCheck` runs on every mutation path, including no-ops: a stale rev is 409 whether or not anything would change; from the current rev a no-op still writes nothing | `task-repair4`, `task-repair3` finding-a test updated |
+| 4 | the eval harness wrote scenario vault paths without confinement | a scenario path `../../escaped-by-eval.md` **was written outside** the harness's temporary vault | every scenario path is checked before anything runs (`scenarioPathProblem`: relative, plain segments, no `..`/`.`/empty segments, no absolute, `~`, drive letter, backslash or control character); writes go through `writeConfined` (each directory created here or a real directory, a symbolic link anywhere refused, the parent's real path inside the root's, `O_CREAT|O_EXCL|O_NOFOLLOW`) | `task-repair4`: spellings, symlinked directory, planted file link, no overwrite, refusal before any model call |
+
+What is and is not guaranteed after the fix: unresolved items are never dropped; resolved items beyond 100 per task are dropped with a count; the block shows at most 8 tasks and 5 items per task per Assistant turn, so delivery of a large backlog takes several completed turns (each delivers what it showed; nothing is skipped). Deferral bookkeeping still writes the task file once per deferred task per tick (1/minute), which is bounded but not free.
+
+### Delivery is not acknowledgement or resolution
+
+Before: `surfaced` was written when the activity block was built, so an Assistant turn that then failed or was interrupted still marked its items as seen (a Repair 3 limit). Now the block records nothing; the server marks what it showed **delivered** (`surfaced`) only after the Assistant turn completed without an error, and counts a failed turn on each item (`undelivered`). An interrupted turn (ORBIT stopped) records nothing, so its items stay `new`. Delivery never acknowledges or resolves: a delivered request stays open until it is answered. Tests: `task-repair4` (failed, interrupted, restart), `task-repair4-server` (a model failure through `POST /assistant/messages`, then a completed turn).
+
+### Attention in Sessions and the Assistant page
+
+`GET /threads` (owner) carries `task: {task, lifecycle, open, new, derived}` on each task session; the Sessions list says "N need(s) attention (M new)" on that row (gold edge as a cue only) and the Sessions tab shows how many task sessions need attention. `GET /tasks/attention` (owner) returns counts per task with session links; the Assistant page shows a strip "Tasks needing attention" linking to each task session, and the wake control where the operator switch is on. Reading these delivers nothing. Checked in Chromium at 1200×900 and 390×844, light and dark, no horizontal overflow (`task-repair4-server` page test).
+
+### The opt-in supervisor wake (`src/task-wake.ts`)
+
+Off by default at two levels, both required: the operator's `ORBIT_SUPERVISOR_WAKE=on` (no deploy file sets it) and Rai's own opt-in (`POST /tasks/wake {enabled, perDay?}`, the Assistant page's "Allow supervisor wake"). No model can turn it on; the Assistant has no tool for it.
+
+| Bound | Value |
+|---|---|
+| Trigger | open attention that no completed Assistant turn was given (`new`) |
+| Concurrency | one wake at a time; never while the Assistant has a reply in progress (then nothing is claimed; the attention stays pending) |
+| Rate | at least 20 minutes between wake starts |
+| Budget | `perDay` wake turns per rolling 24 hours (default 4, at most 12); counts turns, not spend |
+| Retries | an item causes at most 2 wakes; then it waits for Rai's next Assistant turn (shown as `waitingForRai`, never marked handled) |
+| Failures | 3 wake turns in a row ending in an error pause it with the reason; only Rai resumes |
+| Turn | one Assistant turn authored `orbit-wake` ("ORBIT supervisor wake", never Rai), at most 6 tool rounds, **no paid fallback**, tools: read-only ones plus `task_respond`, `task_attention_ack`, `task_steer`, `task_update`, `job_launch`, `research_launch` (proposals: cards wait for Rai's Confirm); no vault writes, ops, workspace changes, task turns, task creation, pause/resume or vault sync |
+| Restart | claimed (written `running`, with its items and try counts) before the turn starts; nothing starts if that write fails; a wake still `running` at start becomes `interrupted` and is never re-run; its items stay undelivered |
+| Controls | `GET /tasks/wake`, `POST /tasks/wake {enabled, perDay?}`, `POST /tasks/wake/pause {paused, reason?}` (Rai only); turning it off or unsetting the operator switch stops it |
+
+Rai's own send while a wake turn runs is refused (409) as for another tab; nothing is queued or lost. Tests: `task-repair4` (defaults, opt-in authority, rate, budget, retry limit, busy, not-started, claim on disk, restart, failure pause), `task-repair4-server` (end to end through the server, tools offered and withheld, fallback off, author, delivery), `task-walkthrough4` (restart during a wake).
+
+### Task requests: build and research lifecycles
+
+Unchanged rules, now tested end to end through the server for both lanes: the task requests; the Assistant evaluates and proposes on the request's own lane (`job_launch` for build, `research_launch` for research, whose brief is `Research question: <request text>` + the request's brief); the link binds the proposal to that task, request, lane and brief (exact or Rai's digest acceptance) and is globally exclusive; only Rai's Confirm launches; status is derived (`awaiting-confirmation` → `confirmed` → `running` → `result`, or `not-confirmed`); a repeat link is a duplicate; a build proposal never answers research nor text a launch request. A runner's summary ("done", "approved") is a run result: the task's evidence citing it stays `claimed`; `execution: verified` says only that ORBIT's own records tie the job to the request; completion remains Rai's attestation (`task-repair4-server`: research and build lifecycle tests).
+
+### Cancellation: task versus cloud job
+
+Cancelling a task (Rai only) stops a running supervised turn of it and, new here, **withdraws the task's open launch cards** exactly as the card's own Cancel does (nothing launches for a cancelled task). It does **not** and cannot stop a cloud job: ORBIT has no job cancellation. The cancel answer and the task (`cancellation.recorded`, written right after the cancel) list each launch request with its outcome: `card-withdrawn`, `card-not-withdrawn` (with why), `continuing` ("NOT stopped: ORBIT cannot cancel a cloud job"), `ended` (already ended before), `not-launched`, `unknown`; `jobCancellation: "unsupported"`. The view's `cancellation.now` follows the job store, so a continuing run is shown until the job store says it ended. Tests: `task-repair4-server`, `task-walkthrough4` step 11.
+
+### Vault mapping and recovery
+
+Unchanged: explicit link (note under `Projects/` or `Tasks/`, existing heading), append-only through the policy-checked pipeline, protected notes `blocked` without proposals, idempotent by key, manual retry, project association by `project` and read-only reconciliation (`GET /tasks/projects`). New: the sync records `pending {key, at}` **before** the vault write and clears it with the outcome. If the outcome can never be recorded (ORBIT stopped mid-write, or the record after a successful write failed), the task shows coherence **`unconfirmed`** with the attempt time instead of silently keeping its previous state; the retry finds the line by its key, writes no second line and records it. If the pre-write record fails, nothing is written to the vault. Rai's text is never touched (append only). Tests use fake ports only: `task-repair4` (restart in between), `task-walkthrough4` step 10. No real vault was written.
+
+### Task-turn model routing (`src/task-routing.ts`)
+
+An explicit table from turn kind (`supervised`, `automatic`, `interactive`) to configured model ports (`Deps.taskModels: {ports, routes}`). No table (main.ts configures none): every task turn uses the default port, exactly as before. A route to an unknown port, a port marked `paid`, or a port that cannot call tools refuses that kind of turn (503, with the reason; no silent fallback). Each turn records the actual `impl` and, when routed, the port name (`TurnRecord.route`); `GET /tasks` reports the table (`routing`). Task turns never use the paid fallback on any port. No provider is added and no model is recommended. See docs/task-model-routing.md for the deferred real-model evaluation plan.
+
+### Acceptance matrix (Repair 4)
+
+Simulated means: the real server and stores over temporary directories, scripted models, the fixture's fake routines, fake vault ports, operator switches on inside tests only. **None of this is live production validation.**
+
+| Capability | State | Evidence |
+|---|---|---|
+| Finding 1: acknowledged turn items resolved, ordering, no starvation, record repair | Implemented, tested | `task-repair4` (4 tests), `task-acceptance` |
+| Finding 2: prolonged capacity wait surfaced, no attempts, no hot loop, oldest first | Implemented, tested | `task-repair4` (2), `task-scheduler` |
+| Finding 3: rev checks on no-op updates | Implemented, tested | `task-repair4`, `task-repair3` |
+| Finding 4: eval path confinement (traversal, absolute, symlinks) | Implemented, tested | `task-repair4` (3) |
+| Delivery distinct from acknowledgement/resolution; failed and interrupted Assistant turns; restart | Implemented, tested | `task-repair4`, `task-repair4-server` |
+| Attention badges and counts in Sessions and the Assistant page with session links | Implemented, tested (Chromium, light/dark, desktop/phone) | `task-repair4-server` page test |
+| Rai's direct steering visible to the supervisor | Implemented (Repair 3), tested again | `task-walkthrough4` step 2 |
+| Opt-in supervisor wake: default off, restart-safe, concurrency, rate, retry, budget, pause, no paid fallback, no approvals | Implemented, tested (simulated; operator switch on in tests only) | `task-repair4` (3), `task-repair4-server`, `task-walkthrough4` |
+| Build request lifecycle (refusal, cancellation of a card, re-proposal, confirm, running, result, cross-task duplicate) | Tested end to end (fake routine) | `task-repair4-server` |
+| Research request lifecycle on the research lane through `research_launch` (configured lane, fake research routine) | Tested end to end | `task-repair4-server` |
+| Runner claims unverified; job completion is not task completion | Tested | `task-repair4-server`, `task-walkthrough4` step 12 |
+| Cancellation truthfulness (cards withdrawn, jobs continuing, unsupported) | Implemented, tested | `task-repair4-server`, `task-walkthrough4` step 11 |
+| Vault pending/unconfirmed recovery; Rai's text untouched | Implemented, tested (fake ports) | `task-repair4`, `task-walkthrough4` step 10 |
+| Routing table, fail closed, default unchanged | Implemented, tested (scripted ports); **not configured** anywhere | `task-repair4` |
+| Combined walkthrough: create/link, steering, concurrency, dependency, blocker escalation, follow-up and wake opt-ins, budgets, pause/resume, restart with interruption, vault recovery, cancellation, human-only completion | Tested (simulated) | `task-walkthrough4` |
+| Prior regressions: memory exclusion including absolute paths, atomic admission and rollback, photo-only input | Unchanged suites pass | `task-supervisor`, `task-repair`, `task-repair2`, eval fixture `context-isolation-absolute-path` |
+| Evaluation fixtures (9 scenarios, offline) | Extended, tested with scripted ports | `task-eval` |
+| Real-model evaluation, routing changes, new providers | **Deferred** (plan in docs/task-model-routing.md) | |
+| Vault schema mapping (front matter, checkboxes), reading human edits back, sync on change | **Deferred** (needs the vault's task schema reviewed) | |
+| Live host verification | **Not done** (runbook: docs/task-live-runbook.md) | |
+
+### Remaining work (exact)
+
+1. Live verification on a host with docs/task-live-runbook.md (nothing here ran on a host).
+2. A recorded real-model evaluation with the harness, approved separately, before any routing table is configured.
+3. Vault schema mapping and reading human edits back, after the vault's task schema is reviewed.
+4. A banner action to answer a clarification or blocker from Sessions (Rai answers through the Assistant or `POST /tasks/:id/respond` today).
+5. Wall-time and spend budgets (the follow-up and wake budgets count turns, not money).
+
+### Limits (Repair 4)
+
+- Simulated only. The wake was exercised with a scripted model; its usefulness with a real model is unmeasured.
+- A wake turn is an Assistant turn: it appears in Rai's Assistant conversation (labeled), takes the Assistant's lock while it runs (Rai's send then gets 409), and feeds the Assistant's rolling summary like any turn.
+- Withdrawing open cards on cancel uses the proposal store and the card; a card made before a restart is already expired (shown `not-launched`).
+- The wake's try limit counts wakes per item, not model calls; an item that waits for Rai stays visible in the strip and the banner.
+- The Sessions badge reads task counts from the task store at list time; it refreshes with the Sessions poll, not instantly.
 
 ## Next slice (prioritized plan; not built here)
 

@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, lstatSync, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { proposals as newProposals } from "./agent.ts";
 import type { ChatTool } from "./agent.ts";
 import { vaultMemory } from "./memory.ts";
@@ -68,6 +68,60 @@ export type EvalReport =
       summary: { scenarios: number; passed: number; byCategory: Record<string, { passed: number; total: number }> };
     };
 
+// Scenario vault paths (Repair 4, review finding 4 on PR #155). A scenario's synthetic notes are written under the evaluation's own
+// temporary vault directory and NOWHERE else, by construction:
+// - checked as a spelling first (scenarioPathProblem): a plain relative path of at most 8 segments, each a safe name (no `..`, no `.`,
+//   no empty segment), no absolute path (`/`, `\\`, `~`, a drive letter), no backslash, no control character, at most 200 characters;
+// - then confined on disk (writeConfined): every directory on the way is created by this code or must already be a real directory (a
+//   symbolic link anywhere on the path is refused), the parent's real path must be inside the root's real path, and the file is created
+//   with O_CREAT|O_EXCL|O_NOFOLLOW, so an existing file or a planted link at the target is refused instead of followed or overwritten.
+// Every scenario is checked BEFORE any scenario runs or anything is sent to a model: one bad path refuses the whole evaluation.
+const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9 ._()&,'+-]{0,99}$/;
+export function scenarioPathProblem(p: unknown): string | undefined {
+  if (typeof p !== "string" || !p) return "the path is empty or not text";
+  if (p.length > 200) return "the path is longer than 200 characters";
+  if (/[\u0000-\u001f\u007f]/.test(p)) return "the path contains a control character";
+  if (p.includes("\\")) return "the path contains a backslash";
+  if (isAbsolute(p) || p.startsWith("~") || /^[A-Za-z]:/.test(p)) return "the path is absolute; scenario paths are relative to the evaluation's temporary vault";
+  const parts = p.split("/");
+  if (parts.length > 8) return "the path has more than 8 segments";
+  for (const x of parts) {
+    if (x === "" || x === ".") return "the path has an empty or '.' segment";
+    if (x === "..") return "the path has a '..' segment, which could leave the temporary vault";
+    if (!SEGMENT.test(x)) return `the segment ${JSON.stringify(x.slice(0, 40))} is not a plain file or directory name`;
+  }
+  return undefined;
+}
+export function writeConfined(root: string, rel: string, text: string): void {
+  const problem = scenarioPathProblem(rel);
+  if (problem) throw new Error(`refused scenario path ${JSON.stringify(rel.slice(0, 80))}: ${problem}`);
+  const realRoot = realpathSync(root);
+  const target = resolve(realRoot, rel);
+  const back = relative(realRoot, target);
+  if (!back || back.startsWith("..") || isAbsolute(back)) throw new Error(`refused scenario path ${JSON.stringify(rel)}: it resolves outside the temporary vault`);
+  const parts = rel.split("/");
+  let cur = realRoot;
+  for (const d of parts.slice(0, -1)) {
+    cur = join(cur, d);
+    let st;
+    try {
+      st = lstatSync(cur);
+    } catch {
+      mkdirSync(cur);
+      st = lstatSync(cur);
+    }
+    if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`refused scenario path ${JSON.stringify(rel)}: ${relative(realRoot, cur)} is ${st.isSymbolicLink() ? "a symbolic link" : "not a directory"}`);
+  }
+  const parent = realpathSync(cur);
+  if (parent !== realRoot && !parent.startsWith(realRoot + sep)) throw new Error(`refused scenario path ${JSON.stringify(rel)}: its directory resolves outside the temporary vault`);
+  const fd = openSync(join(parent, parts.at(-1)!), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+  try {
+    writeSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 const noObs: Observers = { proposal: () => ({ state: "unknown" }), job: () => ({ found: false, why: "evaluation: no job store" }) };
 const itemText = (i: Item): string => ("content" in i && typeof i.content === "string" ? i.content : "output" in i && typeof i.output === "string" ? i.output : "arguments" in i && typeof i.arguments === "string" ? i.arguments : "");
 
@@ -98,6 +152,11 @@ export async function runTaskEval(o: { model: ModelPort; allow: readonly string[
   if (!o.allow.includes(st.impl)) return { ran: false, refused: `${st.impl} is not in the allowed list (${o.allow.join(", ")}); nothing was sent to it`, model };
   if (st.state !== "live") return { ran: false, refused: `the model port is ${st.state}, not live: ${st.detail}`, model };
   if (!o.model.step) return { ran: false, refused: "the model port cannot call tools, so no task turn can run", model };
+  for (const sc of o.scenarios)
+    for (const p of Object.keys(sc.vault ?? {})) {
+      const problem = scenarioPathProblem(p);
+      if (problem) return { ran: false, refused: `scenario ${sc.id}: vault path ${JSON.stringify(p.slice(0, 80))} is refused (${problem}); nothing was run or sent`, model };
+    }
   const results: EvalResult[] = [];
   for (const sc of o.scenarios) results.push(await runOne(o.model, sc, o.now));
   const byCategory: Record<string, { passed: number; total: number }> = {};
@@ -121,10 +180,7 @@ async function runOne(model: ModelPort, sc: EvalScenario, now?: () => Date): Pro
   try {
     const root = join(dir, "vault");
     mkdirSync(root, { recursive: true });
-    for (const [p, text] of Object.entries(sc.vault ?? {})) {
-      mkdirSync(dirname(join(root, p)), { recursive: true });
-      writeFileSync(join(root, p), text);
-    }
+    for (const [p, text] of Object.entries(sc.vault ?? {})) writeConfined(root, p, text);
     const memory = taskMemory(vaultMemory(root));
     const clock = now ?? (() => new Date());
     let tasks = taskStore(taskFile(join(dir, "state")), clock);

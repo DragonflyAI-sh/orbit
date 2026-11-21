@@ -128,8 +128,15 @@ export function taskVaultSync(deps: { tasks: Tasks; port: TaskVaultPort | undefi
         return { state: "failed", error, key, written: false, recorded };
       }
       if (text.includes(marker(t.id, key))) {
-        const recorded = record(id, { ...attempt, state: "synced", syncedKey: key, lastSuccessAt: at.toISOString(), lastError: undefined });
+        const recorded = record(id, { ...attempt, state: "synced", syncedKey: key, lastSuccessAt: at.toISOString(), lastError: undefined, pending: undefined });
         return { state: "already-written", key, written: false, recorded, ...(recorded ? {} : { error: "The line is already in the vault, but ORBIT could not record that on the task.", retry: RETRY_RECORD }) };
+      }
+      // Repair 4: the attempt is recorded BEFORE the write, so if the outcome can never be recorded (ORBIT stops mid-write, or the record
+      // after a successful write fails) the task shows `unconfirmed` instead of silently keeping its previous state. If even this record
+      // cannot be written, nothing is written to the vault.
+      if (!record(id, { pending: { key, at: at.toISOString() } })) {
+        const error = "NOT saved: ORBIT could not record the sync attempt on the task before writing, so it did not write to the vault. Nothing was written.";
+        return { state: "failed", error, key, written: false, recorded: false };
       }
       let commit: string;
       try {
@@ -143,11 +150,12 @@ export function taskVaultSync(deps: { tasks: Tasks; port: TaskVaultPort | undefi
             ? `NOT confirmed saved: the vault pipeline could not confirm whether the line reached the vault (${e instanceof VaultError ? `${e.code}: ` : ""}${e instanceof Error ? e.message.slice(0, 300) : "error"}). Treat it as not saved; a retry is safe, since it finds the line by its key if it did land.`
             : `NOT saved (${(e as VaultError).code}): ${(e as VaultError).message} Nothing was written.`;
         const state = blocked ? "blocked" : open ? "unknown" : "failed";
-        const recorded = record(id, { ...attempt, state, lastError: error.slice(0, 500) });
+        // An open-ended outcome keeps `pending`: whether the line landed is exactly what is not known.
+        const recorded = record(id, { ...attempt, state, lastError: error.slice(0, 500), ...(open ? {} : { pending: undefined }) });
         return { state, error, key, written: false, recorded, ...(open ? { retry: "Run the sync again." } : {}) };
       }
       // The pipeline committed, pushed and verified the line. From here on the vault write is a fact, whatever the bookkeeping does.
-      const recorded = record(id, { ...attempt, state: "synced", syncedKey: key, commit, lastSuccessAt: now().toISOString(), lastError: undefined });
+      const recorded = record(id, { ...attempt, state: "synced", syncedKey: key, commit, lastSuccessAt: now().toISOString(), lastError: undefined, pending: undefined });
       if (recorded) return { state: "synced", commit, key, written: true, recorded: true };
       return { state: "written-unrecorded", commit, key, written: true, recorded: false, error: `The status line WAS committed and pushed (commit ${commit.slice(0, 12)}), but ORBIT could not record that on the task, so the task still shows its previous sync state.`, retry: RETRY_RECORD };
     } finally {

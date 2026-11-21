@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { maskContent } from "./threads.ts";
-import { raise, resolve, resolveWhere, REQUEST_ATTENTION } from "./task-attention.ts";
+import { raise, repairItems, resolve, resolveWhere, REQUEST_ATTENTION, RESOLVED_BY_ACK } from "./task-attention.ts";
 import type { Attention } from "./task-attention.ts";
 
 // Supervised tasks (docs/adr/0003-supervised-tasks.md), first slice.
@@ -127,6 +127,8 @@ export type TurnRecord = {
   instructionsSeen: number;
   // The model port the turn ran on (its `impl` string at the time), recorded, never chosen here.
   model: string;
+  // Repair 4: the configured port name the turn was routed to (src/task-routing.ts), when a routing table chose a non-default port.
+  route?: string;
   // The thread messages of this turn (the supervisor's prompt and the task's reply), when it started a reply.
   message?: string;
   reply?: string;
@@ -154,6 +156,11 @@ export type VaultLink = {
     lastError?: string;
     // There is no automatic retry in this slice: a failed sync stays failed until someone asks again.
     retry: "manual";
+    // Repair 4: written (bookkeeping) BEFORE the vault write is attempted and cleared when its outcome is recorded. Still present means
+    // the outcome of that attempt was never recorded (ORBIT stopped, or the record after a successful write failed): the vault may or
+    // may not hold the line with this key. Shown as coherence `unconfirmed`; the next sync finds the line by its key and records it
+    // without writing a second one.
+    pending?: { key: string; at: string };
   };
 };
 
@@ -169,6 +176,11 @@ export const AUTO_WINDOW_MS = 24 * 60 * 60 * 1000;
 // these waits. Nothing else is retried automatically.
 export const AUTO_RETRY_BACKOFF_MS: readonly number[] = [60_000, 5 * 60_000, 15 * 60_000];
 export const AUTO_ATTEMPTS_MAX = AUTO_RETRY_BACKOFF_MS.length + 1;
+// A capacity deferral that has lasted this long is a PROLONGED wait (Repair 4, review finding 2 on PR #155): it raises one attention
+// item for that due time (`capacity-wait`), so a follow-up stuck behind busy slots or a session whose reply never ends is visible to the
+// supervisor and Rai. It is still a deferral: no attempt is used, the scheduler keeps trying every tick, oldest due first, and the item
+// resolves when the turn starts or the follow-up time is replaced.
+export const AUTO_CAPACITY_ATTENTION_MS = 30 * 60_000;
 // What the scheduler did for one due time:
 // - retry-wait: a pre-dispatch failure (nothing was sent to a model); tried again at `nextTryAt`, `attempts` so far;
 // - gave-up: pre-dispatch failures reached AUTO_ATTEMPTS_MAX, or a failure that is not transient; no further automatic attempt for
@@ -237,11 +249,20 @@ export type Task = {
   // Supervisor attention (Repair 3, src/task-attention.ts): durable, deduplicated items raised in the same store change as their cause.
   attention?: Attention[];
   attentionSeq?: number;
+  // Resolved attention items dropped from `attention` once more than ATTENTION_KEPT were kept (Repair 4): how many, and the newest
+  // resolution time among them. Unresolved items are never dropped.
+  attentionPruned?: { count: number; lastResolvedAt: string };
+  // What cancelling the task did to the runs it had asked for (Repair 4), recorded by ORBIT right after Rai's cancellation: open launch
+  // cards withdrawn (or why not), and runs that ORBIT could NOT stop (ORBIT has no way to cancel a cloud job; they continue, and their
+  // result is a run result, not task completion). Facts from ORBIT's records only; nothing here claims a job stopped.
+  cancellation?: TaskCancellation;
   // Explicit dependencies on other tasks (Repair 3). A dependency is met only when that task's lifecycle is `done` (Rai marked it done
   // with attested evidence); a job ending, even a verified one, never meets it. Set by Rai or the Assistant; cycles are refused.
   dependsOn?: { task: string; at: string; by: Provenance }[];
 };
 
+export type CancellationRun = { request: string; lane: "build" | "research"; proposal: string; before: string; job?: string; jobState?: string; outcome: "card-withdrawn" | "card-not-withdrawn" | "continuing" | "ended" | "not-launched" | "unknown"; detail: string };
+export type TaskCancellation = { at: string; by: Provenance; runs: CancellationRun[]; jobCancellation: "unsupported" };
 export type UpdatePatch = { nextAction?: unknown; followUpAt?: unknown; followUpNote?: unknown; project?: unknown; vaultNote?: unknown; vaultHeading?: unknown; dependsOn?: unknown; autoFollowUp?: unknown };
 export type IdemOp = "steer" | "turn";
 export type IdemRecord = { op: IdemOp; key: string; digest: string; at: string; instruction?: number; turn?: number };
@@ -524,6 +545,7 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
   let file: TaskFile | undefined;
   let problem: string | undefined;
   let recovered = false;
+  let attentionRepaired = false;
 
   const load = (): TaskFile => {
     if (file) return file;
@@ -573,7 +595,7 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     const f = load();
     const cur = get(id);
     if (!cur) throw new TaskError(404, "No task with that id.");
-    if (o.expectRev !== undefined && o.expectRev !== cur.rev) throw new TaskError(409, `stale: this task changed since rev ${o.expectRev} (it is at rev ${cur.rev}). Nothing was changed; inspect it again and retry with the current rev.`);
+    staleCheck(cur, o.expectRev);
     if (!o.allowTerminal && TERMINAL.includes(cur.lifecycle)) throw new TaskError(409, `This task is ${cur.lifecycle}. Nothing was changed.`);
     const t = structuredClone(cur);
     const result = fn(t);
@@ -583,6 +605,11 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     }
     commit({ ...f, tasks: f.tasks.map((x) => (validTask(x) && x.id === id ? t : x)) });
     return { task: structuredClone(t), result };
+  }
+  // The optimistic revision check, shared by change() and the no-op paths (Repair 4): a mutation based on another rev is refused (409)
+  // whether or not it would change anything.
+  function staleCheck(cur: Task, expectRev: number | undefined) {
+    if (expectRev !== undefined && expectRev !== cur.rev) throw new TaskError(409, `stale: this task changed since rev ${expectRev} (it is at rev ${cur.rev}). Nothing was changed; inspect it again and retry with the current rev.`);
   }
   const requireRev = (rev: unknown): number => {
     if (typeof rev !== "number" || !Number.isSafeInteger(rev) || rev < 1) throw new TaskError(400, "rev is required: the task's current rev from tasks_list or task_inspect, so a change based on an old view is refused.");
@@ -636,6 +663,9 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       const cur = get(id);
       if (!cur) throw new TaskError(404, "No task with that id.");
       const ignored = sent ? ["perDay"] : [];
+      // Repair 4 (review finding 3 on PR #155): a no-op is rev-checked like every other mutation, so a stale view is told it is stale
+      // even when nothing would change. Nothing is written either way.
+      staleCheck(cur, expectRev);
       if (!cur.auto?.enabled) return { task: structuredClone(cur), changed: false, ignored };
       const { task } = change(id, { expectRev, allowTerminal: true }, (t) => {
         t.auto = { ...t.auto!, enabled: false, changedAt: now().toISOString(), changedBy: by };
@@ -662,6 +692,8 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     const notes: string[] = [];
     const offNoop = patch.autoFollowUp === "off" && !cur.auto?.enabled;
     if (offNoop) notes.push("automatic follow-up was already off; nothing to change");
+    // Repair 4: rev-checked even when nothing would change (see staleCheck).
+    staleCheck(cur, expectRev);
     if (!fields.length && (patch.autoFollowUp === undefined || offNoop)) return { task: structuredClone(cur), changed: false, notes };
     const { task } = change(id, { expectRev }, (t) => {
       const at = now().toISOString();
@@ -828,7 +860,7 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     //   and a turn record starts that has seen it. A photo-only message starts the turn and records no instruction.
     // - paused: the text is recorded as instruction v(n+1) for when the task resumes; no turn starts. A photo-only message records nothing.
     // `expect` is the lifecycle the reply was prepared for; if the task changed meanwhile, nothing is recorded (409; send again).
-    admitHuman(id: string, input: { text: string; photos: number }, by: Provenance, model: string, expect: "active" | "paused"): { task: Task; instruction?: Instruction; turn?: TurnRecord } {
+    admitHuman(id: string, input: { text: string; photos: number }, by: Provenance, model: string, expect: "active" | "paused", route?: string): { task: Task; instruction?: Instruction; turn?: TurnRecord } {
       const clean = cleanText(input.text, TASK_INSTRUCTION_MAX);
       const cur = get(id);
       if (!cur) throw new TaskError(404, "No task with that id.");
@@ -849,7 +881,7 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         let turn: TurnRecord | undefined;
         if (expect === "active") {
           t.turnSeq = (t.turnSeq ?? t.turns.length) + 1;
-          turn = { n: t.turnSeq, startedAt: now().toISOString(), state: "running", trigger: by, instructionsSeen: currentInstructionVersion(t), model, ...(input.photos ? { photos: input.photos } : {}) };
+          turn = { n: t.turnSeq, startedAt: now().toISOString(), state: "running", trigger: by, instructionsSeen: currentInstructionVersion(t), model, ...(route ? { route } : {}), ...(input.photos ? { photos: input.photos } : {}) };
           t.turns = [...t.turns, turn].slice(-TASK_TURNS_KEPT);
         }
         return { instruction, turn };
@@ -918,7 +950,7 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     // `auto`: the follow-up scheduler starting the automatic turn for the follow-up due at `dueAt`. Eligibility is checked again here,
     // inside the same store change that records the turn and claims the due time, so the claim and the start are one durable fact:
     // a second tick, a restart or a racing start finds the due time claimed (or a turn running) and starts nothing.
-    beginTurn(id: string, expectRev: number | undefined, trigger: Provenance, model: string, key?: string, auto?: { dueAt: string; globalMax: number }): { task: Task; turn: TurnRecord; duplicate: boolean } {
+    beginTurn(id: string, expectRev: number | undefined, trigger: Provenance, model: string, key?: string, auto?: { dueAt: string; globalMax: number }, route?: string): { task: Task; turn: TurnRecord; duplicate: boolean } {
       const again = priorTurn(id, expectRev, key);
       if (again) return { ...again, duplicate: true };
       const digest = digestOf({ rev: expectRev ?? null });
@@ -931,14 +963,14 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         if (t.lifecycle !== "active") throw new TaskError(409, `This task is ${t.lifecycle}: no turn is started.`);
         if (runningTurn(t)) throw new TaskError(409, "A turn of this task is already running. Turns of one task run one at a time.");
         t.turnSeq = (t.turnSeq ?? t.turns.length) + 1;
-        const turn: TurnRecord = { n: t.turnSeq, startedAt: now().toISOString(), state: "running", trigger, instructionsSeen: currentInstructionVersion(t), model };
+        const turn: TurnRecord = { n: t.turnSeq, startedAt: now().toISOString(), state: "running", trigger, instructionsSeen: currentInstructionVersion(t), model, ...(route ? { route } : {}) };
         t.turns = [...t.turns, turn].slice(-TASK_TURNS_KEPT);
         remember(t, "turn", key, digest, { turn: turn.n });
         if (auto && t.auto) {
           const before = t.auto.slot?.dueAt === auto.dueAt ? t.auto.slot : undefined;
           // Capacity deferrals are carried over for the record; they never counted as attempts.
           t.auto.slot = { dueAt: auto.dueAt, state: "started", at: turn.startedAt, attempts: (before?.attempts ?? 0) + 1, turn: turn.n, ...(before?.deferrals ? { deferrals: before.deferrals, deferredSince: before.deferredSince } : {}) };
-          resolveWhere(t, turn.startedAt, (a) => a.kind === "budget" && a.source.type === "follow-up" && a.source.dueAt === auto.dueAt, `automatic turn ${turn.n} started for this follow-up`);
+          resolveWhere(t, turn.startedAt, (a) => (a.kind === "budget" || a.kind === "capacity-wait") && a.source.type === "follow-up" && a.source.dueAt === auto.dueAt, `automatic turn ${turn.n} started for this follow-up`);
           t.auto.started = [...t.auto.started, turn.startedAt].slice(-AUTO_PER_DAY_LIMIT);
         }
         return turn;
@@ -962,7 +994,14 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         const error = cleanText(failure.error, 300);
         const carry = cur?.deferrals ? { deferrals: cur.deferrals, deferredSince: cur.deferredSince } : {};
         if (failure.capacity) {
-          t.auto.slot = { dueAt, state: "capacity-wait", at: iso, attempts: cur?.attempts ?? 0, deferrals: (cur?.deferrals ?? 0) + 1, deferredSince: cur?.deferredSince ?? iso, error };
+          const since = cur?.deferredSince ?? iso;
+          t.auto.slot = { dueAt, state: "capacity-wait", at: iso, attempts: cur?.attempts ?? 0, deferrals: (cur?.deferrals ?? 0) + 1, deferredSince: since, error };
+          // Repair 4: a prolonged wait is surfaced (once per due time; repeats counted), without using an attempt.
+          const waited = at.getTime() - Date.parse(since);
+          const open = t.attention?.find((a) => a.key === `capacity:${dueAt}` && a.state !== "resolved");
+          // Raised once; later deferrals only move its time (never reopen an acknowledged one: the wait is the same wait).
+          if (open) open.lastAt = iso;
+          else if (waited >= AUTO_CAPACITY_ATTENTION_MS) raise(t, iso, { key: `capacity:${dueAt}`, kind: "capacity-wait", summary: `The automatic follow-up due ${dueAt} has waited ${Math.floor(waited / 60_000)} minutes for a free task turn slot (${t.auto.slot.deferrals} deferrals since ${since}; last: ${error.slice(0, 120)}). It uses no attempts and still starts when a slot frees; free a slot, start a turn, or set a new follow-up time.`, source: { type: "follow-up", dueAt } });
           return;
         }
         const attempts = (cur?.attempts ?? 0) + 1;
@@ -1141,14 +1180,18 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         if (a.state === "resolved") throw new TaskError(409, `${a.id} is already resolved (${a.resolved?.why ?? ""}). Nothing was changed.`);
         if (a.state === "acknowledged") return { item: structuredClone(a), duplicate: true };
         const n = cleanText(note, TASK_NOTE_MAX);
-        a.state = "acknowledged";
-        a.ack = { at: now().toISOString(), by, ...(n ? { note: n } : {}) };
+        const at = now().toISOString();
+        a.ack = { at, by, ...(n ? { note: n } : {}) };
+        // Repair 4: a past turn outcome has no later cause to clear, so its acknowledgement resolves it (the ack is kept on the item).
+        if (RESOLVED_BY_ACK.includes(a.kind)) Object.assign(a, { state: "resolved", resolved: { at, why: `acknowledged by ${actorLabel(by)}${n ? `: ${n.slice(0, 200)}` : ""}` } });
+        else a.state = "acknowledged";
         return { item: structuredClone(a), duplicate: false };
       });
       return { task, ...result };
     },
-    // Records that these items were shown to the Assistant (its task-activity block). One write for all tasks; no rev bump. Being shown
-    // changes nothing else: an item stays open until it is answered, resolved or acknowledged.
+    // Records that these items were DELIVERED: shown to the Assistant in a turn that completed (Repair 4: the caller marks them only
+    // after the Assistant's reply was stored without an error; src/server.ts). One write for all tasks; no rev bump. Delivery changes
+    // nothing else: an item stays open until it is answered, resolved or acknowledged.
     markSurfaced(items: { task: string; ids: string[] }[]): void {
       const want = new Map(items.filter((x) => x.ids.length).map((x) => [x.task, new Set(x.ids)]));
       if (!want.size) return;
@@ -1167,6 +1210,57 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         return y;
       });
       if (touched) commit({ ...f, tasks });
+    },
+    // Items that were put in front of an Assistant turn that then failed (Repair 4): NOT delivered, so they stay `new` and are offered
+    // again at the next turn; the failure is counted on each, for the record. One write; no rev bump.
+    markUndelivered(items: { task: string; ids: string[] }[], why: string): void {
+      const want = new Map(items.filter((x) => x.ids.length).map((x) => [x.task, new Set(x.ids)]));
+      if (!want.size) return;
+      const f = load();
+      const at = now().toISOString();
+      let touched = false;
+      const tasks = f.tasks.map((x) => {
+        if (!validTask(x) || !want.has(x.id)) return x;
+        const ids = want.get(x.id)!;
+        const y = structuredClone(x);
+        for (const a of y.attention ?? [])
+          if (ids.has(a.id) && a.state !== "resolved") {
+            a.undelivered = { count: (a.undelivered?.count ?? 0) + 1, last: at, why: cleanText(why, 200) };
+            touched = true;
+          }
+        return y;
+      });
+      if (touched) commit({ ...f, tasks });
+    },
+    // Repair of stored attention records (Repair 4; src/task-attention.ts repairItems): once per store, at start. One write for every
+    // task it changes, no rev bump (bookkeeping), idempotent. A write failure changes nothing and is reported; every view applies the
+    // same rules read-only, so what is shown is right either way.
+    repairAttention(): { tasks: string[]; items: number } {
+      if (attentionRepaired) return { tasks: [], items: 0 };
+      const f = load();
+      const at = now().toISOString();
+      let items = 0;
+      const hit: string[] = [];
+      const tasks = f.tasks.map((x) => {
+        if (!validTask(x) || !x.attention?.length) return x;
+        const y = structuredClone(x);
+        const n = repairItems(y, at);
+        if (!n) return x;
+        items += n;
+        hit.push(x.id);
+        return y;
+      });
+      if (hit.length) commit({ ...f, tasks });
+      attentionRepaired = true;
+      return { tasks: hit, items };
+    },
+
+    // ORBIT's record of what a cancellation did to the task's runs (Repair 4). Bookkeeping (no rev bump), only on a cancelled task.
+    recordCancellation(id: string, c: TaskCancellation): Task {
+      return change(id, { bump: false, allowTerminal: true }, (t) => {
+        if (t.lifecycle !== "cancelled") throw new TaskError(409, "Only a cancelled task records a cancellation.");
+        t.cancellation = { ...c, runs: c.runs.slice(0, TASK_REQUESTS_MAX).map((r) => ({ ...r, detail: cleanText(r.detail, 300) })) };
+      }).task;
     },
 
     // ORBIT's bookkeeping of the vault sync. Does not bump rev (it is not task content), so it never makes a view stale.
