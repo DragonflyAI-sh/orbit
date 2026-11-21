@@ -121,7 +121,7 @@ test("the page markup: Assistant first in the nav, then Jobs, Sessions (no Statu
   const nav = html.match(/<nav id="tabs"[^>]*>([\s\S]*?)<\/nav>/)![1]!;
   const labels = [...nav.matchAll(/<a [^>]*>([\s\S]*?)<\/a>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
   assert.deepEqual(labels.map((l) => l.split(" ")[0]), ["Assistant", "Jobs", "Sessions"]);
-  assert.match(html, /<div class="brand"><img src="\/avatar.png" alt=""><h1>ORBIT<\/h1>/);
+  assert.match(html, /<h1 class="brand"><button type="button" id="brandbtn" aria-label="ORBIT: Refresh page" title="Refresh page"><img src="\/avatar.png" alt=""><span class="wordmark">ORBIT<\/span><\/button><\/h1>/);
   const dot = html.match(/<button type="button" id="health"[^>]*>/)![0];
   assert.doesNotMatch(dot, /href=/, "a toggle, not a link");
   assert.match(dot, /aria-expanded="false"/);

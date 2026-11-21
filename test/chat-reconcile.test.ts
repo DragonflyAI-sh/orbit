@@ -173,5 +173,8 @@ test("the page draws the thread through the reconciler, never by replacing the w
   assert.match(render, /key: `m:\$\{view\.id\}:\$\{m\.id\}`/, "message keys are scoped to the thread");
   assert.match(html, /if \(seq !== loadSeq\) return true;/, "a stale load is dropped");
   assert.match(html, /view\.rev < current\.rev\) return true;/, "an older revision never rolls the view back");
-  assert.doesNotMatch(html, /location\.reload|location\.href\s*=|location\.assign/, "chat updates never reload the page");
+  // The one reload on the page is the header brand's, and only when the reader clicks it (test/brand-refresh-browser.test.ts).
+  const brand = 'document.getElementById("brandbtn").addEventListener("click", () => location.reload());';
+  assert.equal(html.split(brand).length, 2, "the brand's reload is wired once, to a click");
+  assert.doesNotMatch(html.replace(brand, ""), /location\.reload|location\.href\s*=|location\.assign/, "chat updates never reload the page");
 });
