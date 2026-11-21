@@ -102,6 +102,31 @@ export function validateConfigChanges(raw: unknown): ConfigChanges {
   return out;
 }
 
+// A proposal (ORBIT's side, before anything exists) names only the settings it changes. Every setting it leaves out stays exactly
+// as it is in orbit.env, and so does every other line of the file. A model may say "unchanged" in two ways, because the tool schema
+// reaches it in two forms (src/model.ts strictSchema): under the Responses API's strict schemas every property is required and
+// nullable, so it sends null; under the canonical schema (OpenRouter) it leaves the setting out. Both mean "unchanged", and nothing
+// else does: "" and masked display values (what orbit_config_view and proposal cards show for ORBIT_ROUTINES) are refused with a
+// message saying how to keep the setting, never read as "unchanged" and never written. Unknown keys are refused even when null.
+// A request that changes nothing (empty, or every setting null) is refused: no proposal is made. The result holds only real values,
+// so the digest, the ledger and the helper never see a null. Any one invalid value refuses the whole request (nothing is proposed).
+const MASKED = /…|\*{3}|\[redacted\]|trig_\.\.\./i;
+export function proposedConfigChanges(raw: unknown): ConfigChanges {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return bad("changes must be an object naming the orbit.env settings to change.");
+  const obj = raw as Record<string, unknown>;
+  for (const key of Object.keys(obj)) if (!(CONFIG_KEYS as readonly string[]).includes(key)) bad(`${redact(key).slice(0, 40)} is not a setting this action may change.`);
+  const named: Record<string, unknown> = {};
+  for (const key of CONFIG_KEYS) {
+    if (!Object.hasOwn(obj, key) || obj[key] === null) continue;
+    const value = obj[key];
+    if (typeof value === "string" && !value.trim()) bad(`${key} is empty. An empty value never means "unchanged" and is not written: to keep ${key} as it is, leave it out or send null.`);
+    if (typeof value === "string" && MASKED.test(value)) bad(`${key} looks like a masked display value. Masked values are never written: to keep ${key} as it is, leave it out or send null.`);
+    named[key] = value;
+  }
+  if (!Object.keys(named).length) return bad("Nothing to change: every setting was left out or null. No proposal was made.");
+  return validateConfigChanges(named);
+}
+
 // What a card, the ledger, an audit line or a result may show: sensitive values are reduced to names and counts.
 export function displayConfig(changes: ConfigChanges): Record<string, string> {
   const out: Record<string, string> = {};
