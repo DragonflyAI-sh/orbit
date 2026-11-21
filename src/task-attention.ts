@@ -91,7 +91,13 @@ export function prune(t: Task): void {
   const list = t.attention ?? [];
   if (list.length <= ATTENTION_KEPT) return;
   const unresolved = list.filter((x) => x.state !== "resolved");
-  const resolved = list.filter((x) => x.state === "resolved").slice(-Math.max(0, ATTENTION_KEPT - unresolved.length));
+  // The most recently resolved are kept (by resolution time, then list order), so a repair that resolves old items keeps them visible.
+  const resolved = list
+    .map((x, i) => ({ x, i }))
+    .filter(({ x }) => x.state === "resolved")
+    .sort((a, b) => (a.x.resolved?.at ?? "").localeCompare(b.x.resolved?.at ?? "") || a.i - b.i)
+    .slice(-Math.max(0, ATTENTION_KEPT - unresolved.length))
+    .map(({ x }) => x);
   const keep = new Set([...unresolved, ...resolved]);
   const dropped = list.filter((x) => !keep.has(x));
   if (dropped.length) {
@@ -113,11 +119,11 @@ export function repairItems(t: Task, at: string): number {
   for (const x of t.attention ?? []) {
     if (x.state === "resolved") continue;
     if (x.state === "acknowledged" && RESOLVED_BY_ACK.includes(x.kind)) {
-      Object.assign(x, { state: "resolved", resolved: { at: x.ack?.at ?? at, why: "acknowledged (a past turn outcome is resolved by its acknowledgement; repaired from a record that kept it acknowledged)" } });
+      Object.assign(x, { state: "resolved", resolved: { at, why: `acknowledged${x.ack ? ` at ${x.ack.at}` : ""} (a past turn outcome is resolved by its acknowledgement; repaired from a record that kept it acknowledged)` } });
       n += 1;
     } else if (stale(t, x)) {
       const r = t.requests.find((q) => q.id === (x.source as { request: string }).request);
-      Object.assign(x, { state: "resolved", resolved: { at: r?.response?.at ?? at, why: r ? `the request is ${r.state} (repaired: the record still showed it waiting)` : "the request is no longer on record (repaired)" } });
+      Object.assign(x, { state: "resolved", resolved: { at, why: r ? `the request is ${r.state}${r.response ? ` since ${r.response.at}` : ""} (repaired: the record still showed it waiting)` : "the request is no longer on record (repaired)" } });
       n += 1;
     }
   }
