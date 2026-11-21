@@ -78,6 +78,8 @@ import { AUTO_GLOBAL_PER_DAY_DEFAULT, isTaskId, parseCreate, TaskError, taskFile
 import type { Observers, Provenance, Tasks } from "./tasks.ts";
 import { isTaskToolName, TASK_ASSISTANT_TOOL_NAMES, TASK_TURNS_MAX_CONCURRENT, taskSupervisor } from "./task-supervisor.ts";
 import { taskScheduler } from "./task-scheduler.ts";
+import { taskRouter } from "./task-routing.ts";
+import type { TaskRouting } from "./task-routing.ts";
 import { supervisorWake, WAKE_MAX_ROUNDS, wakeFile } from "./task-wake.ts";
 import type { SupervisorWake, WakeBackend, WakeTurn } from "./task-wake.ts";
 import type { TaskScheduler } from "./task-scheduler.ts";
@@ -182,6 +184,9 @@ export type Deps = {
   tasks?: Tasks;
   taskVault?: TaskVaultPort;
   taskModel?: ModelPort;
+  // Repair 4: an explicit table from task-turn kind to configured model ports (src/task-routing.ts). Absent (main.ts sets none): every
+  // task turn uses `taskModel` (or the model every turn uses), as before. A route to an unknown, paid or tool-less port refuses the turn.
+  taskModels?: TaskRouting;
   taskTurnsMax?: number;
   // Automatic task follow-ups (src/task-scheduler.ts, docs/adr/0003-supervised-tasks.md "Automatic follow-up"). Absent or
   // enabled: false means the scheduler never starts a turn (the per-task opt-in is then shown as having no effect). `tickMs`: how often
@@ -292,6 +297,7 @@ export function buildServer({
   tasks = taskStore(taskFile(undefined)),
   taskVault,
   taskModel,
+  taskModels,
   taskTurnsMax = TASK_TURNS_MAX_CONCURRENT,
   taskFollowUps,
   supervisorWake: supervisorWakeArg,
@@ -445,7 +451,19 @@ export function buildServer({
   // ---- Supervised tasks (docs/adr/0003-supervised-tasks.md). A task's session is a chat thread; its turns run through their own thread
   // service over the same thread store (so the thread's single-turn lock serializes them with Rai's own messages), with the task model,
   // and without the rolling recent-context note, so no other conversation's context reaches a task turn.
-  const tsvc = threadService({ threads, model: taskModel ?? model, proposals, jobs, admin: adminOps, sys: sysOps, workspace, workspaceAdmin, now, toolDeadlineMs, abortGraceMs, origin: chatSessionId, photos: (tid, aid) => attachments.read(aid, chatScope(tid)), galleries: (tid, g) => display.galleries(chatSessionId(tid), g) });
+  const taskSvcFor = (m: ModelPort) => threadService({ threads, model: m, proposals, jobs, admin: adminOps, sys: sysOps, workspace, workspaceAdmin, now, toolDeadlineMs, abortGraceMs, origin: chatSessionId, photos: (tid, aid) => attachments.read(aid, chatScope(tid)), galleries: (tid, g) => display.galleries(chatSessionId(tid), g) });
+  const tsvc = taskSvcFor(taskModel ?? model);
+  // Task-turn routing (Repair 4): one thread service per routed port, over the same thread store (same lock, same tools and cards).
+  const taskRoutes = taskRouter(taskModel ?? model, taskModels);
+  const routedSvc = new Map<string, ReturnType<typeof threadService>>();
+  const svcForPort = (name?: string) => {
+    if (!name || name === "default") return tsvc;
+    let s = routedSvc.get(name);
+    const p = taskRoutes.port(name);
+    if (!s && p) routedSvc.set(name, (s = taskSvcFor(p)));
+    if (!s) throw new TaskError(503, `No model port named ${name} is configured for task turns.`);
+    return s;
+  };
   // What a linked launch proposal became (the proposal store, then its card) and what the job store says of a job. Read only.
   const taskObservers: Observers = {
     proposal: (pid) => {
@@ -472,7 +490,15 @@ export function buildServer({
     createThread: (title) => threads.create(title, { taskSession: true }).id,
     threadBusy: (tid) => threads.isBusy(tid),
     threadExists: (tid) => Boolean(threads.get(tid)),
-    turn: (tid, text, prep, opts) => tsvc.turn(tid, text, prep, opts),
+    turn: (tid, text, prep, opts) => svcForPort(opts.port).turn(tid, text, prep, { ...(opts.signal ? { signal: opts.signal } : {}) }),
+    ...(taskModels
+      ? {
+          route: (kind: Parameters<typeof taskRoutes.resolve>[0]) => {
+            const r = taskRoutes.resolve(kind);
+            return r.ok ? { ok: true as const, name: r.name, impl: r.impl, routed: r.routed, canUseTools: Boolean(r.port.step) } : r;
+          },
+        }
+      : {}),
     prepare: async (isOwner, query, tid) => {
       const p = await prepare(isOwner, query, "chat", chatSessionId(tid), { taskSession: true });
       return { notes: p.notes, used: p.used, current: p.current, offered: p.offered };
@@ -494,6 +520,16 @@ export function buildServer({
       return { ok: true, proposal: { id: p.id, kind: "job_launch", lane: p.lane === "research" ? "research" : "build", routine: p.routine, brief: p.brief, origin: p.origin, createdAt: p.createdAt } };
     },
     vault: tasksVault,
+    // Rai cancelled a task: its OPEN launch cards are withdrawn exactly as the card's own Cancel does (proposal store take + card
+    // open -> cancelled), so nothing launches for a cancelled task. A card that is no longer open is left as it is.
+    withdrawProposal: (pid) => {
+      const p = proposals.peek(pid);
+      if (!p) return { withdrawn: false, why: "the proposal is no longer open (already confirmed, cancelled or expired)" };
+      const taken = proposals.take(pid);
+      if (!taken) return { withdrawn: false, why: "the proposal was taken meanwhile" };
+      const ok = cardSvc(pid).claim(pid, "cancelled");
+      return ok ? { withdrawn: true, why: "withdrawn" } : { withdrawn: false, why: "its card was no longer open" };
+    },
     modelName: () => (taskModel ?? model).status().impl,
     canUseTools: () => Boolean((taskModel ?? model).step),
     now: clock,
@@ -1120,7 +1156,7 @@ export function buildServer({
       if (!(await owned("tasks", action))) return;
       const human: Provenance = { actor: "human", via: "task-panel" };
       try {
-        if (action === "list") return send(res, 200, { tasks: tasks.all().map((t) => supervisor.view(t, "summary")), status: tasks.status(), turnsRunning: supervisor.runningCount() });
+        if (action === "list") return send(res, 200, { tasks: tasks.all().map((t) => supervisor.view(t, "summary")), status: tasks.status(), turnsRunning: supervisor.runningCount(), routing: taskRoutes.describe(), wake: wake.view() });
         // Read-only reconciliation by project (Repair 3): writes nothing, syncs nothing.
         if (action === "projects") return send(res, 200, supervisor.projectStatus({ project: url.searchParams.get("project") ?? undefined, includeClosed: url.searchParams.get("closed") === "1" }));
         if (action === "create") {
@@ -1148,7 +1184,7 @@ export function buildServer({
         }
         if (action === "pause" || action === "resume" || action === "cancel") {
           const r = supervisor.setLifecycle(id, rev, action === "pause" ? "paused" : action === "resume" ? "active" : "cancelled", human, input.reason);
-          return send(res, 200, { task: supervisor.view(r.task), stoppedRunningTurn: r.stoppedRunningTurn });
+          return send(res, 200, { task: supervisor.view(r.task), stoppedRunningTurn: r.stoppedRunningTurn, ...("cancellation" in r ? { cancellation: r.cancellation } : {}) });
         }
         if (action === "turn") {
           const r = await supervisor.startTurn(id, { trigger: human, isOwner: true, expectRev: rev, key });

@@ -127,6 +127,8 @@ export type TurnRecord = {
   instructionsSeen: number;
   // The model port the turn ran on (its `impl` string at the time), recorded, never chosen here.
   model: string;
+  // Repair 4: the configured port name the turn was routed to (src/task-routing.ts), when a routing table chose a non-default port.
+  route?: string;
   // The thread messages of this turn (the supervisor's prompt and the task's reply), when it started a reply.
   message?: string;
   reply?: string;
@@ -250,11 +252,17 @@ export type Task = {
   // Resolved attention items dropped from `attention` once more than ATTENTION_KEPT were kept (Repair 4): how many, and the newest
   // resolution time among them. Unresolved items are never dropped.
   attentionPruned?: { count: number; lastResolvedAt: string };
+  // What cancelling the task did to the runs it had asked for (Repair 4), recorded by ORBIT right after Rai's cancellation: open launch
+  // cards withdrawn (or why not), and runs that ORBIT could NOT stop (ORBIT has no way to cancel a cloud job; they continue, and their
+  // result is a run result, not task completion). Facts from ORBIT's records only; nothing here claims a job stopped.
+  cancellation?: TaskCancellation;
   // Explicit dependencies on other tasks (Repair 3). A dependency is met only when that task's lifecycle is `done` (Rai marked it done
   // with attested evidence); a job ending, even a verified one, never meets it. Set by Rai or the Assistant; cycles are refused.
   dependsOn?: { task: string; at: string; by: Provenance }[];
 };
 
+export type CancellationRun = { request: string; lane: "build" | "research"; proposal: string; before: string; job?: string; jobState?: string; outcome: "card-withdrawn" | "card-not-withdrawn" | "continuing" | "ended" | "not-launched" | "unknown"; detail: string };
+export type TaskCancellation = { at: string; by: Provenance; runs: CancellationRun[]; jobCancellation: "unsupported" };
 export type UpdatePatch = { nextAction?: unknown; followUpAt?: unknown; followUpNote?: unknown; project?: unknown; vaultNote?: unknown; vaultHeading?: unknown; dependsOn?: unknown; autoFollowUp?: unknown };
 export type IdemOp = "steer" | "turn";
 export type IdemRecord = { op: IdemOp; key: string; digest: string; at: string; instruction?: number; turn?: number };
@@ -852,7 +860,7 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     //   and a turn record starts that has seen it. A photo-only message starts the turn and records no instruction.
     // - paused: the text is recorded as instruction v(n+1) for when the task resumes; no turn starts. A photo-only message records nothing.
     // `expect` is the lifecycle the reply was prepared for; if the task changed meanwhile, nothing is recorded (409; send again).
-    admitHuman(id: string, input: { text: string; photos: number }, by: Provenance, model: string, expect: "active" | "paused"): { task: Task; instruction?: Instruction; turn?: TurnRecord } {
+    admitHuman(id: string, input: { text: string; photos: number }, by: Provenance, model: string, expect: "active" | "paused", route?: string): { task: Task; instruction?: Instruction; turn?: TurnRecord } {
       const clean = cleanText(input.text, TASK_INSTRUCTION_MAX);
       const cur = get(id);
       if (!cur) throw new TaskError(404, "No task with that id.");
@@ -873,7 +881,7 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         let turn: TurnRecord | undefined;
         if (expect === "active") {
           t.turnSeq = (t.turnSeq ?? t.turns.length) + 1;
-          turn = { n: t.turnSeq, startedAt: now().toISOString(), state: "running", trigger: by, instructionsSeen: currentInstructionVersion(t), model, ...(input.photos ? { photos: input.photos } : {}) };
+          turn = { n: t.turnSeq, startedAt: now().toISOString(), state: "running", trigger: by, instructionsSeen: currentInstructionVersion(t), model, ...(route ? { route } : {}), ...(input.photos ? { photos: input.photos } : {}) };
           t.turns = [...t.turns, turn].slice(-TASK_TURNS_KEPT);
         }
         return { instruction, turn };
@@ -942,7 +950,7 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     // `auto`: the follow-up scheduler starting the automatic turn for the follow-up due at `dueAt`. Eligibility is checked again here,
     // inside the same store change that records the turn and claims the due time, so the claim and the start are one durable fact:
     // a second tick, a restart or a racing start finds the due time claimed (or a turn running) and starts nothing.
-    beginTurn(id: string, expectRev: number | undefined, trigger: Provenance, model: string, key?: string, auto?: { dueAt: string; globalMax: number }): { task: Task; turn: TurnRecord; duplicate: boolean } {
+    beginTurn(id: string, expectRev: number | undefined, trigger: Provenance, model: string, key?: string, auto?: { dueAt: string; globalMax: number }, route?: string): { task: Task; turn: TurnRecord; duplicate: boolean } {
       const again = priorTurn(id, expectRev, key);
       if (again) return { ...again, duplicate: true };
       const digest = digestOf({ rev: expectRev ?? null });
@@ -955,7 +963,7 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         if (t.lifecycle !== "active") throw new TaskError(409, `This task is ${t.lifecycle}: no turn is started.`);
         if (runningTurn(t)) throw new TaskError(409, "A turn of this task is already running. Turns of one task run one at a time.");
         t.turnSeq = (t.turnSeq ?? t.turns.length) + 1;
-        const turn: TurnRecord = { n: t.turnSeq, startedAt: now().toISOString(), state: "running", trigger, instructionsSeen: currentInstructionVersion(t), model };
+        const turn: TurnRecord = { n: t.turnSeq, startedAt: now().toISOString(), state: "running", trigger, instructionsSeen: currentInstructionVersion(t), model, ...(route ? { route } : {}) };
         t.turns = [...t.turns, turn].slice(-TASK_TURNS_KEPT);
         remember(t, "turn", key, digest, { turn: turn.n });
         if (auto && t.auto) {
@@ -1245,6 +1253,14 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       if (hit.length) commit({ ...f, tasks });
       attentionRepaired = true;
       return { tasks: hit, items };
+    },
+
+    // ORBIT's record of what a cancellation did to the task's runs (Repair 4). Bookkeeping (no rev bump), only on a cancelled task.
+    recordCancellation(id: string, c: TaskCancellation): Task {
+      return change(id, { bump: false, allowTerminal: true }, (t) => {
+        if (t.lifecycle !== "cancelled") throw new TaskError(409, "Only a cancelled task records a cancellation.");
+        t.cancellation = { ...c, runs: c.runs.slice(0, TASK_REQUESTS_MAX).map((r) => ({ ...r, detail: cleanText(r.detail, 300) })) };
+      }).task;
     },
 
     // ORBIT's bookkeeping of the vault sync. Does not bump rev (it is not task content), so it never makes a view stale.
