@@ -202,17 +202,19 @@ test("browser 1280px: each view scrolls on its own; the head stays put and the c
 });
 
 test("browser 1280px: receipts are sent only for notes listed in the shown Notifications view, never from the Status view", { skip }, async () => {
-  const { page, ctx, acks } = await open(1280, 800, "/#assistant", { notes: 4 });
+  const { page, ctx, acks } = await open(1280, 800, "/#assistant", { notes: 12 });
   await page.click("#health");
   await page.waitForTimeout(300);
   assert.deepEqual(acks, [], "the Status view lists no notes, so it sends no receipt");
   await page.click("#sidetab-notes");
-  for (let i = 0; acks.length < 3 && i < 100; i++) await page.waitForTimeout(20);
-  assert.deepEqual([...new Set(acks)].sort(), ["n1", "n2", "n3"], "the three listed (newest) notes only");
+  const listed = Array.from({ length: 10 }, (_, i) => `n${i + 2}`).sort();
+  for (let i = 0; acks.length < 10 && i < 100; i++) await page.waitForTimeout(20);
+  await page.waitForTimeout(200);
+  assert.deepEqual([...new Set(acks)].sort(), listed, "the ten listed (newest) notes only, not the two past the limit");
   const dismissed = await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes"));
   await page.click("#sideclose");
   assert.equal(await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")), dismissed, "closing is not dismissing");
-  assert.equal(await page.textContent("#notecount"), "4");
+  assert.equal(await page.textContent("#notecount"), "12");
   await ctx.close();
 });
 

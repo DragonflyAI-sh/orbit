@@ -240,10 +240,10 @@ test("browser: arrivals in a collapsed panel get no receipt and leave the run re
   const dir = stateDir();
   const o = orbit(dir);
   const run = await reviewedRun(o);
-  const notes = urgent(o, 4, 2);
+  const notes = urgent(o, 11, 2);
   const { page, context, acks } = await openPage(await o.base());
   try {
-    await waitCount(page, 5);
+    await waitCount(page, 12);
     await settle();
     assert.equal(await page.getAttribute("#notesbtn", "aria-expanded"), "false");
     assert.deepEqual(acks, [], "the badge changed; nothing was displayed, so no ack");
@@ -252,15 +252,15 @@ test("browser: arrivals in a collapsed panel get no receipt and leave the run re
     assert.equal(o.runs.get(run.id)!.state, "reviewed");
     // Reload: the server still holds every unseen note; the test re-adds nothing.
     await page.reload();
-    await waitCount(page, 5);
+    await waitCount(page, 12);
     // Restart ORBIT on the same state directory and open the page from the new process.
     o.r.close();
     const o2 = orbit(dir);
     const again = await openPage(await o2.base(), { context });
-    await waitCount(again.page, 5);
+    await waitCount(again.page, 12);
     await settle();
     assert.deepEqual(again.acks, []);
-    // Open the panel: the three listed (newest) notes get a listing receipt; the two past the limit do not.
+    // Open the panel: the ten listed (newest) notes get a listing receipt; the two past the limit do not.
     await again.page.click("#notesbtn");
     const listed = notes.slice(1).map((n) => n.id);
     await until(() => listed.every((id) => receipt(o2, id)?.listed === true), "the listed notes have a listing receipt");
@@ -277,7 +277,7 @@ test("browser: arrivals in a collapsed panel get no receipt and leave the run re
     assert.match(o2.runs.get(run.id)!.events.at(-1)!.detail, new RegExp(`^Receipt: ${LISTED}`));
     // Shown is not dismissed: after a reload every note is still listed and counted.
     await again.page.reload();
-    await waitCount(again.page, 5);
+    await waitCount(again.page, 12);
     await settle();
     assert.equal(new Set(again.acks).size, again.acks.length, "one ack per note: no duplicates");
   } finally {
@@ -348,41 +348,41 @@ test("browser: a failed ack is retried later, a sent one is not repeated, and a 
 test("browser: dismissing is explicit and kept by ORBIT for every browser; collapsing is not dismissing; the unlisted remainder stays unshown", { skip }, async () => {
   const dir = stateDir();
   const o = orbit(dir);
-  const notes = urgent(o, 5);
+  const notes = urgent(o, 12);
   const ids = notes.map((n) => n.id);
   const { page, context } = await openPage(await o.base());
   try {
-    await waitCount(page, 5);
+    await waitCount(page, 12);
     await page.click("#notesbtn");
-    await until(() => ids.slice(2).every((id) => receipt(o, id)?.listed === true), "the three listed notes acked");
+    await until(() => ids.slice(2).every((id) => receipt(o, id)?.listed === true), "the ten listed notes acked");
     // Collapse and reopen: no dismissal, count unchanged.
     await page.click("#notesbtn");
     assert.equal(await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")), null);
-    assert.equal(await count(page), "5");
+    assert.equal(await count(page), "12");
     await page.click("#notesbtn");
     // Dismiss the newest: the count drops and the next note moves into the list, so it is now listed and acked.
     await page.click("#inbox .note .x");
-    await waitCount(page, 4);
+    await waitCount(page, 11);
     await until(() => receipt(o, ids[1]!)?.listed === true, "the note that moved into the list is acked");
     await settle();
     assert.equal(receipt(o, ids[0]!), undefined, "the oldest was never listed: no receipt");
-    assert.equal(await page.getAttribute("#notesbtn", "aria-label"), "Notifications: 4");
+    assert.equal(await page.getAttribute("#notesbtn", "aria-label"), "Notifications: 11");
     // ORBIT recorded the dismissal: it no longer lists the note, and still keeps it.
-    await until(() => o.notify.get(ids[4]!)?.dismissed !== undefined, "ORBIT recorded the dismissal");
-    assert.deepEqual((await o.r.api("/notifications")).data.current.map((n: Notification) => n.id), ids.slice(0, 4));
-    assert.ok(o.notify.get(ids[4]!), "the note is kept, only no longer listed");
+    await until(() => o.notify.get(ids[11]!)?.dismissed !== undefined, "ORBIT recorded the dismissal");
+    assert.deepEqual((await o.r.api("/notifications")).data.current.map((n: Notification) => n.id), ids.slice(0, 11));
+    assert.ok(o.notify.get(ids[11]!), "the note is kept, only no longer listed");
     // This browser keeps its dismissal across a reload.
     await page.reload();
-    await waitCount(page, 4);
+    await waitCount(page, 11);
     // Another browser (another device, or this one with its storage cleared) does not list it either.
     const other = await openPage(await o.base());
-    await waitCount(other.page, 4);
+    await waitCount(other.page, 11);
     await other.context.close();
     // So does an ORBIT restart on the same state directory.
     o.r.close();
     const o2 = orbit(dir);
     const third = await openPage(await o2.base());
-    await waitCount(third.page, 4);
+    await waitCount(third.page, 11);
     await third.context.close();
   } finally {
     await context.close();

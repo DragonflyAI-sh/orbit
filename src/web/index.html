@@ -1784,7 +1784,7 @@
   composerKeys(document.getElementById("input"), () => document.getElementById("form").requestSubmit());
   // The notifications panel. The list is ORBIT's `current` notifications (due, not yet shown, or shown by this kind of page),
   // replaced on every refresh, so a reload or another tab or device gets the same notes back from the server. Each note shows
-  // its first line with "more" and "×"; at most 3 show unless "show all".
+  // its first line with "more" and "×"; at most 10 (NOTES_SHOWN) show unless "show all".
   // Shown and dismissed are different things (docs/assistant.md, "Notifications"):
   // - Shown: ORBIT's receipt that the note was listed in the open notifications panel of a visible tab. It is sent once per
   //   note (retried after a failure; ORBIT keeps the first receipt), only for the notes actually listed: never while the panel
@@ -2776,7 +2776,7 @@
   // <notes>
   // Pure helpers for the inbox and for runner text. Runner text is only ever inserted as text nodes and real <a>
   // elements built with textContent; no HTML parsing is involved.
-  const NOTES_SHOWN = 3;
+  const NOTES_SHOWN = 10;
   function firstLine(text) {
     const lines = String(text ?? "").split("\n");
     const i = lines.findIndex((l) => l.trim());
