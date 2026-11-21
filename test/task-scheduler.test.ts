@@ -272,38 +272,42 @@ test("follow-up: Rai writing in the task session at the due time: serialized wit
   assert.equal(r.tasks.get(t.id)!.turns.at(-1)!.instructionsSeen, 1);
 });
 
-test("follow-up: the global turn cap is a pre-dispatch failure: retried with backoff, at most the attempt cap, then gave-up (visible), never dispatched", async () => {
+// Repair 3 (finding b on PR #154): the global turn cap is CAPACITY, not failure. It used to consume the attempt budget (4 attempts, then
+// gave-up); now it is a deferral that uses no attempt, waits for the next tick (no hot loop) and starts as soon as a slot frees.
+test("follow-up: the global turn cap is a capacity deferral: no attempt used however long it lasts, never dispatched while full, started at the first tick after a slot frees", async () => {
   const r = rig({ maxConcurrent: 1, hold: true });
   const blocker = r.create({ title: "Busy" });
   const busy = await r.sup.startTurn(blocker.id, { trigger: HUMAN, isOwner: true, expectRev: blocker.rev });
   const t = r.optedIn();
+  const rev = r.tasks.get(t.id)!.rev;
   r.advance(11 * MIN);
-  for (let attempt = 1; attempt < AUTO_ATTEMPTS_MAX; attempt++) {
+  // Far more ticks than the old attempt cap, over hours: each defers, none uses an attempt, none gives up.
+  for (let i = 1; i <= AUTO_ATTEMPTS_MAX * 3; i++) {
     const rep = await r.sched.tick();
-    assert.equal(rep.retrying.length, 1, `attempt ${attempt}`);
+    assert.deepEqual(rep.started, []);
+    assert.deepEqual(rep.gaveUp, []);
+    assert.deepEqual(rep.retrying, []);
+    assert.equal(rep.deferred.length, 1, `tick ${i}`);
     const v = r.at(t.id);
-    assert.equal(v.state, "retry-wait");
-    assert.equal(v.lastAttempt!.attempts, attempt);
-    assert.match(v.lastAttempt!.error!, /At most 1 supervised task turns/);
-    // Not before the backoff.
-    r.advance(AUTO_RETRY_BACKOFF_MS[attempt - 1]! - 1000);
-    assert.deepEqual((await r.sched.tick()).retrying, []);
-    r.advance(1000);
+    assert.equal(v.state, "capacity-wait");
+    assert.equal(v.lastAttempt!.attempts, 0, "a capacity deferral is not an attempt");
+    assert.equal(r.tasks.get(t.id)!.auto!.slot!.deferrals, i);
+    r.advance(20 * MIN);
   }
-  const last = await r.sched.tick();
-  assert.equal(last.gaveUp.length, 1);
-  assert.equal(r.at(t.id).state, "gave-up");
-  assert.match(r.at(t.id).detail, /no turn started after 4 attempt/);
-  // Gave up: freeing capacity does not resume it; only an explicit retry (a new follow-up time) does.
+  assert.equal(r.tasks.get(t.id)!.turns.length, 0, "nothing was dispatched while every slot was busy");
+  assert.equal(r.tasks.get(t.id)!.rev, rev, "deferral bookkeeping never makes a view stale");
+  assert.ok(!(r.tasks.get(t.id)!.attention ?? []).length, "capacity alone raises no attention item");
+  // A slot frees: the very next tick starts it, with its first attempt.
   r.gate.held = false;
   r.gate.release!();
   await busy.done;
-  assert.deepEqual((await r.sched.tick()).started, []);
-  assert.equal(r.tasks.get(t.id)!.turns.length, 0, "nothing was ever dispatched for the given-up due time");
-  r.tasks.update(t.id, r.tasks.get(t.id)!.rev, { followUpAt: r.now().toISOString() }, HUMAN);
-  assert.equal((await r.sched.tick()).started.length, 1);
+  const rep = await r.sched.tick();
+  assert.equal(rep.started.length, 1);
   await r.sup.idle();
-  // Bookkeeping of attempts never made anyone's view stale: rev changed only by real changes.
+  const slot = r.tasks.get(t.id)!.auto!.slot!;
+  assert.equal(slot.state, "ended");
+  assert.equal(slot.attempts, 1);
+  assert.equal(slot.deferrals, AUTO_ATTEMPTS_MAX * 3, "the deferrals stay on record");
 });
 
 test("follow-up: a failure that is not transient (the session is gone, the model cannot call tools) gives up at once", async () => {

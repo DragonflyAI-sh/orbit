@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { maskContent } from "./threads.ts";
+import { raise, resolve, resolveWhere, REQUEST_ATTENTION } from "./task-attention.ts";
+import type { Attention } from "./task-attention.ts";
 
 // Supervised tasks (docs/adr/0003-supervised-tasks.md), first slice.
 //
@@ -76,7 +78,10 @@ export const TERMINAL: readonly Lifecycle[] = ["done", "cancelled"];
 
 export type Criterion = { id: string; text: string };
 export type Instruction = { v: number; at: string; text: string; by: Provenance };
-export type RequestKind = "clarification" | "blocker" | "job";
+// "research" (Repair 3): research the task needs done on the RESEARCH lane (research_launch), never a build job in its place.
+export type RequestKind = "clarification" | "blocker" | "job" | "research";
+export const LAUNCH_KINDS: readonly RequestKind[] = ["job", "research"];
+export const laneOf = (k: RequestKind): "build" | "research" => (k === "research" ? "research" : "build");
 // What the supervisor did with a request. Job requests go further than this: once a launch proposal is linked, whether it was confirmed,
 // is running or produced a result is DERIVED from the proposal card and the job store at observation time, never stored here.
 export type RequestState = "pending" | "answered" | "proposed" | "declined" | "withdrawn";
@@ -105,9 +110,10 @@ export type TaskRequest = {
 // - match "exact": the proposal's routine and brief are the request's (whitespace-normalized brief text, same routine when the request
 //   named one).
 // - match "accepted-by-rai": the briefs differ and Rai himself linked it, naming the proposal brief's digest he compared.
-export type ProposalBinding = { kind: "job_launch"; routine: string; briefSha256: string; requestBriefSha256: string; origin: string; proposedAt: string; requestKey: string; match: "exact" | "accepted-by-rai" };
+export type ProposalBinding = { kind: "job_launch"; lane?: "build" | "research"; routine: string; briefSha256: string; requestBriefSha256: string; origin: string; proposedAt: string; requestKey: string; match: "exact" | "accepted-by-rai" };
 // The proposal as the proposal store has it, for linking (src/server.ts reads it; the task store never sees the proposal store itself).
-export type LinkableProposal = { id: string; kind: "job_launch"; routine: string; brief: string; origin: string; createdAt: string };
+// `lane`: "research" for a research_launch proposal, "build" for job_launch (Repair 3: a request is linked only to its own lane).
+export type LinkableProposal = { id: string; kind: "job_launch"; lane?: "build" | "research"; routine: string; brief: string; origin: string; createdAt: string };
 export type EvidenceKind = "job" | "commit" | "pull-request" | "url" | "vault-note" | "note";
 export type Evidence = { id: string; criterion: string; kind: EvidenceKind; ref: string; note?: string; at: string; by: Provenance };
 export type TurnState = "running" | "done" | "error" | "interrupted";
@@ -170,15 +176,21 @@ export const AUTO_ATTEMPTS_MAX = AUTO_RETRY_BACKOFF_MS.length + 1;
 // - started: turn `turn` was started (claimed and recorded in one store change);
 // - ended: that turn ended (`outcome`: done or error, from the turn record);
 // - interrupted: ORBIT stopped while that turn ran; whether the model request was made is unknown, so it is NEVER re-run automatically.
-export type AutoSlotState = "retry-wait" | "gave-up" | "started" | "ended" | "interrupted";
-export type AutoSlot = { dueAt: string; state: AutoSlotState; at: string; attempts: number; nextTryAt?: string; turn?: number; outcome?: string; error?: string };
+// - capacity-wait (Repair 3): every supervised turn slot was busy, or the task's session had a reply in progress, when the scheduler
+//   tried. Nothing was sent. This is a DEFERRAL, not a failed attempt: it never uses one of the AUTO_ATTEMPTS_MAX attempts, has no
+//   backoff beyond the scheduler's own tick (so it is not a hot loop) and is tried again at the next tick, oldest due time first (so a
+//   task is not starved by later ones). `deferrals` counts them and `deferredSince` says since when.
+export type AutoSlotState = "retry-wait" | "capacity-wait" | "gave-up" | "started" | "ended" | "interrupted";
+export type AutoSlot = { dueAt: string; state: AutoSlotState; at: string; attempts: number; nextTryAt?: string; turn?: number; outcome?: string; error?: string; deferrals?: number; deferredSince?: string };
 export type AutoFollowUp = {
   enabled: boolean;
   changedAt: string;
   // Who turned it on (always Rai) or off (Rai or the Assistant).
   changedBy: Provenance;
-  // Automatic turns this task may start in any 24 hours (1..AUTO_PER_DAY_LIMIT).
+  // Automatic turns this task may start in any 24 hours (1..AUTO_PER_DAY_LIMIT). Rai's explicit choice is kept across turning it off
+  // and on again (Repair 3); only a new perDay from Rai changes it. `perDaySetBy`: who set it (absent: the default).
   perDay: number;
+  perDaySetBy?: Provenance;
   // When automatic turns of this task started (newest last; only as many as the limit needs are kept).
   started: string[];
   slot?: AutoSlot;
@@ -222,8 +234,15 @@ export type Task = {
   // Version 1 kept request ids without saying which operation they were for. Kept (never extended): such an id is refused if reused.
   seen?: string[];
   completedAt?: string;
+  // Supervisor attention (Repair 3, src/task-attention.ts): durable, deduplicated items raised in the same store change as their cause.
+  attention?: Attention[];
+  attentionSeq?: number;
+  // Explicit dependencies on other tasks (Repair 3). A dependency is met only when that task's lifecycle is `done` (Rai marked it done
+  // with attested evidence); a job ending, even a verified one, never meets it. Set by Rai or the Assistant; cycles are refused.
+  dependsOn?: { task: string; at: string; by: Provenance }[];
 };
 
+export type UpdatePatch = { nextAction?: unknown; followUpAt?: unknown; followUpNote?: unknown; project?: unknown; vaultNote?: unknown; vaultHeading?: unknown; dependsOn?: unknown; autoFollowUp?: unknown };
 export type IdemOp = "steer" | "turn";
 export type IdemRecord = { op: IdemOp; key: string; digest: string; at: string; instruction?: number; turn?: number };
 
@@ -329,7 +348,7 @@ export type Observers = { proposal(id: string): ProposalObservation; job(id: str
 //   or not-confirmed (the card expired, was cancelled or refused), declined (by the supervisor), withdrawn.
 export type RequestStatus = "pending" | "answered" | "declined" | "withdrawn" | "awaiting-confirmation" | "confirmed" | "running" | "result" | "not-confirmed" | "unknown";
 export function requestStatus(r: TaskRequest, obs: Observers): { status: RequestStatus; job?: string; jobState?: string; detail?: string } {
-  if (r.kind !== "job" || r.state !== "proposed" || !r.proposal) return { status: r.state === "proposed" ? "unknown" : r.state };
+  if (!LAUNCH_KINDS.includes(r.kind) || r.state !== "proposed" || !r.proposal) return { status: r.state === "proposed" ? "unknown" : r.state };
   const p = obs.proposal(r.proposal.id);
   if (p.state === "awaiting-confirmation") return { status: "awaiting-confirmation" };
   if (p.state === "expired" || p.state === "cancelled" || p.state === "refused") return { status: "not-confirmed", detail: `the launch proposal was ${p.state}${p.detail ? `: ${p.detail}` : ""}` };
@@ -356,7 +375,7 @@ export type ExecutionCheck = { state: ExecutionState; request?: string; jobState
 export function executionOf(task: Task, jobId: string, obs: Observers): ExecutionCheck {
   const j = obs.job(jobId);
   const viaJob = j.found ? j.proposal : undefined;
-  const r = task.requests.find((x) => x.kind === "job" && x.proposal && (x.proposal.id === viaJob || (!viaJob && obs.proposal(x.proposal.id).job === jobId)));
+  const r = task.requests.find((x) => LAUNCH_KINDS.includes(x.kind) && x.proposal && (x.proposal.id === viaJob || (!viaJob && obs.proposal(x.proposal.id).job === jobId)));
   if (!r || !r.proposal) return { state: "unlinked", detail: "no request of this task produced this job (ORBIT's job record does not name one of this task's linked proposals)" };
   if (!r.proposal.binding) return { state: "legacy-unbound", request: r.id, detail: "this request's proposal was linked by an earlier build that did not compare the proposal with the request, so ORBIT does not treat the job as this request's" };
   if ((obs.links?.(r.proposal.id) ?? 1) > 1) return { state: "ambiguous", request: r.id, detail: "the proposal is linked to more than one request, so the job cannot be attributed to this one" };
@@ -390,10 +409,17 @@ export function readiness(task: Task, obs: Observers): Readiness {
 const briefDigest = (b: string) => createHash("sha256").update(oneLine(b)).digest("hex");
 function bind(r: TaskRequest, p: LinkableProposal, by: Provenance, accept: unknown): ProposalBinding {
   if (p.kind !== "job_launch") throw new TaskError(409, "Not linked: that proposal is not a job launch. Nothing was changed.");
+  // Repair 3: a request is answered only on its own lane. A build job never stands in for research, nor research for a build.
+  const want = laneOf(r.kind);
+  if ((p.lane ?? "build") !== want) throw new TaskError(409, want === "research" ? "Not linked: this is a research request and the proposal is a BUILD launch. Research is proposed with research_launch (the research lane); a build job is never a substitute. Nothing was changed." : "Not linked: this is a build job request and the proposal is a RESEARCH launch. Propose it with job_launch, or decline the request. Nothing was changed.");
   if (r.job!.routine && r.job!.routine !== p.routine) throw new TaskError(409, `Not linked: the request asked for routine ${r.job!.routine}; the proposal launches ${p.routine}. Nothing was changed.`);
-  const requestBriefSha256 = briefDigest(r.job!.brief);
+  // A research proposal's brief is "Research question: <question>\n\n<brief>" (research_launch builds it). A research request matches
+  // when the Assistant proposed it with the request's text as the question and the request's brief as the brief, or when the request's
+  // brief already is that whole text. Nothing else is loosened: the question is compared too.
   const briefSha256 = briefDigest(cleanText(p.brief, Number.MAX_SAFE_INTEGER));
-  const base = { kind: "job_launch" as const, routine: p.routine, briefSha256, requestBriefSha256, origin: p.origin, proposedAt: p.createdAt, requestKey: r.key };
+  const candidates = want === "research" ? [r.job!.brief, `Research question: ${r.text}\n\n${r.job!.brief}`] : [r.job!.brief];
+  const requestBriefSha256 = candidates.map(briefDigest).find((x) => x === briefSha256) ?? briefDigest(candidates.at(-1)!);
+  const base = { kind: "job_launch" as const, lane: want, routine: p.routine, briefSha256, requestBriefSha256, origin: p.origin, proposedAt: p.createdAt, requestKey: r.key };
   if (briefSha256 === requestBriefSha256) return { ...base, match: "exact" };
   if (by.actor === "human" && accept === briefSha256) return { ...base, match: "accepted-by-rai" };
   throw new TaskError(
@@ -419,9 +445,10 @@ export function blockerOf(t: Task): { request: string; text: string } | undefine
 
 // Where a task stands with automatic follow-up at `at`, and whether the scheduler may start its turn now. Pure: the scheduler, the views
 // and the store's own recheck inside beginTurn use the same rule. `global`: automatic turns started across all tasks in the last 24h.
-export type AutoState = "off" | "no-follow-up" | "not-due" | "inactive" | "turn-running" | "due" | "retry-wait" | "gave-up" | "started" | "ended" | "interrupted" | "budget-task" | "budget-global";
+export type AutoState = "off" | "no-follow-up" | "not-due" | "inactive" | "turn-running" | "due" | "capacity-wait" | "dependency-wait" | "retry-wait" | "gave-up" | "started" | "ended" | "interrupted" | "budget-task" | "budget-global";
 export type AutoEligibility = { eligible: boolean; state: AutoState; dueAt?: string; nextAt?: string; usedToday: number; detail: string };
-export function autoEligibility(t: Task, at: Date, global: { used: number; max: number }): AutoEligibility {
+// `deps`: the task's dependency state (dependencyState below); an automatic turn waits while a dependency is unmet. Absent: not checked.
+export function autoEligibility(t: Task, at: Date, global: { used: number; max: number }, deps?: DependencyState): AutoEligibility {
   const a = t.auto;
   const ms = at.getTime();
   const used = (a?.started ?? []).filter((x) => ms - Date.parse(x) < AUTO_WINDOW_MS).length;
@@ -443,8 +470,46 @@ export function autoEligibility(t: Task, at: Date, global: { used: number; max: 
     return { ...base, eligible: false, state: "budget-task", dueAt, nextAt: new Date(Date.parse(oldest) + AUTO_WINDOW_MS).toISOString(), detail: `this task's budget of ${a.perDay} automatic turn(s) per 24 hours is used` };
   }
   if (global.used >= global.max) return { ...base, eligible: false, state: "budget-global", dueAt, detail: `ORBIT's budget of ${global.max} automatic turn(s) per 24 hours across tasks is used` };
+  if (deps && deps.unmet.length) return { ...base, eligible: false, state: "dependency-wait", dueAt, detail: `waiting on ${deps.unmet.length} dependenc${deps.unmet.length === 1 ? "y" : "ies"}: ${deps.blockedReason}` };
+  if (s?.state === "capacity-wait") return { ...base, eligible: true, state: "capacity-wait", dueAt, detail: `due since ${dueAt}; deferred ${s.deferrals ?? 1} time(s) since ${s.deferredSince ?? s.at} because every task turn slot (or this task's session) was busy. Deferrals use no attempt; the next scheduler tick tries again, oldest due first` };
   return { ...base, eligible: true, state: "due", dueAt, detail: `due since ${dueAt}; the next scheduler tick starts one turn` };
 }
+// Dependencies (Repair 3). Met only when the other task is `done`; a cancelled or missing dependency can never be met by itself, and the
+// blocked reason says what Rai or the Assistant must do (remove it, or finish that task). A job's result never meets a dependency.
+export type DependencyRow = { task: string; title: string | null; lifecycle: Lifecycle | "missing"; met: boolean; why: string };
+export type DependencyState = { deps: DependencyRow[]; unmet: DependencyRow[]; blockedReason: string | null };
+export function dependencyState(t: Task, lookup: (id: string) => Task | undefined): DependencyState {
+  const deps = (t.dependsOn ?? []).map((d): DependencyRow => {
+    const o = lookup(d.task);
+    if (!o) return { task: d.task, title: null, lifecycle: "missing", met: false, why: "that task is not in the task store; remove the dependency" };
+    if (o.lifecycle === "done") return { task: o.id, title: o.title, lifecycle: o.lifecycle, met: true, why: "done (Rai marked it done with attested evidence)" };
+    if (o.lifecycle === "cancelled") return { task: o.id, title: o.title, lifecycle: o.lifecycle, met: false, why: "cancelled: it will never be done; remove the dependency or re-plan" };
+    return { task: o.id, title: o.title, lifecycle: o.lifecycle, met: false, why: `${o.lifecycle}: not done yet (only Rai marks a task done; a job ending does not)` };
+  });
+  const unmet = deps.filter((x) => !x.met);
+  return { deps, unmet, blockedReason: unmet.length ? unmet.map((x) => `${x.task} ${x.why}`).join("; ") : null };
+}
+export const TASK_DEPENDENCIES_MAX = 5;
+// Whether making `id` depend on `on` would close a cycle: true when `id` is reachable from `on` through dependsOn.
+export function wouldCycle(id: string, on: string[], lookup: (id: string) => Task | undefined): string[] | undefined {
+  const seen = new Set<string>();
+  const walk = (cur: string, path: string[]): string[] | undefined => {
+    if (cur === id) return [...path, cur];
+    if (seen.has(cur)) return undefined;
+    seen.add(cur);
+    for (const d of lookup(cur)?.dependsOn ?? []) {
+      const hit = walk(d.task, [...path, cur]);
+      if (hit) return hit;
+    }
+    return undefined;
+  };
+  for (const o of on) {
+    const hit = walk(o, [id]);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+const actorLabel = (p: Provenance) => (p.actor === "human" ? "Rai" : p.actor === "assistant" ? "the Assistant" : p.actor === "task" ? "the task" : p.via === "follow-up" ? "automatic follow-up" : "ORBIT");
 const autoStartedSince = (tasks: Task[], at: Date) => tasks.reduce((n, t) => n + (t.auto?.started ?? []).filter((x) => at.getTime() - Date.parse(x) < AUTO_WINDOW_MS).length, 0);
 
 // Thrown when the store's own recheck (inside the turn's store change) finds an automatic follow-up no longer eligible: the scheduler
@@ -563,6 +628,87 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     return out;
   }
 
+  function setAutoDetailed(id: string, expectRev: number, enabled: boolean, by: Provenance, perDay?: unknown): { task: Task; changed: boolean; ignored: string[] } {
+    if (enabled && (by.actor !== "human" || by.via === "sessions-ui")) throw new TaskError(403, "Only Rai can turn on automatic follow-up, from the task controls. Nothing was changed.");
+    if (!enabled && by.actor !== "human" && by.actor !== "assistant") throw new TaskError(403, "Automatic follow-up can be turned off only by Rai or the Assistant.");
+    const sent = perDay !== undefined && perDay !== null;
+    if (!enabled) {
+      const cur = get(id);
+      if (!cur) throw new TaskError(404, "No task with that id.");
+      const ignored = sent ? ["perDay"] : [];
+      if (!cur.auto?.enabled) return { task: structuredClone(cur), changed: false, ignored };
+      const { task } = change(id, { expectRev, allowTerminal: true }, (t) => {
+        t.auto = { ...t.auto!, enabled: false, changedAt: now().toISOString(), changedBy: by };
+      });
+      return { task, changed: true, ignored };
+    }
+    if (sent && (typeof perDay !== "number" || !Number.isSafeInteger(perDay) || perDay < 1 || perDay > AUTO_PER_DAY_LIMIT)) throw new TaskError(400, `perDay must be a whole number from 1 to ${AUTO_PER_DAY_LIMIT}. Nothing was changed.`);
+    const { task } = change(id, { expectRev }, (t) => {
+      const at = now().toISOString();
+      const keep = t.auto;
+      const n = sent ? (perDay as number) : (keep?.perDay ?? AUTO_PER_DAY_DEFAULT);
+      const setBy = sent ? by : keep?.perDaySetBy;
+      t.auto = { enabled: true, changedAt: at, changedBy: by, perDay: n, ...(setBy ? { perDaySetBy: setBy } : {}), started: keep?.started ?? [], ...(keep?.slot ? { slot: keep.slot } : {}) };
+    });
+    return { task, changed: true, ignored: [] };
+  }
+
+  function updateDetailed(id: string, expectRev: number, patch: UpdatePatch, by: Provenance): { task: Task; changed: boolean; notes: string[] } {
+    if (patch.autoFollowUp !== undefined && patch.autoFollowUp !== "off") throw new TaskError(403, "autoFollowUp can only be turned off here (\"off\"); only Rai turns it on, from the task controls. Nothing was changed.");
+    if (patch.autoFollowUp === "off" && by.actor !== "human" && by.actor !== "assistant") throw new TaskError(403, "Automatic follow-up can be turned off only by Rai or the Assistant.");
+    const cur = get(id);
+    if (!cur) throw new TaskError(404, "No task with that id.");
+    const fields = (["nextAction", "followUpAt", "project", "vaultNote", "dependsOn"] as const).filter((k) => patch[k] !== undefined);
+    const notes: string[] = [];
+    const offNoop = patch.autoFollowUp === "off" && !cur.auto?.enabled;
+    if (offNoop) notes.push("automatic follow-up was already off; nothing to change");
+    if (!fields.length && (patch.autoFollowUp === undefined || offNoop)) return { task: structuredClone(cur), changed: false, notes };
+    const { task } = change(id, { expectRev }, (t) => {
+      const at = now().toISOString();
+      if (patch.nextAction !== undefined) {
+        const n = cleanText(patch.nextAction, TASK_NOTE_MAX);
+        if (n) t.nextAction = { text: n, at, by };
+        else delete t.nextAction;
+      }
+      if (patch.followUpAt !== undefined) {
+        const before = t.followUp?.at;
+        const f = parseFollowUp(patch.followUpAt, patch.followUpNote, now());
+        if (f) t.followUp = { ...f, setAt: at, by, autonomous: "disabled" };
+        else delete t.followUp;
+        // Attention about the earlier due time (its budget wait, its give-up) no longer applies once it is replaced.
+        if (before && before !== t.followUp?.at) resolveWhere(t, at, (a) => a.source.type === "follow-up" && a.source.dueAt === before, "the follow-up time was replaced");
+      }
+      if (patch.project !== undefined) {
+        const p = cleanText(patch.project, PROJECT_REF_MAX);
+        if (p) t.project = p;
+        else delete t.project;
+      }
+      if (patch.vaultNote !== undefined) {
+        if (patch.vaultNote === null || patch.vaultNote === "") delete t.vault;
+        else {
+          if (!isTaskVaultNote(patch.vaultNote)) throw new TaskError(400, "vaultNote must be an existing Markdown note under Projects/ or Tasks/. Nothing was changed.");
+          if (!isTaskHeading(patch.vaultHeading)) throw new TaskError(400, "vaultHeading must be a heading that already exists in that note, written exactly (for example \"## Status\"). Nothing was changed.");
+          t.vault = { note: patch.vaultNote, heading: patch.vaultHeading, sync: { state: "never", attempts: 0, retry: "manual" } };
+        }
+        resolveWhere(t, at, (a) => a.kind === "vault-sync", "the vault link was changed");
+      }
+      if (patch.dependsOn !== undefined) {
+        const list = patch.dependsOn === null ? [] : patch.dependsOn;
+        if (!Array.isArray(list) || list.length > TASK_DEPENDENCIES_MAX || !list.every(isTaskId)) throw new TaskError(400, `dependsOn must be a list of at most ${TASK_DEPENDENCIES_MAX} task ids (task-<uuid>), or empty to clear. Nothing was changed.`);
+        const ids = [...new Set(list as string[])];
+        if (ids.includes(t.id)) throw new TaskError(400, "A task cannot depend on itself. Nothing was changed.");
+        for (const d of ids) if (!get(d)) throw new TaskError(404, `No task ${d}. Nothing was changed.`);
+        const cycle = wouldCycle(t.id, ids, (x) => (x === t.id ? t : get(x)));
+        if (cycle) throw new TaskError(409, `Refused: that would make a dependency cycle (${cycle.join(" -> ")}). Nothing was changed.`);
+        const old = new Map((t.dependsOn ?? []).map((d) => [d.task, d]));
+        t.dependsOn = ids.map((d) => old.get(d) ?? { task: d, at, by });
+        if (!t.dependsOn.length) delete t.dependsOn;
+      }
+      if (patch.autoFollowUp === "off" && t.auto?.enabled) t.auto = { ...t.auto, enabled: false, changedAt: at, changedBy: by };
+    });
+    return { task, changed: true, notes };
+  }
+
   // Restart recovery, once per load: a turn recorded as running was cut off by the stop. It is marked interrupted (never re-run).
   function recover(): string[] {
     if (recovered) return [];
@@ -579,7 +725,10 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         const cut = new Set(x.turns.filter((r) => r.state === "running").map((r) => r.n));
         // An automatic follow-up whose turn was cut off: interrupted, never re-run (the model may or may not have been called).
         const slot = x.auto?.slot && x.auto.slot.state === "started" && x.auto.slot.turn !== undefined && cut.has(x.auto.slot.turn) ? { ...x.auto.slot, state: "interrupted" as const, at, error: "ORBIT stopped while this turn was running" } : undefined;
-        return { ...x, rev: x.rev + 1, updatedAt: at, turns: x.turns.map((r) => (r.state === "running" ? { ...r, state: "interrupted" as const, endedAt: at, error: "ORBIT stopped while this turn was running. It was not re-run." } : r)), ...(slot ? { auto: { ...x.auto!, slot } } : {}) };
+        const y: Task = structuredClone({ ...x, rev: x.rev + 1, updatedAt: at, turns: x.turns.map((r) => (r.state === "running" ? { ...r, state: "interrupted" as const, endedAt: at, error: "ORBIT stopped while this turn was running. It was not re-run." } : r)), ...(slot ? { auto: { ...x.auto!, slot } } : {}) });
+        // Repair 3: every interrupted turn is an attention item, raised in this same change (whether its model request was made is unknown).
+        for (const r of x.turns.filter((r) => r.state === "running")) raise(y, at, { key: `turn:${r.n}`, kind: "turn-interrupted", summary: `Turn ${r.n} (started by ${actorLabel(r.trigger)}) was cut off by an ORBIT restart and was not re-run; whether its model request was made is unknown. Look at the task session, then start a turn if needed.`, source: { type: "turn", turn: r.n, trigger: r.trigger.actor } });
+        return y;
       }),
     });
     return [...ids];
@@ -754,34 +903,13 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       }).task;
     },
 
-    update(id: string, expectRev: number, patch: { nextAction?: unknown; followUpAt?: unknown; followUpNote?: unknown; project?: unknown; vaultNote?: unknown; vaultHeading?: unknown }, by: Provenance): Task {
-      return change(id, { expectRev }, (t) => {
-        const at = now().toISOString();
-        if (patch.nextAction !== undefined) {
-          const n = cleanText(patch.nextAction, TASK_NOTE_MAX);
-          if (n) t.nextAction = { text: n, at, by };
-          else delete t.nextAction;
-        }
-        if (patch.followUpAt !== undefined) {
-          const f = parseFollowUp(patch.followUpAt, patch.followUpNote, now());
-          if (f) t.followUp = { ...f, setAt: at, by, autonomous: "disabled" };
-          else delete t.followUp;
-        }
-        if (patch.project !== undefined) {
-          const p = cleanText(patch.project, PROJECT_REF_MAX);
-          if (p) t.project = p;
-          else delete t.project;
-        }
-        if (patch.vaultNote !== undefined) {
-          if (patch.vaultNote === null || patch.vaultNote === "") delete t.vault;
-          else {
-            if (!isTaskVaultNote(patch.vaultNote)) throw new TaskError(400, "vaultNote must be an existing Markdown note under Projects/ or Tasks/.");
-            if (!isTaskHeading(patch.vaultHeading)) throw new TaskError(400, "vaultHeading must be a heading that already exists in that note, written exactly (for example \"## Status\").");
-            t.vault = { note: patch.vaultNote, heading: patch.vaultHeading, sync: { state: "never", attempts: 0, retry: "manual" } };
-          }
-        }
-      }).task;
+    // One atomic change (Repair 3): every field is validated and applied inside ONE store change, so either all of the patch is saved
+    // or none of it (a refusal anywhere leaves the file and rev as they were). `autoFollowUp: "off"` is part of the same change; when it
+    // is already off it is a no-op, and a patch that changes nothing else writes nothing and is answered with `changed: false`.
+    update(id: string, expectRev: number, patch: UpdatePatch, by: Provenance): Task {
+      return updateDetailed(id, expectRev, patch, by).task;
     },
+    updateDetailed,
 
     // ---- the task's own turn ----
 
@@ -797,7 +925,7 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       const { task, result } = change(id, { expectRev }, (t) => {
         if (auto) {
           const at = now();
-          const e = autoEligibility(t, at, { used: autoStartedSince(all(), at), max: auto.globalMax });
+          const e = autoEligibility(t, at, { used: autoStartedSince(all(), at), max: auto.globalMax }, dependencyState(t, get));
           if (!e.eligible || e.dueAt !== auto.dueAt) throw new AutoNotEligible(409, `Automatic follow-up not started: ${e.detail}.`);
         }
         if (t.lifecycle !== "active") throw new TaskError(409, `This task is ${t.lifecycle}: no turn is started.`);
@@ -807,47 +935,62 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         t.turns = [...t.turns, turn].slice(-TASK_TURNS_KEPT);
         remember(t, "turn", key, digest, { turn: turn.n });
         if (auto && t.auto) {
-          const prev = t.auto.slot?.dueAt === auto.dueAt ? t.auto.slot.attempts : 0;
-          t.auto.slot = { dueAt: auto.dueAt, state: "started", at: turn.startedAt, attempts: prev + 1, turn: turn.n };
+          const before = t.auto.slot?.dueAt === auto.dueAt ? t.auto.slot : undefined;
+          // Capacity deferrals are carried over for the record; they never counted as attempts.
+          t.auto.slot = { dueAt: auto.dueAt, state: "started", at: turn.startedAt, attempts: (before?.attempts ?? 0) + 1, turn: turn.n, ...(before?.deferrals ? { deferrals: before.deferrals, deferredSince: before.deferredSince } : {}) };
+          resolveWhere(t, turn.startedAt, (a) => a.kind === "budget" && a.source.type === "follow-up" && a.source.dueAt === auto.dueAt, `automatic turn ${turn.n} started for this follow-up`);
           t.auto.started = [...t.auto.started, turn.startedAt].slice(-AUTO_PER_DAY_LIMIT);
         }
         return turn;
       });
       return { task, turn: result, duplicate: false };
     },
-    // The scheduler's record of an automatic attempt that did not start a turn (nothing was sent to a model). `transient`: the global
-    // turn cap or a busy turn/thread, retried after a backoff up to AUTO_ATTEMPTS_MAX attempts; anything else gives up at once. ORBIT's
-    // own bookkeeping: it does not bump rev, so it never makes Rai's or the Assistant's view stale.
-    recordAutoAttempt(id: string, dueAt: string, failure: { transient: boolean; error: string }): Task {
+    // The scheduler's record of an automatic attempt that did not start a turn (nothing was sent to a model). ORBIT's own bookkeeping: it
+    // does not bump rev, so it never makes Rai's or the Assistant's view stale. Three kinds (Repair 3 separates the first):
+    // - capacity: every supervised turn slot was busy, or the task's session had a reply in progress. A DEFERRAL: `attempts` does not
+    //   change, the slot is `capacity-wait`, and the next tick tries again (no backoff beyond the tick, no give-up for capacity alone);
+    // - transient: a failure that may clear by itself (an unexpected error before the claim, such as a write failure); retried after a
+    //   backoff, at most AUTO_ATTEMPTS_MAX attempts in all;
+    // - anything else gives up at once (a refusal, a missing session, a model that cannot call tools), and raises an attention item.
+    recordAutoAttempt(id: string, dueAt: string, failure: { transient: boolean; capacity?: boolean; error: string }): Task {
       return change(id, { bump: false, allowTerminal: true }, (t) => {
         if (!t.auto) return;
         const cur = t.auto.slot?.dueAt === dueAt ? t.auto.slot : undefined;
-        if (cur && cur.state !== "retry-wait") return;
-        const attempts = (cur?.attempts ?? 0) + 1;
+        if (cur && cur.state !== "retry-wait" && cur.state !== "capacity-wait") return;
         const at = now();
+        const iso = at.toISOString();
         const error = cleanText(failure.error, 300);
+        const carry = cur?.deferrals ? { deferrals: cur.deferrals, deferredSince: cur.deferredSince } : {};
+        if (failure.capacity) {
+          t.auto.slot = { dueAt, state: "capacity-wait", at: iso, attempts: cur?.attempts ?? 0, deferrals: (cur?.deferrals ?? 0) + 1, deferredSince: cur?.deferredSince ?? iso, error };
+          return;
+        }
+        const attempts = (cur?.attempts ?? 0) + 1;
         t.auto.slot =
           failure.transient && attempts < AUTO_ATTEMPTS_MAX
-            ? { dueAt, state: "retry-wait", at: at.toISOString(), attempts, nextTryAt: new Date(at.getTime() + AUTO_RETRY_BACKOFF_MS[attempts - 1]!).toISOString(), error }
-            : { dueAt, state: "gave-up", at: at.toISOString(), attempts, error: failure.transient ? `${error} (gave up after ${attempts} attempts)` : error };
+            ? { dueAt, state: "retry-wait", at: iso, attempts, nextTryAt: new Date(at.getTime() + AUTO_RETRY_BACKOFF_MS[attempts - 1]!).toISOString(), error, ...carry }
+            : { dueAt, state: "gave-up", at: iso, attempts, error: failure.transient ? `${error} (gave up after ${attempts} attempts)` : error, ...carry };
+        if (t.auto.slot.state === "gave-up") raise(t, iso, { key: `auto:${dueAt}`, kind: "follow-up-gave-up", summary: `The automatic follow-up due ${dueAt} did not start and will not be retried automatically (${t.auto.slot.attempts} attempt(s)). Start a turn or set a new follow-up time.`, source: { type: "follow-up", dueAt } });
+      }).task;
+    },
+    // The scheduler saw a due follow-up held back by a turn budget (this task's or ORBIT's): raised once per due time as an attention
+    // item (bookkeeping, no rev bump). Resolved when a turn starts for that due time or the follow-up time is replaced.
+    noteAutoBudget(id: string, dueAt: string, state: "budget-task" | "budget-global", detail: string): Task {
+      return change(id, { bump: false, allowTerminal: true }, (t) => {
+        if (t.attention?.some((a) => a.key === `budget:${dueAt}` && a.state !== "resolved")) return;
+        raise(t, now().toISOString(), { key: `budget:${dueAt}`, kind: "budget", summary: `The automatic follow-up due ${dueAt} is waiting: ${state === "budget-task" ? "this task's" : "ORBIT's"} automatic turn budget for 24 hours is used (${cleanText(detail, 160)}).`, source: { type: "follow-up", dueAt } });
       }).task;
     },
     // Turning automatic follow-up on is Rai's alone (an owner route, never a model: not the Assistant, not the task). Turning it off is
-    // allowed to Rai and to the Assistant. Neither changes the follow-up time; turning it on again keeps the history and the budget.
+    // allowed to Rai and to the Assistant. Neither changes the follow-up time. Repair 3:
+    // - turning it OFF is always safe and idempotent: when it is already off, nothing is written (no rev bump, `changed: false`), and a
+    //   perDay sent with it is irrelevant, so it is neither validated nor applied (`ignored: ["perDay"]`);
+    // - turning it ON keeps Rai's explicitly set perDay unless a new perDay is sent (only then is it validated and changed), and never
+    //   resets the record of automatic turns already started, so toggling cannot buy more turns in the 24-hour window.
     setAuto(id: string, expectRev: number, enabled: boolean, by: Provenance, perDay?: unknown): Task {
-      if (enabled && (by.actor !== "human" || by.via === "sessions-ui")) throw new TaskError(403, "Only Rai can turn on automatic follow-up, from the task controls. Nothing was changed.");
-      if (!enabled && by.actor !== "human" && by.actor !== "assistant") throw new TaskError(403, "Automatic follow-up can be turned off only by Rai or the Assistant.");
-      let n = AUTO_PER_DAY_DEFAULT;
-      if (perDay !== undefined && perDay !== null) {
-        if (typeof perDay !== "number" || !Number.isSafeInteger(perDay) || perDay < 1 || perDay > AUTO_PER_DAY_LIMIT) throw new TaskError(400, `perDay must be a whole number from 1 to ${AUTO_PER_DAY_LIMIT}.`);
-        n = perDay;
-      }
-      return change(id, { expectRev }, (t) => {
-        const at = now().toISOString();
-        if (!enabled && !t.auto?.enabled) throw new TaskError(409, "Automatic follow-up is already off for this task.");
-        t.auto = { enabled, changedAt: at, changedBy: by, perDay: enabled ? n : (t.auto?.perDay ?? n), started: t.auto?.started ?? [], ...(t.auto?.slot ? { slot: t.auto.slot } : {}) };
-      }).task;
+      return setAutoDetailed(id, expectRev, enabled, by, perDay).task;
     },
+    setAutoDetailed,
     autoGlobalUsed: (at: Date) => autoStartedSince(all(), at),
     endTurn(id: string, n: number, outcome: { state: "done" | "error"; message?: string; reply?: string; error?: string; toolCalls?: number }): Task {
       return change(id, { allowTerminal: true }, (t) => {
@@ -857,6 +1000,10 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         // The automatic follow-up's outcome is the turn's, recorded in the same change.
         const slot = t.auto?.slot;
         if (slot && slot.state === "started" && slot.turn === n) Object.assign(slot, { state: "ended", at: turn.endedAt, outcome: outcome.state, ...(outcome.error ? { error: outcome.error.slice(0, 300) } : {}) });
+        // A supervised or automatic turn that ended in an error (including one a pause or cancel cut short) needs the supervisor
+        // (Repair 3), whoever started it: it ran in the background. Rai's own interactive turn in the session does not: he was there
+        // and saw the reply fail.
+        if (outcome.state === "error" && !(turn.trigger.actor === "human" && turn.trigger.via === "sessions-ui")) raise(t, turn.endedAt!, { key: `turn:${n}`, kind: "turn-failed", summary: `Turn ${n} (started by ${actorLabel(turn.trigger)}) ended with an error: ${cleanText(outcome.error ?? "unknown", 200)}`, source: { type: "turn", turn: n, trigger: turn.trigger.actor } });
       }).task;
     },
 
@@ -864,13 +1011,13 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
     // withdrawn) is returned with `duplicate: true` and counted, never filed twice, so a task repeating itself cannot flood the Assistant.
     fileRequest(id: string, input: { kind: unknown; text: unknown; routine?: unknown; brief?: unknown }, by: Provenance): { task: Task; request: TaskRequest; duplicate: boolean } {
       const kind = input.kind;
-      if (kind !== "clarification" && kind !== "blocker" && kind !== "job") throw new TaskError(400, "kind must be clarification, blocker or job.");
+      if (kind !== "clarification" && kind !== "blocker" && kind !== "job" && kind !== "research") throw new TaskError(400, "kind must be clarification, blocker, job or research.");
       const text = cleanText(input.text, TASK_REQUEST_TEXT_MAX);
       if (!text) throw new TaskError(400, "A request needs text saying what is needed and why.");
       let job: TaskRequest["job"];
-      if (kind === "job") {
+      if (kind === "job" || kind === "research") {
         const brief = cleanText(input.brief, TASK_BRIEF_MAX);
-        if (!brief) throw new TaskError(400, "A job request needs a brief: what the job should do. The Assistant decides whether to propose it; Rai confirms any launch.");
+        if (!brief) throw new TaskError(400, `A ${kind} request needs a brief: what the ${kind === "research" ? "research" : "job"} should do. The Assistant decides whether to propose it; Rai confirms any launch.`);
         const routine = cleanText(input.routine, 64) || undefined;
         job = { brief, ...(routine ? { routine } : {}) };
       }
@@ -881,12 +1028,16 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         if (same) {
           same.duplicates = (same.duplicates ?? 0) + 1;
           same.lastDuplicateAt = now().toISOString();
+          // Counted on its attention item too, if it is still waiting (a repeat of an answered request raises nothing new).
+          const item = t.attention?.find((a) => a.key === `request:${same.id}` && a.state !== "resolved");
+          if (item) Object.assign(item, { occurrences: item.occurrences + 1, lastAt: same.lastDuplicateAt });
           return { request: structuredClone(same), duplicate: true };
         }
         if (openRequests(t).length >= TASK_OPEN_REQUESTS_MAX) throw new TaskError(429, `This task already has ${TASK_OPEN_REQUESTS_MAX} requests waiting for the Assistant. Wait for answers before asking more.`);
         if (t.requests.length >= TASK_REQUESTS_MAX) throw new TaskError(409, `This task has filed ${TASK_REQUESTS_MAX} requests; no more are accepted.`);
         const r: TaskRequest = { id: `req-${t.requests.length + 1}`, kind, text, key, createdAt: now().toISOString(), by, ...(job ? { job } : {}), state: "pending" };
         t.requests.push(r);
+        raise(t, r.createdAt, { key: `request:${r.id}`, kind, summary: `${r.id}: the task asks for ${kind === "job" ? "a build job" : kind === "research" ? "research (research lane)" : kind === "blocker" ? "a decision on a blocker" : "a clarification"}. Read it with task_inspect and answer it with task_respond; being shown it is not an answer.`, source: { type: "request", request: r.id } });
         return { request: structuredClone(r), duplicate: false };
       });
       return { task, ...result };
@@ -917,7 +1068,7 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
         const text = cleanText(data.text, TASK_REQUEST_TEXT_MAX) || undefined;
         if (action === "link") {
           const p = data.proposal!;
-          if (r.kind !== "job" || !r.job) throw new TaskError(400, "Only a job request can be linked to a launch proposal.");
+          if (!LAUNCH_KINDS.includes(r.kind) || !r.job) throw new TaskError(400, "Only a job or research request can be linked to a launch proposal.");
           if (linksOf(p.id).length) throw new TaskError(409, "Not linked: that proposal is already linked to a request. Nothing was changed.");
           const binding = bind(r, p, by, data.acceptBriefSha256);
           if (r.state === "proposed" && r.proposal) {
@@ -928,11 +1079,12 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
           r.state = "proposed";
           r.proposal = { id: p.id, linkedAt: at, by, binding };
           r.response = { at, by, ...(text ? { text } : {}) };
+          resolve(t, at, `request:${r.id}`, `a ${laneOf(r.kind)} launch proposal (${p.id}) was linked; nothing runs until Rai confirms its card`);
           return structuredClone(r);
         }
         if (r.state !== "pending") throw new TaskError(409, `This request is ${r.state}. Nothing was changed.`);
         if (action === "answer") {
-          if (r.kind === "job") throw new TaskError(400, "A job request is answered by linking a launch proposal (which Rai confirms) or declined.");
+          if (LAUNCH_KINDS.includes(r.kind)) throw new TaskError(400, `A ${r.kind} request is answered by linking a ${laneOf(r.kind)} launch proposal (which Rai confirms) or declined.`);
           if (!text) throw new TaskError(400, "An answer needs text.");
           r.state = "answered";
         } else if (action === "decline") r.state = "declined";
@@ -941,6 +1093,7 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
           r.state = "withdrawn";
         }
         r.response = { at, by, ...(text ? { text } : {}) };
+        resolve(t, at, `request:${r.id}`, `the request was ${r.state} by ${actorLabel(by)}`);
         return structuredClone(r);
       });
       return { task, request: result };
@@ -975,11 +1128,58 @@ export function taskStore(backend: TaskBackend, now: () => Date = () => new Date
       }).task;
     },
 
+    // ---- supervisor attention (Repair 3, src/task-attention.ts) ----
+
+    // The Assistant or Rai acknowledges an item: "seen; this is what happens next". Bookkeeping (no rev bump). A request item cannot be
+    // acknowledged: it is resolved only by answering, declining or linking the request, so acknowledging never stands for an answer.
+    acknowledge(id: string, attentionId: unknown, by: Provenance, note?: unknown): { task: Task; item: Attention; duplicate: boolean } {
+      if (by.actor !== "human" && by.actor !== "assistant") throw new TaskError(403, "Only Rai or the Assistant can acknowledge attention items.");
+      const { task, result } = change(id, { bump: false, allowTerminal: true }, (t) => {
+        const a = t.attention?.find((x) => x.id === attentionId);
+        if (!a) throw new TaskError(404, "No attention item with that id on this task.");
+        if (REQUEST_ATTENTION.includes(a.kind)) throw new TaskError(409, `${a.id} is a ${a.kind} request (${a.source.type === "request" ? a.source.request : ""}): it is resolved only by answering, declining or linking it with task_respond. Acknowledging is not an answer. Nothing was changed.`);
+        if (a.state === "resolved") throw new TaskError(409, `${a.id} is already resolved (${a.resolved?.why ?? ""}). Nothing was changed.`);
+        if (a.state === "acknowledged") return { item: structuredClone(a), duplicate: true };
+        const n = cleanText(note, TASK_NOTE_MAX);
+        a.state = "acknowledged";
+        a.ack = { at: now().toISOString(), by, ...(n ? { note: n } : {}) };
+        return { item: structuredClone(a), duplicate: false };
+      });
+      return { task, ...result };
+    },
+    // Records that these items were shown to the Assistant (its task-activity block). One write for all tasks; no rev bump. Being shown
+    // changes nothing else: an item stays open until it is answered, resolved or acknowledged.
+    markSurfaced(items: { task: string; ids: string[] }[]): void {
+      const want = new Map(items.filter((x) => x.ids.length).map((x) => [x.task, new Set(x.ids)]));
+      if (!want.size) return;
+      const f = load();
+      const at = now().toISOString();
+      let touched = false;
+      const tasks = f.tasks.map((x) => {
+        if (!validTask(x) || !want.has(x.id)) return x;
+        const ids = want.get(x.id)!;
+        const y = structuredClone(x);
+        for (const a of y.attention ?? [])
+          if (ids.has(a.id) && a.state !== "resolved") {
+            a.surfaced = { first: a.surfaced?.first ?? at, last: at, count: (a.surfaced?.count ?? 0) + 1 };
+            touched = true;
+          }
+        return y;
+      });
+      if (touched) commit({ ...f, tasks });
+    },
+
     // ORBIT's bookkeeping of the vault sync. Does not bump rev (it is not task content), so it never makes a view stale.
     recordSync(id: string, patch: Partial<VaultLink["sync"]>): Task {
       return change(id, { bump: false, allowTerminal: true }, (t) => {
         if (!t.vault) return;
         t.vault.sync = { ...t.vault.sync, ...patch };
+        // Repair 3: a sync that did not save (failed, blocked by policy, or unconfirmed) is an attention item until a later sync saves.
+        const at = now().toISOString();
+        const st = t.vault.sync.state;
+        if (st === "failed" || st === "blocked" || st === "unknown")
+          raise(t, at, { key: "vault", kind: "vault-sync", summary: `Vault sync to ${t.vault.note} ${st === "blocked" ? "was blocked by the vault policy (no proposal is made)" : st === "unknown" ? "could not be confirmed (treat it as not saved; a retry is safe)" : "failed (nothing was written)"}: ${cleanText(t.vault.sync.lastError ?? "", 160)}`, source: { type: "vault", note: t.vault.note, attempt: t.vault.sync.attempts, syncState: st } });
+        else if (st === "synced") resolve(t, at, "vault", `a later sync saved the status line${t.vault.sync.commit ? ` (commit ${t.vault.sync.commit.slice(0, 12)})` : ""}`);
       }).task;
     },
   };

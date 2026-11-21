@@ -1,4 +1,4 @@
-import { AUTO_GLOBAL_PER_DAY_DEFAULT, autoEligibility, AutoNotEligible, TaskError } from "./tasks.ts";
+import { AUTO_GLOBAL_PER_DAY_DEFAULT, autoEligibility, AutoNotEligible, dependencyState, TaskError } from "./tasks.ts";
 import type { Tasks } from "./tasks.ts";
 import type { TaskSupervisor } from "./task-supervisor.ts";
 
@@ -15,9 +15,15 @@ import type { TaskSupervisor } from "./task-supervisor.ts";
 //   tick, an overlapping tick, a restart or a racing manual start finds the due time claimed (or a turn running) and starts nothing.
 // - A turn cut off by a restart is marked interrupted (tasks.recover) and its follow-up `interrupted`: whether the model request was made
 //   is unknown, so it is never re-run automatically. A new follow-up time, or a turn Rai or the Assistant starts, is the explicit retry.
-// - Only failures before the claim are retried (the global turn cap, the task's turn or thread busy): at most AUTO_ATTEMPTS_MAX
-//   attempts per due time with growing waits, recorded on the task. Anything else (a refusal, the model unable to call tools, a missing
-//   session) gives up at once and says why.
+// - Capacity is not failure (Repair 3). When every supervised turn slot is busy, or the task's session has a reply in progress, the due
+//   time is DEFERRED (`capacity-wait`): no attempt is used, nothing is sent, and the next tick tries again. When the slots are full the
+//   tick does not call startTurn at all for the remaining due tasks (no hot loop of refused starts), and due tasks are taken oldest due
+//   time first, so the task that has waited longest gets the next free slot (no starvation by later ones).
+// - Only other failures before the claim are retried (an unexpected error such as a write failure): at most AUTO_ATTEMPTS_MAX attempts
+//   per due time with growing waits, recorded on the task. Anything else (a refusal, the model unable to call tools, a missing session)
+//   gives up at once, says why and raises an attention item for the supervisor.
+// - A due follow-up held back by a turn budget raises one attention item per due time; one waiting on an unmet dependency waits
+//   (`dependency-wait`) and is shown, never started.
 // - Budgets: at most `perDay` automatic turns per task and `globalPerDay` across tasks in any 24 hours. They count turns started, not
 //   spend; each turn is bounded by its tool rounds and has no paid fallback, but provider cost is not measured or capped here.
 // - It never reschedules: a turn consumes its due time, and the task's own tools cannot set a follow-up time. Only Rai or the Assistant
@@ -32,28 +38,47 @@ export type TickReport = {
   skipped?: "scheduler-off" | "tick-in-progress" | "store-unavailable";
   started: { task: string; turn: number; dueAt: string }[];
   retrying: { task: string; dueAt: string; error: string }[];
+  // Due, but no turn slot (or the task's session) was free: deferred, no attempt used (Repair 3).
+  deferred: { task: string; dueAt: string; why: string }[];
   gaveUp: { task: string; dueAt: string; error: string }[];
   notEligible: { task: string; why: string }[];
   // Bookkeeping that could not be written (the attempt changed nothing durable, so the next tick sees the same state).
   unrecorded: { task: string; error: string }[];
 };
 
-// Failures before the claim that may clear by themselves: the global turn cap (429) and the task's turn or thread being busy (409).
-const transient = (e: unknown) => e instanceof TaskError && (e.code === 429 || (e.code === 409 && /already running|reply in progress/.test(e.message)));
+// Capacity before the claim (Repair 3): the global turn cap (429) or the task's turn or session busy (409). A deferral, never an attempt.
+const capacity = (e: unknown) => e instanceof TaskError && (e.code === 429 || (e.code === 409 && /already running|reply in progress/.test(e.message)));
+// Other failures that may clear by themselves: anything that is not one of ORBIT's own refusals (for example a task file write error).
+const transient = (e: unknown) => !(e instanceof TaskError);
 
-export function taskScheduler(d: { tasks: Tasks; supervisor: TaskSupervisor; enabled: boolean; globalPerDay?: number; now?: () => Date; log?: (e: Record<string, unknown>) => void }) {
+export function taskScheduler(d: { tasks: Tasks; supervisor: Pick<TaskSupervisor, "startTurn"> & Partial<Pick<TaskSupervisor, "capacity">>; enabled: boolean; globalPerDay?: number; now?: () => Date; log?: (e: Record<string, unknown>) => void }) {
   const now = d.now ?? (() => new Date());
   const log = d.log ?? ((e) => console.log(JSON.stringify({ at: now().toISOString(), ...e })));
   const globalPerDay = d.globalPerDay ?? AUTO_GLOBAL_PER_DAY_DEFAULT;
   let ticking = false;
   let timer: ReturnType<typeof setInterval> | undefined;
 
+  // Bookkeeping that never decides anything: a failure to write it is reported, and the next tick sees the same state.
+  function note(fn: () => unknown, task: string, report: TickReport) {
+    try {
+      fn();
+    } catch (rec) {
+      report.unrecorded.push({ task, error: rec instanceof Error ? rec.message.slice(0, 200) : "error" });
+    }
+  }
+  let current: TickReport | undefined;
+  function defer(task: string, dueAt: string, why: string) {
+    current!.deferred.push({ task, dueAt, why: why.slice(0, 200) });
+    note(() => d.tasks.recordAutoAttempt(task, dueAt, { transient: true, capacity: true, error: why }), task, current!);
+  }
+
   async function tick(): Promise<TickReport> {
     const at = now();
-    const report: TickReport = { at: at.toISOString(), started: [], retrying: [], gaveUp: [], notEligible: [], unrecorded: [] };
+    const report: TickReport = { at: at.toISOString(), started: [], retrying: [], deferred: [], gaveUp: [], notEligible: [], unrecorded: [] };
     if (!d.enabled) return { ...report, skipped: "scheduler-off" };
     if (ticking) return { ...report, skipped: "tick-in-progress" };
     ticking = true;
+    current = report;
     try {
       let all;
       try {
@@ -61,35 +86,53 @@ export function taskScheduler(d: { tasks: Tasks; supervisor: TaskSupervisor; ena
       } catch {
         return { ...report, skipped: "store-unavailable" };
       }
+      const lookup = (id: string) => all.find((x) => x.id === id);
+      const due: { id: string; dueAt: string; since: string }[] = [];
       for (const t of all) {
         if (!t.auto?.enabled) continue;
-        const e = autoEligibility(t, now(), { used: d.tasks.autoGlobalUsed(now()), max: globalPerDay });
+        const e = autoEligibility(t, now(), { used: d.tasks.autoGlobalUsed(now()), max: globalPerDay }, dependencyState(t, lookup));
         if (!e.eligible || !e.dueAt) {
           if (e.state !== "not-due" && e.state !== "no-follow-up" && e.state !== "ended") report.notEligible.push({ task: t.id, why: e.detail });
+          if ((e.state === "budget-task" || e.state === "budget-global") && e.dueAt) note(() => d.tasks.noteAutoBudget(t.id, e.dueAt!, e.state as "budget-task" | "budget-global", e.detail), t.id, report);
           continue;
         }
-        const dueAt = e.dueAt;
+        const slot = t.auto.slot?.dueAt === e.dueAt ? t.auto.slot : undefined;
+        due.push({ id: t.id, dueAt: e.dueAt, since: slot?.deferredSince ?? e.dueAt });
+      }
+      // Oldest due time first (it has waited longest), then the longest deferred, then by id: a later due time never overtakes an earlier one.
+      due.sort((x, y) => (x.dueAt < y.dueAt ? -1 : x.dueAt > y.dueAt ? 1 : x.since < y.since ? -1 : x.since > y.since ? 1 : x.id < y.id ? -1 : 1));
+      for (const { id, dueAt } of due) {
+        // Slots full: defer without asking startTurn (it would only refuse), so a full ORBIT costs one cheap check per due task per tick.
+        const cap = d.supervisor.capacity?.();
+        if (cap && cap.running >= cap.max) {
+          defer(id, dueAt, `all ${cap.max} supervised task turn slots are busy`);
+          continue;
+        }
         try {
-          const r = await d.supervisor.startTurn(t.id, { trigger: { actor: "orbit", via: "follow-up", dueAt }, isOwner: true, auto: { dueAt } });
-          report.started.push({ task: t.id, turn: r.turn.n, dueAt });
-          log({ event: "task_follow_up_started", task: t.id, turn: r.turn.n, dueAt });
+          const r = await d.supervisor.startTurn(id, { trigger: { actor: "orbit", via: "follow-up", dueAt }, isOwner: true, auto: { dueAt } });
+          report.started.push({ task: id, turn: r.turn.n, dueAt });
+          log({ event: "task_follow_up_started", task: id, turn: r.turn.n, dueAt });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           // The store's recheck found it no longer eligible (paused, turned off, claimed by another start): nothing to record.
           if (err instanceof AutoNotEligible) {
-            report.notEligible.push({ task: t.id, why: msg });
+            report.notEligible.push({ task: id, why: msg });
+            continue;
+          }
+          if (capacity(err)) {
+            defer(id, dueAt, msg);
             continue;
           }
           const tr = transient(err);
           try {
-            const after = d.tasks.recordAutoAttempt(t.id, dueAt, { transient: tr, error: msg });
+            const after = d.tasks.recordAutoAttempt(id, dueAt, { transient: tr, error: msg });
             const slot = after.auto?.slot;
-            if (slot?.state === "retry-wait") report.retrying.push({ task: t.id, dueAt, error: msg });
-            else report.gaveUp.push({ task: t.id, dueAt, error: msg });
-            log({ event: "task_follow_up_not_started", task: t.id, dueAt, state: slot?.state, attempts: slot?.attempts, detail: msg.slice(0, 200) });
+            if (slot?.state === "retry-wait") report.retrying.push({ task: id, dueAt, error: msg });
+            else report.gaveUp.push({ task: id, dueAt, error: msg });
+            log({ event: "task_follow_up_not_started", task: id, dueAt, state: slot?.state, attempts: slot?.attempts, detail: msg.slice(0, 200) });
           } catch (rec) {
-            report.unrecorded.push({ task: t.id, error: rec instanceof Error ? rec.message.slice(0, 200) : "error" });
-            log({ event: "task_follow_up_record_failed", task: t.id, dueAt, detail: rec instanceof Error ? rec.message.slice(0, 200) : "error" });
+            report.unrecorded.push({ task: id, error: rec instanceof Error ? rec.message.slice(0, 200) : "error" });
+            log({ event: "task_follow_up_record_failed", task: id, dueAt, detail: rec instanceof Error ? rec.message.slice(0, 200) : "error" });
           }
         }
       }

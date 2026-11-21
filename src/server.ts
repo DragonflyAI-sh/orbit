@@ -482,7 +482,8 @@ export function buildServer({
       if (!p) return { ok: false, why: "no open proposal has that id (it was never made, already used, or expired)" };
       if (p.kind !== "job_launch") return { ok: false, why: "that proposal is not a job launch" };
       if (p.origin !== assistantSessionId()) return { ok: false, why: "that proposal was not made in the Assistant" };
-      return { ok: true, proposal: { id: p.id, kind: "job_launch", routine: p.routine, brief: p.brief, origin: p.origin, createdAt: p.createdAt } };
+      // The lane is the proposal store's own (research_launch sets "research"), never the request's or the model's say-so.
+      return { ok: true, proposal: { id: p.id, kind: "job_launch", lane: p.lane === "research" ? "research" : "build", routine: p.routine, brief: p.brief, origin: p.origin, createdAt: p.createdAt } };
     },
     vault: tasksVault,
     modelName: () => (taskModel ?? model).status().impl,
@@ -1022,15 +1023,17 @@ export function buildServer({
     // ---- Supervised tasks (owner only, every route; docs/adr/0003-supervised-tasks.md). Rai's own actions: list, inspect, create,
     // steer, pause, resume, cancel, run one turn, attest evidence, answer a request, sync to the vault, and mark done (evidence-gated).
     // Every mutation names the rev it was based on; a stale one is refused (409) and changes nothing.
-    const taskMatch = url.pathname.match(/^\/tasks\/([^/]{1,80})(?:\/(steer|pause|resume|cancel|turn|complete|evidence|respond|sync|follow-up))?$/);
-    if (url.pathname === "/tasks" || taskMatch) {
-      const action = taskMatch ? (taskMatch[2] ?? "inspect") : req.method === "POST" ? "create" : "list";
-      const method = action === "list" || action === "inspect" ? "GET" : "POST";
+    const taskMatch = url.pathname === "/tasks/projects" ? null : url.pathname.match(/^\/tasks\/([^/]{1,80})(?:\/(steer|pause|resume|cancel|turn|complete|evidence|respond|sync|follow-up|update|attention))?$/);
+    if (url.pathname === "/tasks" || url.pathname === "/tasks/projects" || taskMatch) {
+      const action = url.pathname === "/tasks/projects" ? "projects" : taskMatch ? (taskMatch[2] ?? "inspect") : req.method === "POST" ? "create" : "list";
+      const method = action === "list" || action === "inspect" || action === "projects" ? "GET" : "POST";
       if (req.method !== method) return send(res, 405, { error: `Use ${method} for this route.` });
       if (!(await owned("tasks", action))) return;
       const human: Provenance = { actor: "human", via: "task-panel" };
       try {
         if (action === "list") return send(res, 200, { tasks: tasks.all().map((t) => supervisor.view(t, "summary")), status: tasks.status(), turnsRunning: supervisor.runningCount() });
+        // Read-only reconciliation by project (Repair 3): writes nothing, syncs nothing.
+        if (action === "projects") return send(res, 200, supervisor.projectStatus({ project: url.searchParams.get("project") ?? undefined, includeClosed: url.searchParams.get("closed") === "1" }));
         if (action === "create") {
           const input = await body();
           if (!input) return;
@@ -1043,6 +1046,11 @@ export function buildServer({
         if (action === "inspect") return send(res, 200, { task: supervisor.view(tasks.get(id)!) });
         const input = await body();
         if (!input) return;
+        // Acknowledging an attention item is bookkeeping about the item, not a change to the task, so it needs no rev (Repair 3).
+        if (action === "attention") {
+          const r = tasks.acknowledge(id, input.attention, human, input.note);
+          return send(res, 200, { task: supervisor.view(r.task), attention: r.item.id, state: r.item.state, duplicate: r.duplicate });
+        }
         const rev = tasks.requireRev(input.rev);
         const key = typeof input.requestId === "string" && /^[A-Za-z0-9-]{8,64}$/.test(input.requestId) ? `owner:${input.requestId}` : undefined;
         if (action === "steer") {
@@ -1061,7 +1069,15 @@ export function buildServer({
         // Rai's per-task opt-in to automatic follow-up (on or off). Only this owner route can turn it on.
         if (action === "follow-up") {
           if (typeof input.enabled !== "boolean") return send(res, 400, { error: "Send {rev, enabled: true|false, perDay?}." });
-          return send(res, 200, { task: supervisor.view(tasks.setAuto(id, rev, input.enabled, human, input.perDay)) });
+          const r = tasks.setAutoDetailed(id, rev, input.enabled, human, input.perDay);
+          return send(res, 200, { task: supervisor.view(r.task), changed: r.changed, ...(r.ignored.length ? { ignored: r.ignored, note: "perDay is not used when turning automatic follow-up off; it was neither checked nor applied." } : {}) });
+        }
+        // Rai's own edit of the task's plan (Repair 3): next action, follow-up time, project, vault link, dependencies, automatic
+        // follow-up off. One atomic change; turning off what is already off changes nothing.
+        if (action === "update") {
+          const pick = (k: string) => (input[k] === undefined ? undefined : input[k]);
+          const r = tasks.updateDetailed(id, rev, { nextAction: pick("nextAction"), followUpAt: pick("followUpAt"), followUpNote: pick("followUpNote"), project: pick("project"), vaultNote: pick("vaultNote"), vaultHeading: pick("vaultHeading"), dependsOn: pick("dependsOn"), autoFollowUp: pick("autoFollowUp") }, human);
+          return send(res, 200, { task: supervisor.view(r.task), changed: r.changed, ...(r.notes.length ? { notes: r.notes } : {}) });
         }
         if (action === "evidence") {
           const r = tasks.addEvidence(id, input as { criterion: unknown; kind: unknown; ref: unknown }, human, rev);
