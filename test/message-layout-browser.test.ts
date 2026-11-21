@@ -267,6 +267,49 @@ for (const surface of ["assistant", "chat"] as const) {
     assert.ok(m.right <= m.view, `no row or open time runs past the screen (${m.right} > ${m.view})`);
     assert.equal(await page.locator(`${sel} .msg .mtip`).nth(4).isVisible(), true);
   });
+
+  test(`browser (${surface}): message content keeps 8px clear of the sender's line and of the scroll edge, on phone and desktop, light and dark`, { skip }, async () => {
+    for (const viewport of [{ width: 360, height: 740 }, { width: 390, height: 760 }, { width: 1000, height: 900 }, { width: 1600, height: 700 }]) {
+      for (const colorScheme of ["light", "dark"] as const) {
+        reset();
+        const sel = await open(hash, viewport);
+        await page.emulateMedia({ colorScheme });
+        const m = await page.evaluate((s: string) => {
+          const log = document.querySelector(s) as HTMLElement;
+          const lr = log.getBoundingClientRect();
+          const scrollEdge = lr.left + log.clientLeft + log.clientWidth; // the inside of the scrollbar, or the edge where an overlay one draws
+          return [...log.querySelectorAll(".msg")].map((n) => {
+            const r = n.getBoundingClientRect();
+            const rule = getComputedStyle(n, "::before");
+            const ruleLeft = r.left + parseFloat(rule.left), ruleRight = ruleLeft + parseFloat(rule.width);
+            const parts = [...n.children].filter((c) => !c.classList.contains("mavatar")).map((c) => c.getBoundingClientRect());
+            const pre = n.querySelector(".md .scrollx:has(pre)") as HTMLElement | null; // a code block's own sideways scroller
+            return {
+              avatarRight: n.querySelector(".mavatar")!.getBoundingClientRect().right, ruleLeft, ruleRight, ruleWidth: parseFloat(rule.width),
+              left: Math.min(...parts.map((p) => p.left)), right: Math.max(...parts.map((p) => p.right)), rowRight: r.right, scrollEdge,
+              pre: pre ? { right: pre.getBoundingClientRect().right, overflowX: getComputedStyle(pre).overflowX } : null,
+            };
+          });
+        }, sel);
+        const where = `${viewport.width}px ${colorScheme}`;
+        assert.ok(m.length > 0);
+        for (const row of m) {
+          assert.ok(row.ruleWidth > 0 && row.ruleLeft >= row.avatarRight, `the line sits right of the icon at ${where}`);
+          const left = Math.round(row.left - row.ruleRight), right = Math.round(row.rowRight - row.right);
+          assert.equal(left, 8, `8px between the sender's line and the content at ${where} (${left})`);
+          assert.equal(right, 8, `8px inside the row's right edge, not doubled (${right}) at ${where}`);
+          assert.ok(row.scrollEdge - row.right >= 8, `the content keeps at least 8px from the scroll edge at ${where} (${row.scrollEdge - row.right})`);
+          if (row.pre) {
+            assert.ok(row.pre.right <= row.right + 0.5, `code stays inside the content column at ${where}`);
+            assert.match(row.pre.overflowX, /auto|scroll/, `wide code still scrolls inside the message at ${where}`);
+          }
+        }
+        assert.ok(m.some((r: any) => r.pre), "a code block was checked");
+        const page2 = await page.evaluate((s: string) => ({ page: document.documentElement.scrollWidth <= document.documentElement.clientWidth, log: document.querySelector(s)!.scrollWidth <= document.querySelector(s)!.clientWidth }), sel);
+        assert.deepEqual(page2, { page: true, log: true }, `nothing scrolls sideways at ${where}`);
+      }
+    }
+  });
 }
 
 test("browser (assistant): a send shows Sending… and Waiting… rows with no time until ORBIT stores them, then their stored times", { skip }, async () => {

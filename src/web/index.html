@@ -370,14 +370,18 @@
      down the content's left edge; never a background. Rows, cards, banners and the context line use the full width of the
      reading column (--measure, centred on wide screens; the whole log, less its gutter, on narrow ones). A message never
      grows past the column: long
-     words and URLs wrap, wide code and tables scroll inside it. */
-  .msg { --who: var(--accent-2); position: relative; display: grid; grid-template-columns: 32px minmax(0, 1fr); column-gap: 10px;
-         align-self: stretch; width: 100%; max-width: 100%; min-width: 0; padding: 4px 8px 4px 4px;
+     words and URLs wrap, wide code and tables scroll inside it.
+     Inline spacing: the content keeps --msg-inset (8px) clear of the sender's line on its left and of the row's right edge
+     (so of the scroll edge and its scrollbar), at every width. The line sits --msg-rule-gap right of the avatar. */
+  .msg { --who: var(--accent-2); --msg-av: 32px; --msg-pad-l: 4px; --msg-rule-gap: 5px; --msg-rule-w: 2px; --msg-inset: var(--space-2);
+         position: relative; display: grid; grid-template-columns: var(--msg-av) minmax(0, 1fr);
+         column-gap: calc(var(--msg-rule-gap) + var(--msg-rule-w) + var(--msg-inset));
+         align-self: stretch; width: 100%; max-width: 100%; min-width: 0; padding: 4px var(--msg-inset) 4px var(--msg-pad-l);
          white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg.user { --who: var(--accent); }
   .msg > * { grid-column: 2; min-width: 0; }
   .msg > .mavatar { grid-column: 1; grid-row: 1 / span 60; align-self: start; }
-  .msg::before { content: ""; position: absolute; left: 41px; top: 28px; bottom: 6px; width: 2px; border-radius: 1px; background: color-mix(in srgb, var(--who) 40%, transparent); }
+  .msg::before { content: ""; position: absolute; left: calc(var(--msg-pad-l) + var(--msg-av) + var(--msg-rule-gap)); top: 28px; bottom: 6px; width: var(--msg-rule-w); border-radius: 1px; background: color-mix(in srgb, var(--who) 40%, transparent); }
   .msg:hover { background: color-mix(in srgb, var(--fg) 4%, transparent); }
   .mavatar { width: 32px; height: 32px; margin-top: 2px; border-radius: 50%; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 0 1px var(--line); }
   img.mavatar { object-fit: cover; }
@@ -394,8 +398,8 @@
           background: var(--fg); color: var(--bg); font-size: var(--text-xs); line-height: 1.4; text-align: left; white-space: normal; overflow-wrap: anywhere; box-shadow: 0 2px 8px rgba(0, 0, 0, .3); }
   .mtime:hover .mtip, .mtime:focus-visible .mtip, .mtime[aria-expanded="true"] .mtip { display: block; }
   @media (max-width: 480px) {
-    .msg { grid-template-columns: 28px minmax(0, 1fr); column-gap: 8px; padding: 4px 2px; }
-    .msg::before { left: 33px; top: 26px; }
+    .msg { --msg-av: 28px; --msg-pad-l: 2px; --msg-rule-gap: 3px; }
+    .msg::before { top: 26px; }
     .mavatar { width: 28px; height: 28px; } span.mavatar { font-size: var(--text-sm); }
   }
   .msg a { color: var(--accent-2); overflow-wrap: anywhere; }
