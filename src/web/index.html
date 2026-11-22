@@ -399,6 +399,9 @@
   .mtime { font: inherit; font-size: var(--text-xs); color: var(--muted); background: none; border: 0; border-radius: var(--radius-xs); padding: 0 2px; min-height: 24px; cursor: help; }
   .mtime:not(:disabled):hover, .mtime:not(:disabled):active { filter: none; box-shadow: none; transform: none; text-decoration: underline; }
   .mtime.provisional { font-style: italic; }
+  /* Which model wrote a reply, after its time: as small and muted as the time; a paid fallback answer in the warning color. */
+  .mmodel { font-size: var(--text-xs); color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
+  .mmodel.fallback { color: var(--warn); font-weight: 600; }
   .mtip { display: none; position: absolute; left: 0; top: 100%; z-index: 5; width: max-content; max-width: 100%; padding: 6px 8px; border-radius: var(--radius-sm);
           background: var(--fg); color: var(--bg); font-size: var(--text-xs); line-height: 1.4; text-align: left; white-space: normal; overflow-wrap: anywhere; box-shadow: 0 2px 8px rgba(0, 0, 0, .3); }
   .mtime:hover .mtip, .mtime:focus-visible .mtip, .mtime[aria-expanded="true"] .mtip { display: block; }
@@ -3199,19 +3202,52 @@
     b.className = `mtime${s.provisional ? " provisional" : ""}`;
     b.ariaLabel = `${s.label}. ${s.full}`;
   }
-  function msgHead(role, owner, state, at, mk, author) {
+  // `model`: the stored reply's model label (modelLabelOf), drawn after the time, small and muted; a fallback answer is in the warning color.
+  function msgHead(role, owner, state, at, mk, author, model) {
     const b = mk("button", { type: "button", ariaExpanded: "false", onclick: () => { b.ariaExpanded = b.ariaExpanded === "true" ? "false" : "true"; }, onblur: () => { b.ariaExpanded = "false"; } });
     if (b.dataset) Object.assign(b.dataset, { state, at: typeof at === "string" ? at : "", role });
     fillStamp(b, msgStamp(state, at, role, Date.now(), msgZone()), mk);
-    return mk("div", { className: "mhead" }, mk("span", { className: "mname", textContent: msgSender(role, owner, author).name }), b);
+    const head = mk("div", { className: "mhead" }, mk("span", { className: "mname", textContent: msgSender(role, owner, author).name }), b);
+    if (model && model.label) head.append(modelTag(model, mk));
+    return head;
+  }
+  const modelTag = (model, mk) => mk("span", { className: `mmodel${model.fallback ? " fallback" : ""}`, textContent: model.label, title: model.full, ariaLabel: model.full });
+  // Which model wrote a stored reply (AnsweredBy, src/model.ts) as the label shown beside its time: the model name, or
+  // "fallback: <model>" when the paid fallback answered instead of the primary. A reply stored before ORBIT recorded it is read
+  // from its own `fallback` and `source` fields, which name the same model; a reply with none of them, a user message, a reply
+  // still being written and a failed turn get no label (never a guess).
+  function modelLabelOf(m) {
+    if (m.role !== "assistant" || (m.status && m.status !== "done")) return null;
+    const a = m.answeredBy;
+    let model = "", fallback = false, mixed = false;
+    if (a && typeof a.model === "string" && a.model) { model = a.model; fallback = a.fallback === true; mixed = a.mixed === true; }
+    else if (m.fallback && typeof m.fallback.model === "string" && m.fallback.model) { model = m.fallback.model; fallback = true; }
+    else {
+      const s = typeof m.source === "string" ? m.source.match(/^model\/(?:chatgpt-token-sharing\/|openai\/)?([^\s()]+)$/) : null;
+      if (s) model = s[1];
+    }
+    if (!model) return null;
+    const label = fallback ? `fallback: ${model}` : model;
+    const full = fallback ? `Answered by the paid fallback model ${model}, not the primary model${mixed ? " (earlier rounds of this reply came from the primary)" : ""}` : `Answered by ${model}`;
+    return { label, full, fallback };
   }
   // The icon and the name line of a stored message, as keyed parts (see messageParts). Neither depends on anything that
   // changes while a reply runs, so a reply in progress never rebuilds them (the label itself follows the clock: refreshMsgTimes).
+  // Only the model label is added to the name line, in place, when the reply finishes.
   function headParts(m, mk) {
     const role = m.role === "user" ? "user" : "assistant";
+    const model = modelLabelOf(m);
     return [
       { key: "avatar", sig: `${role}${m.author ? `:${m.author}` : ""}`, build: () => msgAvatar(role, true, mk, m.author) },
-      { key: "head", sig: JSON.stringify([role, m.at ?? null, m.author ?? null]), build: () => msgHead(role, true, "stored", m.at, mk, m.author) },
+      // A message's role, time and author never change once it is stored (its id is the part's place), so the only change the
+      // name line ever sees is the model label appearing when the reply finishes: it is updated in place, and the time button
+      // (with an open time tip) is kept.
+      { key: "head", sig: JSON.stringify([role, m.at ?? null, m.author ?? null, model]), build: () => msgHead(role, true, "stored", m.at, mk, m.author, model),
+        update: (node) => {
+          const old = Array.from(node.childNodes).find((k) => typeof k.className === "string" && k.className.split(" ")[0] === "mmodel");
+          if (old) node.removeChild(old);
+          if (model) node.append(modelTag(model, mk));
+        } },
     ];
   }
   // A row the page draws before (or without) ORBIT storing it: same layout, its state where the time goes.

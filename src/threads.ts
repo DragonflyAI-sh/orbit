@@ -3,7 +3,8 @@ import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, r
 import { join } from "node:path";
 import { redact } from "./ops/protocol.ts";
 import { maskStoredText, maskVaultText } from "./vault/filter.ts";
-import type { FallbackInfo } from "./model.ts";
+import type { AnsweredBy, FallbackInfo } from "./model.ts";
+import { modelLabel } from "./model.ts";
 import type { AttachmentRef } from "./attachments.ts";
 import { safeGalleries } from "./photo-ref.ts";
 import type { StoredGallery } from "./photo-ref.ts";
@@ -136,6 +137,9 @@ export type ThreadMessage = {
   capped?: boolean;
   // Set when the OpenRouter fallback answered: provider, model, why, and when the primary limit ends.
   fallback?: FallbackInfo;
+  // Which model wrote this reply (src/model.ts, AnsweredBy): set on every finished assistant reply. Absent on replies stored before
+  // ORBIT recorded it, on user messages and on failed turns.
+  answeredBy?: AnsweredBy;
   // Spend-accounting diagnostics for the owner (a ledger write failed on a billed call). Not part of `text`, so never sent back to the model.
   accounting?: string[];
   // Notes that the reply is cut off or partly dropped (output limit, early finish, malformed tool calls not run). Not part of `text`, so never sent back to the model.
@@ -213,8 +217,21 @@ export type SessionFacts = { busy: boolean; titleSet: boolean; messageCount: num
 // arguments or outputs, cards, memory paths, error, accounting or fallback details. Only how many calls and cards there were is kept,
 // so a reader knows something was left out.
 // Photos are never readable through session_read: only how many a message had (`photos`, when there were any).
-export type TranscriptMessage = { id: string; role: "user" | "assistant"; at: string; text: string; status?: MessageStatus; toolCalls: number; cards: number; photos?: number };
-export const transcriptMessage = (m: ThreadMessage): TranscriptMessage => ({ id: m.id, role: m.role, at: m.at, text: typeof m.text === "string" ? m.text : "", ...(m.status ? { status: m.status } : {}), toolCalls: m.calls?.length ?? 0, cards: m.cards?.length ?? 0, ...(m.attachments?.length ? { photos: m.attachments.length } : {}) });
+// `model`: the label of the model that wrote an assistant reply ("gpt-6.2-sol", or "fallback: <model>"), when ORBIT recorded one.
+// Only the label: no reason, limit, cost or spend detail of a fallback.
+export type TranscriptMessage = { id: string; role: "user" | "assistant"; at: string; text: string; status?: MessageStatus; toolCalls: number; cards: number; photos?: number; model?: string };
+export const transcriptMessage = (m: ThreadMessage): TranscriptMessage => ({ id: m.id, role: m.role, at: m.at, text: typeof m.text === "string" ? m.text : "", ...(m.status ? { status: m.status } : {}), toolCalls: m.calls?.length ?? 0, cards: m.cards?.length ?? 0, ...(m.attachments?.length ? { photos: m.attachments.length } : {}), ...(m.role === "assistant" && validAnsweredBy(m.answeredBy) ? { model: modelLabel(m.answeredBy) } : {}) });
+
+// A stored AnsweredBy as written by safePatch: a non-empty model string and only the two flags. Anything else (a hand-edited or
+// damaged thread file) is treated as not recorded, never shown.
+export const validAnsweredBy = (a: unknown): a is AnsweredBy =>
+  typeof a === "object" && a !== null && typeof (a as AnsweredBy).model === "string" && (a as AnsweredBy).model.length > 0;
+const MAX_MODEL_NAME_CHARS = 200;
+const safeAnsweredBy = (a: unknown): AnsweredBy | undefined => {
+  if (!validAnsweredBy(a)) return undefined;
+  const model = maskText(a.model).replace(/\s+/g, " ").trim().slice(0, MAX_MODEL_NAME_CHARS);
+  return model ? { model, ...(a.fallback === true ? { fallback: true as const } : {}), ...(a.mixed === true ? { mixed: true as const } : {}) } : undefined;
+};
 
 // The stored form of a message's photo references: ids and safe facts only, at most 10, in the order given.
 export const safeAttachments = (refs: AttachmentRef[] | undefined): AttachmentRef[] | undefined =>
@@ -295,6 +312,11 @@ export function safePatch(patch: MessagePatch): MessagePatch {
   if (typeof safe.error === "string") safe.error = maskText(safe.error).slice(0, 1000);
   if (Array.isArray(safe.accounting)) safe.accounting = safe.accounting.slice(0, 5).map((a) => maskText(String(a)).slice(0, 300));
   if (Array.isArray(safe.incomplete)) safe.incomplete = safe.incomplete.slice(0, 5).map((a) => maskText(String(a)).slice(0, 300));
+  if ("answeredBy" in safe) {
+    const a = safeAnsweredBy(safe.answeredBy);
+    if (a) safe.answeredBy = a;
+    else delete safe.answeredBy;
+  }
   if ("gallery" in safe) {
     const g = safeGalleries(safe.gallery);
     if (g?.length) safe.gallery = g;
