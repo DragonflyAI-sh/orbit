@@ -148,7 +148,9 @@ before(async () => { if (!skip) browser = await playwright.chromium.launch(); })
 after(async () => { await browser?.close(); });
 
 async function openPage(url: string, opts: { context?: any; setup?: (page: any) => Promise<void> } = {}) {
-  const context = opts.context ?? (await browser.newContext({ viewport: { width: 900, height: 700 } }));
+  // A laptop width: the left sidebar is docked and open by default (docs/sidebar.md), so the header bell toggles the
+  // notifications view in place, as the panel did. The narrow-screen drawer is covered by test/sidebar-browser.test.ts.
+  const context = opts.context ?? (await browser.newContext({ viewport: { width: 1280, height: 700 } }));
   const page = await context.newPage();
   const errors: string[] = [];
   page.on("pageerror", (e: Error) => errors.push(e.message));

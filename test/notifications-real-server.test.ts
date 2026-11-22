@@ -212,7 +212,9 @@ after(async () => { await browser?.close(); });
 // A page whose visibility the test can set (Chromium's headless tabs are always visible): it overrides
 // document.visibilityState/hidden and fires visibilitychange, which is what the page listens to.
 async function openPage(base: string, opts: { context?: any; notesOpen?: boolean; setup?: (page: any) => Promise<void> } = {}) {
-  const context = opts.context ?? (await browser.newContext({ viewport: { width: 900, height: 700 } }));
+  // A laptop width: the left sidebar is docked and open by default (docs/sidebar.md), so the header bell toggles the
+  // notifications view in place, as the panel did. The narrow-screen drawer is covered by test/sidebar-browser.test.ts.
+  const context = opts.context ?? (await browser.newContext({ viewport: { width: 1280, height: 700 } }));
   const page = await context.newPage();
   await page.addInitScript(`(() => {
     let vis = "visible";
@@ -431,7 +433,7 @@ test("browser: the status indicator says not read yet before the first answer, a
     release();
     await page.waitForFunction(() => /could not be reached/.test(document.getElementById("health")!.title));
     assert.equal(await page.getAttribute("#health", "class"), "unknown", "no answer is unknown (grey), never green and not claimed down");
-    assert.equal(await page.textContent("#health .label"), "Disconnected");
+    assert.equal(await page.textContent("#navstatuslabel"), "Disconnected");
   } finally {
     await context.close();
   }

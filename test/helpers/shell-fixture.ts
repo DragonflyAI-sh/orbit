@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { sidebarNote, sidebarView } from "../../src/sidebar.ts";
+import type { SidebarPhoto } from "../../src/sidebar.ts";
 
 // A scripted fake of the routes the web page reads, with synthetic conversations of any length, for the app-shell layout
 // checks (test/app-shell-browser.test.ts) and the screenshot script (test/helpers/shell-screens.ts). Nothing here is real
@@ -28,10 +30,28 @@ function exchange(i: number, at: (n: number) => string) {
   return [user, reply];
 }
 
-export type ShellOpts = { exchanges?: number; pending?: boolean; notes?: number; card?: boolean; html?: string; longNotes?: boolean };
+// Synthetic vault notes and photos for the left sidebar (docs/sidebar.md), read through the real sidebarView.
+export const SIDEBAR_NOTES = new Map<string, string>([
+  ["now.md", "# Now\n\n## Top priorities\n- Ship the synthetic release\n- Review the fixture plan\n"],
+  ["Projects/alpha-garden.md", "---\nstatus: active\naliases: [Alpha Garden]\ntags: [project]\n---\n# Alpha Garden\n\n## Next actions\n- [ ] Order the synthetic seeds\n- [x] Measure the beds\n- Draw the watering plan\n\n## Resume here\nPick up at the trellis sketch.\n\n## Locations\n- ~/projects/alpha-garden\n"],
+  ["Projects/beta-desk.md", "---\nstatus: paused\n---\n# Beta Desk\n\n## Plan\n- Sand the top\n"],
+  ["Projects/old-shed.md", "---\nstatus: done\n---\n# Old Shed\n"],
+  ["Tasks/buy-seeds.md", "---\nstatus: todo\nproject: \"[[alpha-garden]]\"\ndue: 2026-11-30\n---\n# Buy seeds\n"],
+  ["Tasks/fix-drawer.md", "---\nstatus: todo\nproject: \"[[beta-desk]]\"\n---\n# Fix the drawer\n"],
+  ["Resources/soil-notes.md", "# Soil notes\n\nFor [[alpha-garden]]: loam, not clay.\n"],
+]);
+export const SIDEBAR_REFS = ["ph_" + "a".repeat(32), "ph_" + "b".repeat(32), "ph_" + "c".repeat(32)];
+const sidebarPhotos = (at: (n: number) => string): SidebarPhoto[] => [
+  { ref: SIDEBAR_REFS[0]!, sentAt: at(30), sentLocal: "Nov 17, 9:30 PM", caption: "The alpha garden beds after rain", conversation: { id: "assistant:assistant", kind: "assistant", title: "Assistant" }, present: true },
+  { ref: SIDEBAR_REFS[1]!, sentAt: at(20), sentLocal: "Nov 17, 9:20 PM", caption: "Desk drawer runner", conversation: { id: `chat:${T1}`, kind: "chat", title: "Beta desk repairs" }, present: true },
+  { ref: SIDEBAR_REFS[2]!, sentAt: at(10), sentLocal: "Nov 17, 9:10 PM", caption: "", conversation: { id: "assistant:assistant", kind: "assistant", title: "Assistant" }, present: true },
+];
+
+export type ShellOpts = { exchanges?: number; pending?: boolean; notes?: number; card?: boolean; html?: string; longNotes?: boolean; sidebar?: "ok" | "vault-down" | 500 };
 
 export function shellServer(opts: ShellOpts = {}) {
-  let o: ShellOpts = { exchanges: 2, pending: false, notes: 3, card: false, ...opts };
+  let o: ShellOpts = { exchanges: 2, pending: false, notes: 3, card: false, sidebar: "ok", ...opts };
+  const sidebarReads: string[] = [];
   const base = Date.parse("2026-11-18T05:00:00Z");
   const at = (n: number) => new Date(base + n * 60_000).toISOString();
   const page = () => o.html ?? readFileSync(new URL("../../src/web/index.html", import.meta.url), "utf8");
@@ -67,6 +87,14 @@ export function shellServer(opts: ShellOpts = {}) {
     if (p === "/status") return json(200, { ports: [{ port: "model", state: "live" }, { port: "vault", state: "live" }, { port: "jobs", state: "degraded" }], deploy: { at: at(0), commit: "0123456789abcdef0123456789abcdef01234567" } });
     if (p === "/notifications") return json(200, { inbox: notes() });
     if (p.startsWith("/notifications/")) { await drain(); return json(200, { ok: true }); }
+    if (p === "/sidebar") {
+      sidebarReads.push(url.search);
+      if (typeof o.sidebar === "number") return json(o.sidebar, { error: "synthetic failure" });
+      const down = o.sidebar === "vault-down";
+      return json(200, { ...sidebarView(down ? undefined : SIDEBAR_NOTES, sidebarPhotos(at), url.searchParams.get("project") || undefined), vault: down ? { ok: false, error: "The vault could not be read: synthetic outage" } : { ok: true, source: "memory/vault@fixture" } });
+    }
+    if (p === "/sidebar/note") { const n = sidebarNote(SIDEBAR_NOTES, url.searchParams.get("path") ?? ""); return n ? json(200, { note: n }) : json(404, { error: "No such note in the vault." }); }
+    if (/^\/assistant\/photos\/ph_[0-9a-f]{32}$/.test(p)) { res.writeHead(200, { "content-type": "image/png" }); return res.end(avatar); }
     if (p === "/model/login") return json(403, { error: "no" });
     if (p === "/chat/proposals") return json(200, { proposals: [] });
     if (p === "/jobs") return json(200, { jobs: [] });
@@ -83,6 +111,7 @@ export function shellServer(opts: ShellOpts = {}) {
   return {
     server,
     set(next: ShellOpts) { o = { ...o, ...next }; },
+    sidebarReads,
     async start() { await new Promise<void>((r) => server.listen(0, "127.0.0.1", r)); return `http://127.0.0.1:${(server.address() as AddressInfo).port}`; },
     close() { server.close(); },
   };

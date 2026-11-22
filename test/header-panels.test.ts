@@ -6,8 +6,9 @@ import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import { isPagePath } from "./helpers/sessions-ui.ts";
 
-// The page header: page links in the bar, a notifications count button and the status indicator on the right, each toggling
-// its own panel below the bar (the status line with every pill and a new-tab link to /status; the notifications). The pure
+// The page header: page links in the bar, a notifications count button (bell and count) and the status indicator (the dot) on
+// the right, each toggling its view in the left sidebar's Notifications and status section (docs/sidebar.md): the status view
+// with every pill and a new-tab link to /status, and the notifications. One view shows at a time. The pure
 // <panels> helpers always run; the page's layout and toggles run in a real browser (Playwright's Chromium) against a scripted
 // fake of ORBIT's routes, and are skipped, saying so, where Playwright is not installed. Offline: no model, no real ORBIT.
 // The fake keeps its notifications as ORBIT does (GET /notifications returns `current` on every read; a read consumes nothing).
@@ -57,9 +58,10 @@ test("the notification count label says how many, says none at zero, and never c
   assert.doesNotMatch(block("panels").replace(/\/\/[^\n]*/g, ""), /unread|seen/i);
 });
 
-test("the markup: page links in the header bar with no Status link; two toggle buttons; collapsed panels below the bar", () => {
+test("the markup: page links in the header bar with no Status link; two icon toggles; collapsed views in the sidebar", () => {
   const header = html.match(/<header>[\s\S]*?<\/header>/)![0];
-  const bar = header.match(/<div class="bar">([\s\S]*?)<\/div><div id="side">/)![1]!;
+  const aside = html.match(/<aside id="nav"[\s\S]*?<\/aside>/)![0];
+  const bar = header.match(/<div class="bar">([\s\S]*?)<\/div><div id="sesspicker"/)![1]!;
   assert.match(bar, /<nav id="tabs" aria-label="ORBIT pages">/, "the page links are in the bar");
   assert.equal(html.match(/<nav\b/g)?.length, 1, "one navigation, no duplicate");
   const nav = header.match(/<nav id="tabs"[^>]*>([\s\S]*?)<\/nav>/)![1]!;
@@ -69,15 +71,18 @@ test("the markup: page links in the header bar with no Status link; two toggle b
     assert.match(b, /aria-expanded="false"/, button);
     assert.match(b, new RegExp(`aria-controls="${panel}"`), button);
     assert.match(b, /aria-label="[^"]+"/, button);
-    assert.match(header, new RegExp(`<div id="${panel}" role="region" aria-label="[^"]+" hidden>`), `${panel} starts collapsed`);
+    assert.match(aside, new RegExp(`<div id="${panel}" role="region" aria-label="[^"]+" hidden>`), `${panel} starts collapsed, in the sidebar`);
+    assert.doesNotMatch(header, new RegExp(`id="${panel}"`), `${panel} is no longer in the header`);
   }
-  // The status line holds the running release (Deployed, then Commit) first, then the overall summary (shown in the desktop
-  // side panel only), a read-error line, the pills (saying they are being read until the first answer) and the page link. It comes straight after the bar on phones: the side
-  // panel's head before it is not shown there (test/side-panel-browser.test.ts).
-  assert.match(header, /<\/div><\/div><div id="side"><div class="sidehead">[\s\S]*?<\/div><\/div><div id="statusline"[^>]*><dl id="deployinfo"[^>]*>[\s\S]*?<\/dl><div id="statussum">[\s\S]*?<div id="statuserr" role="alert" hidden><\/div><div id="ports"><span class="empty">Reading status…<\/span><\/div><a id="statusopen" href="\/status" target="_blank" rel="noopener noreferrer"/);
+  // The header shows icons only: no "Notifications" or status words beside them (the full indicators are in the sidebar).
+  assert.doesNotMatch(bar.replace(/aria-label="[^"]*"|title="[^"]*"/g, "").replace(/<[^>]+>/g, " "), /Notifications|All live|Status unknown/);
+  // The status view holds the running release (Deployed, then Commit) first, then the overall summary, a read-error line, the
+  // pills (saying they are being read until the first answer) and the page link. It follows the view tabs in the sidebar
+  // (test/sidebar-browser.test.ts).
+  assert.match(aside, /<div id="side"><div class="sidetabs" role="tablist"[^>]*>[\s\S]*?<\/div><div id="statusline"[^>]*><dl id="deployinfo"[^>]*>[\s\S]*?<\/dl><div id="statussum">[\s\S]*?<div id="statuserr" role="alert" hidden><\/div><div id="ports"><span class="empty">Reading status…<\/span><\/div><a id="statusopen" href="\/status" target="_blank" rel="noopener noreferrer"/);
   // Before the first /status request the indicator says the status has not been read yet, not that reading it failed.
   const health = bar.match(/<button type="button" id="health"[^>]*>/)![0];
-  assert.match(health, /title="ORBIT's status has not been read yet, so it is not known to be all live\. Show or hide the status line\."/);
+  assert.match(health, /title="ORBIT's status has not been read yet, so it is not known to be all live\. Show or hide the status in the sidebar\."/);
   assert.match(health, /aria-label="Overall status: unknown, not all live\. ORBIT's status has not been read yet, so it is not known to be all live\."/);
   assert.doesNotMatch(health, /could not be read/);
   // Icons are decoration; the controls carry the words.
@@ -125,7 +130,7 @@ after(async () => { await browser?.close(); server.close(); });
 const live = (port: string, state = "live") => ({ port, state, detail: `${port} detail` });
 async function open(opts: { hash?: string; width?: number; colorScheme?: string } = {}) {
   await context?.close();
-  context = await browser.newContext({ viewport: { width: opts.width ?? 900, height: 700 }, colorScheme: opts.colorScheme ?? "light" });
+  context = await browser.newContext({ viewport: { width: opts.width ?? 1280, height: 700 }, colorScheme: opts.colorScheme ?? "light" });
   page = await context.newPage();
   await page.goto(`${base}${opts.hash ?? ""}`);
   await page.waitForFunction(() => document.readyState === "complete");
@@ -139,7 +144,7 @@ const count = () => page.textContent("#notecount");
 
 test("browser: page links sit in the header bar beside the toggles, with no Status link, on desktop and phone widths", { skip }, async () => {
   reset();
-  for (const width of [900, 360]) {
+  for (const width of [1280, 360]) {
     await open({ width });
     assert.deepEqual(await page.$$eval("header .bar nav a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.getAttribute("href"))), ["/#assistant", "/#jobs", "/sessions"]);
     assert.equal(await page.$$eval('header nav a[href="/status"]', (as: unknown[]) => as.length), 0);
@@ -147,13 +152,16 @@ test("browser: page links sit in the header bar beside the toggles, with no Stat
     const box = await page.evaluate(() => { const r = (id: string) => document.getElementById(id)!.getBoundingClientRect(); return { health: r("health"), notes: r("notesbtn"), brand: document.querySelector(".brand")!.getBoundingClientRect(), width: document.documentElement.clientWidth }; });
     assert.ok(box.health.right <= box.width && box.health.left > box.brand.right, `status indicator on the right at ${width}px`);
     assert.ok(box.notes.right <= box.health.left, `notifications button beside it at ${width}px`);
-    // Open both panels with many notes and a long pill: still no sideways scroll.
+    // Open each view with many notes and a long pill: still no sideways scroll. On a phone the header toggle opens the drawer
+    // (modal), so the other view is reached by its tab there.
     ports = [...ports, live("a-very-long-port-name-that-should-wrap-rather-than-overflow", "degraded")];
     current = notes(11);
     await page.evaluate("refreshStatus(); refreshInbox()");
     await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "11");
     await page.click("#health");
-    await page.click("#notesbtn");
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `no horizontal overflow at ${width}px (status)`);
+    await page.click(width < 1024 ? "#sidetab-notes" : "#notesbtn");
+    assert.equal(await visible("#inbox"), true);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `no horizontal overflow at ${width}px`);
     reset();
   }
@@ -168,9 +176,10 @@ test("browser: the status indicator toggles the status line of every pill; its i
   assert.equal(await expanded("#health"), "true");
   assert.equal(await visible("#statusline"), true);
   assert.deepEqual(await page.$$eval("#statusline .pill", (ps: HTMLElement[]) => ps.map((p) => p.textContent)), ["model: live", "memory: live", "watch: live"]);
-  // The panel sits directly below the header bar.
-  const gap = await page.evaluate(() => document.getElementById("statusline")!.getBoundingClientRect().top - document.querySelector("header .bar")!.getBoundingClientRect().bottom);
-  assert.ok(gap >= 0 && gap <= 12, `status line right under the bar (gap ${gap}px)`);
+  // The status view is in the sidebar, on screen.
+  assert.equal(await page.evaluate(() => document.getElementById("nav")!.contains(document.getElementById("statusline"))), true);
+  const where = await page.evaluate(() => { const r = document.getElementById("statusline")!.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, h: window.innerHeight }; });
+  assert.ok(where.top >= 0 && where.top < where.h, `the status view is scrolled into the sidebar's view (${where.top})`);
   const link = await page.$eval("#statusopen", (a: HTMLAnchorElement) => ({ href: a.getAttribute("href"), target: a.target, rel: a.rel, label: a.getAttribute("aria-label") }));
   assert.deepEqual(link, { href: "/status", target: "_blank", rel: "noopener noreferrer", label: "Open the status page (raw JSON) in a new tab" });
   const [tab] = await Promise.all([context.waitForEvent("page"), page.click("#statusopen")]);
@@ -328,23 +337,23 @@ test("browser: a collapsed panel sends no receipt; opening it sends one for each
   assert.equal(await page.getAttribute("#inbox .note .x", "aria-label"), "Dismiss this notification");
 });
 
-test("browser: the two toggles are independent and survive refreshes, page switches and a reload in this tab", { skip }, async () => {
+test("browser: the two toggles show one view at a time and survive refreshes, page switches and a reload in this tab", { skip }, async () => {
   reset();
   await open();
   await page.click("#notesbtn");
   assert.equal(await visible("#inbox"), true);
-  assert.equal(await visible("#statusline"), false, "opening one leaves the other alone");
+  assert.equal(await visible("#statusline"), false, "one view at a time");
   current = notes(2);
   await page.evaluate("refreshStatus(); refreshInbox()");
   await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "2");
   assert.equal(await expanded("#notesbtn"), "true");
   assert.equal(await expanded("#health"), "false");
   await page.click("#health");
+  assert.equal(await expanded("#notesbtn"), "false", "the status toggle switches the view");
   await page.click('#tabs a[data-tab="chat"]');
   await page.waitForFunction(() => document.body.dataset.tab === "chat");
-  assert.equal(await visible("#inbox"), true);
-  assert.equal(await visible("#statusline"), true);
-  await page.click("#notesbtn");
+  assert.equal(await visible("#inbox"), false);
+  assert.equal(await visible("#statusline"), true, "kept across a page switch");
   await page.click("#assistanttab");
   await page.waitForFunction(() => document.body.dataset.tab === "assistant");
   assert.equal(await visible("#inbox"), false);

@@ -273,7 +273,7 @@ test("browser: the indicator follows green, amber (fallback, optional), red (cor
   // The fallback answers: amber, labelled, with the provider and model.
   await set({ ports: withPort(healthy(), onFallback()) });
   await at("degraded");
-  assert.equal(await page.textContent("#health .label"), "Degraded: fallback model");
+  assert.equal(await page.textContent("#navstatuslabel"), "Degraded: fallback model");
   assert.match(await page.getAttribute("#health", "aria-label"), /^Overall status: degraded but working\. Degraded: fallback model\. .*openrouter\/vendor\/cheap-model/);
   assert.match(await page.getAttribute("#health", "title"), /Replies come from the fallback model openrouter\/vendor\/cheap-model/);
   const amber = await dot();
@@ -284,7 +284,7 @@ test("browser: the indicator follows green, amber (fallback, optional), red (cor
   // Both providers unavailable: red, and it overrides the amber.
   await set({ ports: withPort(withPort(healthy(), bothDown()), P("memory", "degraded")) });
   await at("down");
-  assert.equal(await page.textContent("#health .label"), "Down: model");
+  assert.equal(await page.textContent("#navstatuslabel"), "Down: model");
   assert.match(await page.getAttribute("#health", "aria-label"), /^Overall status: down, core functionality unavailable\./);
   const red = await dot();
   assert.notEqual(red.bg, amber.bg);
@@ -298,20 +298,20 @@ test("browser: the indicator follows green, amber (fallback, optional), red (cor
   // An optional subsystem only: amber.
   await set({ ports: withPort(healthy(), P("watch", "degraded")) });
   await at("degraded");
-  assert.equal(await page.textContent("#health .label"), "Degraded: 1 not live");
+  assert.equal(await page.textContent("#navstatuslabel"), "Degraded: 1 not live");
   assert.match(await page.getAttribute("#health", "title"), /watch: degraded/);
 
   // No usable answer: grey "unknown", never green and not claimed red.
   await set({ error: "boom" }, 500);
   await at("unknown");
-  assert.equal(await page.textContent("#health .label"), "Status unknown");
+  assert.equal(await page.textContent("#navstatuslabel"), "Status unknown");
   assert.match(await page.getAttribute("#health", "title"), /HTTP 500/);
   await set({ ports: healthy() });
   await at("ok");
   status = { code: 0, body: null };
   await page.evaluate("refreshStatus()");
   await at("unknown");
-  assert.equal(await page.textContent("#health .label"), "Disconnected");
+  assert.equal(await page.textContent("#navstatuslabel"), "Disconnected");
   assert.match(await page.getAttribute("#health", "aria-label"), /^Overall status: unknown\. Disconnected\. ORBIT could not be reached/);
   assert.equal(await page.textContent("#ports"), healthy().map((p) => `${p.port}: ${p.state}`).join(""), "the last pills stay while disconnected");
   const grey = await dot();

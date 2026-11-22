@@ -164,7 +164,7 @@ test("browser: collapsed shows only the indicator; expanded shows Deployed and C
   await open();
   assert.equal(await page.getAttribute("#health", "aria-expanded"), "false");
   assert.equal(await visible("#deployinfo"), false, "collapsed: no deployment rows");
-  assert.equal(await page.textContent("#health .label"), "All live", "the collapsed indicator is unchanged");
+  assert.equal(await page.textContent("#navstatuslabel"), "All live", "the collapsed indicator is unchanged");
   await page.click("#health");
   assert.equal(await visible("#deployinfo"), true);
   // The browser is in Tokyo; the page uses ORBIT's configured zone, as message times do.
@@ -192,8 +192,8 @@ test("browser: collapsed shows only the indicator; expanded shows Deployed and C
     return { above: r("deployinfo").bottom <= r("ports").top, first: document.getElementById("statusline")!.firstElementChild!.id, linkBeside: r("statusopen").top >= r("deployinfo").bottom };
   });
   assert.deepEqual(order, { above: true, first: "deployinfo", linkBeside: true });
-  // Collapsing hides it again.
-  await page.click("#health");
+  // Collapsing hides it again (the header toggle opened the sidebar's drawer at this width, so its own status indicator is used).
+  await page.click("#navstatus");
   assert.equal(await visible("#deployinfo"), false);
 });
 

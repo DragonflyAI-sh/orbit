@@ -251,21 +251,28 @@ test("browser (touch, 320 and 390): header controls and page tabs are at least 4
   }
 });
 
-test("browser (390): notifications and status panels stay bounded, so the conversation and Send keep their room", { skip }, async () => {
+test("browser (568x320 landscape): notifications open in the sidebar drawer, which scrolls inside itself; the page never grows and Send is back after", { skip }, async () => {
   fixture.set({ exchanges: 8, notes: 12 });
   const { page, ctx, p } = await open(chromium, SIZES[4]!, "/#assistant"); // 568x320 landscape: the tightest height
   await page.click("#notesbtn");
-  await page.click("#health");
   await page.waitForTimeout(100);
+  const d = await page.evaluate(() => {
+    const nav = document.getElementById("nav")!, r = nav.getBoundingClientRect(), sc = nav.querySelector(".navscroll") as HTMLElement;
+    return { top: r.top, bottom: r.bottom, vh: window.innerHeight, scrolls: sc.scrollHeight > sc.clientHeight, inbox: !document.getElementById("inbox")!.hidden,
+      doc: document.documentElement.scrollHeight > document.documentElement.clientHeight, focus: document.activeElement!.id };
+  });
+  assert.ok(d.top >= -0.5 && d.bottom <= d.vh + 0.5, `the drawer fits the screen (${d.top}..${d.bottom} of ${d.vh})`);
+  assert.equal(d.scrolls, true, "the drawer scrolls inside itself");
+  assert.equal(d.inbox, true);
+  assert.equal(d.doc, false, "the page does not grow");
+  assert.equal(d.focus, "sidetab-notes", "the modal drawer takes focus, on the view's tab");
+  await page.keyboard.press("Escape");
   const g = await shell(page, p);
   assert.equal(g.docOverflowY, false, "the page does not grow");
   assert.equal(g.scrolled, 0);
   assert.equal(g.sendCovered, false, "Send stays clear");
   assert.ok(g.send.bottom <= g.vh + 1, "Send on screen");
-  const inbox = await page.evaluate(() => { const b = document.getElementById("inbox")!; return { h: b.getBoundingClientRect().height, scrolls: b.scrollHeight > b.clientHeight }; });
-  assert.ok(inbox.h <= 320 * 0.3 + 1, `the notifications panel is at most 30% of the height (${inbox.h})`);
-  await page.click("#notesbtn");
-  await page.click("#health");
+  assert.equal(await page.evaluate(() => document.activeElement!.id), "notesbtn", "focus goes back to the toggle");
   await ctx.close();
   fixture.set({ notes: 3 });
 });

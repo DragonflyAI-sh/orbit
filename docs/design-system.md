@@ -136,7 +136,10 @@ Notifications and Status felt awkward as cards inside the header; and on a phone
   list's edge cannot clip it. The page tabs lose their outline and the current tab its inner border (it stays raised by
   its card colour, shadow and gradient underline), which is the borderless track phones already had. Phones (below 900px)
   are unchanged: same picker rows, same tabs.
-- **Side panel (1024px and wider).** Notifications and Status open in one panel on the right, under the header and down
+- **Side panel (1024px and wider).** *Superseded by the left sidebar ([sidebar.md](sidebar.md)): Notifications and Status
+  now live in its last section on every width, the header keeps only the bell with its count and the status dot, and
+  `test/side-panel-browser.test.ts` became `test/sidebar-browser.test.ts`. The record below is kept as it was.*
+  Notifications and Status open in one panel on the right, under the header and down
   to the bottom of the screen, 320 to 400px wide (`--side-w: clamp(320px, 30vw, 400px)`), on the card surface with a
   left border.
   - Head: a heading naming the view, a close button (×, "Close the panel"), and two tabs (Notifications with the count,

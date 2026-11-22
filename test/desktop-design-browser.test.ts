@@ -55,7 +55,7 @@ async function open(width: number, height: number, route: string, opts: { phone?
 const sideways = (page: any) => page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
 
 for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
-  test(`browser ${width}px: one grouped header row, page tabs read as navigation, labelled toggles`, { skip }, async () => {
+  test(`browser ${width}px: one grouped header row, page tabs read as navigation, icon toggles with the full indicators in the sidebar`, { skip }, async () => {
     const { page, ctx, errors } = await open(width, height, "/#assistant");
     const g = await page.evaluate(() => {
       const r = (e: Element) => e.getBoundingClientRect();
@@ -66,7 +66,8 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
       return {
         header: r(header).height, brand: r(brand), nav: r(nav), notes: r(document.getElementById("notesbtn")!), health: r(document.getElementById("health")!), vw: document.documentElement.clientWidth,
         divider: cs(brand).borderRightWidth, cur: { w: Number(cs(cur).fontWeight), bg: cs(cur).backgroundImage, shadow: cs(cur).boxShadow }, other: { w: Number(cs(other).fontWeight), bg: cs(other).backgroundImage },
-        track: cs(nav).backgroundColor, noteLabel: (document.querySelector("#notesbtn .label") as HTMLElement).offsetWidth > 0,
+        track: cs(nav).backgroundColor, headerText: (document.querySelector("header .hctl") as HTMLElement).innerText.trim(),
+        foot: { notes: (document.getElementById("navnotes") as HTMLElement).innerText.replace(/\s+/g, " ").trim(), status: (document.getElementById("navstatus") as HTMLElement).innerText.trim() },
       };
     });
     assert.ok(g.header <= 56, `the header stays compact (${g.header}px)`);
@@ -78,7 +79,10 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
     assert.ok(g.cur.w >= 600 && g.other.w < 600, `the current page is bold (${g.cur.w} vs ${g.other.w})`);
     assert.match(g.cur.bg, /linear-gradient/, "the current page carries ORBIT's gradient underline");
     assert.equal(g.other.bg, "none", "other tabs do not");
-    assert.equal(g.noteLabel, true, "the notifications toggle has a visible label on a laptop");
+    // The header keeps the bell with its count and the status dot; the words live in the sidebar's indicators (docs/sidebar.md).
+    assert.equal(g.headerText, "5", "no Notifications or status words in the header, only the count");
+    assert.equal(g.foot.notes, "Notifications 5");
+    assert.match(g.foot.status, /^(All live|Degraded: .+)$/);
     assert.equal(await sideways(page), false);
     assert.deepEqual(errors, []);
     await ctx.close();
@@ -93,11 +97,13 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
         const box = form.querySelector("textarea")!.getBoundingClientRect(), plus = form.querySelector(".phbtn")!.getBoundingClientRect(), send = form.querySelector(".sendbtn")!;
         const s = send.getBoundingClientRect(), hit = document.elementFromPoint(s.left + s.width / 2, s.top + s.height / 2);
         return { left: Math.min(...rows.map((r) => r.left)), right: Math.max(...rows.map((r) => r.right)), plusLeft: plus.left, sendRight: s.right, boxRight: box.right, sendLeft: s.left,
-          vw: document.documentElement.clientWidth, sendHit: Boolean(hit && (hit === send || send.contains(hit))) };
+          vw: document.documentElement.clientWidth, sendHit: Boolean(hit && (hit === send || send.contains(hit))), nav: document.getElementById("nav")!.getBoundingClientRect().right };
       }, conv);
       const col = g.right - g.left;
       assert.ok(col <= 860 && col >= 840, `${route}: rows form an ~860px column (${col})`);
-      assert.ok(Math.abs(g.left - (g.vw - 860) / 2) <= 1, `${route}: the column is centred (left ${g.left})`);
+      // The sidebar is docked open by default from 1024px (docs/sidebar.md): the column is centred in the room right of it.
+      assert.ok(g.nav >= 220, `${route}: the sidebar is open on the left (${g.nav})`);
+      assert.ok(Math.abs(g.left - (g.nav + (g.vw - g.nav - 860) / 2)) <= 1, `${route}: the column is centred in the room left by the sidebar (left ${g.left})`);
       assert.ok(Math.abs(g.plusLeft - g.left) <= 1, `${route}: the composer starts where the messages start (${g.plusLeft} vs ${g.left})`);
       assert.ok(g.sendRight <= g.left + 860 + 1, `${route}: Send ends inside the column`);
       assert.ok(g.sendLeft - g.boxRight >= 8, `${route}: an explicit gap before Send`);
@@ -108,30 +114,27 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
   });
 }
 
-// From 1024px the two panels are one side panel instead (test/side-panel-browser.test.ts); between 900 and 1023px they
-// still hang in the header as cards.
-test("browser 960px: both header panels hang under their toggles, as cards, without hiding the conversation", { skip }, async () => {
+// Below 1024px the sidebar is a drawer (test/sidebar-browser.test.ts): the header's bell opens it on the notifications.
+test("browser 960px: the bell opens the sidebar drawer on the notifications, over the page, and closes back to the bell", { skip }, async () => {
   const { page, ctx } = await open(960, 800, "/#assistant");
   await page.click("#notesbtn");
-  await page.click("#health");
   await page.waitForFunction(() => document.querySelectorAll("#inbox .note").length > 0);
   const g = await page.evaluate(() => {
     const r = (id: string) => document.getElementById(id)!.getBoundingClientRect();
-    return { inbox: r("inbox"), status: r("statusline"), health: r("health"), bar: document.querySelector("header .bar")!.getBoundingClientRect(), log: r("alog"),
-      radius: getComputedStyle(document.getElementById("inbox")!).borderTopLeftRadius, vw: document.documentElement.clientWidth };
+    return { nav: r("nav"), inbox: r("inbox"), role: document.getElementById("nav")!.getAttribute("role"), modal: document.getElementById("nav")!.getAttribute("aria-modal"),
+      inert: document.querySelector("header")!.hasAttribute("inert"), vw: document.documentElement.clientWidth, vh: window.innerHeight };
   });
-  // At this width two 520px cards do not fit in one row, so they wrap (as on main); they never overlap.
-  assert.ok(g.inbox.right <= g.status.left || g.inbox.bottom <= g.status.top, "notifications first, then status, as the toggles are ordered, never overlapping");
-  assert.ok(Math.abs(g.status.right - g.health.right) <= 1, `right-aligned with the status toggle (${g.status.right} vs ${g.health.right})`);
-  assert.ok(g.inbox.width <= 521 && g.status.width <= 521, "a readable panel width, not the whole page");
-  assert.ok(g.inbox.top - g.bar.bottom >= 0 && g.inbox.top - g.bar.bottom <= 12, "directly under the bar");
-  assert.equal(g.radius, "12px", "drawn as cards");
-  assert.ok(g.log.height >= 300, `the conversation keeps most of the screen (${g.log.height}px)`);
+  assert.ok(g.nav.left === 0 && g.nav.width <= 361 && Math.abs(g.nav.bottom - g.vh) <= 1, `a drawer from the left edge, full height (${JSON.stringify(g.nav)})`);
+  assert.ok(g.inbox.left >= g.nav.left && g.inbox.right <= g.nav.right, "the notifications are inside it");
+  assert.deepEqual([g.role, g.modal, g.inert], ["dialog", "true", true], "modal while open: the page behind is inert");
   assert.equal(await sideways(page), false);
   // Notification controls keep working: dismiss one with the keyboard; focus stays in the panel.
   await page.focus("#inbox .note .x");
   await page.keyboard.press("Enter");
   assert.equal(await page.evaluate(() => document.getElementById("inbox")!.contains(document.activeElement)), true, "focus stays in the panel after a dismissal");
+  await page.keyboard.press("Escape");
+  assert.equal(await page.evaluate(() => document.activeElement!.id), "notesbtn");
+  assert.equal(await page.evaluate(() => document.querySelector("header")!.hasAttribute("inert")), false);
   await ctx.close();
 });
 
