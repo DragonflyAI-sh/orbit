@@ -123,6 +123,72 @@ All tokens are on `:root`. The theme (dark media query or `data-theme`) changes 
   - Empty and loading ("No notifications.", "Reading notifications…"): muted text.
   - Errors (`role="alert"`): danger text on `--danger-soft` with a danger edge.
 
+## Side panel: tabs, resize and collapse; no indicators in the header (November 2026, third pass)
+
+*Superseded by the left sidebar ([sidebar.md](sidebar.md)): Notifications and Status now live in the sidebar's last
+section (two tabs, one view at a time) on every width instead of this right-hand panel and its rail, the header keeps
+only the bell with its count and the status dot (no "Notifications" or status words), and
+`test/side-panel-browser.test.ts` became `test/sidebar-browser.test.ts`. The record below is kept as it was.*
+
+Rai asked for the side panel without its header (no title, no close button), for tabs to switch its sections, a resize
+handle, a collapse to the right that leaves a handle to reopen it, and for the Notifications and status indicators (and
+their "Notifications" and "All live" words) to leave the page header and live in the panel only. This replaces the
+"Side panel" bullet of the second pass below (and the header toggles of the first pass) on every width.
+
+- **Header.** Logo, page tabs, the session title (Sessions only) and the theme button. No notifications button, no status
+  indicator, no "Notifications", "All live" or status words; the status line and the notifications are not in the header.
+- **One side panel on every width** (`<aside id="side" aria-label="Side panel">`, after the header): at the right edge,
+  from under the header to the bottom of the screen, on the card surface with a left border.
+  - Head: the collapse button (`#sidetoggle`, chevrons, `aria-expanded`, `aria-controls="inbox statusline"`) and the
+    tab list (`role="tablist"`, "Side panel views"): Notifications (bell, label and the count) and Status (the level dot
+    and label). No heading, no ×. One view at a time, each a `tabpanel`; the view scrolls on its own under the head.
+  - The indicators are the tabs. The count (`#notecount`) and the dot keep their meaning and states ("?" until read, the
+    gold count above zero, the dot's colour and shape per level). The Notifications tab's name is "Notifications, 12"
+    (hover: "Notifications: 12"); the Status tab's is "Status: All live (healthy, all live)" with the label and detail on
+    hover, and the Status view shows them in words as before.
+- **Collapsed (the default): a rail.** The panel slides away to the right (about 160ms; none with reduced motion) and
+  leaves a 44px rail (46px on touch screens) at the edge: the expand button, then the two tabs as icons only (the bell
+  with the count, the dot); their labels stay for screen readers. The rail is the visible handle: a tab opens the panel on
+  its view, the button on the last view. Opening slides the panel back in.
+- **Room.** On laptops and desktops (1024px and wider) the conversation, Jobs and the composer keep clear of the rail or
+  the open panel and recentre their column in the room left (`--side-room`), so nothing is covered. Below 1024px the open
+  panel lies over the page (with a deeper shadow) and the page keeps only the rail's room. Below 900px the rail stops above
+  the composer, so the message box and Send keep the full width on a phone.
+- **Resize.** A handle on the panel's inner (left) edge: the panel is anchored to the right edge, so its outer right edge
+  is the screen's edge and the inner edge is the one that can move. An 8px strip (20px on touch) with a quiet grip, an
+  accent line on hover, while dragging and on focus; `ew-resize` cursor. Drag with a mouse, pen or finger. It is a
+  window splitter (`role="separator"`, `aria-orientation="vertical"`, `aria-valuenow`/`min`/`max` in pixels,
+  `aria-valuetext` "360 pixels wide"): Left widens by 16px and Right narrows (64px with Shift), Home and End go to the
+  narrowest and widest, Enter collapses the panel, a double-click resets the default (`clamp(320px, 30vw, 400px)`; below
+  1024px `min(400px, 100vw - 40px)`). Bounds: 280 to 720px, and on laptops at most the window less 480px for the
+  conversation; below 1024px at most the window less 24px. The width is kept on this device (`orbit.side-width` in
+  localStorage) and clamped, not forgotten, on a smaller window.
+- **Keyboard and focus.** Tab goes from the header to the collapse button, the selected tab (one tab stop), into the
+  view, the resize handle and on out: no trap. Open, arrows (Left/Right), Home and End switch and show the view; in the
+  rail the arrows (also Up/Down) only select, and Enter or Space opens. Escape inside the panel collapses it. The button
+  and tabs are the same elements open and collapsed, so focus stays on them; when focus was in a view or on the handle
+  (which go away), it moves to the selected tab. Nothing outside closes the panel and nothing opens it by itself.
+- **Kept state and semantics.** Which view is open is the same pair of flags as before (`orbit.header-panels`, this tab's
+  session); an older value with both open opens Notifications. Receipts are still sent only for notes listed in a shown
+  Notifications view of a visible tab: never from the rail, the Status view or a collapsed panel; collapsing never
+  dismisses.
+
+**Tests.** `test/side-panel-browser.test.ts` (rewritten): the header has no indicators or their words at 320, 390, 900,
+1024, 1280 and 1440; the rail by default (narrow, right edge, under the header, covering no message or Send); a tab opens
+the panel with focus kept, no heading or close button, the column recentred; tabs switch, the selected tab stays, the
+button collapses and reopens on the last view, state across a reload; the slide out and in, sampled mid-animation; tab
+stops, arrows in the rail and open, Escape from a tab and from a view, Tab through and out; the resize handle by mouse
+(drag, bounds 280/720, kept across a reload, double-click reset), by keyboard (16/64px steps, Home/End, Enter collapses,
+focus ring) and by touch on a phone; a kept width clamped to a smaller window and restored; below 1024 (390 and 320
+phones, 900) the overlay, the page not reflowing, labels that fit, the rail above the composer; receipts; status states;
+Light and Dark. `test/header-panels.test.ts`: the width helpers (bounds, clamping, storage, keys), the markup (no
+indicators in the header, the aside, tabs, tabpanels and separator, the status tab before the first read), and the
+browser checks of the views now driven by the tabs. The other suites that used the header toggles now use the tabs;
+layout checks centre the column left of the rail.
+
+**Not verified:** a real screen reader (roles, names and states are checked in the DOM only), real phones and tablets
+(Chromium emulation with touch), WebKit/Safari, and a real pen.
+
 ## Desktop menu, side panel and composer keys (November 2026, second pass)
 
 Rai's feedback after #149: the phone menu is liked; on the laptop the menu items had an extra border that looked off;
@@ -309,10 +375,12 @@ SHELL_SCREENS_SET=panel SHELL_SCREENS_SMALL=1 node test/helpers/shell-screens.ts
 8. **Zoom.** At 200% browser zoom, nothing scrolls sideways and the menu still fits.
 9. **Phone.** The #148 checklist in web-shell.md still passes. The tabs are a segmented row, and Send stays visible
    with the keyboard open.
-10. **Side panel.** At 1280px, click Notifications: a panel opens on the right and the conversation moves left, nothing
-   covered. Click the status toggle: the same panel shows Status. Press Escape: it closes, focus on the toggle. Arrow
-   keys switch the tabs. Scroll a long list inside it: the conversation does not move. Make the window narrower than
-   1024px: the panels go back into the header.
+10. **Side panel.** (Superseded by the left sidebar: see [sidebar.md](sidebar.md), "Layout and behaviour".) The header shows no Notifications or status. At the right edge, a rail shows the bell with the
+   count and the status dot. At 1280px, click the bell: the panel slides in on the right with Notifications and Status
+   tabs (no title, no ×) and the conversation moves left, nothing covered. Click Status: the same panel shows Status.
+   Drag the panel's left edge wider and narrower; reload: the width is kept; double-click the edge: back to the default.
+   Press Escape (or the » button): it slides away to the rail, focus on the tab. Scroll a long list inside it: the
+   conversation does not move. On a phone, tap the bell: the panel lies over the page; tap » to collapse it.
 11. **Menu.** Open the session menu and move the mouse over the rows: a quiet tint, no ring or box.
 12. **Phone composer.** On a real iPhone and Android phone, type two lines with Return: nothing is sent until Send.
    With a Japanese keyboard, confirm a conversion with Return: it only confirms. On a laptop, Enter still sends.

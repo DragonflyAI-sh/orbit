@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { ModelProtocolError, runChat, screenReply, TurnInterrupted } from "./agent.ts";
 import type { ChatTool, Proposal, Proposals } from "./agent.ts";
 import type { Jobs } from "./jobs.ts";
+import { ProviderError } from "./chatgpt.ts";
 import { answeredBy, replySource } from "./model.ts";
 import type { AnsweredBy, FallbackInfo, Item, Message, ModelPort } from "./model.ts";
 import type { ProtocolDiagnostic } from "./tool-protocol.ts";
@@ -18,6 +19,11 @@ import type { GalleryView } from "./photo-access.ts";
 import { GALLERIES_PER_MESSAGE_MAX, GALLERY_ITEMS_MAX, safeGalleries } from "./photo-ref.ts";
 import type { StoredGallery } from "./photo-ref.ts";
 import type { Card, CardState, StoredCall, Thread, ThreadMessage, Threads } from "./threads.ts";
+
+// A reply that failed because ChatGPT is limited (and the OpenRouter fallback could not answer either) still keeps Rai's message: it is
+// stored before the model is called, and the error says so, so nothing has to be typed again.
+export const MESSAGE_KEPT = "Your message is saved in this conversation; send it again once a model is available.";
+const isModelLimit = (err: unknown) => err instanceof ProviderError && (err.kind === "usage_limit" || err.kind === "rate_limit");
 
 // Runs one chat turn against a stored thread and shapes threads for the page. The server owns the policy checks and the
 // confirmation routes; this module owns what is written to the thread and what the model is sent from it.
@@ -382,7 +388,7 @@ export function threadService(d: {
       const error =
         err instanceof TurnInterrupted || err instanceof PhotoRefusal || err instanceof ModelProtocolError
           ? err.message
-          : `The model call failed${photosSent ? " after ORBIT's own photo check passed and the photos were sent to the provider (this is not ORBIT's local capability block)" : ""}: ${err instanceof Error ? err.message : String(err)}`;
+          : `The model call failed${photosSent ? " after ORBIT's own photo check passed and the photos were sent to the provider (this is not ORBIT's local capability block)" : ""}: ${err instanceof Error ? err.message : String(err)}${isModelLimit(err) ? ` ${MESSAGE_KEPT}` : ""}`;
       // The user's message and every call that completed (or was cut off) stay on record; the reply is marked as not completed.
       threads.patchMessage(id, mid, { status: "error", error });
       return { error };

@@ -36,7 +36,7 @@ work (PRs #107–#118) is described in the CSS comments, and this change keeps t
 ## The shell
 
 - `html` and `body` never scroll. `body` is `position: fixed`, `overflow: hidden` and `overscroll-behavior: none`: a
-  flex column of the header, the scroller and the composer. Only `#alog`, `#log`, `#jobs`, the header panels, the session
+  flex column of the header, the scroller and the composer. Only `#alog`, `#log`, `#jobs`, the sidebar's sections, the session
   list, the message box and wide code/tables scroll. Each uses `overscroll-behavior: contain` so scrolling never chains
   to the page.
 - **Height:** `100vh`, then `100dvh` where supported, then the page's own visual-viewport measurement (`viewportShell`
