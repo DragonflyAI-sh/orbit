@@ -148,7 +148,9 @@ before(async () => { if (!skip) browser = await playwright.chromium.launch(); })
 after(async () => { await browser?.close(); });
 
 async function openPage(url: string, opts: { context?: any; setup?: (page: any) => Promise<void> } = {}) {
-  const context = opts.context ?? (await browser.newContext({ viewport: { width: 900, height: 700 }, reducedMotion: "reduce" }));
+  // A laptop width: the left sidebar is docked and open by default (docs/sidebar.md), so the header bell toggles the
+  // notifications view in place, as the panel did. The narrow-screen drawer is covered by test/sidebar-browser.test.ts.
+  const context = opts.context ?? (await browser.newContext({ viewport: { width: 1280, height: 700 } }));
   const page = await context.newPage();
   const errors: string[] = [];
   page.on("pageerror", (e: Error) => errors.push(e.message));
@@ -158,7 +160,7 @@ async function openPage(url: string, opts: { context?: any; setup?: (page: any) 
   return { page, context, errors };
 }
 const countIs = (page: any, v: string) => page.waitForFunction((want: string) => document.getElementById("notecount")!.textContent === want, v);
-const label = (page: any) => page.getAttribute("#sidetab-notes", "title"); // the full count label (the tab's name is "Notifications, 1")
+const label = (page: any) => page.getAttribute("#notesbtn", "aria-label");
 const settle = () => new Promise((r) => setTimeout(r, 300));
 
 test("browser: a quiet-hours completion shows on the count and in the panel on every page, across a reload and a restart", { skip }, async () => {
@@ -172,7 +174,7 @@ test("browser: a quiet-hours completion shows on the count and in the panel on e
   try {
     await countIs(page, "1");
     assert.equal(await label(page), "Notifications: 1");
-    assert.equal(await page.evaluate(() => document.getElementById("sidetab-notes")!.classList.contains("has")), true);
+    assert.equal(await page.evaluate(() => document.getElementById("notesbtn")!.classList.contains("has")), true);
     // The header's page links: Jobs, Sessions, back to the Assistant. The count stays right on each.
     await page.click("#jobstab");
     await page.waitForFunction(() => location.hash === "#jobs");
@@ -180,7 +182,7 @@ test("browser: a quiet-hours completion shows on the count and in the panel on e
     await page.click("#sessionstab");
     await page.waitForFunction(() => location.pathname.startsWith("/sessions"));
     await countIs(page, "1");
-    await page.click("#sidetab-notes");
+    await page.click("#notesbtn");
     const text = await page.textContent("#inbox .note");
     assert.match(text, new RegExp(`Job ${JOB} finished: done`));
     assert.equal(await page.isVisible("#inbox .empty"), false, "no 'No notifications.' next to a listed note");
@@ -217,7 +219,7 @@ test("browser: a repeated completion leaves one note and a count of 1", { skip }
     await page.evaluate("refreshInbox()");
     await settle();
     assert.equal(await page.textContent("#notecount"), "1");
-    await page.click("#sidetab-notes");
+    await page.click("#notesbtn");
     assert.equal(await page.locator("#inbox .note").count(), 1);
   } finally {
     await context.close();
@@ -239,7 +241,7 @@ test("browser: a failed read is shown as a failure, never as an empty inbox; a r
     }),
   });
   try {
-    await page.click("#sidetab-notes");
+    await page.click("#notesbtn");
     await page.waitForSelector("#inbox .readerr");
     assert.equal(await page.textContent("#notecount"), "?");
     assert.equal(await label(page), "Notifications: could not be read");
@@ -286,7 +288,7 @@ test("browser: someone who is not the owner is told the notifications are the ow
   o.r.caller.who = "someone@example.com";
   const { page, context } = await openPage(`${base}/sessions`);
   try {
-    await page.click("#sidetab-notes");
+    await page.click("#notesbtn");
     await page.waitForSelector("#inbox .readerr");
     assert.equal(await page.textContent("#inbox .readerr"), "Notifications are for ORBIT's owner; this sign-in cannot read them.");
     assert.equal(await page.textContent("#notecount"), "?");

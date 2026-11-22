@@ -125,6 +125,11 @@ All tokens are on `:root`. The theme (dark media query or `data-theme`) changes 
 
 ## Side panel: tabs, resize and collapse; no indicators in the header (November 2026, third pass)
 
+*Superseded by the left sidebar ([sidebar.md](sidebar.md)): Notifications and Status now live in the sidebar's last
+section (two tabs, one view at a time) on every width instead of this right-hand panel and its rail, the header keeps
+only the bell with its count and the status dot (no "Notifications" or status words), and
+`test/side-panel-browser.test.ts` became `test/sidebar-browser.test.ts`. The record below is kept as it was.*
+
 Rai asked for the side panel without its header (no title, no close button), for tabs to switch its sections, a resize
 handle, a collapse to the right that leaves a handle to reopen it, and for the Notifications and status indicators (and
 their "Notifications" and "All live" words) to leave the page header and live in the panel only. This replaces the
@@ -197,7 +202,10 @@ Notifications and Status felt awkward as cards inside the header; and on a phone
   list's edge cannot clip it. The page tabs lose their outline and the current tab its inner border (it stays raised by
   its card colour, shadow and gradient underline), which is the borderless track phones already had. Phones (below 900px)
   are unchanged: same picker rows, same tabs.
-- **Side panel (1024px and wider; replaced by the third pass above).** Notifications and Status open in one panel on the right, under the header and down
+- **Side panel (1024px and wider).** *Superseded by the left sidebar ([sidebar.md](sidebar.md)): Notifications and Status
+  now live in its last section on every width, the header keeps only the bell with its count and the status dot, and
+  `test/side-panel-browser.test.ts` became `test/sidebar-browser.test.ts`. The record below is kept as it was.*
+  Notifications and Status open in one panel on the right, under the header and down
   to the bottom of the screen, 320 to 400px wide (`--side-w: clamp(320px, 30vw, 400px)`), on the card surface with a
   left border.
   - Head: a heading naming the view, a close button (×, "Close the panel"), and two tabs (Notifications with the count,
@@ -367,7 +375,7 @@ SHELL_SCREENS_SET=panel SHELL_SCREENS_SMALL=1 node test/helpers/shell-screens.ts
 8. **Zoom.** At 200% browser zoom, nothing scrolls sideways and the menu still fits.
 9. **Phone.** The #148 checklist in web-shell.md still passes. The tabs are a segmented row, and Send stays visible
    with the keyboard open.
-10. **Side panel.** The header shows no Notifications or status. At the right edge, a rail shows the bell with the
+10. **Side panel.** (Superseded by the left sidebar: see [sidebar.md](sidebar.md), "Layout and behaviour".) The header shows no Notifications or status. At the right edge, a rail shows the bell with the
    count and the status dot. At 1280px, click the bell: the panel slides in on the right with Notifications and Status
    tabs (no title, no ×) and the conversation moves left, nothing covered. Click Status: the same panel shows Status.
    Drag the panel's left edge wider and narrower; reload: the width is kept; double-click the edge: back to the default.

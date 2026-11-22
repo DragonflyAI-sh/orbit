@@ -1,7 +1,8 @@
 // Before/after screenshots of the app shell with synthetic content (test/helpers/shell-fixture.ts), for review.
 //   node test/helpers/shell-screens.ts <out-dir> [<before-index.html>]
 // SHELL_SCREENS_SMALL=1 writes the side-by-side images as 1x JPEGs (small enough to keep in docs/web-shell/).
-// SHELL_SCREENS_SET=design shoots the desktop design set instead (kept in docs/design-system/).
+// SHELL_SCREENS_SET=design shoots the desktop design set instead (kept in docs/design-system/); SHELL_SCREENS_SET=sidebar the
+// left sidebar set (kept in docs/sidebar/).
 // With a second argument, each scenario is shot with that page too and the two are put side by side ("before" left).
 // Playwright's Chromium with phone-sized viewports and touch emulation: not iOS Safari, no real keyboard or toolbar.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -26,7 +27,7 @@ const shots: Shot[] = [
   { name: "320-session-picker", width: 320, height: 568, route: "/sessions", data: { exchanges: 8 },
     act: async (p) => { await p.waitForFunction(() => !document.getElementById("sesswrap")!.hidden); await p.click("#sessbtn"); } },
   { name: "568x320-landscape-panels", width: 568, height: 320, route: "/#assistant", data: { exchanges: 8, notes: 12 },
-    act: async (p) => { await p.click("#notesbtn"); await p.click("#health"); } },
+    act: async (p) => { await p.click("#notesbtn"); } },
   { name: "430-dark-assistant", width: 430, height: 932, route: "/#assistant", data: { exchanges: 24, card: true }, dark: true },
   { name: "1280-desktop", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true } },
 ];
@@ -37,7 +38,7 @@ const picker = async (p: any) => { await p.waitForFunction(() => !document.getEl
 const designShots: Shot[] = [
   { name: "1280-assistant", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true } },
   { name: "1440-assistant-panels", width: 1440, height: 900, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 },
-    act: async (p) => { await p.click("#notesbtn"); await p.click("#health"); } },
+    act: async (p) => { await p.click("#notesbtn"); } },
   { name: "1280-session-picker", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true }, act: picker },
   { name: "1280-dark-sessions", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true, pending: true }, dark: true },
   { name: "390-assistant", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true } },
@@ -61,14 +62,32 @@ const panelShots: Shot[] = [
   { name: "1024-side-notes", width: 1024, height: 700, route: "/sessions", data: { exchanges: 24, card: true, notes: 6 }, act: async (p) => { await p.click("#notesbtn"); } },
   { name: "1280-session-menu", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true }, act: hoverMenu },
   { name: "1280-dark-session-menu", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true }, dark: true, act: hoverMenu },
-  { name: "390-panels", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6, longNotes: true }, act: async (p) => { await p.click("#notesbtn"); await p.click("#health"); } },
-  { name: "390-dark-panels", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6, longNotes: true }, dark: true, act: async (p) => { await p.click("#notesbtn"); await p.click("#health"); } },
+  { name: "390-panels", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6, longNotes: true }, act: async (p) => { await p.click("#notesbtn"); } },
+  { name: "390-dark-panels", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6, longNotes: true }, dark: true, act: async (p) => { await p.click("#notesbtn"); } },
   // Before: Return sent the first line (the box is empty again). After: three lines in the box, nothing sent.
   { name: "390-composer-return", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24 },
     act: async (p) => { await p.focus("#ainput"); for (const [i, l] of ["First line", "Second line", "Third line"].entries()) { if (i) await p.keyboard.press("Enter"); await p.keyboard.type(l); } } },
 ];
 if (process.env.SHELL_SCREENS_SET === "design") shots.splice(0, shots.length, ...designShots);
 if (process.env.SHELL_SCREENS_SET === "panel") shots.splice(0, shots.length, ...panelShots);
+// SHELL_SCREENS_SET=sidebar: the left sidebar (docs/sidebar.md), kept in docs/sidebar/: docked with every section, a selected
+// project, collapsed, the notifications and status views, both themes, and the phone drawer. Synthetic vault notes and photos.
+// The "before" page (main) has no sidebar, so a step whose control is missing there is skipped.
+const away = async (p: any) => { await p.mouse.move(5, 5); };
+const has = async (p: any, sel: string) => Boolean(await p.$(sel));
+const sidebarShots: Shot[] = [
+  { name: "1280-sidebar", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 }, act: away },
+  { name: "1280-dark-sidebar", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true, notes: 5 }, dark: true, act: away },
+  { name: "1280-sidebar-project", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 },
+    act: async (p) => { if (!(await has(p, "#navproject"))) return; await p.selectOption("#navproject", "alpha-garden"); await p.waitForTimeout(300); await p.click("#navfiles .navfile >> nth=2"); await p.waitForTimeout(300); await away(p); } },
+  { name: "1280-sidebar-collapsed", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 }, act: async (p) => { if (await has(p, "#navhandle")) await p.click("#navhandle"); await away(p); } },
+  { name: "1440-sidebar-notes", width: 1440, height: 900, route: "/#assistant", data: { exchanges: 24, card: true, notes: 14, longNotes: true }, act: async (p) => { await p.click("#notesbtn"); await away(p); } },
+  { name: "1280-dark-sidebar-status", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 }, dark: true, act: async (p) => { await p.click("#health"); await away(p); } },
+  { name: "390-header", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6 } },
+  { name: "390-sidebar-drawer", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6 }, act: async (p) => { if (await has(p, "#navbtn")) await p.click("#navbtn"); } },
+  { name: "390-dark-sidebar-notes", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6, longNotes: true }, dark: true, act: async (p) => { await p.click("#notesbtn"); } },
+];
+if (process.env.SHELL_SCREENS_SET === "sidebar") shots.splice(0, shots.length, ...sidebarShots);
 
 const browser = await pw.chromium.launch();
 async function shoot(html: string | undefined, s: Shot): Promise<Buffer> {

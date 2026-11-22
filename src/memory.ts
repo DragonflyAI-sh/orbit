@@ -13,6 +13,9 @@ export type MemoryPort = {
   status(): PortStatus;
   search(query: string, limit?: number): Result<Hit[]>;
   read(path: string): Result<string>;
+  // Every note in the snapshot, by vault-relative path (the left sidebar lists projects, plans and related files from it). Read-only;
+  // absent on a port that cannot list.
+  notes?(): Result<ReadonlyMap<string, string>>;
   // Brings the notes up to date from their source if they are older than maxAgeMs (the writable clone fetches; the read-only
   // copy has nothing to fetch). Never throws: a failure shows up in status() and in the `source` of the next answer.
   refresh?(maxAgeMs?: number): Promise<void>;
@@ -177,6 +180,11 @@ export function vaultMemory(root: string, syncFile?: string, now: () => Date = (
       if (text === undefined) throw new Error("no such note");
       return { value: text, provenance: "live", source: source() };
     },
+    notes: () => {
+      load();
+      needSnapshot();
+      return { value: notes, provenance: "live", source: source() };
+    },
   };
 }
 
@@ -288,5 +296,10 @@ export function cloneMemory(clone: VaultClone, fallback: MemoryPort | undefined,
     },
     search: (query, limit) => answer((m) => m.search(query, limit)),
     read: (path) => answer((m) => m.read(path)),
+    notes: () =>
+      answer((m) => {
+        if (!m.notes) throw new Error("this vault copy cannot list its notes");
+        return m.notes();
+      }),
   };
 }

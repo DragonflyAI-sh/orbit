@@ -288,10 +288,10 @@ test("browser: compact header and composer fit desktop and narrow phones with no
     await assistantReady(page);
     const w = size.width;
     const header = await page.evaluate(() => {
-      const h = document.querySelector("header")!, cs = getComputedStyle(h), t = getComputedStyle(document.getElementById("themebtn")!);
-      return { top: parseFloat(cs.paddingTop), left: parseFloat(cs.paddingLeft), hbtn: [parseFloat(t.paddingLeft)], btnH: [document.getElementById("themebtn")!.getBoundingClientRect().height] };
+      const h = document.querySelector("header")!, cs = getComputedStyle(h), b = getComputedStyle(document.getElementById("health")!), n = getComputedStyle(document.getElementById("notesbtn")!);
+      return { top: parseFloat(cs.paddingTop), left: parseFloat(cs.paddingLeft), hbtn: [parseFloat(b.paddingLeft), parseFloat(n.paddingLeft)], btnH: [document.getElementById("health")!.getBoundingClientRect().height, document.getElementById("notesbtn")!.getBoundingClientRect().height] };
     });
-    // Phones keep the tight header; laptops get the page gutter (24px), in a header still under 56px.
+    // Phones keep the tight header; laptops get the page gutter (24px) and labelled toggles, in a header still under 56px.
     const wide = w >= 900;
     assert.ok(wide ? header.top <= 8 && header.left === 24 : header.top <= 6 && header.left <= 12, `${w}px: header padding (${header.top}/${header.left})`);
     assert.ok(header.hbtn.every((x: number) => x <= (wide ? 12 : 8)), `${w}px: header button padding`);
@@ -327,11 +327,11 @@ test("browser: compact header and composer fit desktop and narrow phones with no
     near(g.formBottom, g.vh, `${w}px: the composer is on the bottom edge`);
     near(g.plusBottom, g.boxBottom, `${w}px: + bottom-aligned`);
     near(g.sendBottom, g.boxBottom, `${w}px: Send bottom-aligned`);
-    // The side panel opens on its Status view and does not push anything sideways.
-    await page.click("#sidetab-status");
-    assert.equal(await page.getAttribute("#sidetoggle", "aria-expanded"), "true");
-    assert.equal(await page.getAttribute("#sidetab-notes", "aria-selected"), "false", "one view at a time");
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth), false, `${w}px: no horizontal scroll with the status view open`);
+    // The header panels still open on their own and do not push anything sideways.
+    await page.click("#health");
+    assert.equal(await page.getAttribute("#health", "aria-expanded"), "true");
+    assert.equal(await page.getAttribute("#notesbtn", "aria-expanded"), "false", "panels stay independent");
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth), false, `${w}px: no horizontal scroll with the status line open`);
     await ctx.close();
   }
 });

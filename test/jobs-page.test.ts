@@ -88,7 +88,7 @@ test("a slow request is not overlapped by the next tick", async () => {
 
 test("the page has one place that fetches the job rows, no extra timers or visibility refreshes", () => {
   assert.equal(html.split("/jobs?view=rows").length - 1, 1);
-  assert.equal(html.match(/setInterval\(/g)?.length, 3, "only the status, inbox and message-time timers; the jobs timer is the poller");
+  assert.equal(html.match(/setInterval\(/g)?.length, 4, "only the status, inbox, message-time and sidebar timers; the jobs timer is the poller");
   // The page's visibility listeners are the notifications receipt (docs/assistant.md, "Notifications"): it acks notes the
   // page already holds when they become visible on screen, and the message-time relabel (docs/threads.md, "Message rows and
   // times"). Neither refreshes anything (no rows, no lists).

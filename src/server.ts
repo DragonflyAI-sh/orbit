@@ -58,7 +58,9 @@ import { sessionDigest } from "./session-digest.ts";
 import type { Chunk } from "./assistant-store.ts";
 import { resolutionSummary } from "./model-capability.ts";
 import { AttachmentError, attachmentStore, isAttachmentId, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments.ts";
-import { PHOTO_TOOL_NAMES, photoDisplay, photoTools } from "./photo-access.ts";
+import { localTime, PHOTO_TOOL_NAMES, photoDisplay, photoTools, reachablePhotos } from "./photo-access.ts";
+import { sidebarNote, sidebarView } from "./sidebar.ts";
+import type { SidebarPhoto } from "./sidebar.ts";
 import { isPhotoRef, safeGalleries } from "./photo-ref.ts";
 import type { PhotoSources } from "./photo-access.ts";
 import { observationStore, observationTools } from "./photo-observations.ts";
@@ -1286,6 +1288,55 @@ export function buildServer({
       }
     }
 
+    // ---- The left sidebar (docs/sidebar.md): GET only, owner only. Projects, plan and files come from the vault snapshot memory
+    // search reads (read-only, masked); the images are the photos the Assistant may show (every owner conversation that still
+    // exists, archived ones aside), each fetched through /assistant/photos/<ref>, which re-authorizes it. A vault that cannot be
+    // read is reported in `vault.error` with the photos still listed; nothing is made up in its place.
+    if (url.pathname === "/sidebar" || url.pathname === "/sidebar/note") {
+      if (req.method !== "GET") return send(res, 405, { error: "Use GET for this route." });
+      if (!(await owned("memory", "read"))) return;
+      await memory.refresh?.(60_000);
+      let notes: ReadonlyMap<string, string> | undefined;
+      let source: string | undefined;
+      let vaultError: string | undefined;
+      try {
+        if (!memory.notes) throw new Error("this vault copy cannot list its notes");
+        const r = memory.notes();
+        notes = r.value;
+        source = r.source;
+      } catch (err) {
+        vaultError = `The vault could not be read: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      if (url.pathname === "/sidebar/note") {
+        if (!notes) return send(res, 503, { error: vaultError });
+        const note = sidebarNote(notes, url.searchParams.get("path") ?? "");
+        return note ? send(res, 200, { note, source }) : send(res, 404, { error: "No such note in the vault." });
+      }
+      let photos: SidebarPhoto[] = [];
+      let photoError: string | undefined;
+      const ownerCall = await isOwnerOf(req);
+      // Listing photos across conversations is attachment reading and session reading (as for the photo tools); both are audited.
+      const photoRead = decide("attachments", "read", ownerCall);
+      audit("attachments", "read", photoRead);
+      const sessionRead = photoRead.allow ? decide("sessions", "read", ownerCall) : undefined;
+      if (sessionRead) audit("sessions", "read", sessionRead);
+      if (photoRead.allow && sessionRead?.allow) {
+        try {
+          photos = reachablePhotos({ attachments, sources: photoSources }, assistantSessionId(), false).photos.map((l) => ({
+            ref: l.ref,
+            sentAt: l.sentAt,
+            sentLocal: localTime(l.sentAt, ZONE),
+            caption: l.message?.caption ?? "",
+            conversation: { id: l.conversation.id, kind: l.conversation.kind, title: l.conversation.title },
+            present: attachments.present(l.meta.id, l.meta.scope),
+          }));
+        } catch {
+          photoError = "The photos could not be listed.";
+        }
+      }
+      const project = url.searchParams.get("project") || undefined;
+      return send(res, 200, { ...sidebarView(notes, photos, project), vault: notes ? { ok: true, source } : { ok: false, error: vaultError }, ...(photoError ? { photoError } : {}) });
+    }
     if (url.pathname === "/notifications" && req.method === "GET") {
       if (!(await owned("notify", "inbox"))) return;
       return send(res, 200, { inbox: notify.inbox(), current: notify.current(), recent: notify.recent() });

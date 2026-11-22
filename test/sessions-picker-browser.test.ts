@@ -67,14 +67,14 @@ for (const size of SIZES) {
       // The title is cut with an ellipsis inside the header bar; the full title is the hover text and the accessible name.
       const box = await page.evaluate(() => {
         const t = document.getElementById("sesstitle")!, b = document.getElementById("sessbtn")!.getBoundingClientRect(), bar = document.querySelector("header .bar")!.getBoundingClientRect();
-        const n = document.getElementById("themebtn")!.getBoundingClientRect();
-        return { cut: t.scrollWidth > t.clientWidth, ellipsis: getComputedStyle(t).textOverflow, btn: { left: b.left, right: b.right, top: b.top, h: b.height }, bar: { left: bar.left, right: bar.right }, notesLeft: n.left, healthTop: n.top, header: document.querySelector("header")!.getBoundingClientRect().height };
+        const h = document.getElementById("health")!.getBoundingClientRect(), n = document.getElementById("notesbtn")!.getBoundingClientRect();
+        return { cut: t.scrollWidth > t.clientWidth, ellipsis: getComputedStyle(t).textOverflow, btn: { left: b.left, right: b.right, top: b.top, h: b.height }, bar: { left: bar.left, right: bar.right }, notesLeft: n.left, healthTop: h.top, header: document.querySelector("header")!.getBoundingClientRect().height };
       });
       assert.equal(box.cut, true, "the long title is cut");
       assert.equal(box.ellipsis, "ellipsis");
-      assert.ok(box.btn.right <= box.notesLeft, `the title never runs under the theme toggle (${box.btn.right} > ${box.notesLeft})`);
+      assert.ok(box.btn.right <= box.notesLeft, `the title never runs under the notifications toggle (${box.btn.right} > ${box.notesLeft})`);
       assert.ok(box.btn.left >= box.bar.left, "the title stays in the bar");
-      assert.ok(Math.abs(box.btn.top - box.healthTop) < 12, "on the same row as the theme toggle");
+      assert.ok(Math.abs(box.btn.top - box.healthTop) < 12, "on the same row as the toggles");
       // A usable target: 32px with a mouse; on a touch screen 36px to look at with a 44px hit area (docs/web-shell.md).
       assert.ok(box.btn.h >= (size.phone ? 36 : 32), `the title button is a usable target (${box.btn.h}px)`);
       if (size.phone) {
