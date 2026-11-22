@@ -14,6 +14,11 @@
 // healthy /status is not a model check; docs/orbit-ops-admin.md documents both. admin-helper.ts, admin-run.ts, admin-core.ts, the
 // client, units and installers are byte-identical.
 //
+// Re-pinned for the drill interrupt race: a deliberate tier 2 fix to deploy/pull-deploy.sh. A SIGINT that arrived while the drill's
+// shell ran a foreground command could be dropped or run its trap in a broken parser state, so the drill neither restored nor
+// exited 130. The drill's candidate phase now runs in a worker while the drill waits in `wait`, where a trapped signal is handled at
+// once; the trap stops the worker before the same restore-and-verify recovery. Deploy, rollback and vault modes are unchanged.
+//
 // chat-tools.ts is shared with tier 3 (its tier 3 tools live in one block). That block is cut out (from "const sys = d.sys;" up to
 // "const jobs = d.jobs;") and everything else must still be byte-identical: tier 1 and 2's tools cannot be touched from there.
 import assert from "node:assert/strict";
@@ -43,7 +48,7 @@ const PINNED: [string, string][] = [
   ["deploy/systemd/orbit-ops-admin@.service", "d01a79f539ad6c3fdb65800aa040d059f999217c2081b32ca5c3f1f0b84623ee"],
   ["deploy/install.sh", "e4c013992ba3f2b43c5cb657a11f76483f2843c83d1532672afd4740e68e4d7e"],
   ["deploy/install-admin.sh", "241f27a20667e1cc941d3a9fdf27ff6203556c07bad2fbc7b25a37b42d6bb6a9"],
-  ["deploy/pull-deploy.sh", "4060cfbb675d1c682c9240270771e98c18194d0cc02d653e2bc3579a7e136ac4"],
+  ["deploy/pull-deploy.sh", "3be09e54c8159f777074d71dea3e0e17c6b948f8f01d3f2d58820ebce44e56d9"],
   ["docs/orbit-ops.md", "4c8d67e513ed67d611d4d256212faff3c8f6e499902b1a694fe6a978ed259b0e"],
   ["docs/orbit-ops-admin.md", "1a968401fe064b7391cf68ef099464f51597a185e3d388836d5cd35c6bb59ac8"],
   ["test/ops.test.ts", "04005e1ca72fa5b4ac537aacedaaf0d648fee03942948757ee8caa89b1e4823f"],

@@ -169,6 +169,20 @@ recover_interrupted_drill() {
   fi
 }
 
+# Stop the drill's candidate-phase worker and the command it is running, so the interrupt recovery never races it.
+# The worker is frozen first, so it cannot start another command between its child being killed and itself.
+DRILL_WORKER=""
+stop_drill_worker() {
+  local w="$DRILL_WORKER"
+  [ -n "$w" ] || return 0
+  kill -STOP "$w" 2>/dev/null || return 0
+  pkill -TERM -P "$w" 2>/dev/null || true
+  kill -TERM "$w" 2>/dev/null || true
+  kill -CONT "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+  DRILL_WORKER=""
+}
+
 drill() {
   local current known candidate sentinel id rc=0 outcome
   current="$(readlink -f "$ROOT/current" 2>/dev/null || true)"
@@ -197,13 +211,32 @@ drill() {
   echo "$sentinel" > "$candidate/COMMIT"   # release.env still says ORBIT_COMMIT=$known, so the candidate really runs
   jq -n --arg t "$current" --arg c "$known" --arg cand "$candidate" --arg at "$(date -u +%FT%TZ)" \
     '{knownGoodTarget: $t, knownGoodCommit: $c, candidate: $cand, at: $at}' > "$DRILL_DIR/in-progress.json"
-  # On INT/TERM/HUP: ignore further signals, restore and verify, remove the candidate only if that was verified (recover exits 2 otherwise).
-  trap 'trap "" INT TERM HUP; echo "drill: interrupted; restoring known-good"; recover_interrupted_drill; exit 130' INT TERM HUP
+  # On INT/TERM/HUP: ignore further signals, stop the candidate phase, restore and verify, remove the candidate only if that was
+  # verified (recover exits 2 otherwise).
+  trap 'trap "" INT TERM HUP; stop_drill_worker; echo "drill: interrupted; restoring known-good"; recover_interrupted_drill; exit 130' INT TERM HUP
   echo "drill: known-good $known at $current"
   echo "drill: failure injection: candidate $candidate must fail its smoke test (expects $sentinel); only the candidate is affected"
 
-  switch_and_verify "$candidate" "$sentinel" "$current" "$known" || rc=$?
-  outcome="$SWITCH_OUTCOME"
+  # The candidate phase (activate, restart, smoke test, rollback) runs in a worker while this shell sits in `wait`. A trapped signal
+  # interrupts `wait` at once and its trap runs reliably there; while bash runs a foreground command (sleep, curl, a $(...)), a SIGINT
+  # can be dropped or its trap can run in a broken parser state, so a long smoke loop must never be in the foreground of this shell.
+  local result
+  result="$(mktemp "${TMPDIR:-/tmp}/orbit-drill.XXXXXX")"
+  ( trap - INT TERM HUP; r=0; switch_and_verify "$candidate" "$sentinel" "$current" "$known" || r=$?
+    printf '%s\n%s\n%s\n' "$r" "$SWITCH_OUTCOME" "$SMOKE_SEEN" > "$result" ) &
+  DRILL_WORKER=$!
+  wait "$DRILL_WORKER" || true
+  DRILL_WORKER=""
+  rc=""; outcome=""; SMOKE_SEEN=""
+  { read -r rc; read -r outcome; read -r SMOKE_SEEN; } < "$result" || true
+  rm -f "$result"
+  if [ -z "$rc" ]; then
+    echo "drill: the candidate phase ended without a result; restoring known-good"
+    recover_interrupted_drill
+    record "$DRILL_DIR/last.json" not-exercised-no-result "$known"
+    echo "drill: FAILED (not a pass): no result"
+    return 5
+  fi
   # The result is decided by the outcome of each step, never by "switch_and_verify returned non-zero".
   if [ "$rc" = 2 ]; then
     echo "drill: candidate outcome: $outcome; restoration of $known FAILED or is unverified"
