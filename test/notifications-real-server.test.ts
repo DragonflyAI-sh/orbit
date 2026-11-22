@@ -212,7 +212,7 @@ after(async () => { await browser?.close(); });
 // A page whose visibility the test can set (Chromium's headless tabs are always visible): it overrides
 // document.visibilityState/hidden and fires visibilitychange, which is what the page listens to.
 async function openPage(base: string, opts: { context?: any; notesOpen?: boolean; setup?: (page: any) => Promise<void> } = {}) {
-  const context = opts.context ?? (await browser.newContext({ viewport: { width: 900, height: 700 } }));
+  const context = opts.context ?? (await browser.newContext({ viewport: { width: 900, height: 700 }, reducedMotion: "reduce" }));
   const page = await context.newPage();
   await page.addInitScript(`(() => {
     let vis = "visible";
@@ -245,7 +245,7 @@ test("browser: arrivals in a collapsed panel get no receipt and leave the run re
   try {
     await waitCount(page, 12);
     await settle();
-    assert.equal(await page.getAttribute("#notesbtn", "aria-expanded"), "false");
+    assert.equal(await page.getAttribute("#sidetoggle", "aria-expanded"), "false", "the side panel is collapsed");
     assert.deepEqual(acks, [], "the badge changed; nothing was displayed, so no ack");
     for (const id of [run.notification!, ...notes.map((n) => n.id)]) assert.equal(receipt(o, id), undefined, id);
     o.runs.pump();
@@ -261,7 +261,7 @@ test("browser: arrivals in a collapsed panel get no receipt and leave the run re
     await settle();
     assert.deepEqual(again.acks, []);
     // Open the panel: the ten listed (newest) notes get a listing receipt; the two past the limit do not.
-    await again.page.click("#notesbtn");
+    await again.page.click("#sidetab-notes");
     const listed = notes.slice(1).map((n) => n.id);
     await until(() => listed.every((id) => receipt(o2, id)?.listed === true), "the listed notes have a listing receipt");
     await settle();
@@ -289,7 +289,8 @@ test("browser: a hidden tab sends no receipt even with the panel open; becoming 
   const o = orbit(stateDir());
   const { page, context, acks } = await openPage(await o.base(), { notesOpen: true });
   try {
-    assert.equal(await page.getAttribute("#notesbtn", "aria-expanded"), "true");
+    assert.equal(await page.getAttribute("#sidetoggle", "aria-expanded"), "true");
+    assert.equal(await page.getAttribute("#sidetab-notes", "aria-selected"), "true");
     await page.evaluate(() => (window as any).__setVisibility("hidden"));
     const [n] = urgent(o, 1);
     await page.evaluate("refreshInbox()");
@@ -328,8 +329,8 @@ test("browser: a failed ack is retried later, a sent one is not repeated, and a 
     const first = receipt(o, n!.id);
     const tries = acks.length;
     for (let i = 0; i < 3; i++) await page.evaluate("refreshInbox()");
-    await page.click("#notesbtn");
-    await page.click("#notesbtn");
+    await page.click("#sidetoggle");
+    await page.click("#sidetab-notes");
     await settle();
     assert.equal(acks.length, tries, "no more acks once ORBIT has the receipt");
     // A second tab of a fresh browser lists it too; ORBIT already has a listing receipt, so it is not rewritten.
@@ -353,20 +354,20 @@ test("browser: dismissing is explicit and kept by ORBIT for every browser; colla
   const { page, context } = await openPage(await o.base());
   try {
     await waitCount(page, 12);
-    await page.click("#notesbtn");
+    await page.click("#sidetab-notes");
     await until(() => ids.slice(2).every((id) => receipt(o, id)?.listed === true), "the ten listed notes acked");
     // Collapse and reopen: no dismissal, count unchanged.
-    await page.click("#notesbtn");
+    await page.click("#sidetoggle");
     assert.equal(await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")), null);
     assert.equal(await count(page), "12");
-    await page.click("#notesbtn");
+    await page.click("#sidetab-notes");
     // Dismiss the newest: the count drops and the next note moves into the list, so it is now listed and acked.
     await page.click("#inbox .note .x");
     await waitCount(page, 11);
     await until(() => receipt(o, ids[1]!)?.listed === true, "the note that moved into the list is acked");
     await settle();
     assert.equal(receipt(o, ids[0]!), undefined, "the oldest was never listed: no receipt");
-    assert.equal(await page.getAttribute("#notesbtn", "aria-label"), "Notifications: 11");
+    assert.equal(await page.getAttribute("#sidetab-notes", "aria-label"), "Notifications, 11");
     // ORBIT recorded the dismissal: it no longer lists the note, and still keeps it.
     await until(() => o.notify.get(ids[11]!)?.dismissed !== undefined, "ORBIT recorded the dismissal");
     assert.deepEqual((await o.r.api("/notifications")).data.current.map((n: Notification) => n.id), ids.slice(0, 11));
@@ -400,7 +401,7 @@ test("browser: a dismissal an older page kept in this browser only is sent to OR
     // A dismissal whose request fails is still hidden here, and reaches ORBIT on a later refresh.
     let failing = true;
     await page.route("**/notifications/*/dismiss", (route: any) => (failing ? route.fulfill({ status: 503, body: "{}" }) : route.continue()));
-    await page.click("#notesbtn");
+    await page.click("#sidetab-notes");
     await page.click("#inbox .note .x");
     await waitCount(page, 1);
     await settle();
@@ -418,7 +419,7 @@ test("browser: a dismissal an older page kept in this browser only is sent to OR
 
 test("browser: the status indicator says not read yet before the first answer, and disconnected (unknown) after a failed request", { skip }, async () => {
   const o = orbit(stateDir());
-  const context = await browser.newContext();
+  const context = await browser.newContext({ reducedMotion: "reduce" });
   const page = await context.newPage();
   let release!: () => void;
   const held = new Promise<void>((r) => (release = r));
@@ -426,12 +427,13 @@ test("browser: the status indicator says not read yet before the first answer, a
   try {
     await page.goto(await o.base());
     await page.waitForFunction(() => document.readyState === "complete");
-    assert.match(await page.getAttribute("#health", "title"), /^ORBIT's status has not been read yet/);
-    assert.match(await page.getAttribute("#health", "aria-label"), /has not been read yet/);
+    assert.match(await page.getAttribute("#sidetab-status", "title"), /^Status unknown\. ORBIT's status has not been read yet/);
+    assert.equal(await page.getAttribute("#sidetab-status", "aria-label"), "Status: Status unknown (unknown)");
     release();
-    await page.waitForFunction(() => /could not be reached/.test(document.getElementById("health")!.title));
-    assert.equal(await page.getAttribute("#health", "class"), "unknown", "no answer is unknown (grey), never green and not claimed down");
-    assert.equal(await page.textContent("#health .label"), "Disconnected");
+    await page.waitForFunction(() => /could not be reached/.test(document.getElementById("sidetab-status")!.title));
+    assert.equal(await page.getAttribute("#sidetab-status", "class"), "sidetab unknown", "no answer is unknown (grey), never green and not claimed down");
+    assert.equal(await page.getAttribute("#sidetab-status", "aria-label"), "Status: Disconnected (unknown)");
+    assert.equal(await page.textContent("#statuslabel"), "Disconnected");
   } finally {
     await context.close();
   }
