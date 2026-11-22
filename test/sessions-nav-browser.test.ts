@@ -99,7 +99,7 @@ async function tabStops(page: any) {
     await page.keyboard.press("Tab");
     const id = await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName || "");
     stops.push(id);
-    if (id === "health") break;
+    if (id === "sidetab-status") break;
   }
   return stops;
 }
@@ -114,13 +114,14 @@ for (const size of SIZES) {
       await assertControl(page, LONG, "Sessions");
       assert.equal(await page.getAttribute("#sessionstab", "aria-current"), "page");
       // The title sits after the links on desktop (one row); on a phone the links take their own row under it.
-      const geo = await page.evaluate(() => { const r = (id: string) => document.getElementById(id)!.getBoundingClientRect(); return { sessions: r("sessionstab"), btn: r("sessbtn"), notes: r("notesbtn"), header: document.querySelector("header")!.getBoundingClientRect().height }; });
+      const geo = await page.evaluate(() => { const r = (id: string) => document.getElementById(id)!.getBoundingClientRect(); return { sessions: r("sessionstab"), btn: r("sessbtn"), theme: r("themebtn"), header: document.querySelector("header")!.getBoundingClientRect().height }; });
       if (!size.phone) assert.ok(geo.btn.left >= geo.sessions.right, "the title comes after the Sessions link");
       else assert.ok(geo.sessions.top > geo.btn.top, "on a phone the links are on the row under the title");
-      assert.ok(geo.btn.right <= geo.notes.left, "the long title never runs under the toggles");
+      assert.ok(geo.btn.right <= geo.theme.left, "the long title never runs under the theme toggle");
       assert.equal(await noSideways(page), true, "no horizontal scroll on Sessions");
-      // Keyboard: the links in order, then the session control, then the toggles.
-      assert.deepEqual(await tabStops(page), ["assistanttab", "jobstab", "sessionstab", "sessbtn", "themebtn", "notesbtn", "health"]);
+      // Keyboard: the links in order, then the session control, the theme toggle, then the side panel (its button, its selected
+      // tab, Status by default).
+      assert.deepEqual(await tabStops(page), ["assistanttab", "jobstab", "sessionstab", "sessbtn", "themebtn", "sidetoggle", "sidetab-status"]);
       await shot(page, `${size.name}-nav-sessions`);
       const sessionsHeader = geo.header;
 
@@ -131,8 +132,8 @@ for (const size of SIZES) {
         await assertNoControl(page, tab);
         assert.equal(await page.getAttribute(link, "aria-current"), "page");
         assert.equal(await page.getAttribute("#sessionstab", "aria-current"), null);
-        // Keyboard: straight from the links to the toggles; the session control is not a stop.
-        assert.deepEqual(await tabStops(page), ["assistanttab", "jobstab", "sessionstab", "themebtn", "notesbtn", "health"], `${tab}: tab order`);
+        // Keyboard: straight from the links to the theme toggle and the side panel; the session control is not a stop.
+        assert.deepEqual(await tabStops(page), ["assistanttab", "jobstab", "sessionstab", "themebtn", "sidetoggle", "sidetab-status"], `${tab}: tab order`);
         const h = await page.evaluate(() => document.querySelector("header")!.getBoundingClientRect().height);
         assert.ok(h <= sessionsHeader, `${tab}: the header is no taller than on Sessions (${h} > ${sessionsHeader})`);
         assert.equal(await noSideways(page), true, `${tab}: no horizontal scroll`);

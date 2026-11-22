@@ -117,17 +117,18 @@ test("routing: the root and unknown hashes open the Assistant; /sessions, legacy
   assert.equal(pageFor("/", "#chat", false, false), "chat");
 });
 
-test("the page markup: Assistant first in the nav, then Jobs, Sessions (no Status link); the logo header stays; the dot toggles the status line", () => {
+test("the page markup: Assistant first in the nav, then Jobs, Sessions (no Status link); the logo header stays; the status dot is the side panel's Status tab", () => {
   const nav = html.match(/<nav id="tabs"[^>]*>([\s\S]*?)<\/nav>/)![1]!;
   const labels = [...nav.matchAll(/<a [^>]*>([\s\S]*?)<\/a>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
   assert.deepEqual(labels.map((l) => l.split(" ")[0]), ["Assistant", "Jobs", "Sessions"]);
   assert.match(html, /<h1 class="brand"><button type="button" id="brandbtn" aria-label="ORBIT: Refresh page" title="Refresh page"><img src="\/avatar.png" alt=""><span class="wordmark">ORBIT<\/span><\/button><\/h1>/);
-  const dot = html.match(/<button type="button" id="health"[^>]*>/)![0];
-  assert.doesNotMatch(dot, /href=/, "a toggle, not a link");
-  assert.match(dot, /aria-expanded="false"/);
+  assert.doesNotMatch(html, /id="health"/, "no status indicator in the page header");
+  assert.doesNotMatch(html.match(/<header>[\s\S]*?<\/header>/)![0], /statusline|All live/, "nor the status line");
+  const dot = html.match(/<button type="button" role="tab" id="sidetab-status"[^>]*>/)![0];
+  assert.doesNotMatch(dot, /href=/, "a tab, not a link");
   assert.match(dot, /aria-controls="statusline"/);
-  assert.match(dot, /aria-label="Overall status: unknown, not all live/);
-  assert.match(dot, /class="unknown"/, "it starts unknown, never green before an answer");
+  assert.match(dot, /aria-label="Status: Status unknown \(unknown\)"/);
+  assert.match(dot, /class="sidetab unknown"/, "it starts unknown, never green before an answer");
   // No session picker, New, Rename, Archive or delete control on the Assistant: the only controls are the input and Send.
   const aform = html.match(/<form id="aform">[\s\S]*?<\/form>/)![0];
   assert.doesNotMatch(aform, /<select|New|Rename|Archive|Delete/);
@@ -259,23 +260,23 @@ test("browser: a viewer who is not the owner gets no Assistant link and lands on
 
 test("browser: the indicator follows green, amber (fallback, optional), red (core), grey (error, disconnected), in text as well as colour", { skip }, async () => {
   reset();
-  const at = async (level: string) => page.waitForFunction((l: string) => document.getElementById("health")!.className === l, level);
+  const at = async (level: string) => page.waitForFunction((l: string) => document.getElementById("sidetab-status")!.className === `sidetab ${l}`, level);
   const set = async (body: unknown, code = 200) => { status = { code, body }; await page.evaluate("refreshStatus()"); };
   status = { code: 200, body: { ports: healthy() } };
   await open();
   await at("ok");
-  assert.match(await page.getAttribute("#health", "aria-label"), /^Overall status: healthy, all live\. All live\./);
-  assert.equal(await page.getAttribute("#health", "href"), null, "the dot toggles the status line; the status page link is inside it");
+  assert.equal(await page.getAttribute("#sidetab-status", "aria-label"), "Status: All live (healthy, all live)");
+  assert.equal(await page.getAttribute("#sidetab-status", "href"), null, "the dot is the Status tab; the status page link is inside its view");
   assert.equal(await page.getAttribute("#statusopen", "href"), "/status");
-  const dot = () => page.$eval("#health .dot", (d: HTMLElement) => { const c = getComputedStyle(d); return { bg: c.backgroundColor, radius: c.borderRadius, transform: c.transform }; });
+  const dot = () => page.$eval("#sidetab-status .dot", (d: HTMLElement) => { const c = getComputedStyle(d); return { bg: c.backgroundColor, radius: c.borderRadius, transform: c.transform }; });
   const green = await dot();
 
   // The fallback answers: amber, labelled, with the provider and model.
   await set({ ports: withPort(healthy(), onFallback()) });
   await at("degraded");
-  assert.equal(await page.textContent("#navstatuslabel"), "Degraded: fallback model");
-  assert.match(await page.getAttribute("#health", "aria-label"), /^Overall status: degraded but working\. Degraded: fallback model\. .*openrouter\/vendor\/cheap-model/);
-  assert.match(await page.getAttribute("#health", "title"), /Replies come from the fallback model openrouter\/vendor\/cheap-model/);
+  assert.equal(await page.textContent("#statuslabel"), "Degraded: fallback model");
+  assert.equal(await page.getAttribute("#sidetab-status", "aria-label"), "Status: Degraded: fallback model (degraded but working)");
+  assert.match(await page.getAttribute("#sidetab-status", "title"), /^Degraded: fallback model\. .*Replies come from the fallback model openrouter\/vendor\/cheap-model/);
   const amber = await dot();
   assert.notEqual(amber.bg, green.bg);
   assert.notEqual(amber.transform, green.transform, "a different shape, not only a different colour");
@@ -284,8 +285,8 @@ test("browser: the indicator follows green, amber (fallback, optional), red (cor
   // Both providers unavailable: red, and it overrides the amber.
   await set({ ports: withPort(withPort(healthy(), bothDown()), P("memory", "degraded")) });
   await at("down");
-  assert.equal(await page.textContent("#navstatuslabel"), "Down: model");
-  assert.match(await page.getAttribute("#health", "aria-label"), /^Overall status: down, core functionality unavailable\./);
+  assert.equal(await page.textContent("#statuslabel"), "Down: model");
+  assert.equal(await page.getAttribute("#sidetab-status", "aria-label"), "Status: Down: model (down, core functionality unavailable)");
   const red = await dot();
   assert.notEqual(red.bg, amber.bg);
   assert.notEqual(red.radius, green.radius);
@@ -298,21 +299,22 @@ test("browser: the indicator follows green, amber (fallback, optional), red (cor
   // An optional subsystem only: amber.
   await set({ ports: withPort(healthy(), P("watch", "degraded")) });
   await at("degraded");
-  assert.equal(await page.textContent("#navstatuslabel"), "Degraded: 1 not live");
-  assert.match(await page.getAttribute("#health", "title"), /watch: degraded/);
+  assert.equal(await page.textContent("#statuslabel"), "Degraded: 1 not live");
+  assert.match(await page.getAttribute("#sidetab-status", "title"), /watch: degraded/);
 
   // No usable answer: grey "unknown", never green and not claimed red.
   await set({ error: "boom" }, 500);
   await at("unknown");
-  assert.equal(await page.textContent("#navstatuslabel"), "Status unknown");
-  assert.match(await page.getAttribute("#health", "title"), /HTTP 500/);
+  assert.equal(await page.textContent("#statuslabel"), "Status unknown");
+  assert.match(await page.getAttribute("#sidetab-status", "title"), /HTTP 500/);
   await set({ ports: healthy() });
   await at("ok");
   status = { code: 0, body: null };
   await page.evaluate("refreshStatus()");
   await at("unknown");
-  assert.equal(await page.textContent("#navstatuslabel"), "Disconnected");
-  assert.match(await page.getAttribute("#health", "aria-label"), /^Overall status: unknown\. Disconnected\. ORBIT could not be reached/);
+  assert.equal(await page.textContent("#statuslabel"), "Disconnected");
+  assert.equal(await page.getAttribute("#sidetab-status", "aria-label"), "Status: Disconnected (unknown)");
+  assert.match(await page.getAttribute("#sidetab-status", "title"), /^Disconnected\. ORBIT could not be reached/);
   assert.equal(await page.textContent("#ports"), healthy().map((p) => `${p.port}: ${p.state}`).join(""), "the last pills stay while disconnected");
   const grey = await dot();
   assert.notEqual(grey.bg, green.bg);

@@ -5,14 +5,12 @@ import { shellServer, SIDEBAR_REFS } from "./helpers/shell-fixture.ts";
 
 // The left sidebar (docs/sidebar.md) and the desktop menu (docs/design-system.md, "Desktop menu"):
 // - 1024px and wider: docked on the left under the header, open by default, with Projects (a selector), Plan, Files and
-//   Images read from GET /sidebar (the real sidebarView over synthetic vault notes and photos, test/helpers/shell-fixture.ts),
-//   then Notifications and status (two tabs, one view at a time) and the full indicators at the bottom. The conversation and
-//   composer move right and are never covered. A handle on its right edge collapses it to the left edge and reopens it; a
+//   Images read from GET /sidebar (the real sidebarView over synthetic vault notes and photos, test/helpers/shell-fixture.ts).
+//   Status and notifications are not in it: they are in the right side panel (test/side-panel-browser.test.ts, which also
+//   checks both panels open together). The conversation and composer move right and are never covered. A handle on its right edge collapses it to the left edge and reopens it; a
 //   separator resizes it by pointer or keyboard; each section collapses on its own; all of it is remembered;
-// - narrower: a modal drawer, closed by default, opened by the menu button or the header's bell and status dot; Escape, the
-//   close button or the scrim close it and focus goes back;
-// - receipts are sent only for notes listed in a Notifications view that is on screen; the status view has loading, empty
-//   and error states;
+// - narrower: a modal drawer, closed by default, opened by the menu button; Escape, the close button or the scrim close it
+//   and focus goes back;
 // - the session menu's rows have no nested outline on desktop and keep the keyboard focus ring; the page tabs lose their
 //   inner borders on desktop; phones are unchanged.
 // Chromium (Playwright) with synthetic content only. Skipped, saying so, without Playwright.
@@ -60,7 +58,7 @@ const geo = (page: any) => page.evaluate(() => {
 });
 
 for (const [width, height] of [[1024, 700], [1280, 800], [1440, 900]] as const) {
-  test(`browser ${width}px: the sidebar is docked open on the left with real sections, covers nothing, and the header shows icons only`, { skip }, async () => {
+  test(`browser ${width}px: the sidebar is docked open on the left with real sections, covers nothing, and holds no status or notifications`, { skip }, async () => {
     const { page, ctx, errors } = await open(width, height);
     assert.equal(await shown(page, "#nav"), true, "open by default on a wide screen");
     assert.equal(await page.getAttribute("#nav", "aria-label"), "Sidebar");
@@ -76,21 +74,18 @@ for (const [width, height] of [[1024, 700], [1280, 800], [1440, 900]] as const) 
     assert.ok(g.box.left >= g.nav.right + 8, "the composer is not covered");
     assert.ok(g.handle.left < g.nav.right && g.handle.right > g.nav.right, "the collapse handle sits on the sidebar's right edge");
     // The sections, in order, each with a header button that controls its content.
-    assert.deepEqual(await words(page, "#nav .navtoggle"), ["Projects", "Plan", "Files", "Images", "Notifications and status"]);
-    for (const name of ["projects", "plan", "files", "images", "activity"]) assert.equal(await page.getAttribute(`#navh-${name}`, "aria-controls"), `navbody-${name}`);
+    assert.deepEqual(await words(page, "#nav .navtoggle"), ["Projects", "Plan", "Files", "Images"]);
+    for (const name of ["projects", "plan", "files", "images"]) assert.equal(await page.getAttribute(`#navh-${name}`, "aria-controls"), `navbody-${name}`);
     // Real data from the vault: active projects only (the done one is left out), the plan from now.md, the related files, the photos.
     assert.deepEqual(await texts(page, "#navproject option"), ["All projects", "Alpha Garden", "Beta Desk (paused)"]);
     assert.equal(await page.textContent("#navprojnote"), "2 active projects in the vault.");
     assert.deepEqual(await texts(page, "#navplan .navlist li"), ["Ship the synthetic release", "Review the fixture plan", "Buy seeds todo · due 2026-11-30", "Fix the drawer todo"]);
     assert.deepEqual(await texts(page, "#navfiles .navfile .path"), ["now.md", "Projects/alpha-garden.md", "Projects/beta-desk.md"]);
     assert.equal(await page.$$eval("#navimages img", (is: HTMLImageElement[]) => is.length), 3);
-    // Notifications and status: collapsed until asked for; the full indicators at the bottom carry the words.
-    assert.equal(await expanded(page, "#navh-activity"), "false");
-    assert.equal(await page.textContent("#navnotes"), "Notifications14");
-    assert.equal(await page.textContent("#navstatuslabel"), "Degraded: 1 not live");
-    // The header keeps the bell with its count and the status dot, with no words beside them.
-    assert.equal((await page.innerText("header .hctl")).trim(), "14");
-    assert.match(await page.getAttribute("#health", "aria-label"), /^Overall status: degraded but working\. Degraded: 1 not live\./, "the words stay in the accessible name");
+    // Status and notifications live in the right side panel, Status first; neither the sidebar nor the header holds them.
+    assert.equal(await page.evaluate(() => document.getElementById("nav")!.contains(document.getElementById("statusline")) || document.getElementById("nav")!.contains(document.getElementById("inbox"))), false);
+    assert.equal(await page.evaluate(() => Boolean(document.getElementById("notesbtn") || document.getElementById("health"))), false, "no toggles in the header");
+    assert.deepEqual(await page.$$eval("#side .sidetab", (t: Element[]) => t.map((b) => b.id)), ["sidetab-status", "sidetab-notes"]);
     assert.equal(await sideways(page), false);
     assert.deepEqual(errors, []);
     await ctx.close();
@@ -107,7 +102,8 @@ test("browser 1280px: the handle collapses the sidebar to the left edge and reop
   const g = await geo(page);
   assert.ok(Math.abs(g.handle.left) <= 1, "collapsed: the handle stays at the left edge to reopen it");
   assert.ok(g.handle.width >= 20 && g.handle.height >= 36, "a visible handle");
-  assert.ok(Math.abs(g.msgLeft - (g.vw - 860) / 2) <= 1, `the 860px column recentres in the full width (${g.msgLeft})`);
+  const rail = await page.evaluate(() => document.getElementById("side")!.getBoundingClientRect().width);
+  assert.ok(Math.abs(g.msgLeft - (g.vw - rail - 860) / 2) <= 1, `the 860px column recentres in the width left of the side panel's rail (${g.msgLeft})`);
   assert.ok(g.msgLeft < before.msgLeft, "the content moved left into the freed room");
   assert.equal(await active(page), "navhandle", "focus stays on the handle");
   // Remembered across a reload (this browser).
@@ -265,129 +261,6 @@ test("browser 1280px: a vault that cannot be read keeps the remembered project f
   fixture.set({ sidebar: "ok" });
 });
 
-test("browser 1280px: the header toggles show their view in the sidebar without moving focus; the tabs and section header switch and collapse it; it survives a reload", { skip }, async () => {
-  const { page, ctx } = await open(1280, 800);
-  await page.focus("#notesbtn");
-  await page.keyboard.press("Enter");
-  assert.equal(await active(page), "notesbtn", "non-modal: never moves focus");
-  assert.equal(await expanded(page, "#notesbtn"), "true");
-  assert.equal(await expanded(page, "#navnotes"), "true", "the sidebar's indicator says the same");
-  assert.equal(await expanded(page, "#health"), "false");
-  assert.equal(await expanded(page, "#navh-activity"), "true");
-  assert.equal(await page.getAttribute("#sidetab-notes", "aria-selected"), "true");
-  assert.equal(await page.getAttribute("#inbox", "role"), "tabpanel");
-  assert.equal(await page.getAttribute("#inbox", "aria-labelledby"), "sidetab-notes");
-  assert.equal(await shown(page, "#inbox"), true);
-  assert.equal(await shown(page, "#statusline"), false, "one view at a time");
-  const r = await page.evaluate(() => document.getElementById("inbox")!.getBoundingClientRect().top);
-  assert.ok(r < 800, "scrolled into the sidebar's view");
-  // The status dot switches the view; the toggle of the shown view collapses the section.
-  await page.click("#health");
-  assert.equal(await shown(page, "#statusline"), true);
-  assert.equal(await shown(page, "#inbox"), false);
-  assert.equal(await expanded(page, "#notesbtn"), "false");
-  assert.equal(await page.textContent("#statuslabel"), await page.textContent("#navstatuslabel"), "the same words as the indicator");
-  await page.click("#health");
-  assert.equal(await expanded(page, "#navh-activity"), "false");
-  assert.equal(await shown(page, "#statusline"), false);
-  // The section header reopens the last view; the footer indicators work like the header toggles.
-  await page.click("#navh-activity");
-  assert.equal(await shown(page, "#statusline"), true);
-  await page.click("#navnotes");
-  assert.equal(await shown(page, "#inbox"), true);
-  // Tabs: one tab stop; arrows, Home and End switch and show the view.
-  await page.focus("#sidetab-notes");
-  await page.keyboard.press("ArrowRight");
-  assert.equal(await active(page), "sidetab-status");
-  assert.equal(await shown(page, "#statusline"), true);
-  await page.keyboard.press("Home");
-  assert.equal(await active(page), "sidetab-notes");
-  await page.keyboard.press("End");
-  assert.equal(await active(page), "sidetab-status");
-  await page.keyboard.press("ArrowLeft");
-  assert.equal(await shown(page, "#inbox"), true);
-  assert.equal(await page.getAttribute("#sidetab-status", "tabindex"), "-1");
-  // Kept for this tab's session.
-  await page.reload();
-  await page.waitForFunction(() => document.getElementById("notecount")!.textContent !== "?");
-  assert.equal(await expanded(page, "#notesbtn"), "true");
-  assert.equal(await shown(page, "#inbox"), true);
-  // Collapsing the sidebar hides the view: the toggles say so, and the next click shows it again.
-  await page.click("#navhandle");
-  assert.equal(await expanded(page, "#notesbtn"), "false");
-  await page.click("#notesbtn");
-  assert.equal(await shown(page, "#nav"), true, "the toggle reopens the sidebar on its view");
-  assert.equal(await shown(page, "#inbox"), true);
-  await ctx.close();
-});
-
-test("browser 1280px: receipts are sent only for notes listed in a Notifications view on screen: not from Status, not while the sidebar is collapsed", { skip }, async () => {
-  const { page, ctx, acks } = await open(1280, 800);
-  await page.click("#health");
-  await page.waitForTimeout(250);
-  assert.equal(acks.length, 0, "the Status view lists no notes");
-  await page.click("#notesbtn");
-  for (let i = 0; acks.length < 10 && i < 100; i++) await page.waitForTimeout(20);
-  assert.deepEqual([...acks].sort(), Array.from({ length: 10 }, (_, i) => `n${i + 4}`).sort(), "the ten listed (newest), not the four past the limit");
-  // Collapsed sidebar: a new arrival is not on screen, so it gets no receipt until the sidebar opens again.
-  await page.click("#navhandle");
-  fixture.set({ notes: 15 });
-  await page.evaluate("refreshInbox()");
-  await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "15");
-  await page.waitForTimeout(250);
-  assert.equal(acks.includes("n14"), false, "nothing acked while collapsed");
-  await page.click("#navhandle");
-  for (let i = 0; !acks.includes("n14") && i < 100; i++) await page.waitForTimeout(20);
-  assert.equal(acks.includes("n14"), true, "acked once it is on screen");
-  await ctx.close();
-});
-
-test("browser 1280px: the status view says when it is reading, when the read failed, and keeps the last answer", { skip }, async () => {
-  const ctx = await chromium.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
-  const page = await ctx.newPage();
-  let mode: "hold" | "fail" | "ok" | "empty" | "down" = "hold";
-  let release: () => void = () => {};
-  await page.route("**/status", async (route: any) => {
-    if (mode === "hold") { await new Promise<void>((r) => { release = r; }); return route.fulfill({ status: 500, body: "{}" }); }
-    if (mode === "fail") return route.fulfill({ status: 500, body: "{}" });
-    if (mode === "down") return route.abort();
-    const ports = mode === "empty" ? [] : [{ port: "model", state: "live" }, { port: "vault", state: "live" }];
-    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ports }) });
-  });
-  await page.goto(url + "/#assistant");
-  await page.click("#health");
-  assert.equal(await page.textContent("#ports"), "Reading status…", "loading, before any answer");
-  assert.equal(await shown(page, "#statuserr"), false);
-  release();
-  await page.waitForFunction(() => !document.getElementById("statuserr")!.hidden);
-  assert.equal(await page.textContent("#statuserr"), "ORBIT's status could not be read (HTTP 500).");
-  assert.equal(await page.getAttribute("#statuserr", "role"), "alert");
-  assert.equal(await page.textContent("#ports"), "", "no stale “Reading status…” after a failure");
-  mode = "ok";
-  await page.evaluate("refreshStatus()");
-  await page.waitForFunction(() => document.querySelectorAll("#ports .pill").length === 2);
-  assert.equal(await shown(page, "#statuserr"), false, "a good answer clears the error");
-  mode = "down";
-  await page.evaluate("refreshStatus()");
-  await page.waitForFunction(() => !document.getElementById("statuserr")!.hidden);
-  assert.equal(await page.textContent("#statuserr"), "ORBIT could not be reached for its status. Showing the last answer.");
-  assert.equal(await page.$$eval("#ports .pill", (p: unknown[]) => p.length), 2, "the last answer stays");
-  assert.equal(await page.textContent("#statuslabel"), "Disconnected", "the summary says the status is not known now");
-  mode = "empty";
-  await page.evaluate("refreshStatus()");
-  await page.waitForFunction(() => document.getElementById("ports")!.textContent === "ORBIT reported no status entries.");
-  assert.equal(await shown(page, "#statuserr"), false);
-  await ctx.close();
-});
-
-test("browser 1280px: the Notifications view has an empty state", { skip }, async () => {
-  const { page, ctx } = await open(1280, 800, "/#assistant", { notes: 0 });
-  await page.click("#notesbtn");
-  assert.equal(await page.textContent("#inbox"), "No notifications.");
-  assert.equal(await page.getAttribute("#sidetab-notes", "aria-label"), "Notifications, none");
-  await ctx.close();
-});
-
 test("browser (390 phone): the sidebar is a drawer, closed by default; the menu button opens it as a modal dialog; Escape, × and the scrim close it with focus back", { skip }, async () => {
   const { page, ctx, errors } = await open(390, 844, "/#assistant", { phone: true });
   assert.equal(await shown(page, "#nav"), false, "closed by default on a phone");
@@ -418,26 +291,6 @@ test("browser (390 phone): the sidebar is a drawer, closed by default; the menu 
   await page.mouse.click(380, 400); // the scrim, right of the 360px drawer
   assert.equal(await shown(page, "#nav"), false, "a tap outside closes it");
   assert.deepEqual(errors, []);
-  await ctx.close();
-});
-
-test("browser (390 phone): the bell and the status dot open the drawer on their view with focus on its tab; receipts only while the notes are on screen", { skip }, async () => {
-  const { page, ctx, acks } = await open(390, 844, "/#assistant", { phone: true });
-  await page.waitForTimeout(200);
-  assert.equal(acks.length, 0, "a closed drawer lists nothing");
-  await page.click("#notesbtn");
-  assert.equal(await shown(page, "#nav"), true);
-  assert.equal(await active(page), "sidetab-notes");
-  assert.equal(await shown(page, "#inbox"), true);
-  for (let i = 0; acks.length < 10 && i < 100; i++) await page.waitForTimeout(20);
-  assert.equal(acks.length, 10, "the listed notes get their receipt");
-  await page.keyboard.press("Escape");
-  assert.equal(await active(page), "notesbtn");
-  await page.click("#health");
-  assert.equal(await active(page), "sidetab-status");
-  assert.equal(await shown(page, "#statusline"), true);
-  assert.equal(await shown(page, "#inbox"), false);
-  await page.keyboard.press("Escape");
   await ctx.close();
 });
 
@@ -535,7 +388,7 @@ const CONTRAST = `(pairs) => {
   probe.remove(); return out;
 }`;
 const PAIRS: [string, string, number][] = [
-  ["var(--fg)", "color-mix(in srgb, var(--attention) 6%, var(--card))", 4.5], // a note in the sidebar
+  ["var(--fg)", "color-mix(in srgb, var(--attention) 6%, var(--card))", 4.5], // a note in the side panel
   ["var(--muted)", "var(--card)", 4.5], // section headers, notes and file paths in the sidebar
   ["var(--accent-2)", "var(--card)", 4.5], // a photo's "Open" link
   ["var(--fg)", "var(--bg)", 4.5], // the project selector
@@ -553,7 +406,7 @@ test("browser 1280px: the sidebar and menu rows in Light and Dark: themed surfac
     const page = await ctx.newPage();
     await page.goto(url + "/#assistant");
     await page.waitForFunction(() => document.getElementById("notecount")!.textContent !== "?");
-    await page.click("#notesbtn");
+    await page.click("#sidetab-notes"); // the side panel open on the notes too, so both panels are drawn in the theme
     const look = await page.evaluate(() => { const s = getComputedStyle(document.getElementById("nav")!), card = getComputedStyle(document.documentElement).getPropertyValue("--card").trim(); const probe = document.createElement("i"); probe.style.color = card; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return { bg: s.backgroundColor, card: c, scheme: getComputedStyle(document.documentElement).colorScheme }; });
     assert.equal(look.bg, look.card, `${theme}: the sidebar is a card surface`);
     assert.equal(look.scheme, theme);

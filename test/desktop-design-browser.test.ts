@@ -55,7 +55,7 @@ async function open(width: number, height: number, route: string, opts: { phone?
 const sideways = (page: any) => page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
 
 for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
-  test(`browser ${width}px: one grouped header row, page tabs read as navigation, icon toggles with the full indicators in the sidebar`, { skip }, async () => {
+  test(`browser ${width}px: one grouped header row, page tabs read as navigation, the theme toggle at the right`, { skip }, async () => {
     const { page, ctx, errors } = await open(width, height, "/#assistant");
     const g = await page.evaluate(() => {
       const r = (e: Element) => e.getBoundingClientRect();
@@ -64,25 +64,20 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
       const cur = tabs.find((a) => a.getAttribute("aria-current") === "page")!, other = tabs.find((a) => a !== cur)!;
       const cs = (e: Element) => getComputedStyle(e);
       return {
-        header: r(header).height, brand: r(brand), nav: r(nav), notes: r(document.getElementById("notesbtn")!), health: r(document.getElementById("health")!), vw: document.documentElement.clientWidth,
+        header: r(header).height, brand: r(brand), nav: r(nav), theme: r(document.getElementById("themebtn")!), vw: document.documentElement.clientWidth,
         divider: cs(brand).borderRightWidth, cur: { w: Number(cs(cur).fontWeight), bg: cs(cur).backgroundImage, shadow: cs(cur).boxShadow }, other: { w: Number(cs(other).fontWeight), bg: cs(other).backgroundImage },
-        track: cs(nav).backgroundColor, headerText: (document.querySelector("header .hctl") as HTMLElement).innerText.trim(),
-        foot: { notes: (document.getElementById("navnotes") as HTMLElement).innerText.replace(/\s+/g, " ").trim(), status: (document.getElementById("navstatus") as HTMLElement).innerText.trim() },
+        track: cs(nav).backgroundColor,
       };
     });
     assert.ok(g.header <= 56, `the header stays compact (${g.header}px)`);
     const mid = (b: any) => b.top + b.height / 2;
-    for (const k of ["nav", "notes", "health"] as const) assert.ok(Math.abs(mid(g[k]) - mid(g.brand)) <= 3, `${k} on the brand's row`);
+    for (const k of ["nav", "theme"] as const) assert.ok(Math.abs(mid(g[k]) - mid(g.brand)) <= 3, `${k} on the brand's row`);
     assert.equal(g.divider, "1px", "a divider separates the brand from the page tabs");
-    assert.ok(g.nav.left > g.brand.right && g.notes.left > g.nav.right && g.health.left >= g.notes.right && g.health.right <= g.vw, "brand, tabs, then the toggles at the right edge");
+    assert.ok(g.nav.left > g.brand.right && g.theme.left > g.nav.right && g.theme.right <= g.vw, "brand, tabs, then the theme toggle at the right edge");
     assert.notEqual(g.track, "rgba(0, 0, 0, 0)", "the tabs sit on a track");
     assert.ok(g.cur.w >= 600 && g.other.w < 600, `the current page is bold (${g.cur.w} vs ${g.other.w})`);
     assert.match(g.cur.bg, /linear-gradient/, "the current page carries ORBIT's gradient underline");
     assert.equal(g.other.bg, "none", "other tabs do not");
-    // The header keeps the bell with its count and the status dot; the words live in the sidebar's indicators (docs/sidebar.md).
-    assert.equal(g.headerText, "5", "no Notifications or status words in the header, only the count");
-    assert.equal(g.foot.notes, "Notifications 5");
-    assert.match(g.foot.status, /^(All live|Degraded: .+)$/);
     assert.equal(await sideways(page), false);
     assert.deepEqual(errors, []);
     await ctx.close();
@@ -97,13 +92,14 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
         const box = form.querySelector("textarea")!.getBoundingClientRect(), plus = form.querySelector(".phbtn")!.getBoundingClientRect(), send = form.querySelector(".sendbtn")!;
         const s = send.getBoundingClientRect(), hit = document.elementFromPoint(s.left + s.width / 2, s.top + s.height / 2);
         return { left: Math.min(...rows.map((r) => r.left)), right: Math.max(...rows.map((r) => r.right)), plusLeft: plus.left, sendRight: s.right, boxRight: box.right, sendLeft: s.left,
-          vw: document.documentElement.clientWidth, sendHit: Boolean(hit && (hit === send || send.contains(hit))), nav: document.getElementById("nav")!.getBoundingClientRect().right };
+          vw: document.documentElement.clientWidth, room: document.getElementById("side")!.getBoundingClientRect().left, sendHit: Boolean(hit && (hit === send || send.contains(hit))), nav: document.getElementById("nav")!.getBoundingClientRect().right };
       }, conv);
       const col = g.right - g.left;
       assert.ok(col <= 860 && col >= 840, `${route}: rows form an ~860px column (${col})`);
-      // The sidebar is docked open by default from 1024px (docs/sidebar.md): the column is centred in the room right of it.
+      // The left sidebar is docked open by default from 1024px (docs/sidebar.md): the column is centred between it and the
+      // side panel's rail.
       assert.ok(g.nav >= 220, `${route}: the sidebar is open on the left (${g.nav})`);
-      assert.ok(Math.abs(g.left - (g.nav + (g.vw - g.nav - 860) / 2)) <= 1, `${route}: the column is centred in the room left by the sidebar (left ${g.left})`);
+      assert.ok(Math.abs(g.left - (g.nav + (g.room - g.nav - 860) / 2)) <= 1, `${route}: the column is centred between the sidebar and the rail (left ${g.left}, nav ${g.nav}, room ${g.room})`);
       assert.ok(Math.abs(g.plusLeft - g.left) <= 1, `${route}: the composer starts where the messages start (${g.plusLeft} vs ${g.left})`);
       assert.ok(g.sendRight <= g.left + 860 + 1, `${route}: Send ends inside the column`);
       assert.ok(g.sendLeft - g.boxRight >= 8, `${route}: an explicit gap before Send`);
@@ -114,27 +110,26 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
   });
 }
 
-// Below 1024px the sidebar is a drawer (test/sidebar-browser.test.ts): the header's bell opens it on the notifications.
-test("browser 960px: the bell opens the sidebar drawer on the notifications, over the page, and closes back to the bell", { skip }, async () => {
+// Below 1024px the open side panel lies over the page instead of moving it (test/side-panel-browser.test.ts has the rest).
+test("browser 960px: the open side panel lies over the page without moving it, and its notification controls work", { skip }, async () => {
   const { page, ctx } = await open(960, 800, "/#assistant");
-  await page.click("#notesbtn");
+  const before = await page.evaluate(() => { const r = document.getElementById("alog")!.getBoundingClientRect(); return { left: r.left, width: r.width }; });
+  await page.click("#sidetab-notes");
   await page.waitForFunction(() => document.querySelectorAll("#inbox .note").length > 0);
+  await page.waitForTimeout(300); // the panel slides in
   const g = await page.evaluate(() => {
     const r = (id: string) => document.getElementById(id)!.getBoundingClientRect();
-    return { nav: r("nav"), inbox: r("inbox"), role: document.getElementById("nav")!.getAttribute("role"), modal: document.getElementById("nav")!.getAttribute("aria-modal"),
-      inert: document.querySelector("header")!.hasAttribute("inert"), vw: document.documentElement.clientWidth, vh: window.innerHeight };
+    return { log: r("alog"), side: r("side"), header: document.querySelector("header")!.getBoundingClientRect(), vw: document.documentElement.clientWidth };
   });
-  assert.ok(g.nav.left === 0 && g.nav.width <= 361 && Math.abs(g.nav.bottom - g.vh) <= 1, `a drawer from the left edge, full height (${JSON.stringify(g.nav)})`);
-  assert.ok(g.inbox.left >= g.nav.left && g.inbox.right <= g.nav.right, "the notifications are inside it");
-  assert.deepEqual([g.role, g.modal, g.inert], ["dialog", "true", true], "modal while open: the page behind is inert");
+  assert.deepEqual({ left: g.log.left, width: g.log.width }, before, "the conversation keeps its place and width");
+  assert.ok(Math.abs(g.side.right - g.vw) <= 1 && g.side.width <= 401, `on the right edge, at a readable width (${g.side.width})`);
+  assert.ok(Math.abs(g.side.top - g.header.bottom) <= 1, "under the header");
+  assert.ok(g.log.height >= 300, `the conversation keeps most of the screen (${g.log.height}px)`);
   assert.equal(await sideways(page), false);
   // Notification controls keep working: dismiss one with the keyboard; focus stays in the panel.
   await page.focus("#inbox .note .x");
   await page.keyboard.press("Enter");
   assert.equal(await page.evaluate(() => document.getElementById("inbox")!.contains(document.activeElement)), true, "focus stays in the panel after a dismissal");
-  await page.keyboard.press("Escape");
-  assert.equal(await page.evaluate(() => document.activeElement!.id), "notesbtn");
-  assert.equal(await page.evaluate(() => document.querySelector("header")!.hasAttribute("inert")), false);
   await ctx.close();
 });
 
@@ -199,18 +194,18 @@ test("browser: reduced motion stops the busy spinner", { skip }, async () => {
   await ctx.close();
 });
 
-test("browser: keyboard focus on a page tab and on the header toggles shows the shared focus ring", { skip }, async () => {
+test("browser: keyboard focus on a page tab and on the side panel's tabs shows the shared focus ring", { skip }, async () => {
   const { page, ctx } = await open(1280, 800, "/#assistant");
   await page.focus("#assistanttab");
   await page.keyboard.press("Tab");
   const ring = await page.evaluate(() => { const e = document.activeElement as HTMLElement, cs = getComputedStyle(e); return { id: e.id, style: cs.outlineStyle, width: parseFloat(cs.outlineWidth) }; });
   assert.equal(ring.style, "solid", `${ring.id} shows a ring`);
   assert.ok(ring.width >= 2);
-  await page.focus("#notesbtn");
+  await page.focus("#sidetab-notes");
   await page.keyboard.press("Shift+Tab");
   await page.keyboard.press("Tab");
   const r2 = await page.evaluate(() => getComputedStyle(document.activeElement!).outlineStyle);
-  assert.equal(r2, "solid", "the notifications toggle shows a ring");
+  assert.equal(r2, "solid", "the notifications tab shows a ring");
   await ctx.close();
 });
 
