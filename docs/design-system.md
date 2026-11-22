@@ -154,8 +154,11 @@ their "Notifications" and "All live" words) to leave the page header and live in
   panel lies over the page (with a deeper shadow) and the page keeps only the rail's room. Below 900px the rail stops above
   the composer, so the message box and Send keep the full width on a phone.
 - **Resize.** A handle on the panel's inner (left) edge: the panel is anchored to the right edge, so its outer right edge
-  is the screen's edge and the inner edge is the one that can move. An 8px strip (20px on touch) with a quiet grip, an
-  accent line on hover, while dragging and on focus; `ew-resize` cursor. Drag with a mouse, pen or finger. It is a
+  is the screen's edge and the inner edge is the one that can move. The same strip as the left sidebar's (`#navresize`):
+  7px on the edge, tinted in the accent on hover, while dragging and on focus; `col-resize` cursor. *(Changed November
+  2026 from an 8px strip with a grip, to match the left sidebar. On laptops and desktops the collapse button is also the
+  left sidebar's edge handle: a 22 by 40px pill straddling the panel's edge, or the rail's edge when collapsed, near the
+  top, its chevron pointing right to collapse and left to open. Narrower screens keep the button at the head.)* Drag with a mouse, pen or finger. It is a
   window splitter (`role="separator"`, `aria-orientation="vertical"`, `aria-valuenow`/`min`/`max` in pixels,
   `aria-valuetext` "360 pixels wide"): Left widens by 16px and Right narrows (64px with Shift), Home and End go to the
   narrowest and widest, Enter collapses the panel, a double-click resets the default (`clamp(320px, 30vw, 400px)`; below

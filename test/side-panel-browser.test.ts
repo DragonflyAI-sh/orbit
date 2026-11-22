@@ -270,7 +270,7 @@ test("browser 1280px: the resize handle drags the panel wider and narrower, with
   await page.click("#sidetab-notes");
   const h = await page.evaluate(() => { const e = document.getElementById("sideresize")!, b = e.getBoundingClientRect(), s = document.getElementById("side")!.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2, sideLeft: s.left, cursor: getComputedStyle(e).cursor, h: b.height, sh: s.height }; });
   assert.ok(Math.abs(h.x - h.sideLeft) <= 2, "on the panel's inner (left) edge");
-  assert.equal(h.cursor, "ew-resize");
+  assert.equal(h.cursor, "col-resize", "the same cursor as the left sidebar's separator");
   assert.ok(h.h >= h.sh - 1, "the whole height of the panel");
   // ARIA: a focusable window splitter with its value.
   const aria = await page.evaluate(() => { const e = document.getElementById("sideresize")!; return { role: e.getAttribute("role"), o: e.getAttribute("aria-orientation"), label: e.getAttribute("aria-label"), now: Number(e.getAttribute("aria-valuenow")), min: Number(e.getAttribute("aria-valuemin")), max: Number(e.getAttribute("aria-valuemax")), tab: e.tabIndex }; });
@@ -679,6 +679,39 @@ test("browser: narrowing the window with both open closes the one opened earlier
   await page.setViewportSize({ width: 1040, height: 900 });
   await page.waitForFunction(() => document.documentElement.getAttribute("data-side") !== "open");
   assert.equal(await navOpen(page), true, "the sidebar, opened last, stays");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("browser 1280px: the right panel's edge matches the left sidebar's: the same resize strip and the same pill collapse handle", { skip }, async () => {
+  const { page, ctx, errors } = await open(1280, 800, "/#assistant", { nav: true });
+  const edge = () => page.evaluate(() => {
+    const st = (id: string) => { const e = document.getElementById(id)!, c = getComputedStyle(e), b = e.getBoundingClientRect(); return { w: Math.round(b.width), h: Math.round(b.height), top: Math.round(b.top), left: b.left, right: b.right, cursor: c.cursor, radius: c.borderTopLeftRadius, bg: c.backgroundColor }; };
+    return { side: document.getElementById("side")!.getBoundingClientRect().left, nav: document.getElementById("nav")!.getBoundingClientRect().right, navhandle: st("navhandle"), sidetoggle: st("sidetoggle"), navresize: st("navresize"), sideresize: st("sideresize") };
+  });
+  // Collapsed: the pill straddles the rail's edge, at the same height as the left one.
+  let g = await edge();
+  assert.equal(g.sidetoggle.w, g.navhandle.w);
+  assert.equal(g.sidetoggle.h, g.navhandle.h);
+  assert.equal(g.sidetoggle.top, g.navhandle.top);
+  assert.ok(g.sidetoggle.left < g.side && g.sidetoggle.right > g.side, "collapsed: on the rail's edge");
+  await page.click("#sidetoggle");
+  assert.equal(await isOpen(page), true);
+  g = await edge();
+  assert.ok(Math.abs((g.sidetoggle.left + g.sidetoggle.right) / 2 - g.side) <= 1, "open: centred on the panel's edge, as the left one is on its edge");
+  assert.equal(g.sidetoggle.radius, g.navhandle.radius, "the same pill");
+  assert.equal(g.sidetoggle.bg, g.navhandle.bg);
+  assert.equal(g.sideresize.w, g.navresize.w, "the same strip width");
+  assert.equal(g.sideresize.cursor, g.navresize.cursor);
+  assert.ok(Math.abs(g.sideresize.left + g.sideresize.w / 2 - g.side) <= 1.5, "the strip sits on the panel's edge");
+  // The strip shows the same accent tint on hover.
+  await page.hover("#sideresize", { position: { x: 3, y: 300 } });
+  await page.hover("#navresize", { position: { x: 3, y: 300 } });
+  const tint = await page.evaluate(() => [getComputedStyle(document.getElementById("navresize")!).backgroundColor]);
+  await page.hover("#sideresize", { position: { x: 3, y: 300 } });
+  assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById("sideresize")!).backgroundColor), tint[0]);
+  await page.click("#sidetoggle");
+  assert.equal(await isOpen(page), false, "the pill collapses the panel");
   assert.deepEqual(errors, []);
   await ctx.close();
 });
