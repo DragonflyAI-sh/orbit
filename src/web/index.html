@@ -112,10 +112,15 @@
   /* Laptops and desktops: a roomier gutter. */
   @media (min-width: 900px) { :root { --gutter: var(--space-5); --text-lg: 18px; } }
   * { box-sizing: border-box; }
-  /* The column paddings are worked out on each element that uses them, so a region can set its own --measure (Jobs). */
+  /* The column paddings are worked out on each element that uses them, so a region can set its own --measure (Jobs). Two
+     panels hold room at the page's edges: the left sidebar (--nav-room, its width while docked open on laptops and desktops,
+     otherwise nothing) and the right side panel (--side-room, its collapsed rail, or the open panel on laptops and desktops).
+     These regions keep clear of both (margins below), so their paddings, percentages of the shell's width, take both off
+     before centring. Each panel covers its own safe area. */
+  :root { --nav-room: 0px; --nav-safe-l: var(--safe-l); }
   #log, #alog, #jobs, #astatus, #form, #aform {
-    --col-l: max(calc(var(--gutter) + var(--safe-l)), calc((100% - var(--measure)) / 2));
-    --col-r: max(calc(var(--gutter) + var(--safe-r)), calc((100% - var(--measure)) / 2)); }
+    --col-l: max(calc(var(--gutter) + var(--nav-safe-l)), calc((100% - var(--nav-room) - var(--side-room) - var(--measure)) / 2));
+    --col-r: max(var(--gutter), calc((100% - var(--nav-room) - var(--side-room) - var(--measure)) / 2)); }
   /* The app shell. The document itself never scrolls: the page is pinned to the visible area (position: fixed, so iOS
      Safari has no page to scroll, bounce or slide under its toolbars), and only the conversation, the Jobs list and the
      small panels scroll inside it. Its height is the visible height: the page's own measurement of the visual viewport
@@ -161,15 +166,13 @@
     header { padding: calc(8px + var(--safe-t)) calc(var(--gutter) + var(--safe-r)) 8px calc(var(--gutter) + var(--safe-l));
              display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: flex-end; gap: 0 var(--space-3); }
     header > * { flex: 1 1 100%; min-width: 0; }
-    /* The open panels hang under their toggles (right-aligned, notifications then status, as the toggles are ordered), at a
-       readable width, instead of stretching across the page. */
     #tstatus, #signin { order: 3; }
     .bar { gap: 6px var(--space-4); }
     .brand { padding-right: var(--space-4); border-right: var(--border); }
     .brand img { width: 30px; height: 30px; }
     #sesswrap { max-width: 520px; }
     .hctl { gap: var(--space-2); }
-    #health, .hbtn { min-height: var(--btn-h); padding: 0 var(--space-3); font-size: var(--text-sm); }
+    .hbtn { min-height: var(--btn-h); padding: 0 var(--space-3); font-size: var(--text-sm); }
   }
   @media (max-width: 560px) {
     .bar nav { order: 3; flex: 1 1 0; padding: 2px; border: 0; } /* a borderless track: the phone header stays compact */
@@ -187,13 +190,13 @@
   /* Touch screens: header controls are at least 36px tall and 44px wide, and an invisible frame around each (::after) makes
      the hit area 44px tall without making the header taller. */
   @media (pointer: coarse) {
-    nav a, #health, .hbtn, #sessbtn, #brandbtn { position: relative; min-height: var(--ctl-sm); display: inline-flex; align-items: center; justify-content: center; }
-    #health, .hbtn, #brandbtn { min-width: var(--tap); }
-    nav a::after, #health::after, .hbtn::after, #sessbtn::after, #brandbtn::after { content: ""; position: absolute; left: -1px; right: -1px; top: calc((var(--ctl-sm) - var(--tap)) / 2 - 1px); bottom: calc((var(--ctl-sm) - var(--tap)) / 2 - 1px); } /* -1px: from the padding box, past the 1px border */
+    nav a, .hbtn, #sessbtn, #brandbtn { position: relative; min-height: var(--ctl-sm); display: inline-flex; align-items: center; justify-content: center; }
+    .hbtn, #brandbtn { min-width: var(--tap); }
+    nav a::after, .hbtn::after, #sessbtn::after, #brandbtn::after { content: ""; position: absolute; left: -1px; right: -1px; top: calc((var(--ctl-sm) - var(--tap)) / 2 - 1px); bottom: calc((var(--ctl-sm) - var(--tap)) / 2 - 1px); } /* -1px: from the padding box, past the 1px border */
     .hctl { gap: var(--space-2); }
   }
   .ico { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-  #statusline { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-2); min-width: 0; }
+  #statusline { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-2); min-width: 0; max-height: calc(var(--app-1) * 30); overflow-y: auto; overscroll-behavior: contain; }
   #statusline #ports { flex: 1 1 0; min-width: 0; }
   #statusopen { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; border-radius: var(--radius-sm); color: var(--accent-2); border: 1px solid var(--line); background: var(--card); }
   #statusopen:hover { box-shadow: 0 0 0 2px var(--ring); }
@@ -224,7 +227,7 @@
   /* States (status pills, reply tags): the state is also in the text ("model: degraded"). Degraded is amber like the overall
      indicator (working, with a caveat); down is red. */
   .live { color: var(--live); } .mock, .degraded { color: var(--mock); } .down { color: var(--down); }
-  #inbox { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+  #inbox { display: flex; flex-direction: column; gap: 6px; margin-top: var(--space-2); max-height: calc(var(--app-1) * 30); overflow-y: auto; overscroll-behavior: contain; }
   .note { border-left: 3px solid var(--attention); padding: 4px 6px 4px 10px; background: var(--card); border-radius: var(--radius-xs); overflow-wrap: anywhere; }
   .note .top { display: flex; gap: 6px; align-items: flex-start; }
   .note .first { flex: 1; min-width: 0; }
@@ -233,9 +236,8 @@
   .note button.x { color: var(--muted); font-size: 16px; line-height: 1; }
   .note a, .ev a, .latest a { color: var(--accent-2); }
   #inbox .showall { align-self: flex-start; background: none; border: 0; padding: 2px 0; color: var(--accent-2); font: inherit; font-size: var(--text-sm); cursor: pointer; }
-  /* The left sidebar (docs/sidebar.md). Projects (a selector), Plan, Files and Images from the vault and the photo store, then
-     Notifications and status, each a section whose header button collapses its content; at the bottom, the full notifications
-     and live-status indicators. The header keeps only their icons (the bell and count, the status dot).
+  /* The left sidebar (docs/sidebar.md). Projects (a selector), Plan, Files and Images from the vault and the photo store, each
+     a section whose header button collapses its content. Status and notifications are in the right side panel, not here.
      - 1024px and wider: docked on the left, under the header and down to the bottom of the screen, open by default. The
        conversation, the Jobs list and the composer move right by its width and recentre their reading column in the room
        left, so nothing is covered. A handle on its right edge collapses it to the left edge (and, collapsed, sits at the
@@ -287,58 +289,13 @@
   .navimgs button { display: block; width: 100%; aspect-ratio: 1 / 1; padding: 0; border: var(--border); border-radius: var(--radius-sm); background: var(--bg); line-height: 0; cursor: zoom-in; }
   .navimgs img { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: calc(var(--radius-sm) - 1px); }
   .navimgs a { display: block; margin-top: 2px; font-size: var(--text-2xs); color: var(--accent-2); line-height: 1.3; }
-  .navfoot { flex: none; display: flex; flex-wrap: wrap; gap: 6px; padding: var(--space-2) var(--space-3) calc(var(--space-2) + var(--safe-b)); border-top: var(--border); background: var(--card); }
-  .navind { flex: 1 1 auto; min-width: 0; display: inline-flex; align-items: center; gap: 6px; min-height: var(--btn-h); padding: 0 var(--space-3); border: var(--border);
-            border-radius: var(--radius-pill); background: var(--card); color: var(--fg); font-size: var(--text-xs); font-weight: var(--weight-medium); }
-  .navind:not(:disabled):hover { filter: none; box-shadow: none; background: var(--surface-hover); }
-  .navind[aria-expanded="true"] { border-color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 8%, var(--card)); }
-  .navind .label { min-width: 0; overflow-wrap: anywhere; text-align: left; }
-  .navind .count { min-width: 1.5em; padding: 0 4px; border-radius: var(--radius-pill); text-align: center; font-weight: var(--weight-strong); line-height: 1.4; background: var(--surface-2); }
-  .navind.has .count { background: var(--attention); color: #1c1838; }
-  @media (pointer: coarse) { .navtoggle, .navind, .navfile, #navproject { min-height: var(--tap); } }
-  /* Notifications and status, in the sidebar: two tabs (Notifications with the count, Status with the level dot), one view at
-     a time. The status view leads with the running release and the raw status link, then the overall status (the same label
-     and detail as the indicators, with a coloured edge), then the port states as rows. */
-  #side { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
-  #side > * { min-width: 0; }
-  .sidetabs { display: flex; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--surface-2); }
-  .sidetab { flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: var(--btn-h); padding: 0 var(--space-2);
-             border-radius: calc(var(--radius-md) - 3px); background: none; color: var(--muted); font-size: var(--text-sm); font-weight: var(--weight-medium); white-space: nowrap; }
-  .sidetab:not(:disabled):hover { filter: none; box-shadow: none; color: var(--fg); background: var(--surface-hover); }
-  .sidetab:not(:disabled):active { filter: none; transform: none; box-shadow: none; }
-  .sidetab[aria-selected="true"], .sidetab[aria-selected="true"]:not(:disabled):hover { background: var(--card); color: var(--fg); font-weight: var(--weight-strong); box-shadow: 0 1px 2px var(--header-shadow); }
-  .sidetab:focus-visible { outline-offset: -2px; }
-  .sidetab .count { min-width: 1.5em; padding: 0 4px; border-radius: var(--radius-pill); text-align: center; font-size: var(--text-xs); font-weight: var(--weight-strong); line-height: 1.4; background: var(--surface-2); }
-  .sidetab.has .count { background: var(--attention); color: #1c1838; }
-  #side .note { padding: var(--space-2) var(--space-1) var(--space-2) var(--space-3); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--attention) 6%, var(--card)); }
-  #side .note .first { font-weight: var(--weight-medium); }
-  #ports .empty { color: var(--muted); font-size: var(--text-sm); font-style: italic; }
-  #statuserr { color: var(--danger); font-size: var(--text-sm); background: var(--danger-soft); border-left: 3px solid var(--danger); padding: 4px 10px; border-radius: var(--radius-xs); overflow-wrap: anywhere; }
-  #statuserr[hidden], #statusline[hidden], #inbox[hidden] { display: none; }
-  #side #statusline { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-content: start; gap: var(--space-3); }
-  #side #deployinfo { grid-column: 1 / -1; grid-row: 1; border-bottom: 0; padding: 0 var(--space-1); gap: 6px 14px; }
-  #side #statusopen { grid-column: 2; grid-row: 2; align-self: start; min-width: var(--ctl-md); min-height: var(--ctl-md); }
-  #statussum { grid-column: 1; grid-row: 2; display: flex; align-items: flex-start; gap: 10px; padding: 10px var(--space-3); border-radius: var(--radius-md);
-               background: var(--surface-2); border-left: 3px solid var(--muted); }
-  #statussum.ok { border-left-color: var(--green-dot); } #statussum.degraded { border-left-color: var(--amber-dot); } #statussum.down { border-left-color: var(--red-dot); }
-  #statussum .dot { margin-top: 6px; }
-  #statuslabel { display: block; font-size: var(--text-md); line-height: var(--leading-tight); }
-  #statusdetail { margin: 4px 0 0; font-size: var(--text-sm); color: var(--muted); overflow-wrap: anywhere; }
-  #side #statuserr, #side #ports { grid-column: 1 / -1; }
-  #side #ports { flex-direction: column; flex-wrap: nowrap; gap: 0; border: var(--border); border-radius: var(--radius-md); font-size: var(--text-sm); }
-  #side #ports .empty { padding: var(--space-2) var(--space-3); }
-  #side .pill { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 0; border-radius: 0; background: none; overflow-wrap: anywhere; }
-  #side .pill + .pill { border-top: var(--border); }
-  #side .pill::before { margin-right: 0; flex: none; }
+  @media (pointer: coarse) { .navtoggle, .navfile, #navproject { min-height: var(--tap); } }
   @media (min-width: 1024px) {
     :root[data-nav="open"] #nav { display: flex; position: fixed; z-index: 1; left: 0; top: var(--nav-top); bottom: var(--nav-bottom); width: var(--nav-w);
                                    padding-left: var(--safe-l); border-right: var(--border); box-shadow: 12px 0 28px -20px var(--header-shadow); }
     :root[data-nav="open"] .navtop { display: none; }
-    :root[data-nav="open"] :is(#log, #alog, .latestdock, #jobs, #astatus, #form, #aform) { margin-left: var(--nav-w); }
-    /* Their column paddings are percentages of the shell's width, so the sidebar's width comes off before centring. */
-    :root[data-nav="open"] :is(#log, #alog, #jobs, #astatus, #form, #aform) {
-      --col-l: max(var(--gutter), calc((100% - var(--nav-w) - var(--measure)) / 2));
-      --col-r: max(calc(var(--gutter) + var(--safe-r)), calc((100% - var(--nav-w) - var(--measure)) / 2)); }
+    :root[data-nav="open"] { --nav-room: var(--nav-w); --nav-safe-l: 0px; }
+    :root[data-nav="open"] :is(#log, #alog, .latestdock, #jobs, #astatus, #form, #aform) { margin-left: var(--nav-room); }
     #navhandle { display: inline-flex; align-items: center; justify-content: center; position: fixed; z-index: 3; top: calc(var(--nav-top) + 10px); left: var(--safe-l);
                  width: 22px; height: 40px; padding: 0; border: var(--border); border-left: 0; border-radius: 0 var(--radius-md) var(--radius-md) 0;
                  background: var(--card); color: var(--muted); box-shadow: var(--elev-1); }
@@ -357,6 +314,106 @@
                                    padding-top: var(--safe-t); padding-left: var(--safe-l); border-right: var(--border); box-shadow: var(--elev-3); }
     :root[data-nav="open"] #navscrim:not([hidden]) { display: block; position: fixed; inset: 0; z-index: calc(var(--z-drawer) - 1); background: rgba(8, 10, 26, .5); }
   }
+  /* The side panel (docs/design-system.md, "Side panel"). Notifications and Status live here only, on every width, in one
+     panel at the right edge of the page, from under the header down to the bottom of the screen. It has no heading and no
+     close button: its head is a row of tabs (Notifications with the count, Status with the level dot), with the collapse
+     button at its leading edge. One view shows at a time and scrolls on its own while the head stays put.
+     - Collapsed (the default), the panel slides away to the right and leaves a narrow rail (--rail-w) at the edge: the
+       expand button, then the same two tabs as icons (the bell with the count, the level dot), so the indicators are always
+       in view. A tab in the rail opens the panel on its view.
+     - Open, on laptops and desktops (1024px and wider), the conversation, the Jobs list and the composer move left by the
+       panel's width and recentre their column in the room left, so nothing is covered. Below 1024px the open panel lies
+       over the page (the page keeps only the rail's room), so a phone keeps its full column.
+     - Below 900px the collapsed rail stops above the composer, so the message box and Send keep the full width.
+     - A resize handle on the panel's inner (left) edge drags it wider or narrower; the width is kept on this device.
+     Not modal: nothing here moves focus by itself, traps it, or closes because of a click elsewhere. */
+  :root { --rail-w: 44px; --side-w: clamp(320px, 30vw, 400px); --side-room: calc(var(--rail-w) + var(--safe-r)); }
+  @media (max-width: 1023.98px) { :root { --side-w: min(400px, calc(100vw - 40px)); } }
+  @media (pointer: coarse) { :root { --rail-w: 46px; } }
+  @media (min-width: 1024px) { :root[data-side="open"] { --side-room: var(--side-w); } }
+  :is(#log, #alog, .latestdock, #jobs, #astatus) { margin-right: var(--side-room); }
+  /* Phones and small tablets keep the composer's full width: there the rail ends above it (placeSide in the script). */
+  @media (min-width: 900px) { :is(#form, #aform) { margin-right: var(--side-room); } }
+  #side { position: fixed; z-index: calc(var(--z-header) - 1); right: 0; top: var(--side-top, 56px); bottom: var(--side-bottom, 0px);
+          display: flex; flex-direction: column; width: calc(var(--rail-w) + var(--safe-r)); min-width: 0; padding-right: var(--safe-r);
+          background: var(--card); border-left: var(--border); box-shadow: -12px 0 28px -20px var(--header-shadow); }
+  :root[data-side="open"] #side { width: var(--side-w); }
+  /* A rail taller than the room left (a very short window) scrolls inside instead of spilling over the composer. */
+  :root:not([data-side="open"]) #side { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
+  @media (max-width: 1023.98px) { :root[data-side="open"] #side { box-shadow: var(--elev-3); } }
+  #side > * { min-width: 0; }
+  .sidehead { flex: none; display: flex; align-items: center; gap: var(--space-1); padding: var(--space-2); border-bottom: var(--border); }
+  #sidetoggle { flex: none; display: inline-flex; align-items: center; justify-content: center; width: var(--ctl-md); height: var(--ctl-md); padding: 0;
+                border: 0; border-radius: var(--radius-sm); background: none; color: var(--muted); }
+  #sidetoggle .ico { transition: transform var(--dur-2) var(--ease); }
+  :root:not([data-side="open"]) #sidetoggle .ico { transform: rotate(180deg); } /* points left: "slide the panel back in" */
+  :is(#sidetoggle, .sidetab):not(:disabled):hover { filter: none; box-shadow: none; color: var(--fg); background: var(--surface-hover); }
+  :is(#sidetoggle, .sidetab):not(:disabled):active { filter: none; transform: none; box-shadow: none; }
+  #sidetoggle:focus-visible, .sidetab:focus-visible { outline-offset: -2px; }
+  .sidetabs { flex: 1 1 auto; min-width: 0; display: flex; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--surface-2); }
+  .sidetab { flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: var(--btn-h); padding: 0 var(--space-3);
+             border: 0; border-radius: calc(var(--radius-md) - 3px); background: none; color: var(--muted); font-size: var(--text-sm); font-weight: var(--weight-medium); white-space: nowrap; }
+  @media (max-width: 560px) { :root[data-side="open"] .sidetab { flex: 1 1 auto; padding: 0 var(--space-2); } }
+  .sidetab[aria-selected="true"], .sidetab[aria-selected="true"]:not(:disabled):hover { background: var(--card); color: var(--fg); font-weight: var(--weight-strong); box-shadow: 0 1px 2px var(--header-shadow); }
+  .sidetab .count { min-width: 1.5em; padding: 0 4px; border-radius: var(--radius-pill); text-align: center; font-size: var(--text-xs); font-weight: var(--weight-strong); line-height: 1.4; background: var(--card); color: var(--fg); }
+  .sidetab.has .count { background: var(--attention); color: #1c1838; }
+  /* The rail: the head stands on end; the tab labels are for screen readers only (each tab's name says it in full). */
+  :root:not([data-side="open"]) .sidehead { flex-direction: column; align-items: stretch; padding: var(--space-1) 0; gap: var(--space-1); border-bottom: 0; }
+  :root:not([data-side="open"]) #sidetoggle { align-self: stretch; width: auto; }
+  :root:not([data-side="open"]) .sidetabs { flex-direction: column; padding: 0; border-radius: 0; background: none; gap: var(--space-1); }
+  :root:not([data-side="open"]) .sidetab { flex: none; flex-direction: column; gap: 4px; min-height: 44px; padding: 6px 0; border-radius: 0; }
+  :root:not([data-side="open"]) .sidetab[aria-selected="true"] { background: none; box-shadow: none; font-weight: var(--weight-medium); color: var(--muted); }
+  :root:not([data-side="open"]) .sidetab .tlabel { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); white-space: nowrap; }
+  :root:not([data-side="open"]) .sidetab .count { background: var(--surface-2); }
+  :root:not([data-side="open"]) .sidetab.has .count { background: var(--attention); }
+  /* The resize handle: a strip on the panel's inner edge (8px; 20px on touch screens) with a quiet grip in the middle, an
+     accent line on hover, while dragging and on keyboard focus. Only while the panel is open. */
+  #sideresize { display: none; }
+  :root[data-side="open"] #sideresize { display: block; position: absolute; z-index: 1; left: -5px; top: 0; bottom: 0; width: 9px; cursor: ew-resize; touch-action: none; }
+  @media (pointer: coarse) { :root[data-side="open"] #sideresize { left: -10px; width: 20px; } }
+  #sideresize::before { content: ""; position: absolute; left: 50%; top: 50%; width: 4px; height: 36px; margin: -18px 0 0 -2px; border-radius: 2px; background: var(--line); }
+  #sideresize::after { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: transparent; transition: background-color var(--dur-2) var(--ease); }
+  #sideresize:hover::after, #sideresize.dragging::after, #sideresize:focus-visible::after { background: var(--accent-2); }
+  #sideresize:hover::before, #sideresize.dragging::before, #sideresize:focus-visible::before { background: var(--accent-2); }
+  #sideresize:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 0; border-radius: 2px; }
+  :root[data-side-drag] { cursor: ew-resize; user-select: none; -webkit-user-select: none; }
+  /* The views. Each fills the panel under the head and scrolls by itself. */
+  #statussum { display: none; }
+  #side :is(#statusline, #inbox) { flex: 1 1 auto; min-height: 0; max-height: none; margin: 0; padding: var(--space-4); border: 0; border-radius: 0;
+                                   background: none; overflow-y: auto; overscroll-behavior: contain; }
+  #side #inbox { gap: var(--space-2); }
+  #side .note { padding: var(--space-2) var(--space-1) var(--space-2) var(--space-3); border-radius: var(--radius-sm); box-shadow: none;
+                background: color-mix(in srgb, var(--attention) 6%, var(--card)); }
+  #side .note .first { font-weight: var(--weight-medium); }
+  #side #statusline { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-content: start; gap: var(--space-3); }
+  #side #statussum { grid-column: 1 / -1; grid-row: 2; display: flex; align-items: flex-start; gap: 10px; padding: 10px var(--space-3); border-radius: var(--radius-md);
+                     background: var(--surface-2); border-left: 3px solid var(--muted); }
+  #side #statussum.ok { border-left-color: var(--green-dot); } #side #statussum.degraded { border-left-color: var(--amber-dot); } #side #statussum.down { border-left-color: var(--red-dot); }
+  #statussum .dot { margin-top: 6px; }
+  #statuslabel { display: block; font-size: var(--text-md); line-height: var(--leading-tight); }
+  #statusdetail { margin: 4px 0 0; font-size: var(--text-sm); color: var(--muted); overflow-wrap: anywhere; }
+  #side #statusopen { grid-column: 2; grid-row: 1; align-self: start; min-width: var(--ctl-md); min-height: var(--ctl-md); }
+  #side #statuserr, #side #ports { grid-column: 1 / -1; }
+  #side #ports { flex-direction: column; flex-wrap: nowrap; gap: 0; border: var(--border); border-radius: var(--radius-md); font-size: var(--text-sm); }
+  #side #ports .empty { padding: var(--space-2) var(--space-3); }
+  #side .pill { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 0; border-radius: 0; background: none; overflow-wrap: anywhere; }
+  #side .pill + .pill { border-top: var(--border); }
+  #side .pill::before { margin-right: 0; flex: none; }
+  /* The running release leads the view (row 1, the /status link beside it); the overall status follows on row 2. In a
+     narrow panel (a phone, or dragged narrow) the release takes the whole first row, so its date stays on one line, and
+     the link moves beside the overall status. */
+  #side #deployinfo { grid-column: 1; grid-row: 1; border-bottom: 0; padding: 0 var(--space-1); gap: 6px 14px; }
+  #side { container-type: inline-size; }
+  @container (max-width: 340px) {
+    #side :is(#statusline, #inbox) { padding: var(--space-3); }
+    #side #deployinfo { grid-column: 1 / -1; gap: 6px 10px; }
+    #side #statussum { grid-column: 1; }
+    #side #statusopen { grid-row: 2; }
+  }
+  #ports .empty { color: var(--muted); font-size: var(--text-sm); font-style: italic; }
+  #statuserr { flex: 1 0 100%; color: var(--danger); font-size: var(--text-sm); background: var(--danger-soft); border-left: 3px solid var(--danger); padding: 4px 10px; border-radius: var(--radius-xs); overflow-wrap: anywhere; }
+  #statuserr[hidden] { display: none; }
+  @media (pointer: coarse) { #sidetoggle { width: var(--tap); height: var(--tap); } :root[data-side="open"] .sidetab { min-height: var(--tap); } }
   /* Sessions: the open session's title and a chevron sit in the header bar (no row of their own). The title takes the room
      left between the page links and the toggles and is cut with an ellipsis; its full text is the button's hover text and
      accessible name. The button opens the session picker, which overlays the page under the header (it never pushes the
@@ -521,18 +578,14 @@
   body:not([data-tab="chat"]) #sesswrap, body:not([data-tab="chat"]) #sesspicker, body:not([data-tab="chat"]) #tstatus { display: none !important; }
   /* Overall status (aggregateStatus): green all live; amber degraded but working; red a core port down; grey unknown. The dot's shape
      differs per level too (circle, diamond, square, ring), and the level is in the label and accessible name, never colour alone. */
-  /* The header toggles (notifications, status): compact pill buttons, not navigation. aria-expanded shows which panel is open. */
-  #health, .hbtn { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); min-height: var(--ctl-sm); font-size: var(--text-xs); color: var(--muted); border: var(--border); border-radius: var(--radius-pill); padding: 2px 8px; background: var(--card); }
-  #health[aria-expanded="true"], .hbtn[aria-expanded="true"] { border-color: var(--accent-2); color: var(--fg); background: color-mix(in srgb, var(--accent-2) 8%, var(--card)); }
-  #health:not(:disabled):hover, .hbtn:not(:disabled):hover { color: var(--fg); filter: none; }
-  .hbtn .label { display: none; }
-  @media (min-width: 900px) { .hbtn .label { display: inline; } .hbtn { gap: 6px; } }
-  .hbtn .count { min-width: 1.5em; padding: 0 4px; border-radius: var(--radius-pill); text-align: center; font-weight: 600; line-height: 1.4; }
-  .hbtn.has .count { background: var(--attention); color: #1c1838; }
-  :is(#health, .sidetab, #statussum, #navstatus) .dot { box-sizing: border-box; width: 10px; height: 10px; border-radius: 50%; flex: none; background: transparent; border: 2px solid var(--muted); }
-  :is(#health, .sidetab, #statussum, #navstatus).ok .dot { border: 0; background: var(--green-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--green-dot) 25%, transparent); }
-  :is(#health, .sidetab, #statussum, #navstatus).degraded .dot { border: 0; border-radius: 1px; transform: rotate(45deg) scale(.85); background: var(--amber-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber-dot) 25%, transparent); }
-  :is(#health, .sidetab, #statussum, #navstatus).down .dot { border: 0; border-radius: 2px; background: var(--red-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--red-dot) 25%, transparent); }
+  /* The header toggle (the theme menu): a compact pill button, not navigation. aria-expanded shows when its menu is open. */
+  .hbtn { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); min-height: var(--ctl-sm); font-size: var(--text-xs); color: var(--muted); border: var(--border); border-radius: var(--radius-pill); padding: 2px 8px; background: var(--card); }
+  .hbtn[aria-expanded="true"] { border-color: var(--accent-2); color: var(--fg); background: color-mix(in srgb, var(--accent-2) 8%, var(--card)); }
+  .hbtn:not(:disabled):hover { color: var(--fg); filter: none; }
+  :is(.sidetab, #statussum) .dot { box-sizing: border-box; width: 10px; height: 10px; border-radius: 50%; flex: none; background: transparent; border: 2px solid var(--muted); }
+  :is(.sidetab, #statussum).ok .dot { border: 0; background: var(--green-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--green-dot) 25%, transparent); }
+  :is(.sidetab, #statussum).degraded .dot { border: 0; border-radius: 1px; transform: rotate(45deg) scale(.85); background: var(--amber-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber-dot) 25%, transparent); }
+  :is(.sidetab, #statussum).down .dot { border: 0; border-radius: 2px; background: var(--red-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--red-dot) 25%, transparent); }
   :root { --green-dot: #1f9d55; --amber-dot: #d99a00; --red-dot: #d23c3c; }
   #alog .older { align-self: center; }
   .ctxline { align-self: stretch; font-size: var(--text-xs); color: var(--muted); border-top: 1px dashed var(--line); padding-top: 4px; overflow-wrap: anywhere; }
@@ -797,8 +850,8 @@
 </style>
 </head>
 <body>
-<header><div class="bar"><button type="button" id="navbtn" class="hbtn" aria-controls="nav" aria-expanded="false" aria-label="Show the sidebar" title="Show the sidebar"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16 M4 12h16 M4 18h16"/></svg></button><h1 class="brand"><button type="button" id="brandbtn" aria-label="ORBIT: Refresh page" title="Refresh page"><img src="/avatar.png" alt=""><span class="wordmark">ORBIT</span></button></h1><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions<span id="sessionsbadge" class="tbadge"></span></a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="themebtn" class="hbtn" data-mode="system" aria-expanded="false" aria-controls="themepicker" aria-label="Theme: System" title="Theme: System. Choose Light, Dark or System."><svg class="ico i-system" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 5h18v11H3z M8 20h8 M12 16v4"/></svg><svg class="ico i-light" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0z M12 2v2 M12 20v2 M4.9 4.9l1.4 1.4 M17.7 17.7l1.4 1.4 M2 12h2 M20 12h2 M4.9 19.1l1.4-1.4 M17.7 6.3l1.4-1.4"/></svg><svg class="ico i-dark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button><button type="button" id="notesbtn" class="hbtn" aria-expanded="false" aria-controls="inbox" aria-label="Notifications: not read yet" title="Notifications: not read yet. Show or hide the notifications."><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span id="notecount" class="count" aria-hidden="true">?</span></button><button type="button" id="health" class="unknown" aria-expanded="false" aria-controls="statusline" title="ORBIT's status has not been read yet, so it is not known to be all live. Show or hide the status in the sidebar." aria-label="Overall status: unknown, not all live. ORBIT's status has not been read yet, so it is not known to be all live."><span class="dot" aria-hidden="true"></span></button></div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="themepicker" hidden><fieldset><legend>Theme</legend><label class="topt"><input type="radio" name="theme" value="system"><span>System<small>Follows this device</small></span></label><label class="topt"><input type="radio" name="theme" value="light"><span>Light</span></label><label class="topt"><input type="radio" name="theme" value="dark"><span>Dark</span></label></fieldset></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header>
-<aside id="nav" aria-label="Sidebar"><div class="navtop"><span class="navtitle" aria-hidden="true">Sidebar</span><button type="button" id="navclose" aria-label="Close the sidebar" title="Close the sidebar (Esc)"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12 M18 6L6 18"/></svg></button></div><div class="navscroll"><section class="navsec" id="navsec-projects" aria-labelledby="navh-projects"><h2 class="navh"><button type="button" class="navtoggle" id="navh-projects" aria-expanded="true" aria-controls="navbody-projects"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Projects</span></button></h2><div class="navbody" id="navbody-projects"><select id="navproject" aria-label="Project" aria-describedby="navprojnote"><option value="">All projects</option></select><p id="navprojnote" class="navnote" role="status">Reading the vault…</p></div></section><section class="navsec" id="navsec-plan" aria-labelledby="navh-plan"><h2 class="navh"><button type="button" class="navtoggle" id="navh-plan" aria-expanded="true" aria-controls="navbody-plan"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Plan</span></button></h2><div class="navbody" id="navbody-plan"><div id="navplan"><p class="navnote">Reading the plan…</p></div></div></section><section class="navsec" id="navsec-files" aria-labelledby="navh-files"><h2 class="navh"><button type="button" class="navtoggle" id="navh-files" aria-expanded="true" aria-controls="navbody-files"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Files</span></button></h2><div class="navbody" id="navbody-files"><div id="navfiles"><p class="navnote">Reading the files…</p></div></div></section><section class="navsec" id="navsec-images" aria-labelledby="navh-images"><h2 class="navh"><button type="button" class="navtoggle" id="navh-images" aria-expanded="true" aria-controls="navbody-images"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Images</span></button></h2><div class="navbody" id="navbody-images"><div id="navimages"><p class="navnote">Reading the photos…</p></div></div></section><section class="navsec" id="navsec-activity" aria-labelledby="navh-activity"><h2 class="navh"><button type="button" class="navtoggle" id="navh-activity" aria-expanded="false" aria-controls="navbody-activity"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Notifications and status</span></button></h2><div class="navbody" id="navbody-activity" hidden><div id="side"><div class="sidetabs" role="tablist" aria-label="Panel views"><button type="button" role="tab" id="sidetab-notes" class="sidetab" aria-selected="true" aria-controls="inbox">Notifications<span id="sidenotecount" class="count">?</span></button><button type="button" role="tab" id="sidetab-status" class="sidetab unknown" aria-selected="false" aria-controls="statusline" tabindex="-1"><span class="dot" aria-hidden="true"></span>Status</button></div><div id="statusline" role="region" aria-label="Status details" hidden><dl id="deployinfo" aria-label="Running release"><dt>Deployed</dt><dd id="deployedat"><span class="na">Not read yet</span></dd><dt>Commit</dt><dd id="deploycommit"><span class="na">Not read yet</span></dd></dl><div id="statussum"><span class="dot" aria-hidden="true"></span><div><strong id="statuslabel">Status unknown</strong><p id="statusdetail">ORBIT's status has not been read yet.</p></div></div><div id="statuserr" role="alert" hidden></div><div id="ports"><span class="empty">Reading status…</span></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a></div><div id="inbox" role="region" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div></div></div></section></div><div class="navfoot" role="group" aria-label="Notifications and live status"><button type="button" id="navnotes" class="navind" aria-controls="inbox" aria-expanded="false"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span class="label">Notifications</span><span id="navnotecount" class="count">?</span></button><button type="button" id="navstatus" class="navind unknown" aria-controls="statusline" aria-expanded="false"><span class="dot" aria-hidden="true"></span><span id="navstatuslabel" class="label">Status unknown</span></button></div><div id="navresize" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="nav" aria-label="Resize the sidebar" aria-valuemin="220" aria-valuemax="480" aria-valuenow="280" title="Drag, or use the arrow keys, to resize the sidebar"></div></aside><button type="button" id="navhandle" aria-controls="nav" aria-expanded="true" aria-label="Collapse the sidebar" title="Collapse the sidebar"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 6l-6 6 6 6"/></svg></button><div id="navscrim" hidden></div>
+<header><div class="bar"><button type="button" id="navbtn" class="hbtn" aria-controls="nav" aria-expanded="false" aria-label="Show the sidebar" title="Show the sidebar"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16 M4 12h16 M4 18h16"/></svg></button><h1 class="brand"><button type="button" id="brandbtn" aria-label="ORBIT: Refresh page" title="Refresh page"><img src="/avatar.png" alt=""><span class="wordmark">ORBIT</span></button></h1><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions<span id="sessionsbadge" class="tbadge"></span></a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="themebtn" class="hbtn" data-mode="system" aria-expanded="false" aria-controls="themepicker" aria-label="Theme: System" title="Theme: System. Choose Light, Dark or System."><svg class="ico i-system" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 5h18v11H3z M8 20h8 M12 16v4"/></svg><svg class="ico i-light" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0z M12 2v2 M12 20v2 M4.9 4.9l1.4 1.4 M17.7 17.7l1.4 1.4 M2 12h2 M20 12h2 M4.9 19.1l1.4-1.4 M17.7 6.3l1.4-1.4"/></svg><svg class="ico i-dark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button></div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="themepicker" hidden><fieldset><legend>Theme</legend><label class="topt"><input type="radio" name="theme" value="system"><span>System<small>Follows this device</small></span></label><label class="topt"><input type="radio" name="theme" value="light"><span>Light</span></label><label class="topt"><input type="radio" name="theme" value="dark"><span>Dark</span></label></fieldset></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header><aside id="side" aria-label="Side panel"><div class="sidehead"><button type="button" id="sidetoggle" aria-expanded="false" aria-controls="inbox statusline" aria-label="Side panel" title="Open the side panel"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M13 6l6 6-6 6 M5 6l6 6-6 6"/></svg></button><div class="sidetabs" role="tablist" aria-label="Side panel views" aria-orientation="vertical"><button type="button" role="tab" id="sidetab-status" class="sidetab unknown" aria-selected="true" aria-controls="statusline" aria-label="Status: Status unknown (unknown)" title="Status unknown. ORBIT's status has not been read yet."><span class="dot" aria-hidden="true"></span><span class="tlabel">Status</span></button><button type="button" role="tab" id="sidetab-notes" class="sidetab" aria-selected="false" tabindex="-1" aria-controls="inbox" aria-label="Notifications, not read yet" title="Notifications: not read yet"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span class="tlabel">Notifications</span><span id="notecount" class="count">?</span></button></div></div><div id="statusline" role="tabpanel" aria-label="Status" hidden><dl id="deployinfo" aria-label="Running release"><dt>Deployed</dt><dd id="deployedat"><span class="na">Not read yet</span></dd><dt>Commit</dt><dd id="deploycommit"><span class="na">Not read yet</span></dd></dl><div id="statussum"><span class="dot" aria-hidden="true"></span><div><strong id="statuslabel">Status unknown</strong><p id="statusdetail">ORBIT's status has not been read yet.</p></div></div><div id="statuserr" role="alert" hidden></div><div id="ports"><span class="empty">Reading status…</span></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a></div><div id="inbox" role="tabpanel" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div><div id="sideresize" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="side" aria-label="Resize the side panel" title="Drag, or use the arrow keys, to make the side panel wider or narrower. Double-click to reset."></div></aside>
+<aside id="nav" aria-label="Sidebar"><div class="navtop"><span class="navtitle" aria-hidden="true">Sidebar</span><button type="button" id="navclose" aria-label="Close the sidebar" title="Close the sidebar (Esc)"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12 M18 6L6 18"/></svg></button></div><div class="navscroll"><section class="navsec" id="navsec-projects" aria-labelledby="navh-projects"><h2 class="navh"><button type="button" class="navtoggle" id="navh-projects" aria-expanded="true" aria-controls="navbody-projects"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Projects</span></button></h2><div class="navbody" id="navbody-projects"><select id="navproject" aria-label="Project" aria-describedby="navprojnote"><option value="">All projects</option></select><p id="navprojnote" class="navnote" role="status">Reading the vault…</p></div></section><section class="navsec" id="navsec-plan" aria-labelledby="navh-plan"><h2 class="navh"><button type="button" class="navtoggle" id="navh-plan" aria-expanded="true" aria-controls="navbody-plan"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Plan</span></button></h2><div class="navbody" id="navbody-plan"><div id="navplan"><p class="navnote">Reading the plan…</p></div></div></section><section class="navsec" id="navsec-files" aria-labelledby="navh-files"><h2 class="navh"><button type="button" class="navtoggle" id="navh-files" aria-expanded="true" aria-controls="navbody-files"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Files</span></button></h2><div class="navbody" id="navbody-files"><div id="navfiles"><p class="navnote">Reading the files…</p></div></div></section><section class="navsec" id="navsec-images" aria-labelledby="navh-images"><h2 class="navh"><button type="button" class="navtoggle" id="navh-images" aria-expanded="true" aria-controls="navbody-images"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Images</span></button></h2><div class="navbody" id="navbody-images"><div id="navimages"><p class="navnote">Reading the photos…</p></div></div></section></div><div id="navresize" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="nav" aria-label="Resize the sidebar" aria-valuemin="220" aria-valuemax="480" aria-valuenow="280" title="Drag, or use the arrow keys, to resize the sidebar"></div></aside><button type="button" id="navhandle" aria-controls="nav" aria-expanded="true" aria-label="Collapse the sidebar" title="Collapse the sidebar"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 6l-6 6 6 6"/></svg></button><div id="navscrim" hidden></div>
 <main id="log" hidden></main>
 <div class="latestdock"><button type="button" class="tolatest" id="tolatest" title="Scroll to the latest message" hidden><span aria-hidden="true">↓</span> click to latest</button></div>
 <main id="alog" aria-label="Assistant conversation"></main>
@@ -1109,38 +1162,27 @@
       : "";
     return { level: "degraded", ok: false, label: onFallback ? "Degraded: fallback model" : `Degraded: ${bad.length} not live`, detail: `Working, with degradation. ${route}Not live: ${named(bad)}.` };
   }
-  // The indicator is the toggle for the status line (pills and the status page link); its own text never says "open the page".
-  // The level is in the class (colour and dot shape), the visible label and the accessible name, never colour alone.
+  // The indicator is the side panel's Status tab (the level dot; docs/design-system.md, "Side panel"): the page header shows
+  // no status. The level is in the class (colour and dot shape), the accessible name and the hover text, never colour alone,
+  // and the Status view shows the same label and detail in words, after the running release.
   // `failure`: why there is no answer ("network", an HTTP status, "bad-body"), when there is none.
+  function statusTabName(a) {
+    return `Status: ${a.label} (${STATUS_WORDS[a.level]})`;
+  }
   function renderHealth(s, failure) {
     const a = aggregateStatus(s, failure);
-    const button = document.getElementById("health");
-    button.className = a.level;
-    button.title = `${a.label}. ${a.detail} Show or hide the status in the sidebar.`;
-    button.setAttribute("aria-label", `Overall status: ${STATUS_WORDS[a.level]}. ${a.label}. ${a.detail}`);
-    // The side panel's Status tab carries the same level (dot and accessible name), and its view shows the same words, after
-    // the running release.
     const tab = document.getElementById("sidetab-status"), sum = document.getElementById("statussum");
-    if (tab) { tab.className = `sidetab ${a.level}`; tab.setAttribute("aria-label", `Status, ${STATUS_WORDS[a.level]}`); }
+    if (tab) { tab.className = `sidetab ${a.level}`; tab.setAttribute("aria-label", statusTabName(a)); tab.title = `${a.label}. ${a.detail}`; }
     if (sum) { sum.className = a.level; document.getElementById("statuslabel").textContent = a.label; document.getElementById("statusdetail").textContent = a.detail; }
-    // The full live-status indicator at the bottom of the sidebar: the dot and the label ("All live", "Degraded: ...") the header
-    // no longer shows as text.
-    const foot = document.getElementById("navstatus");
-    if (foot) {
-      foot.className = `navind ${a.level}`;
-      document.getElementById("navstatuslabel").textContent = a.label;
-      foot.title = `${a.detail} Show or hide the status.`;
-      foot.setAttribute("aria-label", `Live status: ${STATUS_WORDS[a.level]}. ${a.label}. Show or hide the status.`);
-    }
   }
   // </status-dot>
 
   // <panels>
-  // The header's two panels: the status line (toggled by the status indicator) and the notifications (toggled by the count
-  // button). Each is independent, collapsed by default, and remembered for this tab's session (sessionStorage), so moving between
-  // the page's views or reloading keeps it. Opening or closing a panel only shows or hides it: it never dismisses a
-  // notification, and a closed panel keeps updating, so it is current whenever it opens. Nothing here opens a panel by itself;
-  // new notifications only change the count. The shown receipt is sent only for notes listed in the open notifications panel
+  // The side panel's two views: the status line and the notifications (docs/design-system.md, "Side panel"). The panel is
+  // collapsed to its rail by default; which view is open (at most one) is remembered for this tab's session (sessionStorage)
+  // as the same pair of flags the header panels used, so moving between the page's views or reloading keeps it. Opening or
+  // collapsing only shows or hides a view: it never dismisses a notification, and a hidden view keeps updating, so it is
+  // current whenever it opens. Nothing here opens the panel by itself; new notifications only change the count. The shown receipt is sent only for notes listed in the open notifications panel
   // of a visible tab (see refreshInbox), so opening the panel can send receipts for the notes it lists. Tests load this block.
   const PANELS_KEY = "orbit.header-panels";
   function readPanels(store) {
@@ -1150,6 +1192,36 @@
   }
   function writePanels(store, panels) {
     try { if (store) store.setItem(PANELS_KEY, JSON.stringify({ status: panels.status === true, notes: panels.notes === true })); } catch { /* private mode: this page only */ }
+  }
+  // The side panel's width, kept on this device (localStorage) when Rai drags or keys the resize handle; null means the
+  // default (--side-w in the CSS). The bounds keep it usable: at least 280px (less only on a screen too narrow for that),
+  // and at most 720px; on laptops and desktops it also leaves the conversation 480px, and below 1024px, where the open
+  // panel lies over the page, a 24px strip of the page stays in view.
+  const SIDE_WIDTH_KEY = "orbit.side-width";
+  const SIDE_STEP = 16;
+  function sideWidthBounds(vw, desk) {
+    const min = Math.max(160, Math.min(280, vw - 40));
+    return { min, max: Math.max(min, Math.min(720, desk ? vw - 480 : vw - 24)) };
+  }
+  function clampSideWidth(w, bounds) {
+    return typeof w === "number" && Number.isFinite(w) ? Math.round(Math.min(bounds.max, Math.max(bounds.min, w))) : null;
+  }
+  function readSideWidth(store) {
+    let v = null;
+    try { v = store ? Number.parseInt(store.getItem(SIDE_WIDTH_KEY) || "", 10) : null; } catch { v = null; }
+    return typeof v === "number" && Number.isFinite(v) && v >= 100 && v <= 4000 ? v : null;
+  }
+  function writeSideWidth(store, w) {
+    try { if (!store) return; if (w === null) store.removeItem(SIDE_WIDTH_KEY); else store.setItem(SIDE_WIDTH_KEY, String(Math.round(w))); } catch { /* private mode: this page only */ }
+  }
+  // The resize handle's keys: Left and Right move the inner edge by SIDE_STEP (four steps with Shift), so Left widens the
+  // panel and Right narrows it; Home and End go to the narrowest and the widest. Returns the new width, or null for a key
+  // that does not resize.
+  function sideWidthForKey(key, shift, w, bounds) {
+    const step = shift ? SIDE_STEP * 4 : SIDE_STEP;
+    const to = key === "ArrowLeft" ? w + step : key === "ArrowRight" ? w - step
+      : key === "Home" ? bounds.min : key === "End" ? bounds.max : null;
+    return to === null ? null : clampSideWidth(to, bounds);
   }
   // The count is of notifications not dismissed (all of them, not just the few listed). ORBIT does not track read or unread,
   // so the label never says "unread".
@@ -1929,34 +2001,22 @@
   // Dismissals ORBIT has recorded (or does not know the id of), and dismissals in flight.
   const dismissDone = new Set();
   const dismissPending = new Set();
-  const notesButton = document.getElementById("notesbtn");
   const sessionStore = (() => { try { return window.sessionStorage; } catch { return null; } })();
+  const localStore = (() => { try { return window.localStorage; } catch { return null; } })();
   const panels = readPanels(sessionStore);
-  // Notifications and status live in the sidebar's last section (docs/sidebar.md): two tabs, one view at a time. The header's
-  // bell and status dot, and the full indicators at the bottom of the sidebar, each toggle their view: a toggle shows the
-  // sidebar (opening the drawer on narrow screens) on its view, switches to it if the other view shows, and collapses the
-  // section if its view already shows. aria-expanded is true only on the toggles of a view that is actually on screen. The
-  // stored state is the same pair of flags as before (`orbit.header-panels`, this tab's session); both false means the
-  // section is collapsed. On wide screens nothing here moves focus (the sidebar is not modal).
-  const panelParts = { status: ["health", "statusline", "navstatus"], notes: ["notesbtn", "inbox", "navnotes"] };
+  if (panels.notes && panels.status) panels.notes = false; // one view at a time (an older page could keep both open)
+  // The left sidebar (docs/sidebar.md): Projects, Plan, Files and Images. Docked on the left at 1024px and wider (open by
+  // default, remembered on this device), a modal drawer below that. Status and notifications are in the right side panel.
   const deskQuery = window.matchMedia("(min-width: 1024px)");
   const nav = document.getElementById("nav");
   const navBtn = document.getElementById("navbtn"), navHandle = document.getElementById("navhandle");
   const navScrim = document.getElementById("navscrim"), navResize = document.getElementById("navresize");
-  const localStore = (() => { try { return window.localStorage; } catch { return null; } })();
   const navPrefs = readSidebar(localStore);
   let drawerOpen = false;
   let drawerReturn = null;
   const docked = () => deskQuery.matches;
   const navVisible = () => (docked() ? navPrefs.open : drawerOpen);
   const navWidth = () => clampNavWidth(navPrefs.width, window.innerWidth);
-  const side = document.getElementById("side");
-  const sideTabs = { notes: document.getElementById("sidetab-notes"), status: document.getElementById("sidetab-status") };
-  const sideNames = ["notes", "status"];
-  let sideView = panels.notes || !panels.status ? "notes" : "status";
-  const activityOn = () => panels.notes || panels.status;
-  const shownView = () => (panels[sideView] ? sideView : panels.notes ? "notes" : panels.status ? "status" : sideView);
-  for (const name of sideNames) { const box = document.getElementById(panelParts[name][1]); box.setAttribute("role", "tabpanel"); box.setAttribute("aria-labelledby", sideTabs[name].id); box.removeAttribute("aria-label"); }
   // Where the docked sidebar goes: from the header's bottom edge to the shell's bottom edge (the shell follows the visible area).
   function placeNav() {
     const root = document.documentElement;
@@ -1990,11 +2050,11 @@
     navScrim.hidden = desk || !open;
     setInert(!desk && open);
     placeNav();
-    showPanels();
+    if (typeof showPanels === "function") showPanels();
   }
   function openNav(focusTarget) {
     if (docked()) {
-      if (!navPrefs.open) { navPrefs.open = true; writeSidebar(localStore, navPrefs); }
+      if (!navPrefs.open) { navPrefs.open = true; writeSidebar(localStore, navPrefs); lastOpened = "nav"; if (sideOpen() && !bothFit()) collapseSide(); }
       showNav();
     } else if (!drawerOpen) {
       drawerReturn = document.activeElement;
@@ -2021,51 +2081,6 @@
     }
     ackListedNotes();
   }
-  function showPanels() {
-    const view = shownView(), on = activityOn(), open = navVisible();
-    for (const [name, [buttonId, panelId, footId]] of Object.entries(panelParts)) {
-      const shown = on && view === name;
-      document.getElementById(buttonId).setAttribute("aria-expanded", String(shown && open));
-      document.getElementById(footId).setAttribute("aria-expanded", String(shown && open));
-      document.getElementById(panelId).hidden = !shown;
-      sideTabs[name].setAttribute("aria-selected", String(view === name));
-      sideTabs[name].tabIndex = view === name ? 0 : -1;
-    }
-    document.getElementById("navh-activity").setAttribute("aria-expanded", String(on));
-    document.getElementById("navbody-activity").hidden = !on;
-  }
-  function setPanels(next) {
-    panels.notes = next.notes; panels.status = next.status;
-    writePanels(sessionStore, panels); showPanels(); ackListedNotes();
-  }
-  function togglePanel(name) {
-    if (navVisible() && activityOn() && shownView() === name) return setPanels({ notes: false, status: false });
-    sideView = name;
-    setPanels({ notes: name === "notes", status: name === "status" });
-    openNav(docked() ? null : sideTabs[name]);
-    document.getElementById("navsec-activity").scrollIntoView({ block: "nearest" });
-  }
-  for (const [name, [buttonId, , footId]] of Object.entries(panelParts)) {
-    document.getElementById(buttonId).addEventListener("click", () => togglePanel(name));
-    document.getElementById(footId).addEventListener("click", () => togglePanel(name));
-  }
-  for (const name of sideNames) {
-    sideTabs[name].addEventListener("click", () => { sideView = name; setPanels({ notes: name === "notes", status: name === "status" }); });
-  }
-  // The tabs: arrow keys, Home and End move between them and show that view (the tab pattern's automatic activation).
-  document.querySelector("#side .sidetabs").addEventListener("keydown", (e) => {
-    const at = sideNames.indexOf(shownView());
-    const n = sideNames.length;
-    const to = e.key === "ArrowRight" ? (at + 1) % n : e.key === "ArrowLeft" ? (at + n - 1) % n : e.key === "Home" ? 0 : e.key === "End" ? n - 1 : -1;
-    if (to < 0) return;
-    e.preventDefault();
-    sideView = sideNames[to];
-    setPanels({ notes: sideView === "notes", status: sideView === "status" });
-    sideTabs[sideView].focus();
-  });
-  // The sections: each header button shows or hides its content and keeps the header. Notifications and status is the pair of
-  // flags above; the data sections are remembered with the sidebar's layout.
-  document.getElementById("navh-activity").addEventListener("click", () => (activityOn() ? setPanels({ notes: false, status: false }) : setPanels({ notes: sideView === "notes", status: sideView === "status" })));
   function showSection(name) {
     const open = !navPrefs.closed.includes(name);
     document.getElementById(`navh-${name}`).setAttribute("aria-expanded", String(open));
@@ -2087,7 +2102,7 @@
   // Resizing (wide screens): drag the separator on the sidebar's right edge, or focus it and use the arrow keys (16px a press,
   // 64px with Shift), Home (narrowest) and End (widest). The width is remembered.
   function setNavWidth(w, save) {
-    navPrefs.width = clampNavWidth(w, window.innerWidth);
+    navPrefs.width = clampNavWidth(sideOpen() ? Math.min(w, window.innerWidth - MAIN_MIN_W - shownSideWidth()) : w, window.innerWidth);
     placeNav();
     if (save) writeSidebar(localStore, navPrefs);
   }
@@ -2117,10 +2132,201 @@
     navResize.addEventListener("pointercancel", up);
   });
   // Crossing 1024px switches between docked and drawer. The drawer is dropped (never carried over as open), the docked state is kept.
-  deskQuery.addEventListener("change", () => { drawerOpen = false; drawerReturn = null; showNav(); ackListedNotes(); });
+  deskQuery.addEventListener("change", () => { drawerOpen = false; drawerReturn = null; showNav(); settleRoom(); ackListedNotes(); });
   window.addEventListener("resize", placeNav);
   if (window.ResizeObserver) new ResizeObserver(placeNav).observe(document.querySelector("header"));
+  // Both panels stay open side by side on laptops and desktops when the conversation keeps at least MAIN_MIN_W pixels between
+  // them. When it would not, opening one closes the other: opening the side panel collapses the docked sidebar, opening the
+  // sidebar collapses the side panel to its rail. When the window narrows with both open, the one opened earlier closes.
+  const MAIN_MIN_W = 480;
+  let lastOpened = "nav";
+  // The side panel's open width: what it shows now when open, else the width it would open at (the kept one, or the CSS default).
+  const openSideWidth = () => {
+    if (sideOpen()) return shownSideWidth();
+    const vw = document.documentElement.clientWidth;
+    return clampSideWidth(sideWidth, sideBounds()) ?? Math.round(Math.min(400, Math.max(320, vw * 0.3)));
+  };
+  const bothFit = () => document.documentElement.clientWidth - navWidth() - openSideWidth() >= MAIN_MIN_W;
+  function settleRoom() {
+    if (!docked() || !navPrefs.open || !sideOpen() || bothFit()) return;
+    if (lastOpened === "side") closeNav(); else setPanels({ notes: false, status: false });
+  }
+  // The side panel (docs/design-system.md, "Side panel"): Status, then Notifications, one view at a time, on every width. Its
+  // head is the tab list with the collapse button; collapsed (the default) it is a rail at the right edge holding the same
+  // button and tabs as icons, so the count and the level dot stay in view. A tab opens the panel on its view (in the rail)
+  // or switches to it; the button, Escape inside the panel, or Enter on the resize handle collapse it. The tabs and the
+  // button are the same elements in both states, so collapsing or opening never moves focus off them: focus moves only
+  // when the control holding it goes away (a view's content or the resize handle), and then to the selected tab. The panel
+  // is not modal: nothing traps focus and nothing outside closes it. Laptops and desktops (1024px and wider, the same query
+  // as the CSS) make room for the open panel; narrower screens lay it over the page.
+  const sideQuery = window.matchMedia("(min-width: 1024px)");
+  const side = document.getElementById("side");
+  const sideToggle = document.getElementById("sidetoggle");
+  const sideResize = document.getElementById("sideresize");
+  const sideTabList = side.querySelector(".sidetabs");
+  const sideTabs = { notes: document.getElementById("sidetab-notes"), status: document.getElementById("sidetab-status") };
+  const sideBoxes = { notes: document.getElementById("inbox"), status: document.getElementById("statusline") };
+  const sideNames = ["status", "notes"];
+  let sideView = panels.notes ? "notes" : "status";
+  const sideOpen = () => panels.notes || panels.status;
+  // Where the panel goes: from the header's bottom edge to the shell's bottom edge (the shell follows the visible area). Below
+  // 900px the collapsed rail ends at the top of the composer instead, which keeps its full width there (see the CSS).
+  const fullComposerQuery = window.matchMedia("(max-width: 899.98px)");
+  function placeSide() {
+    const root = document.documentElement;
+    const head = document.querySelector("header").getBoundingClientRect(), shell = document.body.getBoundingClientRect();
+    let bottom = shell.bottom;
+    if (!sideOpen() && fullComposerQuery.matches) {
+      const form = [document.getElementById("aform"), document.getElementById("form")].find((f) => f && !f.hidden && f.getClientRects().length);
+      if (form) bottom = Math.min(bottom, form.getBoundingClientRect().top);
+    }
+    root.style.setProperty("--side-top", `${Math.round(head.bottom)}px`);
+    root.style.setProperty("--side-bottom", `${Math.max(0, Math.round(window.innerHeight - bottom))}px`);
+  }
+  // The width: the one kept on this device (clamped to this screen; the kept value itself is not changed by a smaller
+  // window), else the CSS default. The resize handle is a window splitter: its value is the panel's width in pixels.
+  let sideWidth = readSideWidth(localStore);
+  const sideBounds = () => sideWidthBounds(document.documentElement.clientWidth, sideQuery.matches);
+  const shownSideWidth = () => Math.round(side.getBoundingClientRect().width);
+  function describeResize() {
+    const b = sideBounds();
+    sideResize.setAttribute("aria-valuemin", String(b.min));
+    sideResize.setAttribute("aria-valuemax", String(b.max));
+    if (!sideOpen()) return;
+    const w = shownSideWidth();
+    sideResize.setAttribute("aria-valuenow", String(w));
+    sideResize.setAttribute("aria-valuetext", `${w} pixels wide`);
+  }
+  function applySideWidth() {
+    const w = clampSideWidth(sideWidth, sideBounds());
+    if (w === null) document.documentElement.style.removeProperty("--side-w");
+    else document.documentElement.style.setProperty("--side-w", `${w}px`);
+    describeResize();
+  }
+  function setSideWidth(w, save) {
+    const b = sideBounds();
+    const c = clampSideWidth(docked() && navPrefs.open ? Math.min(w, Math.max(b.min, window.innerWidth - MAIN_MIN_W - navWidth())) : w, b);
+    if (c === null) return;
+    sideWidth = c;
+    applySideWidth();
+    if (save) writeSideWidth(localStore, sideWidth);
+  }
+  // Collapsing slides the open panel away to the right edge, then leaves the rail; opening slides it back in from there.
+  // Nothing moves for people who ask for reduced motion. A slide still running when another action comes is finished first.
+  let sideAnim = null, sideAnimDone = null;
+  const reduceMotion = () => Boolean(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
+  function finishSlide() {
+    if (!sideAnim) return;
+    const done = sideAnimDone;
+    sideAnim.cancel();
+    sideAnim = null; sideAnimDone = null;
+    if (done) done();
+  }
+  function slideSide(dir, done) {
+    finishSlide();
+    if (reduceMotion() || typeof side.animate !== "function") { if (done) done(); return; }
+    const rail = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--rail-w")) || 44;
+    const away = `translateX(${Math.max(0, shownSideWidth() - rail)}px)`;
+    const frames = dir === "out" ? [{ transform: "none" }, { transform: away }] : [{ transform: away }, { transform: "none" }];
+    const anim = side.animate(frames, { duration: dir === "out" ? 160 : 180, easing: "cubic-bezier(.2, 0, 0, 1)" });
+    sideAnim = anim; sideAnimDone = done || null;
+    anim.onfinish = () => { if (sideAnim !== anim) return; sideAnim = null; const d = sideAnimDone; sideAnimDone = null; if (d) d(); };
+  }
+  function showPanels() {
+    const open = sideOpen();
+    if (open) sideView = panels.status ? "status" : "notes";
+    for (const name of sideNames) {
+      sideBoxes[name].hidden = !(open && sideView === name);
+      sideTabs[name].setAttribute("aria-selected", String(sideView === name));
+      sideTabs[name].tabIndex = sideView === name ? 0 : -1;
+    }
+    sideTabList.setAttribute("aria-orientation", open ? "horizontal" : "vertical");
+    sideToggle.setAttribute("aria-expanded", String(open));
+    sideToggle.title = open ? "Collapse the side panel (Esc)" : "Open the side panel";
+    if (open) document.documentElement.setAttribute("data-side", "open"); else document.documentElement.removeAttribute("data-side");
+    placeSide();
+    describeResize();
+  }
+  function setPanels(next) {
+    panels.notes = next.notes === true; panels.status = next.status === true;
+    writePanels(sessionStore, panels); showPanels(); ackListedNotes();
+  }
+  function openSide(name) {
+    finishSlide();
+    const was = sideOpen();
+    if (!was) { lastOpened = "side"; if (docked() && navPrefs.open && !bothFit()) closeNav(); }
+    sideView = name;
+    setPanels({ notes: name === "notes", status: name === "status" });
+    if (!was) slideSide("in");
+  }
+  function collapseSide() {
+    finishSlide();
+    if (!sideOpen()) return;
+    const at = document.activeElement;
+    const lost = Boolean(at) && (at === sideResize || sideBoxes.notes.contains(at) || sideBoxes.status.contains(at));
+    slideSide("out", () => { setPanels({ notes: false, status: false }); if (lost) sideTabs[sideView].focus(); });
+  }
+  sideToggle.addEventListener("click", () => { finishSlide(); if (sideOpen()) collapseSide(); else openSide(sideView); });
+  for (const name of sideNames) {
+    sideTabs[name].addEventListener("click", () => { finishSlide(); if (!sideOpen() || sideView !== name) openSide(name); });
+  }
+  // The tabs: one tab stop; the arrow keys (Left/Right open, Up/Down in the rail too), Home and End move between them.
+  // Open, the view follows (the tab pattern's automatic activation); in the rail they only select, and a tab's click (Enter
+  // or Space) opens the panel on it.
+  sideTabList.addEventListener("keydown", (e) => {
+    const at = sideNames.indexOf(sideView), n = sideNames.length;
+    const next = e.key === "ArrowRight" || e.key === "ArrowDown", prev = e.key === "ArrowLeft" || e.key === "ArrowUp";
+    const to = next ? (at + 1) % n : prev ? (at + n - 1) % n : e.key === "Home" ? 0 : e.key === "End" ? n - 1 : -1;
+    if (to < 0) return;
+    e.preventDefault();
+    const name = sideNames[to];
+    if (sideOpen()) openSide(name); else { sideView = name; showPanels(); }
+    sideTabs[name].focus();
+  });
+  side.addEventListener("keydown", (e) => { if (e.key === "Escape" && sideOpen()) { e.preventDefault(); collapseSide(); } });
+  // The resize handle: drag it (mouse, pen or touch), or focus it and use the arrow keys, Home and End; Enter collapses
+  // the panel (the window splitter pattern); a double-click goes back to the default width. The width is kept on release.
+  let sideDrag = null;
+  sideResize.addEventListener("pointerdown", (e) => {
+    if (!sideOpen() || (e.pointerType === "mouse" && e.button !== 0)) return;
+    e.preventDefault();
+    finishSlide();
+    const box = side.getBoundingClientRect();
+    sideDrag = { id: e.pointerId, right: box.right, grab: e.clientX - box.left };
+    try { sideResize.setPointerCapture(e.pointerId); } catch { /* the drag still follows moves over the handle */ }
+    sideResize.classList.add("dragging");
+    document.documentElement.setAttribute("data-side-drag", "");
+  });
+  sideResize.addEventListener("pointermove", (e) => {
+    if (!sideDrag || e.pointerId !== sideDrag.id) return;
+    setSideWidth(sideDrag.right - (e.clientX - sideDrag.grab), false);
+  });
+  const endSideDrag = (e) => {
+    if (!sideDrag || e.pointerId !== sideDrag.id) return;
+    sideDrag = null;
+    sideResize.classList.remove("dragging");
+    document.documentElement.removeAttribute("data-side-drag");
+    writeSideWidth(localStore, sideWidth);
+  };
+  for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) sideResize.addEventListener(ev, endSideDrag);
+  sideResize.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); collapseSide(); return; }
+    const w = sideWidthForKey(e.key, e.shiftKey, shownSideWidth(), sideBounds());
+    if (w === null) return;
+    e.preventDefault();
+    setSideWidth(w, true);
+  });
+  sideResize.addEventListener("dblclick", () => { sideWidth = null; writeSideWidth(localStore, null); applySideWidth(); });
+  sideQuery.addEventListener("change", () => { applySideWidth(); showPanels(); ackListedNotes(); });
+  window.addEventListener("resize", () => { placeSide(); applySideWidth(); settleRoom(); });
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(placeSide);
+    for (const e of [document.querySelector("header"), document.body, document.getElementById("form"), document.getElementById("aform")]) if (e) ro.observe(e);
+  }
+  fullComposerQuery.addEventListener("change", placeSide);
+  applySideWidth();
   showNav();
+  settleRoom();
   document.addEventListener("visibilitychange", () => ackListedNotes());
   themeChoice();
   function renderInbox() {
@@ -2146,7 +2352,7 @@
     if (!total && inboxRead.read && !problem) nodes.push(el("div", { className: "empty", textContent: "No notifications." }));
     if (!total && !inboxRead.read && !problem) nodes.push(el("div", { className: "empty", textContent: "Reading notifications…" }));
     box.replaceChildren(...nodes);
-    if (was) (focusable.get(was) || box.querySelector("button") || notesButton).focus({ preventScroll: true });
+    if (was) (focusable.get(was) || box.querySelector("button") || sideTabs.notes).focus({ preventScroll: true });
     showNoteCount(total);
     ackListedNotes();
     sendDismissals();
@@ -2184,17 +2390,10 @@
   function showNoteCount(total) {
     const view = noteCountView(total, { read: inboxRead.read, failed: inboxRead.error !== null });
     const label = view.label;
-    notesButton.classList.toggle("has", view.has);
-    document.getElementById("notecount").textContent = view.text;
     sideTabs.notes.classList.toggle("has", view.has);
-    document.getElementById("sidenotecount").textContent = view.text;
+    document.getElementById("notecount").textContent = view.text;
     sideTabs.notes.setAttribute("aria-label", `Notifications, ${label.replace(/^Notifications: /, "")}`);
-    notesButton.setAttribute("aria-label", label);
-    notesButton.title = `${label}. Show or hide the notifications.`;
-    const foot = document.getElementById("navnotes");
-    foot.classList.toggle("has", view.has);
-    document.getElementById("navnotecount").textContent = view.text;
-    foot.setAttribute("aria-label", `${label}. Show or hide the notifications.`);
+    sideTabs.notes.title = label;
   }
   async function refreshInbox() {
     const gen = ++inboxGen;

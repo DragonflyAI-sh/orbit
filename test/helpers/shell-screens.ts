@@ -27,7 +27,7 @@ const shots: Shot[] = [
   { name: "320-session-picker", width: 320, height: 568, route: "/sessions", data: { exchanges: 8 },
     act: async (p) => { await p.waitForFunction(() => !document.getElementById("sesswrap")!.hidden); await p.click("#sessbtn"); } },
   { name: "568x320-landscape-panels", width: 568, height: 320, route: "/#assistant", data: { exchanges: 8, notes: 12 },
-    act: async (p) => { await p.click("#notesbtn"); } },
+    act: async (p) => { await p.click("#sidetab-notes"); } },
   { name: "430-dark-assistant", width: 430, height: 932, route: "/#assistant", data: { exchanges: 24, card: true }, dark: true },
   { name: "1280-desktop", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true } },
 ];
@@ -38,7 +38,7 @@ const picker = async (p: any) => { await p.waitForFunction(() => !document.getEl
 const designShots: Shot[] = [
   { name: "1280-assistant", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true } },
   { name: "1440-assistant-panels", width: 1440, height: 900, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 },
-    act: async (p) => { await p.click("#notesbtn"); } },
+    act: async (p) => { await p.click("#sidetab-notes"); } },
   { name: "1280-session-picker", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true }, act: picker },
   { name: "1280-dark-sessions", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true, pending: true }, dark: true },
   { name: "390-assistant", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true } },
@@ -52,18 +52,18 @@ const designShots: Shot[] = [
 // SHELL_SCREENS_SET=panel: the desktop menu and side panel pass (docs/design-system.md, "Side panel"), kept in
 // docs/side-panel/: the side panel populated with long content in both themes, the session menu with a hovered row, the
 // phone header panels (unchanged) and the phone composer after Return.
-const notesOpen = async (p: any) => { await p.click("#notesbtn"); await p.click("#inbox .showall"); await p.click("#inbox .note button:not(.x)"); };
+const notesOpen = async (p: any) => { await p.click("#sidetab-notes"); await p.click("#inbox .showall"); await p.click("#inbox .note button:not(.x)"); };
 const hoverMenu = async (p: any) => { await picker(p); await p.hover("#sesslist li:nth-child(2) .sitem"); };
 const panelShots: Shot[] = [
   { name: "1280-side-notes", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true, notes: 14, longNotes: true }, act: notesOpen },
   { name: "1280-dark-side-notes", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true, notes: 14, longNotes: true }, dark: true, act: notesOpen },
-  { name: "1440-side-status", width: 1440, height: 900, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 }, act: async (p) => { await p.click("#health"); } },
-  { name: "1280-dark-side-status", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true, notes: 5, pending: true }, dark: true, act: async (p) => { await p.click("#health"); } },
-  { name: "1024-side-notes", width: 1024, height: 700, route: "/sessions", data: { exchanges: 24, card: true, notes: 6 }, act: async (p) => { await p.click("#notesbtn"); } },
+  { name: "1440-side-status", width: 1440, height: 900, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 }, act: async (p) => { await p.click("#sidetab-status"); } },
+  { name: "1280-dark-side-status", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true, notes: 5, pending: true }, dark: true, act: async (p) => { await p.click("#sidetab-status"); } },
+  { name: "1024-side-notes", width: 1024, height: 700, route: "/sessions", data: { exchanges: 24, card: true, notes: 6 }, act: async (p) => { await p.click("#sidetab-notes"); } },
   { name: "1280-session-menu", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true }, act: hoverMenu },
   { name: "1280-dark-session-menu", width: 1280, height: 800, route: "/sessions", data: { exchanges: 24, card: true }, dark: true, act: hoverMenu },
-  { name: "390-panels", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6, longNotes: true }, act: async (p) => { await p.click("#notesbtn"); } },
-  { name: "390-dark-panels", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6, longNotes: true }, dark: true, act: async (p) => { await p.click("#notesbtn"); } },
+  { name: "390-panels", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6, longNotes: true }, act: async (p) => { await p.click("#sidetab-notes"); } },
+  { name: "390-dark-panels", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6, longNotes: true }, dark: true, act: async (p) => { await p.click("#sidetab-notes"); } },
   // Before: Return sent the first line (the box is empty again). After: three lines in the box, nothing sent.
   { name: "390-composer-return", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24 },
     act: async (p) => { await p.focus("#ainput"); for (const [i, l] of ["First line", "Second line", "Third line"].entries()) { if (i) await p.keyboard.press("Enter"); await p.keyboard.type(l); } } },
@@ -81,11 +81,11 @@ const sidebarShots: Shot[] = [
   { name: "1280-sidebar-project", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 },
     act: async (p) => { if (!(await has(p, "#navproject"))) return; await p.selectOption("#navproject", "alpha-garden"); await p.waitForTimeout(300); await p.click("#navfiles .navfile >> nth=2"); await p.waitForTimeout(300); await away(p); } },
   { name: "1280-sidebar-collapsed", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 }, act: async (p) => { if (await has(p, "#navhandle")) await p.click("#navhandle"); await away(p); } },
-  { name: "1440-sidebar-notes", width: 1440, height: 900, route: "/#assistant", data: { exchanges: 24, card: true, notes: 14, longNotes: true }, act: async (p) => { await p.click("#notesbtn"); await away(p); } },
-  { name: "1280-dark-sidebar-status", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 }, dark: true, act: async (p) => { await p.click("#health"); await away(p); } },
+  { name: "1440-sidebar-notes", width: 1440, height: 900, route: "/#assistant", data: { exchanges: 24, card: true, notes: 14, longNotes: true }, act: async (p) => { await p.click("#sidetab-notes"); await away(p); } },
+  { name: "1280-dark-sidebar-status", width: 1280, height: 800, route: "/#assistant", data: { exchanges: 24, card: true, notes: 5 }, dark: true, act: async (p) => { await p.click("#sidetab-status"); await away(p); } },
   { name: "390-header", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6 } },
   { name: "390-sidebar-drawer", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6 }, act: async (p) => { if (await has(p, "#navbtn")) await p.click("#navbtn"); } },
-  { name: "390-dark-sidebar-notes", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6, longNotes: true }, dark: true, act: async (p) => { await p.click("#notesbtn"); } },
+  { name: "390-dark-sidebar-notes", width: 390, height: 844, route: "/#assistant", data: { exchanges: 24, card: true, notes: 6, longNotes: true }, dark: true, act: async (p) => { await p.click("#sidetab-notes"); } },
 ];
 if (process.env.SHELL_SCREENS_SET === "sidebar") shots.splice(0, shots.length, ...sidebarShots);
 

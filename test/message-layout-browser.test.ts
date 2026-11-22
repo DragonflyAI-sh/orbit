@@ -212,15 +212,15 @@ for (const surface of ["assistant", "chat"] as const) {
       return {
         inner: log.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), pad: parseFloat(cs.paddingLeft), padR: parseFloat(cs.paddingRight),
         page: document.documentElement.clientWidth, rows: [...log.querySelectorAll(".msg")].map((m) => m.getBoundingClientRect().width),
-        room: log.getBoundingClientRect().width, left: log.getBoundingClientRect().left, nav: document.getElementById("nav")!.getBoundingClientRect().right,
+        room: log.getBoundingClientRect().width, left: log.getBoundingClientRect().left, nav: document.getElementById("nav")!.getBoundingClientRect().right, rail: document.getElementById("side")!.getBoundingClientRect().width,
         form: (() => { const f = document.querySelector(log.id === "alog" ? "#aform textarea" : "#form textarea")!.closest("form")!, fc = getComputedStyle(f); return { left: parseFloat(fc.paddingLeft), right: parseFloat(fc.paddingRight) }; })(),
         cards: [...log.querySelectorAll(".proposal")].map((c) => c.getBoundingClientRect().width),
         sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
       };
     });
-    // A readable column (docs/web-shell.md, --measure 860px), centred in the room right of the docked sidebar (docs/sidebar.md):
-    // equal side padding, at least the 24px gutter.
-    assert.ok(w.nav >= 220 && Math.abs(w.left - w.nav) <= 1 && Math.abs(w.room - (w.page - w.nav)) <= 1, `the log starts at the sidebar's edge (${w.left} vs ${w.nav})`);
+    // A readable column (docs/web-shell.md, --measure 860px), centred in the room between the docked sidebar (docs/sidebar.md)
+    // and the side panel's rail: equal side padding, at least the 24px gutter.
+    assert.ok(w.nav >= 220 && Math.abs(w.left - w.nav) <= 1 && Math.abs(w.room - (w.page - w.nav - w.rail)) <= 1, `the log runs from the sidebar's edge to the rail (${w.left} vs ${w.nav}, ${w.room} of ${w.page} less the ${w.rail}px rail)`);
     assert.ok(Math.abs(w.pad - (w.room - 860) / 2) <= 1 && Math.abs(w.padR - w.pad) <= 1, `the log centres an 860px column (${w.pad}/${w.padR} of ${w.room})`);
     assert.ok(w.inner <= 860 && w.inner >= 860 - 20, `the column is the measure, less any scrollbar (${w.inner})`);
     assert.ok(Math.abs(w.form.left - w.pad) <= 1 && Math.abs(w.form.right - w.padR) <= 1, `the composer uses the same column (${JSON.stringify(w.form)})`);
