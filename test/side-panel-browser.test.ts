@@ -3,14 +3,19 @@ import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import { shellServer } from "./helpers/shell-fixture.ts";
 
-// The desktop menu and the side panel (docs/design-system.md, "Desktop menu" and "Side panel"):
-// - laptops and desktops (1024px and wider): Notifications and Status open in one non-modal panel on the right, with a
-//   heading, a close button and a tab per view; the conversation and composer move left and are never covered; each view
-//   scrolls on its own; Escape and the close button put focus back on the toggle; the tabs work by keyboard; receipts are
-//   sent only for notes actually listed; the status view has loading, empty and error states;
-// - narrower screens keep the header panels exactly as before (independent, in the header);
-// - the session menu's rows have no nested outline on desktop (no hover ring, no border on the open session) and keep the
-//   keyboard focus ring; the page tabs lose their inner borders on desktop; phones are unchanged.
+// The side panel and the desktop menu (docs/design-system.md, "Side panel" and "Desktop menu"):
+// - Notifications and Status live in the side panel only, on every width: the page header has no notifications or status
+//   indicator and no "Notifications" or "All live" text;
+// - the panel has no heading and no close button: its head is the tab list (Notifications with the count, Status with the
+//   level dot) with a collapse button; collapsed (the default) it is a rail at the right edge with the same button and tabs
+//   as icons; it slides away to the right and back;
+// - laptops and desktops (1024px and wider): the open panel covers nothing (the conversation and composer move left); below
+//   1024px it lies over the page and the page keeps only the rail's room;
+// - a resize handle on the panel's inner edge drags or keys it wider or narrower, within bounds, and the width is kept;
+// - keyboard and screen readers: one tab stop for the tabs, arrows/Home/End, Escape collapses and focus is never lost, the
+//   handle is a window splitter with its value; receipts only for notes actually listed; status loading/empty/error states;
+// - the session menu's rows have no nested outline on desktop and keep the keyboard focus ring; the page tabs lose their
+//   inner borders on desktop; phones are unchanged.
 // Chromium (Playwright) with synthetic content only (test/helpers/shell-fixture.ts). Skipped, saying so, without Playwright.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -24,9 +29,11 @@ let url = "";
 before(async () => { if (skip) return; url = await fixture.start(); chromium = await playwright.chromium.launch(); });
 after(async () => { await chromium?.close(); fixture.close(); });
 
-async function open(width: number, height: number, route = "/#assistant", opts: { phone?: boolean; colorScheme?: string; notes?: number } = {}) {
+type OpenOpts = { phone?: boolean; colorScheme?: string; notes?: number; motion?: boolean };
+async function open(width: number, height: number, route = "/#assistant", opts: OpenOpts = {}) {
   fixture.set({ notes: opts.notes ?? 14 });
-  const ctx = await chromium.newContext({ viewport: { width, height }, deviceScaleFactor: 1, colorScheme: opts.colorScheme ?? "light", ...(opts.phone ? { isMobile: true, hasTouch: true } : {}) });
+  // Reduced motion unless a test looks at the slide: the panel then changes state at once.
+  const ctx = await chromium.newContext({ viewport: { width, height }, deviceScaleFactor: 1, colorScheme: opts.colorScheme ?? "light", reducedMotion: opts.motion ? "no-preference" : "reduce", ...(opts.phone ? { isMobile: true, hasTouch: true } : {}) });
   const page = await ctx.newPage();
   const errors: string[] = [];
   page.on("pageerror", (e: Error) => errors.push(e.message));
@@ -40,8 +47,10 @@ async function open(width: number, height: number, route = "/#assistant", opts: 
 }
 const sideways = (page: any) => page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
 const expanded = (page: any, sel: string) => page.getAttribute(sel, "aria-expanded");
+const isOpen = (page: any) => page.evaluate(() => document.documentElement.getAttribute("data-side") === "open");
 const shown = (page: any, sel: string) => page.evaluate((s: string) => { const e = document.querySelector(s) as HTMLElement | null; return Boolean(e && e.getClientRects().length && getComputedStyle(e).visibility !== "hidden"); }, sel);
 const active = (page: any) => page.evaluate(() => document.activeElement?.id || document.activeElement?.className || "");
+const inSide = (page: any) => page.evaluate(() => document.getElementById("side")!.contains(document.activeElement));
 const geo = (page: any) => page.evaluate(() => {
   const r = (sel: string) => { const b = document.querySelector(sel)!.getBoundingClientRect(); return { left: b.left, right: b.right, top: b.top, bottom: b.bottom, width: b.width, height: b.height }; };
   const msgs = [...document.querySelectorAll("#alog .msg, #log .msg")].filter((m) => (m as HTMLElement).offsetParent);
@@ -50,27 +59,54 @@ const geo = (page: any) => page.evaluate(() => {
     vw: document.documentElement.clientWidth, vh: window.innerHeight,
     bar: (() => { const c = document.getElementById(document.getElementById("aform")!.hidden ? "log" : "alog")!; return c.offsetWidth - c.clientWidth; })() };
 });
+// The page header shows no notifications or status indicator, and none of their words.
+async function headerHasNoIndicators(page: any, where: string) {
+  const h = await page.evaluate(() => { const head = document.querySelector("header")!; return { text: head.textContent || "", notes: !!document.getElementById("notesbtn"), health: !!document.getElementById("health"), side: head.contains(document.getElementById("side")), count: head.contains(document.getElementById("notecount")) }; });
+  assert.equal(h.notes, false, `${where}: no notifications button in the header`);
+  assert.equal(h.health, false, `${where}: no status indicator in the header`);
+  assert.equal(h.side || h.count, false, `${where}: the side panel and its count are not in the header`);
+  assert.doesNotMatch(h.text, /Notifications|All live|Status unknown/, `${where}: no indicator text in the header`);
+}
 
 for (const [width, height] of [[1024, 700], [1280, 800], [1440, 900]] as const) {
-  test(`browser ${width}px: Notifications opens a side panel on the right that covers nothing and leaves focus on the toggle`, { skip }, async () => {
+  test(`browser ${width}px: collapsed to a rail by default; a tab opens the panel on the right, covering nothing, with focus kept`, { skip }, async () => {
     const { page, ctx, errors } = await open(width, height);
-    assert.equal(await shown(page, "#side"), false, "closed by default");
-    await page.focus("#notesbtn");
+    await headerHasNoIndicators(page, `${width}`);
+    // Collapsed: a narrow rail at the right edge holding the expand button and the two indicators.
+    assert.equal(await isOpen(page), false, "collapsed by default");
+    let g = await geo(page);
+    assert.ok(Math.abs(g.side.right - g.vw) <= 1, "the rail is on the right edge");
+    assert.ok(g.side.width >= 40 && g.side.width <= 48, `the rail is narrow (${g.side.width})`);
+    assert.ok(Math.abs(g.side.top - g.header.bottom) <= 1, "under the header");
+    assert.ok(g.msgRight <= g.side.left + 0.5, "the rail covers no message");
+    assert.ok(g.send.right <= g.side.left - 8, "nor Send");
+    for (const sel of ["#sidetoggle", "#sidetab-notes", "#sidetab-status", "#notecount", "#sidetab-status .dot"]) assert.equal(await shown(page, sel), true, `${sel} in the rail`);
+    assert.equal(await shown(page, "#inbox"), false);
+    assert.equal(await shown(page, "#statusline"), false);
+    assert.equal(await shown(page, "#sideresize"), false, "no resize handle while collapsed");
+    assert.equal(await expanded(page, "#sidetoggle"), "false");
+    assert.equal(await page.textContent("#notecount"), "14");
+    // Opened from its tab: no heading, no close button; the tabs are the head.
+    await page.focus("#sidetab-notes");
     await page.keyboard.press("Enter");
-    assert.equal(await shown(page, "#side"), true);
-    assert.equal(await active(page), "notesbtn", "non-modal: opening never moves focus");
-    assert.equal(await expanded(page, "#notesbtn"), "true");
-    assert.equal(await expanded(page, "#health"), "false");
-    assert.equal(await page.getAttribute("#side", "role"), "region");
-    assert.equal(await page.getAttribute("#side", "aria-labelledby"), "sidetitle");
-    assert.equal(await page.textContent("#sidetitle"), "Notifications");
+    assert.equal(await isOpen(page), true);
+    assert.equal(await active(page), "sidetab-notes", "non-modal: opening never moves focus");
+    assert.equal(await expanded(page, "#sidetoggle"), "true");
+    assert.equal(await page.evaluate(() => document.getElementById("side")!.tagName), "ASIDE");
+    assert.equal(await page.getAttribute("#side", "aria-label"), "Side panel");
+    assert.equal(await page.$$eval("#side :is(h1, h2, h3, h4, [role=heading])", (n: unknown[]) => n.length), 0, "no heading");
+    assert.equal(await page.$("#sideclose"), null, "no close button");
+    assert.equal(await page.$("#sidetitle"), null, "no title");
     assert.equal(await page.getAttribute("#sidetab-notes", "aria-selected"), "true");
     assert.equal(await page.getAttribute("#sidetab-status", "aria-selected"), "false");
+    assert.equal(await page.getAttribute("#side .sidetabs", "aria-orientation"), "horizontal");
     assert.equal(await page.getAttribute("#inbox", "role"), "tabpanel");
     assert.equal(await shown(page, "#inbox"), true);
     assert.equal(await shown(page, "#statusline"), false, "one view at a time");
-    assert.equal(await page.getAttribute("#sideclose", "aria-label"), "Close the panel");
-    const g = await geo(page);
+    assert.equal(await shown(page, "#sideresize"), true);
+    const head = await page.evaluate(() => { const h = document.querySelector("#side .sidehead")!.getBoundingClientRect(), t = document.querySelector("#side .sidetabs")!.getBoundingClientRect(); return { h: h.height, top: t.top - h.top }; });
+    assert.ok(head.h <= 60, `the head is just the tab row (${head.h}px)`);
+    g = await geo(page);
     assert.ok(Math.abs(g.side.right - g.vw) <= 1, "on the right edge");
     assert.ok(Math.abs(g.side.top - g.header.bottom) <= 1, `under the header (${g.side.top} vs ${g.header.bottom})`);
     assert.ok(Math.abs(g.side.bottom - g.vh) <= 1, "down to the bottom of the screen");
@@ -80,27 +116,24 @@ for (const [width, height] of [[1024, 700], [1280, 800], [1440, 900]] as const) 
     assert.ok(g.box.width >= 300, `the message box stays usable (${g.box.width}px)`);
     assert.ok(g.side.left - g.msgLeft >= 500, "the conversation keeps a readable column");
     // The column is recentred in the room left of the panel: as wide as the measure allows, with the gutter each side.
-    // (The conversation's own scrollbar sits inside its right padding.)
     const room = g.side.left, column = Math.min(860, room - 48), colW = g.msgRight - g.msgLeft;
     assert.ok(colW >= column - g.bar - 2, `the column uses the room left (${colW} of ${column}, scrollbar ${g.bar})`);
     assert.ok(Math.abs(g.msgLeft - (room - column) / 2) <= 2, `centred in it (left ${g.msgLeft})`);
     assert.equal(await sideways(page), false);
     // Clicking the conversation does not close a non-modal panel.
     await page.click("#ainput");
-    assert.equal(await shown(page, "#side"), true);
+    assert.equal(await isOpen(page), true);
     assert.deepEqual(errors, []);
     await ctx.close();
   });
 }
 
-test("browser 1280px: the toggles and tabs switch views, the toggle of the shown view closes it, and the state survives a reload", { skip }, async () => {
+test("browser 1280px: the tabs switch views; the collapse button collapses and reopens; the state survives a reload", { skip }, async () => {
   const { page, ctx } = await open(1280, 800);
-  await page.click("#notesbtn");
-  await page.click("#health");
-  assert.equal(await shown(page, "#side"), true, "the status toggle switches the open panel, it does not close it");
-  assert.equal(await page.textContent("#sidetitle"), "Status");
-  assert.equal(await expanded(page, "#health"), "true");
-  assert.equal(await expanded(page, "#notesbtn"), "false");
+  await page.click("#sidetab-notes");
+  await page.click("#sidetab-status");
+  assert.equal(await isOpen(page), true, "the other tab switches the open panel");
+  assert.equal(await page.getAttribute("#sidetab-status", "aria-selected"), "true");
   assert.equal(await shown(page, "#statusline"), true);
   assert.equal(await shown(page, "#inbox"), false);
   assert.equal(await shown(page, "#statussum"), true, "the status view shows the overall status");
@@ -112,83 +145,208 @@ test("browser 1280px: the toggles and tabs switch views, the toggle of the shown
     return { dts, release: r("#deployinfo").bottom <= r("#statussum").top, status: r("#statussum").bottom <= r("#ports").top, link: r("#statusopen").top < r("#statussum").top && r("#statusopen").left >= r("#deployinfo").right };
   });
   assert.deepEqual(order, { dts: ["Deployed", "Commit"], release: true, status: true, link: true });
-  assert.equal(await page.textContent("#statuslabel"), await page.textContent("#health .label"), "the same words as the header indicator");
   assert.match(await page.textContent("#statusdetail"), /Not live: jobs: degraded/);
   assert.match(await page.getAttribute("#sidetab-status", "class"), /\bdegraded\b/);
+  assert.equal(await page.getAttribute("#sidetab-status", "aria-label"), `Status: ${await page.textContent("#statuslabel")} (degraded but working)`, "the tab's name carries the overall status");
   assert.equal(await page.getAttribute("#sidetab-notes", "aria-label"), "Notifications, 14");
+  // Clicking the selected tab again keeps the view (tabs select; the button collapses).
+  await page.click("#sidetab-status");
+  assert.equal(await isOpen(page), true);
   await page.click("#sidetab-notes");
-  assert.equal(await page.textContent("#sidetitle"), "Notifications");
-  assert.equal(await expanded(page, "#notesbtn"), "true");
   await page.reload();
   await page.waitForFunction(() => document.getElementById("notecount")!.textContent !== "?");
-  assert.equal(await shown(page, "#side"), true, "kept for this tab's session");
-  assert.equal(await page.textContent("#sidetitle"), "Notifications");
-  await page.click("#notesbtn");
-  assert.equal(await shown(page, "#side"), false, "the toggle of the shown view closes the panel");
-  assert.equal(await expanded(page, "#notesbtn"), "false");
-  assert.equal(await page.evaluate(() => document.documentElement.hasAttribute("data-side")), false);
-  // Closed, the conversation takes its full centred column again.
+  assert.equal(await isOpen(page), true, "kept for this tab's session");
+  assert.equal(await page.getAttribute("#sidetab-notes", "aria-selected"), "true");
+  await page.click("#sidetoggle");
+  assert.equal(await isOpen(page), false, "the collapse button collapses the panel");
+  assert.equal(await expanded(page, "#sidetoggle"), "false");
+  assert.equal(await active(page), "sidetoggle", "focus stays on the button, which stays in the rail");
+  assert.equal(await page.getAttribute("#side .sidetabs", "aria-orientation"), "vertical");
+  // Collapsed, the conversation takes its centred column in the room left of the rail again.
   const g = await geo(page);
-  assert.ok(Math.abs(g.msgLeft - (g.vw - 860) / 2) <= 1, `the column is centred again (${g.msgLeft})`);
+  assert.ok(Math.abs(g.msgLeft - (g.side.left - 860) / 2) <= 1, `the column is centred again (${g.msgLeft})`);
+  // The button opens it again on the view last shown.
+  await page.click("#sidetab-status");
+  await page.click("#sidetoggle");
+  await page.click("#sidetoggle");
+  assert.equal(await isOpen(page), true);
+  assert.equal(await shown(page, "#statusline"), true, "reopened on the last view");
   await ctx.close();
 });
 
-test("browser 1280px: tabs work by keyboard; Escape and the close button close the panel and put focus back on the toggle", { skip }, async () => {
+test("browser 1280px: collapsing slides the panel away to the right edge and opening slides it back", { skip }, async () => {
+  const { page, ctx } = await open(1280, 800, "/#assistant", { motion: true });
+  await page.click("#sidetab-notes");
+  await page.waitForTimeout(300);
+  const left0 = (await geo(page)).side.left;
+  // Sample the panel's left edge during the slide: it moves right, then the rail is left at the edge.
+  const samples: number[] = await page.evaluate(async () => {
+    const side = document.getElementById("side")!, out: number[] = [];
+    document.getElementById("sidetoggle")!.click();
+    for (let i = 0; i < 8; i++) { await new Promise((r) => setTimeout(r, 25)); out.push(side.getBoundingClientRect().left); }
+    return out;
+  });
+  assert.ok(samples.some((x) => x > left0 + 20 && x < 1280 - 50), `it slid (from ${left0}: ${samples.map(Math.round).join(", ")})`);
+  await page.waitForFunction(() => document.documentElement.getAttribute("data-side") !== "open");
+  await page.waitForTimeout(100);
+  const g = await geo(page);
+  assert.ok(g.side.width <= 48 && Math.abs(g.side.right - g.vw) <= 1, "the rail is left at the right edge");
+  const opening: number[] = await page.evaluate(async () => {
+    const side = document.getElementById("side")!, out: number[] = [];
+    document.getElementById("sidetab-notes")!.click();
+    for (let i = 0; i < 4; i++) { await new Promise((r) => setTimeout(r, 30)); out.push(side.getBoundingClientRect().left); }
+    return out;
+  });
+  await page.waitForTimeout(250);
+  const end = (await geo(page)).side.left;
+  assert.ok(opening[0]! > end + 20, `it slides in from the right (${opening.map(Math.round).join(", ")} → ${end})`);
+  await ctx.close();
+});
+
+test("browser 1280px: the tabs work by keyboard; Escape collapses without losing focus; Tab passes through the panel", { skip }, async () => {
   const { page, ctx } = await open(1280, 800);
-  await page.click("#notesbtn");
-  // Tab from the toggles reaches the panel next (it follows them in the page order): close, then the selected tab only.
-  await page.focus("#health");
+  // Collapsed: Tab from the header reaches the rail: the button, then the selected tab only.
+  await page.focus("#themebtn");
   await page.keyboard.press("Tab");
-  assert.equal(await active(page), "sideclose");
+  assert.equal(await active(page), "sidetoggle");
   await page.keyboard.press("Tab");
   assert.equal(await active(page), "sidetab-notes", "one tab stop for the tab list");
-  await page.keyboard.press("ArrowRight");
+  // In the rail the arrows only select; Enter opens on the selected tab.
+  await page.keyboard.press("ArrowDown");
   assert.equal(await active(page), "sidetab-status");
   assert.equal(await page.getAttribute("#sidetab-status", "aria-selected"), "true");
-  assert.equal(await page.getAttribute("#sidetab-status", "tabindex"), "0");
-  assert.equal(await page.getAttribute("#sidetab-notes", "tabindex"), "-1");
+  assert.equal(await isOpen(page), false, "arrows in the rail do not open the panel");
+  await page.keyboard.press("Enter");
+  assert.equal(await isOpen(page), true);
   assert.equal(await shown(page, "#statusline"), true);
-  assert.notEqual(await page.$eval("#sidetab-status", (b: HTMLElement) => getComputedStyle(b).outlineStyle), "none", "a visible focus ring");
+  assert.equal(await active(page), "sidetab-status");
+  // Open: arrows, Home and End switch and show the view.
   await page.keyboard.press("ArrowRight");
   assert.equal(await active(page), "sidetab-notes", "wraps around");
+  assert.equal(await shown(page, "#inbox"), true);
+  assert.equal(await page.getAttribute("#sidetab-notes", "tabindex"), "0");
+  assert.equal(await page.getAttribute("#sidetab-status", "tabindex"), "-1");
+  assert.notEqual(await page.$eval("#sidetab-notes", (b: HTMLElement) => getComputedStyle(b).outlineStyle), "none", "a visible focus ring");
   await page.keyboard.press("End");
   assert.equal(await active(page), "sidetab-status");
   await page.keyboard.press("Home");
   assert.equal(await active(page), "sidetab-notes");
   await page.keyboard.press("ArrowLeft");
   assert.equal(await active(page), "sidetab-status");
-  // Not a focus trap: Tab moves on into the view and then out of the panel to the rest of the page.
+  // Not a focus trap: Tab moves on into the view, to the resize handle, and then out of the panel.
   await page.keyboard.press("Tab");
-  assert.equal(await page.evaluate(() => document.getElementById("side")!.contains(document.activeElement)), true, "into the view");
-  for (let i = 0; i < 12 && (await page.evaluate(() => document.getElementById("side")!.contains(document.activeElement))); i++) await page.keyboard.press("Tab");
-  assert.equal(await page.evaluate(() => document.getElementById("side")!.contains(document.activeElement)), false, "Tab leaves the panel");
-  // Escape inside the panel closes it and puts focus on the toggle of the view that was showing.
+  assert.equal(await inSide(page), true, "into the view");
+  const stops: string[] = [];
+  for (let i = 0; i < 14 && (await inSide(page)); i++) { stops.push(await active(page)); await page.keyboard.press("Tab"); }
+  assert.ok(stops.includes("sideresize"), `the resize handle is a tab stop (${stops.join(", ")})`);
+  assert.equal(await inSide(page), false, "Tab leaves the panel");
+  // Escape on a tab collapses the panel; focus stays on the tab, now in the rail.
   await page.focus("#sidetab-status");
   await page.keyboard.press("Escape");
-  assert.equal(await shown(page, "#side"), false);
-  assert.equal(await active(page), "health");
-  // The close button does the same for Notifications.
-  await page.click("#notesbtn");
+  assert.equal(await isOpen(page), false);
+  assert.equal(await active(page), "sidetab-status");
+  // Escape from inside a view collapses it and puts focus on the view's tab (the view is gone).
+  await page.click("#sidetab-notes");
   await page.focus("#inbox .note .x");
   await page.keyboard.press("Escape");
-  assert.equal(await shown(page, "#side"), false);
-  assert.equal(await active(page), "notesbtn");
-  await page.click("#notesbtn");
-  await page.click("#sideclose");
-  assert.equal(await shown(page, "#side"), false);
-  assert.equal(await active(page), "notesbtn");
-  assert.equal(await expanded(page, "#notesbtn"), "false");
+  assert.equal(await isOpen(page), false);
+  assert.equal(await active(page), "sidetab-notes");
   // Escape elsewhere (the message box) leaves the panel alone.
-  await page.click("#notesbtn");
+  await page.click("#sidetab-notes");
   await page.focus("#ainput");
   await page.keyboard.press("Escape");
-  assert.equal(await shown(page, "#side"), true);
+  assert.equal(await isOpen(page), true);
   await ctx.close();
 });
 
-test("browser 1280px: each view scrolls on its own; the head stays put and the conversation does not move", { skip }, async () => {
+test("browser 1280px: the resize handle drags the panel wider and narrower, within bounds, and the width is kept", { skip }, async () => {
+  const { page, ctx, errors } = await open(1280, 800);
+  await page.click("#sidetab-notes");
+  const h = await page.evaluate(() => { const e = document.getElementById("sideresize")!, b = e.getBoundingClientRect(), s = document.getElementById("side")!.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2, sideLeft: s.left, cursor: getComputedStyle(e).cursor, h: b.height, sh: s.height }; });
+  assert.ok(Math.abs(h.x - h.sideLeft) <= 2, "on the panel's inner (left) edge");
+  assert.equal(h.cursor, "ew-resize");
+  assert.ok(h.h >= h.sh - 1, "the whole height of the panel");
+  // ARIA: a focusable window splitter with its value.
+  const aria = await page.evaluate(() => { const e = document.getElementById("sideresize")!; return { role: e.getAttribute("role"), o: e.getAttribute("aria-orientation"), label: e.getAttribute("aria-label"), now: Number(e.getAttribute("aria-valuenow")), min: Number(e.getAttribute("aria-valuemin")), max: Number(e.getAttribute("aria-valuemax")), tab: e.tabIndex }; });
+  const w0 = (await geo(page)).side.width;
+  assert.deepEqual({ role: aria.role, o: aria.o, label: aria.label, tab: aria.tab }, { role: "separator", o: "vertical", label: "Resize the side panel", tab: 0 });
+  assert.equal(aria.now, Math.round(w0));
+  assert.deepEqual([aria.min, aria.max], [280, 720]);
+  // Drag 150px to the left: 150px wider; the conversation moves with it and stays uncovered.
+  await page.mouse.move(h.x, h.y);
+  await page.mouse.down();
+  await page.mouse.move(h.x - 75, h.y, { steps: 3 });
+  await page.mouse.move(h.x - 150, h.y, { steps: 3 });
+  await page.mouse.up();
+  let g = await geo(page);
+  assert.ok(Math.abs(g.side.width - (w0 + 150)) <= 2, `dragged wider (${w0} → ${g.side.width})`);
+  assert.ok(g.msgRight <= g.side.left + 0.5, "the conversation is still not covered");
+  assert.ok(g.send.right <= g.side.left - 8, "nor Send");
+  assert.equal(await page.evaluate(() => localStorage.getItem("orbit.side-width")), String(Math.round(g.side.width)), "kept on this device");
+  assert.equal(Number(await page.getAttribute("#sideresize", "aria-valuenow")), Math.round(g.side.width));
+  // Far past the bounds: the conversation keeps 480px; and the narrowest is 280px.
+  await page.mouse.move(g.side.left, h.y); await page.mouse.down(); await page.mouse.move(50, h.y, { steps: 4 }); await page.mouse.up();
+  g = await geo(page);
+  assert.equal(Math.round(g.side.width), 720, "at most 720px");
+  await page.mouse.move(g.side.left, h.y); await page.mouse.down(); await page.mouse.move(1270, h.y, { steps: 4 }); await page.mouse.up();
+  assert.equal(Math.round((await geo(page)).side.width), 280, "at least 280px");
+  // The keyboard: Left widens, Right narrows, Shift for bigger steps, Home and End for the bounds.
+  await page.focus("#sideresize");
+  await page.keyboard.press("ArrowLeft");
+  assert.equal(Math.round((await geo(page)).side.width), 296);
+  await page.keyboard.press("Shift+ArrowLeft");
+  assert.equal(Math.round((await geo(page)).side.width), 360);
+  await page.keyboard.press("ArrowRight");
+  assert.equal(Math.round((await geo(page)).side.width), 344);
+  await page.keyboard.press("End");
+  assert.equal(Math.round((await geo(page)).side.width), 720);
+  await page.keyboard.press("Home");
+  assert.equal(Math.round((await geo(page)).side.width), 280);
+  assert.equal(await page.getAttribute("#sideresize", "aria-valuetext"), "280 pixels wide");
+  await page.keyboard.press("Shift+ArrowLeft");
+  assert.notEqual(await page.$eval("#sideresize", (e: HTMLElement) => getComputedStyle(e).outlineStyle), "none", "a visible focus ring");
+  // Kept across a reload; a double-click goes back to the default.
+  await page.reload();
+  await page.waitForFunction(() => document.getElementById("notecount")!.textContent !== "?");
+  assert.equal(Math.round((await geo(page)).side.width), 344, "the width survives a reload");
+  await page.dblclick("#sideresize");
+  assert.ok(Math.abs((await geo(page)).side.width - w0) <= 1, "double-click resets the width");
+  assert.equal(await page.evaluate(() => localStorage.getItem("orbit.side-width")), null);
+  // Enter on the handle collapses the panel (window splitter); focus goes to the selected tab, not lost.
+  await page.focus("#sideresize");
+  await page.keyboard.press("Enter");
+  assert.equal(await isOpen(page), false);
+  assert.equal(await active(page), "sidetab-notes");
+  assert.equal(await sideways(page), false);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("browser: a kept width is clamped to a smaller screen without being forgotten", { skip }, async () => {
+  const { page, ctx } = await open(1100, 800);
+  await page.evaluate(() => localStorage.setItem("orbit.side-width", "600"));
+  await page.reload();
+  await page.waitForFunction(() => document.getElementById("notecount")!.textContent !== "?");
+  await page.click("#sidetab-notes");
+  assert.equal(Math.round((await geo(page)).side.width), 600, "the kept width");
+  await page.setViewportSize({ width: 1024, height: 800 });
+  await page.waitForTimeout(100);
+  assert.equal(Math.round((await geo(page)).side.width), 544, "the conversation keeps 480px");
+  assert.equal(await page.evaluate(() => localStorage.getItem("orbit.side-width")), "600", "the kept choice is unchanged");
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.waitForTimeout(100);
+  assert.equal(Math.round((await geo(page)).side.width), 600);
+  // Garbage in storage is the default.
+  await page.evaluate(() => localStorage.setItem("orbit.side-width", "wide"));
+  await page.reload();
+  await page.waitForFunction(() => document.getElementById("notecount")!.textContent !== "?");
+  assert.equal(Math.round((await geo(page)).side.width), 384, "clamp(320px, 30vw, 400px) at 1280");
+  await ctx.close();
+});
+
+test("browser 1280px: each view scrolls on its own; the tab row stays put and the conversation does not move", { skip }, async () => {
   const { page, ctx } = await open(1280, 700);
-  await page.click("#notesbtn");
+  await page.click("#sidetab-notes");
   await page.click("#inbox .showall");
   await page.click("#inbox .note button:not(.x)"); // one long note open
   const before = await page.evaluate(() => ({ log: document.getElementById("alog")!.scrollTop, head: document.querySelector("#side .sidehead")!.getBoundingClientRect().top }));
@@ -201,7 +359,7 @@ test("browser 1280px: each view scrolls on its own; the head stays put and the c
   const afterScroll = await page.evaluate(() => ({ inbox: document.getElementById("inbox")!.scrollTop, log: document.getElementById("alog")!.scrollTop, head: document.querySelector("#side .sidehead")!.getBoundingClientRect().top }));
   assert.ok(afterScroll.inbox > 0, "the view scrolled");
   assert.equal(afterScroll.log, before.log, "the conversation did not");
-  assert.equal(afterScroll.head, before.head, "the heading and tabs stay");
+  assert.equal(afterScroll.head, before.head, "the tabs stay");
   // The last note and its dismiss button are reachable (nothing clipped at the bottom).
   const last = await page.evaluate(() => { const b = document.getElementById("inbox")!; b.scrollTop = b.scrollHeight; const x = [...b.querySelectorAll(".note .x")].at(-1)!.getBoundingClientRect(); return { bottom: x.bottom, vh: window.innerHeight }; });
   assert.ok(last.bottom <= last.vh, "the last dismiss button is on screen when scrolled to the end");
@@ -209,9 +367,11 @@ test("browser 1280px: each view scrolls on its own; the head stays put and the c
   await ctx.close();
 });
 
-test("browser 1280px: receipts are sent only for notes listed in the shown Notifications view, never from the Status view", { skip }, async () => {
+test("browser 1280px: receipts are sent only for notes listed in the shown Notifications view, never from Status or the rail", { skip }, async () => {
   const { page, ctx, acks } = await open(1280, 800, "/#assistant", { notes: 12 });
-  await page.click("#health");
+  await page.waitForTimeout(300);
+  assert.deepEqual(acks, [], "the collapsed rail lists no notes, so it sends no receipt");
+  await page.click("#sidetab-status");
   await page.waitForTimeout(300);
   assert.deepEqual(acks, [], "the Status view lists no notes, so it sends no receipt");
   await page.click("#sidetab-notes");
@@ -220,14 +380,14 @@ test("browser 1280px: receipts are sent only for notes listed in the shown Notif
   await page.waitForTimeout(200);
   assert.deepEqual([...new Set(acks)].sort(), listed, "the ten listed (newest) notes only, not the two past the limit");
   const dismissed = await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes"));
-  await page.click("#sideclose");
-  assert.equal(await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")), dismissed, "closing is not dismissing");
+  await page.click("#sidetoggle");
+  assert.equal(await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")), dismissed, "collapsing is not dismissing");
   assert.equal(await page.textContent("#notecount"), "12");
   await ctx.close();
 });
 
 test("browser 1280px: the status view says when it is reading, when the read failed, and keeps the last answer", { skip }, async () => {
-  const ctx = await chromium.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
+  const ctx = await chromium.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1, reducedMotion: "reduce" });
   const page = await ctx.newPage();
   let mode: "hold" | "fail" | "ok" | "empty" | "down" = "hold";
   let release: () => void = () => {};
@@ -239,7 +399,7 @@ test("browser 1280px: the status view says when it is reading, when the read fai
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ports }) });
   });
   await page.goto(url + "/#assistant");
-  await page.click("#health");
+  await page.click("#sidetab-status");
   assert.equal(await page.textContent("#ports"), "Reading status…", "loading, before any answer");
   assert.equal(await shown(page, "#statuserr"), false);
   release();
@@ -266,47 +426,80 @@ test("browser 1280px: the status view says when it is reading, when the read fai
 
 test("browser 1280px: the Notifications view has an empty state", { skip }, async () => {
   const { page, ctx } = await open(1280, 800, "/#assistant", { notes: 0 });
-  await page.click("#notesbtn");
+  await page.click("#sidetab-notes");
   assert.equal(await page.textContent("#inbox"), "No notifications.");
   assert.equal(await page.getAttribute("#sidetab-notes", "aria-label"), "Notifications, none");
   await ctx.close();
 });
 
-test("browser: below 1024px the panels stay in the header, independent, as before; resizing across switches cleanly", { skip }, async () => {
-  for (const [w, h, phone] of [[390, 844, true], [900, 700, false]] as const) {
-    const { page, ctx } = await open(w, h, "/#assistant", { phone });
-    await page.click("#notesbtn");
-    await page.click("#health");
-    assert.equal(await shown(page, "#inbox"), true, `${w}: both open at once`);
+test("browser: below 1024px the rail stays at the edge and the open panel lies over the page; tabs, collapse and resize work", { skip }, async () => {
+  for (const [w, h, phone] of [[390, 844, true], [320, 640, true], [900, 700, false]] as const) {
+    const { page, ctx, errors } = await open(w, h, "/#assistant", { phone });
+    await headerHasNoIndicators(page, `${w}`);
+    let g = await geo(page);
+    assert.ok(Math.abs(g.side.right - g.vw) <= 1 && g.side.width <= 48, `${w}: the rail at the right edge (${g.side.width})`);
+    assert.ok(g.msgRight <= g.side.left + 0.5, `${w}: the rail covers no message`);
+    if (w < 900) {
+      assert.ok(g.side.bottom <= g.box.top, `${w}: the rail ends above the composer (${g.side.bottom} vs ${g.box.top})`);
+      assert.ok(g.send.right >= g.vw - 24, `${w}: which keeps its full width (Send at ${g.send.right})`);
+    } else assert.ok(g.send.right <= g.side.left, `${w}: Send clear of the rail`);
+    const tap = await page.evaluate(() => ["sidetoggle", "sidetab-notes", "sidetab-status"].map((id) => document.getElementById(id)!.getBoundingClientRect().height));
+    if (phone) assert.ok(tap.every((x: number) => x >= 43.5), `${w}: rail controls are 44px tall on touch (${tap.join(", ")})`);
+    const colBefore = { left: g.msgLeft, right: g.msgRight };
+    await (phone ? page.tap("#sidetab-notes") : page.click("#sidetab-notes"));
+    assert.equal(await isOpen(page), true);
+    assert.equal(await shown(page, "#inbox"), true);
+    g = await geo(page);
+    assert.ok(Math.abs(g.side.right - g.vw) <= 1, `${w}: open on the right edge`);
+    assert.ok(g.side.width <= g.vw - 24 && g.side.width >= Math.min(280, g.vw - 40), `${w}: a usable overlay width (${g.side.width})`);
+    assert.ok(Math.abs(g.msgLeft - colBefore.left) <= 1 && Math.abs(g.msgRight - colBefore.right) <= 1, `${w}: the page under it does not reflow`);
+    // Tabs and the tab-row layout fit: no label is cut off on a phone.
+    const cut = await page.$$eval("#side .sidetab .tlabel", (ls: HTMLElement[]) => ls.filter((l) => l.scrollWidth > l.clientWidth + 1).map((l) => l.textContent));
+    if (w >= 390) assert.deepEqual(cut, [], `${w}: tab labels fit`);
+    await (phone ? page.tap("#sidetab-status") : page.click("#sidetab-status"));
     assert.equal(await shown(page, "#statusline"), true);
-    assert.equal(await expanded(page, "#notesbtn"), "true");
-    assert.equal(await expanded(page, "#health"), "true");
-    assert.equal(await shown(page, "#side .sidehead"), false, `${w}: no side panel head`);
-    assert.equal(await shown(page, "#statussum"), false, `${w}: the status line is as before`);
-    assert.equal(await page.evaluate(() => document.documentElement.hasAttribute("data-side")), false);
-    assert.equal(await page.getAttribute("#inbox", "role"), "region");
-    assert.equal(await page.evaluate(() => document.querySelector("header")!.contains(document.getElementById("inbox"))), true);
-    const inHeader = await page.evaluate(() => { const h = document.querySelector("header")!.getBoundingClientRect(), s = document.getElementById("statusline")!.getBoundingClientRect(); return s.top >= h.top && s.bottom <= h.bottom + 1; });
-    assert.equal(inHeader, true, `${w}: the status line is inside the header`);
+    assert.equal(await shown(page, "#inbox"), false);
+    // Resize by keyboard within the narrow bounds.
+    await page.focus("#sideresize");
+    await page.keyboard.press("End");
+    assert.equal(Math.round((await geo(page)).side.width), Math.min(720, w - 24), `${w}: widest leaves a strip of the page`);
+    await page.keyboard.press("Home");
+    assert.equal(Math.round((await geo(page)).side.width), Math.min(280, w - 40), `${w}: narrowest`);
     assert.equal(await sideways(page), false);
+    await (phone ? page.tap("#sidetoggle") : page.click("#sidetoggle"));
+    assert.equal(await isOpen(page), false, `${w}: collapses`);
+    assert.equal(await sideways(page), false);
+    assert.deepEqual(errors, []);
     await ctx.close();
   }
-  // A laptop window made narrow and wide again.
-  const { page, ctx } = await open(1280, 800);
-  await page.click("#notesbtn");
-  await page.click("#health");
-  assert.equal(await page.textContent("#sidetitle"), "Status");
-  await page.setViewportSize({ width: 800, height: 800 });
-  await page.waitForFunction(() => !document.documentElement.hasAttribute("data-side"));
-  assert.equal(await shown(page, "#statusline"), true, "the open view stays open in the header");
-  assert.equal(await shown(page, "#inbox"), false);
-  assert.equal(await sideways(page), false);
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.waitForFunction(() => document.documentElement.getAttribute("data-side") === "open");
-  assert.equal(await page.textContent("#sidetitle"), "Status");
-  const g = await geo(page);
-  assert.ok(Math.abs(g.side.top - g.header.bottom) <= 1, "placed under the header again");
+  // A phone drags the handle with a finger.
+  const { page, ctx } = await open(390, 844, "/#assistant", { phone: true });
+  await page.tap("#sidetab-notes");
+  const before = (await geo(page)).side.width;
+  const box = await page.evaluate(() => { const b = document.getElementById("sideresize")!.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; });
+  const cdp = await ctx.newCDPSession(page);
+  const touch = (type: string, x: number) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x, y: box.y }] });
+  await touch("touchStart", box.x);
+  for (const dx of [10, 25, 40]) await touch("touchMove", box.x + dx);
+  await touch("touchEnd", box.x + 40);
+  const after = (await geo(page)).side.width;
+  assert.ok(Math.abs(after - (before - 40)) <= 3, `dragged narrower by touch (${before} → ${after})`);
   await ctx.close();
+  // A laptop window made narrow and wide again keeps the open view.
+  const lap = await open(1280, 800);
+  await lap.page.click("#sidetab-status");
+  await lap.page.setViewportSize({ width: 800, height: 800 });
+  await lap.page.waitForTimeout(100);
+  assert.equal(await isOpen(lap.page), true);
+  assert.equal(await shown(lap.page, "#statusline"), true, "the open view stays open over the page");
+  assert.equal(await sideways(lap.page), false);
+  await lap.page.setViewportSize({ width: 1280, height: 800 });
+  await lap.page.waitForTimeout(100);
+  assert.equal(await shown(lap.page, "#statusline"), true);
+  const g = await geo(lap.page);
+  assert.ok(Math.abs(g.side.top - g.header.bottom) <= 1, "placed under the header again");
+  assert.ok(g.msgRight <= g.side.left + 0.5, "and the conversation makes room again");
+  await lap.ctx.close();
 });
 
 // ---- the desktop menu -------------------------------------------------------------------------------------------------
@@ -394,7 +587,7 @@ test("browser 1280px: the side panel and menu rows in Light and Dark: themed sur
     const page = await ctx.newPage();
     await page.goto(url + "/#assistant");
     await page.waitForFunction(() => document.getElementById("notecount")!.textContent !== "?");
-    await page.click("#notesbtn");
+    await page.click("#sidetab-notes");
     const look = await page.evaluate(() => { const s = getComputedStyle(document.getElementById("side")!), card = getComputedStyle(document.documentElement).getPropertyValue("--card").trim(); const probe = document.createElement("i"); probe.style.color = card; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return { bg: s.backgroundColor, card: c, scheme: getComputedStyle(document.documentElement).colorScheme }; });
     assert.equal(look.bg, look.card, `${theme}: the panel is a card surface`);
     assert.equal(look.scheme, theme);

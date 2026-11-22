@@ -149,7 +149,7 @@ after(async () => { await browser?.close(); server.close(); });
 const good = () => ({ commit: SHA, deploy: { lastDeployed: { commit: SHA, at: "2026-11-17T22:04:09Z" } }, ports });
 async function open(opts: { width?: number; colorScheme?: string; wait?: string } = {}) {
   await context?.close();
-  context = await browser.newContext({ viewport: { width: opts.width ?? 900, height: 700 }, colorScheme: opts.colorScheme ?? "light", timezoneId: "Asia/Tokyo" });
+  context = await browser.newContext({ viewport: { width: opts.width ?? 900, height: 700 }, colorScheme: opts.colorScheme ?? "light", timezoneId: "Asia/Tokyo", reducedMotion: "reduce" });
   page = await context.newPage();
   await page.goto(base);
   await page.waitForFunction(() => document.readyState === "complete");
@@ -159,13 +159,14 @@ const visible = (sel: string) => page.evaluate((s: string) => { const e = docume
 // What each row shows on screen.
 const rows = () => page.$$eval("#deployinfo > *", (es: HTMLElement[]) => es.map((e) => `${e.tagName}:${e.textContent}`));
 
-test("browser: collapsed shows only the indicator; expanded shows Deployed and Commit above the pills, in the configured zone", { skip }, async () => {
+test("browser: collapsed shows only the indicator; the Status view shows Deployed and Commit above the pills, in the configured zone", { skip }, async () => {
   answer = { code: 200, body: good() };
   await open();
-  assert.equal(await page.getAttribute("#health", "aria-expanded"), "false");
+  assert.equal(await page.getAttribute("#sidetoggle", "aria-expanded"), "false");
   assert.equal(await visible("#deployinfo"), false, "collapsed: no deployment rows");
-  assert.equal(await page.textContent("#health .label"), "All live", "the collapsed indicator is unchanged");
-  await page.click("#health");
+  await page.waitForFunction(() => document.getElementById("sidetab-status")!.className === "sidetab ok");
+  assert.equal(await page.getAttribute("#sidetab-status", "aria-label"), "Status: All live (healthy, all live)", "the collapsed indicator is unchanged");
+  await page.click("#sidetab-status");
   assert.equal(await visible("#deployinfo"), true);
   // The browser is in Tokyo; the page uses ORBIT's configured zone, as message times do.
   assert.deepEqual(await rows(), ["DT:Deployed", "DD:Nov 17, 2026, 2:04 PM PST", "DT:Commit", "DD:2d2228b"]);
@@ -186,21 +187,21 @@ test("browser: collapsed shows only the indicator; expanded shows Deployed and C
   const x = await page.$$eval("#deployinfo dt, #deployinfo dd", (es: HTMLElement[]) => es.map((e) => Math.round(e.getBoundingClientRect().left)));
   assert.equal(x[0], x[2], "labels aligned");
   assert.equal(x[1], x[3], "values aligned");
-  // It comes first, on its own row above the pills (the status), not beside them; the /status link stays beside the pills.
+  // It comes first, on its own row above the pills (the status), not beside them; the /status link sits at its right.
   const order = await page.evaluate(() => {
     const r = (id: string) => document.getElementById(id)!.getBoundingClientRect();
-    return { above: r("deployinfo").bottom <= r("ports").top, first: document.getElementById("statusline")!.firstElementChild!.id, linkBeside: r("statusopen").top >= r("deployinfo").bottom };
+    return { above: r("deployinfo").bottom <= r("ports").top, first: document.getElementById("statusline")!.firstElementChild!.id, linkBeside: r("statusopen").top < r("deployinfo").bottom && r("statusopen").left >= r("deployinfo").right };
   });
   assert.deepEqual(order, { above: true, first: "deployinfo", linkBeside: true });
   // Collapsing hides it again.
-  await page.click("#health");
+  await page.click("#sidetoggle");
   assert.equal(await visible("#deployinfo"), false);
 });
 
 test("browser: missing, mismatched or unreadable metadata shows a quiet Unavailable with the reason on hover", { skip }, async () => {
   answer = { code: 200, body: { commit: "unknown", deploy: { state: "unknown", detail: "No deploy state file is configured." }, ports } };
   await open();
-  await page.click("#health");
+  await page.click("#sidetab-status");
   assert.deepEqual(await rows(), ["DT:Deployed", "DD:Unavailable", "DT:Commit", "DD:Unavailable"]);
   assert.match(await page.getAttribute("#deploycommit .na", "title"), /not known/);
   answer = { code: 200, body: { ...good(), deploy: { lastDeployed: { commit: OTHER, at: "2026-11-17T22:04:09Z" } } } };
@@ -218,14 +219,14 @@ test("browser: missing, mismatched or unreadable metadata shows a quiet Unavaila
   await page.waitForFunction(() => document.querySelector("#deployedat time") !== null);
   answer = { code: 500, body: { error: "x" } };
   await page.evaluate("refreshStatus()");
-  await page.waitForFunction(() => document.getElementById("health")!.className === "unknown");
+  await page.waitForFunction(() => document.getElementById("sidetab-status")!.className === "sidetab unknown");
   assert.deepEqual(await rows(), ["DT:Deployed", "DD:Nov 17, 2026, 2:04 PM PST", "DT:Commit", "DD:2d2228b"]);
 });
 
 test("browser: a page whose first status read fails says Unavailable, not a time", { skip }, async () => {
   answer = { code: 500, body: { error: "x" } };
   await open({ wait: "Not read yet" });
-  await page.click("#health");
+  await page.click("#sidetab-status");
   assert.deepEqual(await rows(), ["DT:Deployed", "DD:Unavailable", "DT:Commit", "DD:Unavailable"]);
   assert.equal(await page.getAttribute("#deployedat .na", "title"), "ORBIT's status could not be read.");
 });
@@ -235,7 +236,7 @@ test("browser: phone and desktop widths, light and dark: no sideways scroll, not
   for (const colorScheme of ["light", "dark"]) {
     for (const width of [320, 390, 900]) {
       await open({ width, colorScheme });
-      await page.click("#health");
+      await page.click("#sidetab-status");
       const m = await page.evaluate(() => {
         const box = document.getElementById("deployinfo")!.getBoundingClientRect();
         const line = document.getElementById("statusline")!.getBoundingClientRect();

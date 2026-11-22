@@ -224,11 +224,12 @@ test("browser (320 and 375): the session picker is bounded on screen, layered ab
   }
 });
 
-test("browser (touch, 320 and 390): header controls and page tabs are at least 44px hit areas, keep a visible focus ring, and every page stays reachable", { skip }, async () => {
+test("browser (touch, 320 and 390): header controls, page tabs and the side panel's rail are at least 44px hit areas, keep a visible focus ring, and every page stays reachable", { skip }, async () => {
   for (const size of [SIZES[0]!, SIZES[2]!]) {
     const { page, ctx } = await open(chromium, size, "/sessions");
     await page.waitForFunction(() => !document.getElementById("sesswrap")!.hidden);
-    const ids = ["assistanttab", "sessionstab", "notesbtn", "health", "sessbtn"];
+    const rail = ["sidetoggle", "sidetab-notes", "sidetab-status"];
+    const ids = ["assistanttab", "sessionstab", "sessbtn", ...rail];
     for (const id of ids) {
       const m = await page.evaluate((id: string) => {
         const e = document.getElementById(id)!, r = e.getBoundingClientRect();
@@ -239,9 +240,9 @@ test("browser (touch, 320 and 390): header controls and page tabs are at least 4
       assert.equal(m.visible, true, `${size.name} ${id}: visible`);
       assert.ok(m.h >= 35.5, `${size.name} ${id}: at least 36px tall (${m.h})`);
       assert.ok(m.up && m.down, `${size.name} ${id}: a touch 21px above or below the center still hits it (44px hit area)`);
-      if (id === "notesbtn" || id === "health") assert.ok(m.w >= 43.5, `${size.name} ${id}: at least 44px wide (${m.w})`);
+      if (rail.includes(id)) assert.ok(m.w >= 43.5, `${size.name} ${id}: at least 44px wide (${m.w})`);
     }
-    await page.focus("#notesbtn");
+    await page.focus("#sidetab-notes");
     await page.keyboard.press("Shift+Tab");
     await page.keyboard.press("Tab");
     const ring = await page.evaluate(() => { const cs = getComputedStyle(document.activeElement!); return { id: document.activeElement!.id, style: cs.outlineStyle, w: parseFloat(cs.outlineWidth) }; });
@@ -251,21 +252,23 @@ test("browser (touch, 320 and 390): header controls and page tabs are at least 4
   }
 });
 
-test("browser (390): notifications and status panels stay bounded, so the conversation and Send keep their room", { skip }, async () => {
+test("browser (568x320): the side panel fits the shortest screen: its view scrolls inside, the page never grows, and collapsing gives Send back", { skip }, async () => {
   fixture.set({ exchanges: 8, notes: 12 });
   const { page, ctx, p } = await open(chromium, SIZES[4]!, "/#assistant"); // 568x320 landscape: the tightest height
-  await page.click("#notesbtn");
-  await page.click("#health");
+  await page.click("#sidetab-notes");
   await page.waitForTimeout(100);
   const g = await shell(page, p);
   assert.equal(g.docOverflowY, false, "the page does not grow");
   assert.equal(g.scrolled, 0);
-  assert.equal(g.sendCovered, false, "Send stays clear");
-  assert.ok(g.send.bottom <= g.vh + 1, "Send on screen");
-  const inbox = await page.evaluate(() => { const b = document.getElementById("inbox")!; return { h: b.getBoundingClientRect().height, scrolls: b.scrollHeight > b.clientHeight }; });
-  assert.ok(inbox.h <= 320 * 0.3 + 1, `the notifications panel is at most 30% of the height (${inbox.h})`);
-  await page.click("#notesbtn");
-  await page.click("#health");
+  const side = await page.evaluate(() => { const s = document.getElementById("side")!.getBoundingClientRect(), h = document.querySelector("header")!.getBoundingClientRect(), b = document.getElementById("inbox")!; return { top: s.top, head: h.bottom, bottom: s.bottom, vh: window.innerHeight, scrolls: b.scrollHeight > b.clientHeight, oy: getComputedStyle(b).overflowY }; });
+  assert.ok(Math.abs(side.top - side.head) <= 1 && side.bottom <= side.vh + 1, `the panel sits between the header and the bottom of the screen (${side.top}..${side.bottom})`);
+  assert.equal(side.oy, "auto");
+  assert.equal(side.scrolls, true, "12 notes scroll inside the view");
+  await page.click("#sidetoggle");
+  await page.waitForTimeout(300); // the panel slides away
+  const c = await shell(page, p);
+  assert.equal(c.sendCovered, false, "Send stays clear of the rail");
+  assert.ok(c.send.bottom <= c.vh + 1, "Send on screen");
   await ctx.close();
   fixture.set({ notes: 3 });
 });

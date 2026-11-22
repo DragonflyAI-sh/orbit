@@ -133,7 +133,7 @@ const geometry = (page: any) => page.evaluate(() => {
   const cs = getComputedStyle(btn), ws = getComputedStyle(word), after = getComputedStyle(btn, "::after");
   return {
     btn: r(btn), img: r(img), word: r(word), wordShown: r(word).width > 1,
-    health: r(document.getElementById("health")!), vw: document.documentElement.clientWidth, sw: document.documentElement.scrollWidth,
+    theme: r(document.getElementById("themebtn")!), vw: document.documentElement.clientWidth, sw: document.documentElement.scrollWidth,
     bg: cs.backgroundColor, border: cs.borderTopWidth, shadow: cs.boxShadow, wordColor: ws.color, wordBg: ws.backgroundImage,
     coarse: matchMedia("(pointer: coarse)").matches, hit: after.content !== "none" ? { top: parseFloat(after.top), bottom: parseFloat(after.bottom) } : null,
   };
@@ -159,7 +159,7 @@ for (const [name, opts] of [
         assert.ok(g.img.left >= g.btn.left && g.img.right <= g.btn.right && g.img.top >= g.btn.top - 0.5 && g.img.bottom <= g.btn.bottom + 0.5, `${where}: the logo is inside the button`);
         if (g.wordShown) assert.ok(g.word.left >= g.img.right && g.word.right <= g.btn.right, `${where}: the name is inside the button, after the logo`);
         else assert.ok(path.startsWith("/sessions") && g.vw <= 400, `${where}: the name is only hidden on narrow Sessions, as before`);
-        assert.ok(Math.abs((g.btn.top + g.btn.bottom) / 2 - (g.health.top + g.health.bottom) / 2) <= 4, `${where}: the brand sits on the toggles' row`);
+        assert.ok(Math.abs((g.btn.top + g.btn.bottom) / 2 - (g.theme.top + g.theme.bottom) / 2) <= 4, `${where}: the brand sits on the theme toggle's row`);
         assert.equal(g.bg, "rgba(0, 0, 0, 0)", `${where}: no button background at rest`);
         assert.equal(g.border, "0px", `${where}: no button border`);
         assert.equal(g.shadow, "none", `${where}: no ring at rest`);

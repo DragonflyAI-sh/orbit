@@ -6,10 +6,13 @@ import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import { isPagePath } from "./helpers/sessions-ui.ts";
 
-// The page header: page links in the bar, a notifications count button and the status indicator on the right, each toggling
-// its own panel below the bar (the status line with every pill and a new-tab link to /status; the notifications). The pure
-// <panels> helpers always run; the page's layout and toggles run in a real browser (Playwright's Chromium) against a scripted
-// fake of ORBIT's routes, and are skipped, saying so, where Playwright is not installed. Offline: no model, no real ORBIT.
+// The page header and the side panel's views: page links and the theme toggle in the bar, and no notifications or status
+// indicator there; those are the side panel's two tabs (docs/design-system.md, "Side panel"): the Notifications tab with the
+// count and the Status tab with the level dot, each showing its view (the notifications; the status line with every pill and
+// a new-tab link to /status). The pure <panels> helpers always run; the page's layout and controls run in a real browser
+// (Playwright's Chromium) against a scripted fake of ORBIT's routes, and are skipped, saying so, where Playwright is not
+// installed. Offline: no model, no real ORBIT. The side panel's own layout, resize and collapse checks are in
+// test/side-panel-browser.test.ts.
 // The fake keeps its notifications as ORBIT does (GET /notifications returns `current` on every read; a read consumes nothing).
 // Receipts, reloads, restarts and run delivery against the REAL server are in test/notifications-real-server.test.ts.
 
@@ -17,15 +20,23 @@ const html = readFileSync(new URL("../src/web/index.html", import.meta.url), "ut
 const block = (name: string) => html.match(new RegExp(`// <${name}>([\\s\\S]*?)// </${name}>`))![1]!;
 type Panels = { status: boolean; notes: boolean };
 type Store = { getItem(k: string): string | null; setItem(k: string, v: string): void };
-const lib = new Function(`${block("panels")}; return { readPanels, writePanels, noteCountLabel, PANELS_KEY };`)() as {
+type Bounds = { min: number; max: number };
+type WStore = Store & { removeItem(k: string): void };
+const lib = new Function(`${block("panels")}; return { readPanels, writePanels, noteCountLabel, PANELS_KEY, SIDE_WIDTH_KEY, sideWidthBounds, clampSideWidth, readSideWidth, writeSideWidth, sideWidthForKey };`)() as {
   readPanels(s: Store | null): Panels;
   writePanels(s: Store | null, p: Panels): void;
   noteCountLabel(n: number): string;
   PANELS_KEY: string;
+  SIDE_WIDTH_KEY: string;
+  sideWidthBounds(vw: number, desk: boolean): Bounds;
+  clampSideWidth(w: unknown, b: Bounds): number | null;
+  readSideWidth(s: Store | null): number | null;
+  writeSideWidth(s: WStore | null, w: number | null): void;
+  sideWidthForKey(key: string, shift: boolean, w: number, b: Bounds): number | null;
 };
 const memStore = (init: Record<string, string> = {}) => {
   const m = new Map(Object.entries(init));
-  return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m };
+  return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), removeItem: (k: string) => void m.delete(k), m };
 };
 
 // ---- pure helpers -----------------------------------------------------------------------------------------------------
@@ -50,6 +61,52 @@ test("panels: each panel's state is kept independently", () => {
   assert.deepEqual(lib.readPanels(s), { status: false, notes: true });
 });
 
+test("side panel width: bounds keep the conversation 480px on desktops and a strip of the page on phones, 280 to 720px", () => {
+  assert.deepEqual(lib.sideWidthBounds(1280, true), { min: 280, max: 720 });
+  assert.deepEqual(lib.sideWidthBounds(1024, true), { min: 280, max: 544 });
+  assert.deepEqual(lib.sideWidthBounds(1600, true), { min: 280, max: 720 });
+  assert.deepEqual(lib.sideWidthBounds(900, false), { min: 280, max: 720 });
+  assert.deepEqual(lib.sideWidthBounds(390, false), { min: 280, max: 366 });
+  assert.deepEqual(lib.sideWidthBounds(320, false), { min: 280, max: 296 });
+  // A screen too narrow for 280px still gets a panel that fits it.
+  const tiny = lib.sideWidthBounds(280, false);
+  assert.ok(tiny.min <= 240 && tiny.max >= tiny.min, JSON.stringify(tiny));
+  const b = { min: 280, max: 720 };
+  assert.equal(lib.clampSideWidth(500.4, b), 500);
+  assert.equal(lib.clampSideWidth(10, b), 280);
+  assert.equal(lib.clampSideWidth(9000, b), 720);
+  for (const bad of [null, undefined, NaN, Infinity, "400"]) assert.equal(lib.clampSideWidth(bad, b), null, String(bad));
+});
+
+test("side panel width: kept per device, and anything unreadable is the default", () => {
+  const s = memStore();
+  assert.equal(lib.readSideWidth(s), null);
+  lib.writeSideWidth(s, 432.6);
+  assert.equal(s.m.get(lib.SIDE_WIDTH_KEY), "433");
+  assert.equal(lib.readSideWidth(s), 433);
+  lib.writeSideWidth(s, null);
+  assert.equal(s.m.has(lib.SIDE_WIDTH_KEY), false, "a reset forgets it");
+  for (const v of ["", "wide", "-5", "50", "99999", "NaN"]) assert.equal(lib.readSideWidth(memStore({ [lib.SIDE_WIDTH_KEY]: v })), null, v);
+  const throwing = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); }, removeItem: () => { throw new Error("blocked"); } };
+  assert.equal(lib.readSideWidth(throwing), null);
+  assert.equal(lib.readSideWidth(null), null);
+  assert.doesNotThrow(() => lib.writeSideWidth(throwing, 400));
+  assert.doesNotThrow(() => lib.writeSideWidth(null, 400));
+});
+
+test("side panel width: the resize handle's keys (Left widens, Right narrows, Shift for big steps, Home and End)", () => {
+  const b = { min: 280, max: 720 };
+  assert.equal(lib.sideWidthForKey("ArrowLeft", false, 400, b), 416);
+  assert.equal(lib.sideWidthForKey("ArrowRight", false, 400, b), 384);
+  assert.equal(lib.sideWidthForKey("ArrowLeft", true, 400, b), 464);
+  assert.equal(lib.sideWidthForKey("ArrowRight", true, 400, b), 336);
+  assert.equal(lib.sideWidthForKey("Home", false, 400, b), 280);
+  assert.equal(lib.sideWidthForKey("End", false, 400, b), 720);
+  assert.equal(lib.sideWidthForKey("ArrowLeft", false, 715, b), 720, "never past the bounds");
+  assert.equal(lib.sideWidthForKey("ArrowRight", true, 300, b), 280);
+  for (const k of ["Enter", "a", "Tab", "ArrowUp", "ArrowDown", "PageUp"]) assert.equal(lib.sideWidthForKey(k, false, 400, b), null, k);
+});
+
 test("the notification count label says how many, says none at zero, and never claims unread", () => {
   assert.equal(lib.noteCountLabel(0), "Notifications: none");
   assert.equal(lib.noteCountLabel(1), "Notifications: 1");
@@ -57,31 +114,40 @@ test("the notification count label says how many, says none at zero, and never c
   assert.doesNotMatch(block("panels").replace(/\/\/[^\n]*/g, ""), /unread|seen/i);
 });
 
-test("the markup: page links in the header bar with no Status link; two toggle buttons; collapsed panels below the bar", () => {
+test("the markup: page links in the header bar with no Status link and no indicators; the side panel's tabs hold them, collapsed", () => {
   const header = html.match(/<header>[\s\S]*?<\/header>/)![0];
-  const bar = header.match(/<div class="bar">([\s\S]*?)<\/div><div id="side">/)![1]!;
+  const bar = header.match(/<div class="bar">([\s\S]*?)<\/div><div id="sesspicker"/)![1]!;
   assert.match(bar, /<nav id="tabs" aria-label="ORBIT pages">/, "the page links are in the bar");
   assert.equal(html.match(/<nav\b/g)?.length, 1, "one navigation, no duplicate");
   const nav = header.match(/<nav id="tabs"[^>]*>([\s\S]*?)<\/nav>/)![1]!;
   assert.doesNotMatch(nav, /\/status|Status/, "no Status link in the page links");
-  for (const [button, panel] of [["notesbtn", "inbox"], ["health", "statusline"]]) {
-    const b = bar.match(new RegExp(`<button type="button" id="${button}"[^>]*>`))?.[0] ?? "";
-    assert.match(b, /aria-expanded="false"/, button);
-    assert.match(b, new RegExp(`aria-controls="${panel}"`), button);
-    assert.match(b, /aria-label="[^"]+"/, button);
-    assert.match(header, new RegExp(`<div id="${panel}" role="region" aria-label="[^"]+" hidden>`), `${panel} starts collapsed`);
+  // The header has no notifications or status indicator, no panel and none of their words.
+  assert.doesNotMatch(html, /id="notesbtn"|id="health"|id="sidetitle"|id="sideclose"/);
+  assert.doesNotMatch(header, /id="(side|inbox|statusline|notecount)"|Notifications|All live|Status unknown/);
+  // The side panel follows the header: a labelled complementary region whose head is the collapse button and the tab list.
+  const side = html.match(/<aside id="side" aria-label="Side panel">[\s\S]*?<\/aside>/)![0];
+  assert.ok(html.indexOf(side) > html.indexOf("</header>"), "after the header");
+  assert.match(side, /^<aside id="side" aria-label="Side panel"><div class="sidehead"><button type="button" id="sidetoggle" aria-expanded="false" aria-controls="inbox statusline" aria-label="Side panel"[^>]*>/);
+  assert.match(side, /<div class="sidetabs" role="tablist" aria-label="Side panel views" aria-orientation="vertical">/);
+  for (const [tab, panel, label] of [["sidetab-notes", "inbox", "Notifications"], ["sidetab-status", "statusline", "Status"]]) {
+    const b = side.match(new RegExp(`<button type="button" role="tab" id="${tab}"[^>]*>`))?.[0] ?? "";
+    assert.match(b, new RegExp(`aria-controls="${panel}"`), tab);
+    assert.match(b, /aria-label="[^"]+"/, tab);
+    assert.match(side, new RegExp(`<div id="${panel}" role="tabpanel" aria-label="${label}" hidden>`), `${panel} starts hidden`);
   }
-  // The status line holds the running release (Deployed, then Commit) first, then the overall summary (shown in the desktop
-  // side panel only), a read-error line, the pills (saying they are being read until the first answer) and the page link. It comes straight after the bar on phones: the side
-  // panel's head before it is not shown there (test/side-panel-browser.test.ts).
-  assert.match(header, /<\/div><\/div><div id="side"><div class="sidehead">[\s\S]*?<\/div><\/div><div id="statusline"[^>]*><dl id="deployinfo"[^>]*>[\s\S]*?<\/dl><div id="statussum">[\s\S]*?<div id="statuserr" role="alert" hidden><\/div><div id="ports"><span class="empty">Reading status…<\/span><\/div><a id="statusopen" href="\/status" target="_blank" rel="noopener noreferrer"/);
-  // Before the first /status request the indicator says the status has not been read yet, not that reading it failed.
-  const health = bar.match(/<button type="button" id="health"[^>]*>/)![0];
-  assert.match(health, /title="ORBIT's status has not been read yet, so it is not known to be all live\. Show or hide the status line\."/);
-  assert.match(health, /aria-label="Overall status: unknown, not all live\. ORBIT's status has not been read yet, so it is not known to be all live\."/);
-  assert.doesNotMatch(health, /could not be read/);
+  assert.match(side, /<span id="notecount" class="count">\?<\/span>/, "the count starts unknown, never 0");
+  assert.match(side, /<div id="sideresize" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="side" aria-label="Resize the side panel"/);
+  // The status line holds the running release (Deployed, then Commit) first, then the overall summary, a read-error line, the
+  // pills (saying they are being read until the first answer) and the page link.
+  assert.match(side, /<div id="statusline"[^>]*><dl id="deployinfo"[^>]*>[\s\S]*?<\/dl><div id="statussum">[\s\S]*?<div id="statuserr" role="alert" hidden><\/div><div id="ports"><span class="empty">Reading status…<\/span><\/div><a id="statusopen" href="\/status" target="_blank" rel="noopener noreferrer"/);
+  // Before the first /status request the Status tab says the status has not been read yet, not that reading it failed.
+  const status = side.match(/<button type="button" role="tab" id="sidetab-status"[^>]*>/)![0];
+  assert.match(status, /class="sidetab unknown"/);
+  assert.match(status, /title="Status unknown\. ORBIT's status has not been read yet\."/);
+  assert.match(status, /aria-label="Status: Status unknown \(unknown\)"/);
+  assert.doesNotMatch(status, /could not be read/);
   // Icons are decoration; the controls carry the words.
-  for (const svg of header.match(/<svg[^>]*>/g) ?? []) assert.match(svg, /aria-hidden="true"/);
+  for (const svg of (header + side).match(/<svg[^>]*>/g) ?? []) assert.match(svg, /aria-hidden="true"/);
 });
 
 // ---- the page in a real browser ---------------------------------------------------------------------------------------
@@ -125,7 +191,7 @@ after(async () => { await browser?.close(); server.close(); });
 const live = (port: string, state = "live") => ({ port, state, detail: `${port} detail` });
 async function open(opts: { hash?: string; width?: number; colorScheme?: string } = {}) {
   await context?.close();
-  context = await browser.newContext({ viewport: { width: opts.width ?? 900, height: 700 }, colorScheme: opts.colorScheme ?? "light" });
+  context = await browser.newContext({ viewport: { width: opts.width ?? 900, height: 700 }, colorScheme: opts.colorScheme ?? "light", reducedMotion: "reduce" });
   page = await context.newPage();
   await page.goto(`${base}${opts.hash ?? ""}`);
   await page.waitForFunction(() => document.readyState === "complete");
@@ -137,40 +203,43 @@ const visible = (sel: string) => page.evaluate((s: string) => { const e = docume
 const expanded = (sel: string) => page.getAttribute(sel, "aria-expanded");
 const count = () => page.textContent("#notecount");
 
-test("browser: page links sit in the header bar beside the toggles, with no Status link, on desktop and phone widths", { skip }, async () => {
+test("browser: page links sit in the header bar beside the theme toggle, with no Status link and no indicators, on desktop and phone widths", { skip }, async () => {
   reset();
   for (const width of [900, 360]) {
     await open({ width });
     assert.deepEqual(await page.$$eval("header .bar nav a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.getAttribute("href"))), ["/#assistant", "/#jobs", "/sessions"]);
     assert.equal(await page.$$eval('header nav a[href="/status"]', (as: unknown[]) => as.length), 0);
     assert.equal(await page.getAttribute("#assistanttab", "aria-current"), "page", "the current page cue stays");
-    const box = await page.evaluate(() => { const r = (id: string) => document.getElementById(id)!.getBoundingClientRect(); return { health: r("health"), notes: r("notesbtn"), brand: document.querySelector(".brand")!.getBoundingClientRect(), width: document.documentElement.clientWidth }; });
-    assert.ok(box.health.right <= box.width && box.health.left > box.brand.right, `status indicator on the right at ${width}px`);
-    assert.ok(box.notes.right <= box.health.left, `notifications button beside it at ${width}px`);
-    // Open both panels with many notes and a long pill: still no sideways scroll.
+    const box = await page.evaluate(() => { const r = (id: string) => document.getElementById(id)!.getBoundingClientRect(); return { theme: r("themebtn"), side: r("side"), brand: document.querySelector(".brand")!.getBoundingClientRect(), width: document.documentElement.clientWidth, text: document.querySelector("header")!.textContent }; });
+    assert.ok(box.theme.right <= box.width && box.theme.left > box.brand.right, `the theme toggle on the right at ${width}px`);
+    assert.doesNotMatch(box.text!, /Notifications|All live|Status/, `no indicator words in the header at ${width}px`);
+    assert.ok(Math.abs(box.side.right - box.width) <= 1, `the side panel's rail at the right edge at ${width}px`);
+    // Open both views in turn with many notes and a long pill: still no sideways scroll.
     ports = [...ports, live("a-very-long-port-name-that-should-wrap-rather-than-overflow", "degraded")];
     current = notes(11);
     await page.evaluate("refreshStatus(); refreshInbox()");
     await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "11");
-    await page.click("#health");
-    await page.click("#notesbtn");
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `no horizontal overflow at ${width}px`);
+    await page.click("#sidetab-status");
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `no horizontal overflow at ${width}px (Status)`);
+    await page.click("#sidetab-notes");
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `no horizontal overflow at ${width}px (Notifications)`);
     reset();
   }
 });
 
-test("browser: the status indicator toggles the status line of every pill; its icon opens /status in a new tab", { skip }, async () => {
+test("browser: the Status tab shows the status line of every pill; its icon opens /status in a new tab", { skip }, async () => {
   reset();
   await open();
-  assert.equal(await expanded("#health"), "false");
+  assert.equal(await expanded("#sidetoggle"), "false");
   assert.equal(await visible("#statusline"), false, "collapsed by default");
-  await page.click("#health");
-  assert.equal(await expanded("#health"), "true");
+  await page.click("#sidetab-status");
+  assert.equal(await expanded("#sidetoggle"), "true");
+  assert.equal(await page.getAttribute("#sidetab-status", "aria-selected"), "true");
   assert.equal(await visible("#statusline"), true);
   assert.deepEqual(await page.$$eval("#statusline .pill", (ps: HTMLElement[]) => ps.map((p) => p.textContent)), ["model: live", "memory: live", "watch: live"]);
-  // The panel sits directly below the header bar.
-  const gap = await page.evaluate(() => document.getElementById("statusline")!.getBoundingClientRect().top - document.querySelector("header .bar")!.getBoundingClientRect().bottom);
-  assert.ok(gap >= 0 && gap <= 12, `status line right under the bar (gap ${gap}px)`);
+  // The panel sits directly below the header.
+  const gap = await page.evaluate(() => document.getElementById("side")!.getBoundingClientRect().top - document.querySelector("header")!.getBoundingClientRect().bottom);
+  assert.ok(Math.abs(gap) <= 1, `the side panel right under the header (gap ${gap}px)`);
   const link = await page.$eval("#statusopen", (a: HTMLAnchorElement) => ({ href: a.getAttribute("href"), target: a.target, rel: a.rel, label: a.getAttribute("aria-label") }));
   assert.deepEqual(link, { href: "/status", target: "_blank", rel: "noopener noreferrer", label: "Open the status page (raw JSON) in a new tab" });
   const [tab] = await Promise.all([context.waitForEvent("page"), page.click("#statusopen")]);
@@ -178,30 +247,35 @@ test("browser: the status indicator toggles the status line of every pill; its i
   assert.equal(new URL(tab.url()).pathname, "/status");
   assert.equal(new URL(page.url()).pathname, "/", "the page itself stays put");
   await tab.close();
-  // Keyboard: Enter and Space work the toggle, and it keeps focus.
-  await page.focus("#health");
-  await page.keyboard.press("Enter");
-  assert.equal(await expanded("#health"), "false");
+  // Keyboard: Escape on the tab collapses the panel and the tab keeps focus; Enter and Space on it open it again.
+  await page.focus("#sidetab-status");
+  await page.keyboard.press("Escape");
+  assert.equal(await expanded("#sidetoggle"), "false");
   assert.equal(await visible("#statusline"), false);
   await page.keyboard.press("Space");
-  assert.equal(await expanded("#health"), "true");
-  assert.equal(await page.evaluate(() => document.activeElement!.id), "health");
+  assert.equal(await expanded("#sidetoggle"), "true");
+  assert.equal(await visible("#statusline"), true);
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Enter");
+  assert.equal(await visible("#statusline"), true);
+  assert.equal(await page.evaluate(() => document.activeElement!.id), "sidetab-status");
   // The keyboard focus ring shows.
-  assert.notEqual(await page.$eval("#health", (b: HTMLElement) => getComputedStyle(b).outlineStyle), "none");
+  assert.notEqual(await page.$eval("#sidetab-status", (b: HTMLElement) => getComputedStyle(b).outlineStyle), "none");
 });
 
-test("browser: a collapsed status line keeps updating, and the indicator keeps its meaning", { skip }, async () => {
+test("browser: a hidden status line keeps updating, and the Status tab keeps its meaning", { skip }, async () => {
   reset();
   await open();
-  assert.equal(await page.getAttribute("#health", "class"), "ok");
+  assert.equal(await page.getAttribute("#sidetab-status", "class"), "sidetab ok");
   ports = [live("model"), live("memory", "degraded")];
   await page.evaluate("refreshStatus()");
-  await page.waitForFunction(() => document.getElementById("health")!.className === "degraded");
-  assert.equal(await visible("#statusline"), false, "a bad status does not open the line by itself");
-  assert.equal(await expanded("#health"), "false");
+  await page.waitForFunction(() => document.getElementById("sidetab-status")!.className === "sidetab degraded");
+  assert.equal(await visible("#statusline"), false, "a bad status does not open the panel by itself");
+  assert.equal(await expanded("#sidetoggle"), "false");
   assert.deepEqual(await page.$$eval("#ports .pill", (ps: HTMLElement[]) => ps.map((p) => `${p.className}|${p.textContent}`)), ["pill live|model: live", "pill degraded|memory: degraded"], "pills current while hidden");
-  assert.match(await page.getAttribute("#health", "aria-label"), /Overall status: degraded but working\. Degraded: 1 not live\. Working, with degradation\. Not live: memory: degraded\./);
-  await page.click("#health");
+  assert.equal(await page.getAttribute("#sidetab-status", "aria-label"), "Status: Degraded: 1 not live (degraded but working)");
+  assert.equal(await page.getAttribute("#sidetab-status", "title"), "Degraded: 1 not live. Working, with degradation. Not live: memory: degraded.");
+  await page.click("#sidetab-status");
   assert.equal(await page.textContent("#ports"), "model: livememory: degraded");
 });
 
@@ -209,26 +283,28 @@ test("browser: the notification count is every undismissed note, not just the fe
   reset();
   await open();
   assert.equal(await count(), "0");
-  assert.equal(await page.getAttribute("#notesbtn", "aria-label"), "Notifications: none");
-  await page.click("#notesbtn");
+  assert.equal(await page.getAttribute("#sidetab-notes", "aria-label"), "Notifications, none");
+  assert.equal(await page.getAttribute("#sidetab-notes", "title"), "Notifications: none");
+  await page.click("#sidetab-notes");
   assert.equal(await page.textContent("#inbox"), "No notifications.", "an empty state, not a blank box");
-  await page.click("#notesbtn");
+  await page.click("#sidetoggle");
   current = notes(12);
   await page.evaluate("refreshInbox()");
   await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "12");
-  assert.equal(await page.getAttribute("#notesbtn", "aria-label"), "Notifications: 12");
-  assert.equal(await visible("#inbox"), false, "new notifications only change the count; the panel stays closed");
-  assert.equal(await expanded("#notesbtn"), "false");
-  // The hidden panel was still rendered: ten listed, the rest behind "show all (12)".
+  assert.equal(await page.getAttribute("#sidetab-notes", "aria-label"), "Notifications, 12");
+  assert.equal(await visible("#inbox"), false, "new notifications only change the count; the panel stays collapsed");
+  assert.equal(await visible("#notecount"), true, "the count shows in the rail");
+  assert.equal(await expanded("#sidetoggle"), "false");
+  // The hidden view was still rendered: ten listed, the rest behind "show all (12)".
   assert.equal(await page.$$eval("#inbox .note", (n: unknown[]) => n.length), 10);
   assert.equal(await page.textContent("#inbox .showall"), "show all (12)");
-  await page.click("#notesbtn");
+  await page.click("#sidetab-notes");
   await page.click("#inbox .showall");
   assert.equal(await page.$$eval("#inbox .note", (n: unknown[]) => n.length), 12);
   assert.equal(await count(), "12");
   await page.click("#inbox .note .x");
   assert.equal(await count(), "11");
-  assert.equal(await page.getAttribute("#notesbtn", "aria-label"), "Notifications: 11");
+  assert.equal(await page.getAttribute("#sidetab-notes", "aria-label"), "Notifications, 11");
   // A keyboard user who dismissed a note stays in the panel.
   await page.focus("#inbox .note .x");
   await page.keyboard.press("Enter");
@@ -251,7 +327,7 @@ test("browser: the notification count is every undismissed note, not just the fe
 test("browser: the collapsed list shows the newest 10; show all appears only past 10, and a dismissal can cross that line", { skip }, async () => {
   reset();
   await open();
-  await page.click("#notesbtn");
+  await page.click("#sidetab-notes");
   const listed = () => page.$$eval("#inbox .note .first", (n: HTMLElement[]) => n.map((e) => e.textContent));
   const showall = () => page.$$eval("#inbox .showall", (b: HTMLElement[]) => b.map((e) => e.textContent));
   const newest = (from: number, to: number) => Array.from({ length: from - to + 1 }, (_, i) => `Note ${from - i}`);
@@ -299,7 +375,7 @@ test("browser: the collapsed list shows the newest 10; show all appears only pas
   assert.deepEqual(await showall(), ["show all (11)"]);
 });
 
-test("browser: a collapsed panel sends no receipt; opening it sends one for each listed note only; hiding never dismisses", { skip }, async () => {
+test("browser: a collapsed panel sends no receipt; opening it sends one for each listed note only; collapsing never dismisses", { skip }, async () => {
   reset();
   await open();
   current = notes(11);
@@ -308,18 +384,18 @@ test("browser: a collapsed panel sends no receipt; opening it sends one for each
   await page.waitForTimeout(300);
   assert.deepEqual(acks, [], "a count change is not display evidence: no receipt while collapsed");
   const dismissed = await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes"));
-  await page.click("#notesbtn");
+  await page.click("#sidetab-notes");
   const listedIds = Array.from({ length: 10 }, (_, i) => `n${i + 2}`).sort();
   for (let i = 0; acks.length < 10 && i < 100; i++) await page.waitForTimeout(20);
   assert.deepEqual([...acks].sort(), listedIds, "the ten listed (newest) notes, not the one past the limit");
-  for (let i = 0; i < 4; i++) await page.click("#notesbtn");
+  for (let i = 0; i < 4; i++) await page.click("#sidetoggle");
   await page.evaluate("refreshInbox()");
   await page.waitForTimeout(200);
-  assert.deepEqual([...acks].sort(), listedIds, "toggling again sends nothing more and no duplicates");
-  assert.equal(await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")), dismissed, "hiding is not dismissing");
+  assert.deepEqual([...acks].sort(), listedIds, "collapsing and opening again sends nothing more and no duplicates");
+  assert.equal(await page.evaluate(() => localStorage.getItem("orbit.dismissed-notes")), dismissed, "collapsing is not dismissing");
   assert.equal(await count(), "11");
   // "more" still opens a note's rest, and says whether it is open (the panel is open again after the even number of toggles).
-  assert.equal(await expanded("#notesbtn"), "true");
+  assert.equal(await expanded("#sidetoggle"), "true");
   const more = '#inbox .note button:not(.x)';
   assert.equal(await page.getAttribute(more, "aria-expanded"), "false");
   await page.click(more);
@@ -328,54 +404,67 @@ test("browser: a collapsed panel sends no receipt; opening it sends one for each
   assert.equal(await page.getAttribute("#inbox .note .x", "aria-label"), "Dismiss this notification");
 });
 
-test("browser: the two toggles are independent and survive refreshes, page switches and a reload in this tab", { skip }, async () => {
+test("browser: one view at a time; the open view survives refreshes, page switches and a reload in this tab", { skip }, async () => {
   reset();
   await open();
-  await page.click("#notesbtn");
+  await page.click("#sidetab-notes");
   assert.equal(await visible("#inbox"), true);
-  assert.equal(await visible("#statusline"), false, "opening one leaves the other alone");
+  assert.equal(await visible("#statusline"), false, "one view at a time");
   current = notes(2);
   await page.evaluate("refreshStatus(); refreshInbox()");
   await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "2");
-  assert.equal(await expanded("#notesbtn"), "true");
-  assert.equal(await expanded("#health"), "false");
-  await page.click("#health");
+  assert.equal(await expanded("#sidetoggle"), "true");
+  assert.equal(await page.getAttribute("#sidetab-notes", "aria-selected"), "true");
+  await page.click("#sidetab-status");
+  assert.equal(await visible("#inbox"), false, "switching views hides the other");
   await page.click('#tabs a[data-tab="chat"]');
   await page.waitForFunction(() => document.body.dataset.tab === "chat");
-  assert.equal(await visible("#inbox"), true);
-  assert.equal(await visible("#statusline"), true);
-  await page.click("#notesbtn");
+  assert.equal(await visible("#statusline"), true, "kept across page switches");
+  await page.click("#sidetoggle");
   await page.click("#assistanttab");
   await page.waitForFunction(() => document.body.dataset.tab === "assistant");
   assert.equal(await visible("#inbox"), false);
-  assert.equal(await visible("#statusline"), true);
+  assert.equal(await visible("#statusline"), false, "collapsed stays collapsed");
+  await page.click("#sidetoggle");
+  assert.equal(await visible("#statusline"), true, "the button reopens the last view");
   await page.reload();
   await page.waitForFunction(() => document.querySelectorAll("#ports .pill").length > 0);
-  assert.equal(await expanded("#health"), "true", "kept for this tab's session");
-  assert.equal(await expanded("#notesbtn"), "false");
+  assert.equal(await expanded("#sidetoggle"), "true", "kept for this tab's session");
+  assert.equal(await page.getAttribute("#sidetab-status", "aria-selected"), "true");
   assert.equal(await visible("#statusline"), true);
   assert.equal(await visible("#inbox"), false);
   // A new tab (a new session) starts collapsed again.
   const fresh = await context.newPage();
   await fresh.goto(base);
   await fresh.waitForFunction(() => document.readyState === "complete");
-  assert.equal(await fresh.getAttribute("#health", "aria-expanded"), "false");
-  assert.equal(await fresh.getAttribute("#notesbtn", "aria-expanded"), "false");
+  assert.equal(await fresh.getAttribute("#sidetoggle", "aria-expanded"), "false");
   await fresh.close();
+});
+
+test("browser: an older page's state with both header panels open opens the side panel on Notifications", { skip }, async () => {
+  reset();
+  await open();
+  await page.evaluate(() => sessionStorage.setItem("orbit.header-panels", JSON.stringify({ status: true, notes: true })));
+  await page.reload();
+  await page.waitForFunction(() => document.querySelectorAll("#ports .pill").length > 0);
+  assert.equal(await visible("#inbox"), true);
+  assert.equal(await visible("#statusline"), false);
+  assert.equal(await page.evaluate(() => sessionStorage.getItem("orbit.header-panels")), JSON.stringify({ status: true, notes: true }), "nothing is rewritten until Rai acts");
+  await page.click("#sidetab-status");
+  assert.equal(await page.evaluate(() => sessionStorage.getItem("orbit.header-panels")), JSON.stringify({ status: true, notes: false }));
 });
 
 test("browser: refreshes never take focus from the message box, and note text is shown as text", { skip }, async () => {
   reset();
   await open();
-  await page.click("#notesbtn");
-  await page.click("#health");
+  await page.click("#sidetab-notes");
   await page.focus("#ainput");
   await page.keyboard.type("half-typed");
   current = [{ id: "evil", text: `<img src=x onerror="window.pwned=1"> https://github.com/o/r/pull/7 javascript:alert(1)` }];
   ports = [live("model", "down")];
   await page.evaluate("refreshStatus(); refreshInbox()");
   await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "1");
-  await page.waitForFunction(() => document.getElementById("health")!.className === "down");
+  await page.waitForFunction(() => document.getElementById("sidetab-status")!.className === "sidetab down");
   assert.equal(await page.evaluate(() => document.activeElement!.id), "ainput");
   assert.equal(await page.inputValue("#ainput"), "half-typed");
   assert.equal(await page.$$eval("#inbox img", (n: unknown[]) => n.length), 0);
@@ -384,7 +473,7 @@ test("browser: refreshes never take focus from the message box, and note text is
   assert.deepEqual(await page.$$eval("#inbox a", (as: HTMLAnchorElement[]) => as.map((a) => [a.getAttribute("href"), a.rel, a.target])), [["https://github.com/o/r/pull/7", "noopener noreferrer", "_blank"]]);
 });
 
-test("browser: dark and light themes both style the header toggles from the theme colours", { skip }, async () => {
+test("browser: dark and light themes both style the side panel and its indicators from the theme colours", { skip }, async () => {
   reset();
   const colours: Record<string, string> = {};
   for (const scheme of ["light", "dark"]) {
@@ -394,11 +483,10 @@ test("browser: dark and light themes both style the header toggles from the them
     await page.waitForFunction(() => document.getElementById("notecount")!.textContent === "1");
     const c = await page.evaluate(() => {
       const css = (sel: string, p: string) => getComputedStyle(document.querySelector(sel)!).getPropertyValue(p);
-      const root = (v: string) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
-      return { bg: css("#notesbtn", "background-color"), card: root("--card"), fg: css("#health", "color"), badge: css("#notecount", "background-color") };
+      return { bg: css("#side", "background-color"), fg: css("#sidetab-status", "color"), badge: css("#notecount", "background-color") };
     });
     assert.notEqual(c.badge, "rgba(0, 0, 0, 0)", "a count above zero is highlighted");
     colours[scheme] = c.bg;
   }
-  assert.notEqual(colours.light, colours.dark, "the toggles follow the theme");
+  assert.notEqual(colours.light, colours.dark, "the rail follows the theme");
 });

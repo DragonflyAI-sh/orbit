@@ -55,7 +55,7 @@ async function open(width: number, height: number, route: string, opts: { phone?
 const sideways = (page: any) => page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
 
 for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
-  test(`browser ${width}px: one grouped header row, page tabs read as navigation, labelled toggles`, { skip }, async () => {
+  test(`browser ${width}px: one grouped header row, page tabs read as navigation, the theme toggle at the right`, { skip }, async () => {
     const { page, ctx, errors } = await open(width, height, "/#assistant");
     const g = await page.evaluate(() => {
       const r = (e: Element) => e.getBoundingClientRect();
@@ -64,21 +64,20 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
       const cur = tabs.find((a) => a.getAttribute("aria-current") === "page")!, other = tabs.find((a) => a !== cur)!;
       const cs = (e: Element) => getComputedStyle(e);
       return {
-        header: r(header).height, brand: r(brand), nav: r(nav), notes: r(document.getElementById("notesbtn")!), health: r(document.getElementById("health")!), vw: document.documentElement.clientWidth,
+        header: r(header).height, brand: r(brand), nav: r(nav), theme: r(document.getElementById("themebtn")!), vw: document.documentElement.clientWidth,
         divider: cs(brand).borderRightWidth, cur: { w: Number(cs(cur).fontWeight), bg: cs(cur).backgroundImage, shadow: cs(cur).boxShadow }, other: { w: Number(cs(other).fontWeight), bg: cs(other).backgroundImage },
-        track: cs(nav).backgroundColor, noteLabel: (document.querySelector("#notesbtn .label") as HTMLElement).offsetWidth > 0,
+        track: cs(nav).backgroundColor,
       };
     });
     assert.ok(g.header <= 56, `the header stays compact (${g.header}px)`);
     const mid = (b: any) => b.top + b.height / 2;
-    for (const k of ["nav", "notes", "health"] as const) assert.ok(Math.abs(mid(g[k]) - mid(g.brand)) <= 3, `${k} on the brand's row`);
+    for (const k of ["nav", "theme"] as const) assert.ok(Math.abs(mid(g[k]) - mid(g.brand)) <= 3, `${k} on the brand's row`);
     assert.equal(g.divider, "1px", "a divider separates the brand from the page tabs");
-    assert.ok(g.nav.left > g.brand.right && g.notes.left > g.nav.right && g.health.left >= g.notes.right && g.health.right <= g.vw, "brand, tabs, then the toggles at the right edge");
+    assert.ok(g.nav.left > g.brand.right && g.theme.left > g.nav.right && g.theme.right <= g.vw, "brand, tabs, then the theme toggle at the right edge");
     assert.notEqual(g.track, "rgba(0, 0, 0, 0)", "the tabs sit on a track");
     assert.ok(g.cur.w >= 600 && g.other.w < 600, `the current page is bold (${g.cur.w} vs ${g.other.w})`);
     assert.match(g.cur.bg, /linear-gradient/, "the current page carries ORBIT's gradient underline");
     assert.equal(g.other.bg, "none", "other tabs do not");
-    assert.equal(g.noteLabel, true, "the notifications toggle has a visible label on a laptop");
     assert.equal(await sideways(page), false);
     assert.deepEqual(errors, []);
     await ctx.close();
@@ -93,11 +92,12 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
         const box = form.querySelector("textarea")!.getBoundingClientRect(), plus = form.querySelector(".phbtn")!.getBoundingClientRect(), send = form.querySelector(".sendbtn")!;
         const s = send.getBoundingClientRect(), hit = document.elementFromPoint(s.left + s.width / 2, s.top + s.height / 2);
         return { left: Math.min(...rows.map((r) => r.left)), right: Math.max(...rows.map((r) => r.right)), plusLeft: plus.left, sendRight: s.right, boxRight: box.right, sendLeft: s.left,
-          vw: document.documentElement.clientWidth, sendHit: Boolean(hit && (hit === send || send.contains(hit))) };
+          vw: document.documentElement.clientWidth, room: document.getElementById("side")!.getBoundingClientRect().left, sendHit: Boolean(hit && (hit === send || send.contains(hit))) };
       }, conv);
       const col = g.right - g.left;
       assert.ok(col <= 860 && col >= 840, `${route}: rows form an ~860px column (${col})`);
-      assert.ok(Math.abs(g.left - (g.vw - 860) / 2) <= 1, `${route}: the column is centred (left ${g.left})`);
+      // Centred in the room left of the side panel's rail.
+      assert.ok(Math.abs(g.left - (g.room - 860) / 2) <= 1, `${route}: the column is centred left of the rail (left ${g.left}, room ${g.room})`);
       assert.ok(Math.abs(g.plusLeft - g.left) <= 1, `${route}: the composer starts where the messages start (${g.plusLeft} vs ${g.left})`);
       assert.ok(g.sendRight <= g.left + 860 + 1, `${route}: Send ends inside the column`);
       assert.ok(g.sendLeft - g.boxRight >= 8, `${route}: an explicit gap before Send`);
@@ -108,24 +108,20 @@ for (const [width, height] of [[1280, 800], [1440, 900]] as const) {
   });
 }
 
-// From 1024px the two panels are one side panel instead (test/side-panel-browser.test.ts); between 900 and 1023px they
-// still hang in the header as cards.
-test("browser 960px: both header panels hang under their toggles, as cards, without hiding the conversation", { skip }, async () => {
+// Below 1024px the open side panel lies over the page instead of moving it (test/side-panel-browser.test.ts has the rest).
+test("browser 960px: the open side panel lies over the page without moving it, and its notification controls work", { skip }, async () => {
   const { page, ctx } = await open(960, 800, "/#assistant");
-  await page.click("#notesbtn");
-  await page.click("#health");
+  const before = await page.evaluate(() => { const r = document.getElementById("alog")!.getBoundingClientRect(); return { left: r.left, width: r.width }; });
+  await page.click("#sidetab-notes");
   await page.waitForFunction(() => document.querySelectorAll("#inbox .note").length > 0);
+  await page.waitForTimeout(300); // the panel slides in
   const g = await page.evaluate(() => {
     const r = (id: string) => document.getElementById(id)!.getBoundingClientRect();
-    return { inbox: r("inbox"), status: r("statusline"), health: r("health"), bar: document.querySelector("header .bar")!.getBoundingClientRect(), log: r("alog"),
-      radius: getComputedStyle(document.getElementById("inbox")!).borderTopLeftRadius, vw: document.documentElement.clientWidth };
+    return { log: r("alog"), side: r("side"), header: document.querySelector("header")!.getBoundingClientRect(), vw: document.documentElement.clientWidth };
   });
-  // At this width two 520px cards do not fit in one row, so they wrap (as on main); they never overlap.
-  assert.ok(g.inbox.right <= g.status.left || g.inbox.bottom <= g.status.top, "notifications first, then status, as the toggles are ordered, never overlapping");
-  assert.ok(Math.abs(g.status.right - g.health.right) <= 1, `right-aligned with the status toggle (${g.status.right} vs ${g.health.right})`);
-  assert.ok(g.inbox.width <= 521 && g.status.width <= 521, "a readable panel width, not the whole page");
-  assert.ok(g.inbox.top - g.bar.bottom >= 0 && g.inbox.top - g.bar.bottom <= 12, "directly under the bar");
-  assert.equal(g.radius, "12px", "drawn as cards");
+  assert.deepEqual({ left: g.log.left, width: g.log.width }, before, "the conversation keeps its place and width");
+  assert.ok(Math.abs(g.side.right - g.vw) <= 1 && g.side.width <= 401, `on the right edge, at a readable width (${g.side.width})`);
+  assert.ok(Math.abs(g.side.top - g.header.bottom) <= 1, "under the header");
   assert.ok(g.log.height >= 300, `the conversation keeps most of the screen (${g.log.height}px)`);
   assert.equal(await sideways(page), false);
   // Notification controls keep working: dismiss one with the keyboard; focus stays in the panel.
@@ -196,18 +192,18 @@ test("browser: reduced motion stops the busy spinner", { skip }, async () => {
   await ctx.close();
 });
 
-test("browser: keyboard focus on a page tab and on the header toggles shows the shared focus ring", { skip }, async () => {
+test("browser: keyboard focus on a page tab and on the side panel's tabs shows the shared focus ring", { skip }, async () => {
   const { page, ctx } = await open(1280, 800, "/#assistant");
   await page.focus("#assistanttab");
   await page.keyboard.press("Tab");
   const ring = await page.evaluate(() => { const e = document.activeElement as HTMLElement, cs = getComputedStyle(e); return { id: e.id, style: cs.outlineStyle, width: parseFloat(cs.outlineWidth) }; });
   assert.equal(ring.style, "solid", `${ring.id} shows a ring`);
   assert.ok(ring.width >= 2);
-  await page.focus("#notesbtn");
+  await page.focus("#sidetab-notes");
   await page.keyboard.press("Shift+Tab");
   await page.keyboard.press("Tab");
   const r2 = await page.evaluate(() => getComputedStyle(document.activeElement!).outlineStyle);
-  assert.equal(r2, "solid", "the notifications toggle shows a ring");
+  assert.equal(r2, "solid", "the notifications tab shows a ring");
   await ctx.close();
 });
 
