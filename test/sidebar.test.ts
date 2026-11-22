@@ -40,6 +40,17 @@ test("front matter: scalars, inline lists and block lists; anything else is skip
   assert.deepEqual(f.data, { status: "active", aliases: ["A, B", "C", "[[d]]"], tags: ["one", "two"] });
   assert.equal(f.body, "# Body\n");
   assert.deepEqual(frontmatter("# No front matter\n").data, {});
+  // Unquoted wiki links, as Obsidian writes them, are links (one, or a comma list), not a YAML list holding a list.
+  const links = frontmatter("---\nproject: [[orbit]]\nprojects: [[a]], [[b|B]]\nlabel: [[x|y]] # a comment\n---\n");
+  assert.deepEqual(links.data, { project: "[[orbit]]", projects: ["[[a]]", "[[b|B]]"], label: "[[x|y]]" });
+});
+
+test("a task whose project is an unquoted wiki link is that project's task", () => {
+  const vault = { ...VAULT, "Tasks/water.md": "---\nstatus: todo\nproject: [[alpha-garden]]\n---\n# Water the beds\n", "Tasks/pots.md": "---\nstatus: todo\nprojects: [[beta]], [[alpha-garden|Alpha]]\n---\n# Buy pots\n" };
+  const v = sidebarView(notes(vault), [], "alpha-garden");
+  const titles = v.plan.tasks.map((t) => t.title);
+  assert.ok(titles.includes("Water the beds"), titles.join(", "));
+  assert.ok(titles.includes("Buy pots"), titles.join(", "));
 });
 
 test("projects: the active hub notes under Projects/, active first, titled from aliases, heading or file name", () => {
@@ -85,6 +96,8 @@ test("without a project: the plan from now.md, every open task, and now.md with 
   // No vault at all: empty lists, never invented ones.
   const none = sidebarView(undefined, [], "alpha-garden");
   assert.deepEqual([none.projects, none.plan.items, none.plan.tasks, none.files.items], [[], [], [], []]);
+  // An unreadable vault says nothing about the requested project: it is not reported unknown, so the page keeps it.
+  assert.equal(none.unknownProject, undefined);
 });
 
 test("photos: newest first; with a project, only those whose caption or conversation title names it as a whole phrase", () => {
@@ -129,7 +142,15 @@ test("GET /sidebar: owner only; projects, plan and files from the vault; photos 
     const id = ((await up.json()) as any).attachment.id;
     assert.equal((await r.api("/assistant/messages", "POST", { text, attachments: [id] })).status, 200);
   }
-  const all = await r.api("/sidebar");
+  // Listing the photos is attachment and session reading: both decisions are audited, like the Assistant's photo tools.
+  const logged: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => { logged.push(a.map(String).join(" ")); };
+  let all: Awaited<ReturnType<typeof r.api>>;
+  try { all = await r.api("/sidebar"); } finally { console.log = log; }
+  const audits = logged.flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }).filter((e) => e && e.action === "read");
+  assert.ok(audits.some((e) => e.port === "attachments" && e.allow === true), JSON.stringify(audits));
+  assert.ok(audits.some((e) => e.port === "sessions" && e.allow === true), JSON.stringify(audits));
   assert.equal(all.status, 200, JSON.stringify(all.data));
   assert.equal(all.data.vault.ok, true);
   assert.match(all.data.vault.source, /^memory\/vault@/);
@@ -168,6 +189,11 @@ test("GET /sidebar: a vault that cannot be read is reported, with the photos sti
   assert.deepEqual(res.data.projects, []);
   assert.deepEqual(res.data.images.items, []);
   assert.equal((await r.api("/sidebar/note?path=now.md")).status, 503);
+  // A remembered project is not called unknown when the vault could not be read.
+  const asked = await r.api("/sidebar?project=alpha-garden");
+  assert.equal(asked.status, 200);
+  assert.equal(asked.data.vault.ok, false);
+  assert.equal(asked.data.unknownProject, undefined);
 });
 
 // ---- the page's remembered layout (<sidebar-lib> in src/web/index.html) -------------------------------------------------

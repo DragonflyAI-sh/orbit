@@ -1315,7 +1315,12 @@ export function buildServer({
       let photos: SidebarPhoto[] = [];
       let photoError: string | undefined;
       const ownerCall = await isOwnerOf(req);
-      if (decide("attachments", "read", ownerCall).allow && decide("sessions", "read", ownerCall).allow) {
+      // Listing photos across conversations is attachment reading and session reading (as for the photo tools); both are audited.
+      const photoRead = decide("attachments", "read", ownerCall);
+      audit("attachments", "read", photoRead);
+      const sessionRead = photoRead.allow ? decide("sessions", "read", ownerCall) : undefined;
+      if (sessionRead) audit("sessions", "read", sessionRead);
+      if (photoRead.allow && sessionRead?.allow) {
         try {
           photos = reachablePhotos({ attachments, sources: photoSources }, assistantSessionId(), false).photos.map((l) => ({
             ref: l.ref,

@@ -2312,7 +2312,8 @@
     if (!vaultOk) note.textContent = vaultWhy;
     else if (b.unknownProject) note.textContent = `“${str(b.unknownProject, 80)}” is not an active project in the vault, so everything is shown.`;
     else note.textContent = projects.length ? `${projects.length} active project${projects.length === 1 ? "" : "s"} in the vault.` : "No active projects in the vault (Projects/).";
-    if (b.unknownProject && navPrefs.project) { navPrefs.project = ""; writeSidebar(localStore, navPrefs); }
+    // Forget the remembered project only when the vault was read and it is not active: an unreadable vault keeps it.
+    if (vaultOk && b.unknownProject && navPrefs.project) { navPrefs.project = ""; writeSidebar(localStore, navPrefs); }
 
     // Plan: the plan sections of the project note (or now.md), then the open tasks.
     const plan = document.getElementById("navplan");

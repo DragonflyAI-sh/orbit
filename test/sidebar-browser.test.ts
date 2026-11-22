@@ -239,6 +239,32 @@ test("browser 1280px: a remembered project that is no longer active falls back t
   fixture.set({ sidebar: "ok" });
 });
 
+test("browser 1280px: a vault that cannot be read keeps the remembered project for the next read", { skip }, async () => {
+  const ctx = await chromium.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
+  await ctx.addInitScript(() => { try { if (!sessionStorage.getItem("seeded")) { localStorage.setItem("orbit.sidebar", JSON.stringify({ open: true, width: 280, closed: [], project: "alpha-garden" })); sessionStorage.setItem("seeded", "1"); } } catch { /* */ } });
+  const remembered = (page: any) => page.evaluate(() => { try { return JSON.parse(localStorage.getItem("orbit.sidebar") || "{}").project ?? null; } catch { return null; } });
+  let { page } = await open(1280, 800, "/#assistant", { ctx, sidebar: "vault-down" });
+  assert.equal(await page.textContent("#navprojnote"), "The vault could not be read: synthetic outage");
+  assert.equal(await remembered(page), "alpha-garden", "the server does not call the project unknown, and the page keeps it");
+  await page.close();
+  // Even an answer that names the project unknown (an older server) does not clear it while the vault is unreadable.
+  await ctx.route("**/sidebar?*", async (route: any) => {
+    const res = await route.fetch();
+    const body = await res.json();
+    await route.fulfill({ response: res, json: { ...body, unknownProject: "alpha-garden" } });
+  });
+  ({ page } = await open(1280, 800, "/#assistant", { ctx, sidebar: "vault-down" }));
+  assert.equal(await page.textContent("#navprojnote"), "The vault could not be read: synthetic outage");
+  assert.equal(await remembered(page), "alpha-garden");
+  await page.close();
+  await ctx.unroute("**/sidebar?*");
+  // Once the vault reads again, the project is chosen.
+  ({ page } = await open(1280, 800, "/#assistant", { ctx }));
+  assert.equal(await page.inputValue("#navproject"), "alpha-garden");
+  await ctx.close();
+  fixture.set({ sidebar: "ok" });
+});
+
 test("browser 1280px: the header toggles show their view in the sidebar without moving focus; the tabs and section header switch and collapse it; it survives a reload", { skip }, async () => {
   const { page, ctx } = await open(1280, 800);
   await page.focus("#notesbtn");

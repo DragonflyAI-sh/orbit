@@ -45,7 +45,11 @@ export function frontmatter(text: string): { data: Frontmatter; body: string } {
     const value = kv[2]!.trim();
     if (!value) { data[key] = []; list = key; continue; }
     list = undefined;
-    if (value.startsWith("[") && value.endsWith("]")) data[key] = splitInline(value.slice(1, -1)).map(scalar).filter(Boolean);
+    // Unquoted wiki links (`project: [[orbit]]`, `projects: [[a]], [[b]]`), as Obsidian writes them, are links, not an
+    // inline list: YAML would read `[[orbit]]` as a list holding a list, which names nothing.
+    const links = /^\[\[[^[\]]+\]\](?:\s*,\s*\[\[[^[\]]+\]\])*$/.test(value) ? splitInline(value) : null;
+    if (links) data[key] = links.length === 1 ? links[0]! : links;
+    else if (value.startsWith("[") && value.endsWith("]")) data[key] = splitInline(value.slice(1, -1)).map(scalar).filter(Boolean);
     else data[key] = scalar(value);
   }
   return { data, body: text.slice(m[0].length) };
@@ -220,7 +224,9 @@ export function sidebarView(notes: ReadonlyMap<string, string> | undefined, phot
   const map = notes ?? new Map<string, string>();
   const projects = projectsOf(map);
   const project = requested ? (projects.find((p) => p.id === requested) ?? null) : null;
-  const unknownProject = requested && !project ? clean(requested, 80) : undefined;
+  // A project is unknown only when the vault was read and has no such active project: an unreadable vault (no notes) says
+  // nothing about it, so the page keeps the remembered choice for the next read.
+  const unknownProject = notes && requested && !project ? clean(requested, 80) : undefined;
   const text = project ? map.get(project.path) : undefined;
 
   // Plan: the project note's plan sections and its open tasks; without a project, now.md and the open tasks due soonest.
