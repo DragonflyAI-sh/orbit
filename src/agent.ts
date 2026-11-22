@@ -5,7 +5,7 @@ import type { FallbackInfo, ImageSupport, Item, Message, ModelPort, ToolDef } fr
 import type { MutatingAction } from "./ops/admin-protocol.ts";
 import type { SysMutatingAction } from "./ops/sys-protocol.ts";
 import type { Result } from "./ports.ts";
-import { detectProtocolText, digestOf, PROTOCOL_REFUSED, PROTOCOL_RETRY_NOTE } from "./tool-protocol.ts";
+import { detectProtocolText, digestOf, PROTOCOL_RECOVERED_NOTE, PROTOCOL_REFUSED, PROTOCOL_RETRY_NOTE, recoverDsmlCalls } from "./tool-protocol.ts";
 import type { ProtocolDiagnostic } from "./tool-protocol.ts";
 import { callItemBytes, fitOutput, NOT_RUN_ERROR, notRunOutput, outputItemBytes, REPLY_TOOL_RESULT_BUDGET_BYTES, RESULT_BUDGET_NOTE, TOOL_RESULT_MIN_BYTES, utf8Bytes } from "./tool-result-budget.ts";
 
@@ -418,8 +418,8 @@ export async function runChat(options: {
       merge(accounting, step.accounting);
       if (step.fallback) fallback = step.fallback;
       else primaryRounds += 1;
-      // Tool-call markup in the text is never parsed or run, whatever it names. Only the step's structured calls can run, and only when
-      // tools were offered. When they run, the text is not used anyway (it is not shown and does not reach the model), so it is only
+      // Tool-call markup in the text is never parsed or run, whatever it names, except a strictly well-formed DSML block on a step that
+      // was offered tools (below). Otherwise only the step's structured calls can run, and only when tools were offered. When they run, the text is not used anyway (it is not shown and does not reach the model), so it is only
       // recorded. When the text IS the answer (no structured calls, or a final step without tools), it is rejected: asked again once,
       // then the reply ends with an honest error instead of showing markup as if it were an answer.
       const hit = detectProtocolText(step.text);
@@ -429,6 +429,17 @@ export async function runChat(options: {
       }
       const answering = !step.calls.length || stop;
       const facts = { family: hit.family, step: round, attempt, model: step.fallback ? step.fallback.model : "primary", toolsOffered: !stop, chars: step.text.length, sha256: digestOf(step.text), structuredCalls: step.calls.length };
+      // The one exception to "markup never runs" (src/tool-protocol.ts recoverDsmlCalls): a step that was offered tools, has no
+      // structured calls and ended normally (no completeness note, so not cut off), whose text is one complete DSML block naming only
+      // the tools offered on this step. Its calls continue below exactly like structured calls (same owner, policy, deadline, budget,
+      // repeat and confirmation checks); the text is not shown and is not sent on.
+      const recovered = hit.family === "dsml" && !stop && !step.calls.length && !step.incomplete?.length ? recoverDsmlCalls(step.text, tools) : undefined;
+      if (recovered) {
+        step = { ...step, text: "", calls: recovered.map((c, i) => ({ call_id: `call_dsml_${round}_${attempt}_${i}`, name: c.name, arguments: c.arguments })) };
+        tell({ ...facts, action: "recovered", recoveredCalls: recovered.length });
+        merge(incomplete, [PROTOCOL_RECOVERED_NOTE(recovered.length)]);
+        break;
+      }
       if (!answering) {
         tell({ ...facts, action: "dropped" });
         merge(incomplete, step.incomplete);

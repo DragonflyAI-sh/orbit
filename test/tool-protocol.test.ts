@@ -16,7 +16,7 @@ import { buildItems, buildMessages } from "../src/thread-context.ts";
 import { threadService } from "../src/thread-service.ts";
 import type { TurnPrep } from "../src/thread-service.ts";
 import { threadStore } from "../src/threads.ts";
-import { detectProtocolText, REPLAY_PLACEHOLDER, withoutCode } from "../src/tool-protocol.ts";
+import { detectProtocolText, RECOVERED_CALLS_MAX, recoverDsmlCalls, REPLAY_PLACEHOLDER, withoutCode } from "../src/tool-protocol.ts";
 import type { ProtocolDiagnostic } from "../src/tool-protocol.ts";
 import { call, say, scripted } from "./threads-fixture.ts";
 
@@ -34,6 +34,10 @@ const DSML =
   tag("parameter", "", true) +
   tag("invoke", "", true) +
   tag("tool_calls", "", true);
+
+// The same leak naming a tool that is not offered: never recoverable (src/tool-protocol.ts recoverDsmlCalls), so it exercises the
+// retry-then-refuse path.
+const LEAK = DSML.replace('name="memory_search"', 'name="inbox_dismiss"');
 
 // A tool that counts its runs, so any execution of markup would show.
 function counter(name = "memory_search") {
@@ -95,13 +99,13 @@ test("detection: quotations in Markdown code, valid XML answers and ordinary pro
 
 // ---- the tool loop --------------------------------------------------------------------------------------------------
 
-test("literal DSML leak: never run, never shown; ORBIT asks once more and the real answer is returned with a note", async () => {
+test("literal DSML leak naming a tool not offered: never run, never shown; ORBIT asks once more and the real answer is returned with a note", async () => {
   const { tool, runs } = counter();
-  const { model, seen } = recorded((n) => (n === 0 ? say(DSML) : say("Nothing in the inbox needs acknowledging.")));
+  const { model, seen } = recorded((n) => (n === 0 ? say(LEAK) : say("Nothing in the inbox needs acknowledging.")));
   const diags: ProtocolDiagnostic[] = [];
   const out = await runChat({ model, messages: user, limits: [], tools: [tool], onProtocol: (d) => diags.push(d) });
   assert.equal(out.text, "Nothing in the inbox needs acknowledging.");
-  assert.equal(runs.length, 0, "the markup named memory_search; it must not run");
+  assert.equal(runs.length, 0, "the markup named a tool that was not offered; nothing may run");
   assert.equal(out.calls.length, 0);
   assert.equal(seen.length, 2);
   // The retry is the same request: nothing from the rejected response was added to the input, and the tools are still offered.
@@ -116,13 +120,13 @@ test("literal DSML leak: never run, never shown; ORBIT asks once more and the re
   const logged = JSON.stringify(diags);
   assert.equal(logged.includes(BAR), false);
   assert.equal(logged.includes("inbox"), false);
-  assert.equal(diags[0].chars, DSML.length);
+  assert.equal(diags[0].chars, LEAK.length);
   assert.match(diags[0].sha256, /^[0-9a-f]{16}$/);
 });
 
 test("repeated leak: bounded to one retry, then an honest error; no markup in the message and no tool run", async () => {
   const { tool, runs } = counter();
-  const model = scripted([say(DSML)]);
+  const model = scripted([say(LEAK)]);
   await assert.rejects(
     runChat({ model, messages: user, limits: [], tools: [tool] }),
     (err: unknown) => {
@@ -154,7 +158,7 @@ test("mixed prose and structured calls: the structured call runs exactly once, t
 
 test("duplicate prevention: a leak after a real call retries without re-running or re-sending that call", async () => {
   const { tool, runs } = counter();
-  const { model, seen } = recorded((n) => (n === 0 ? { text: "", calls: [call("memory_search", { query: "a" }, "c1")] } : n === 1 ? say(DSML) : say("Done.")));
+  const { model, seen } = recorded((n) => (n === 0 ? { text: "", calls: [call("memory_search", { query: "a" }, "c1")] } : n === 1 ? say(LEAK) : say("Done.")));
   const out = await runChat({ model, messages: user, limits: [], tools: [tool] });
   assert.equal(out.text, "Done.");
   assert.equal(runs.length, 1);
@@ -213,9 +217,9 @@ const ev = (o: unknown) => `data: ${JSON.stringify(o)}\n\n`;
 
 test("streaming: DSML split across deltas (inside its delimiter) is assembled and rejected; a streamed function call still runs once", async () => {
   // Split inside the fullwidth sentinel, as a provider's token boundaries may.
-  const cut = DSML.indexOf("DSML") + 2;
-  const leak = ev({ type: "response.output_text.delta", delta: DSML.slice(0, cut) }) + ev({ type: "response.output_text.delta", delta: DSML.slice(cut) });
-  assert.equal(stepFromStream(leak).text, DSML);
+  const cut = LEAK.indexOf("DSML") + 2;
+  const leak = ev({ type: "response.output_text.delta", delta: LEAK.slice(0, cut) }) + ev({ type: "response.output_text.delta", delta: LEAK.slice(cut) });
+  assert.equal(stepFromStream(leak).text, LEAK);
   const fnCall = ev({ type: "response.output_item.done", item: { type: "function_call", call_id: "fc1", name: "memory_search", arguments: '{"query":"x"}' } }) + ev({ type: "response.completed", response: { output: [{ type: "function_call", call_id: "fc1", name: "memory_search", arguments: '{"query":"x"}' }] } });
   const answer = ev({ type: "response.output_text.delta", delta: "All " }) + ev({ type: "response.output_text.delta", delta: "clear." });
   const bodies = [leak, fnCall, answer];
@@ -266,8 +270,8 @@ function fallbackWorld(contents: { content: string; finish?: string }[]) {
   return { model: fallbackModel({ primary, config: orConfig(), ledger, fetcher }), requests };
 }
 
-test("fallback path: OpenRouter content that is DSML (finish stop, no tool_calls) is retried once and never run", async () => {
-  const { model, requests } = fallbackWorld([{ content: DSML }, { content: "Answer from the fallback." }]);
+test("fallback path: OpenRouter DSML content for a tool not offered (finish stop, no tool_calls) is retried once and never run", async () => {
+  const { model, requests } = fallbackWorld([{ content: LEAK }, { content: "Answer from the fallback." }]);
   const { tool, runs } = counter();
   const diags: ProtocolDiagnostic[] = [];
   const out = await runChat({ model, messages: user, limits: [], tools: [tool], fallback: true, onProtocol: (d) => diags.push(d) });
@@ -302,10 +306,10 @@ test("persisted thread: a refused reply is stored as an error without markup, su
   const threads = threadStore(dir);
   const logs: unknown[] = [];
   const { tool, runs } = counter();
-  const model = scripted((_s, n) => (n < 2 ? say(DSML) : say("Second try worked.")));
+  const model = scripted((_s, n) => (n < 2 ? say(LEAK) : say("Second try worked.")));
   const svc = threadService({ threads, model, proposals: newProposals(), onProtocol: (p) => logs.push(p) });
   const t = threads.create("Leak");
-  const quote = `What is this? ${DSML}`;
+  const quote = `What is this? ${LEAK}`;
   const first = await svc.turn(t.id, quote, prep([tool]));
   assert.match(first.error!, /raw tool-call markup \(dsml\)/);
   const stored = threads.get(t.id)!;
@@ -380,4 +384,110 @@ test("a recovered reply does not inherit the rejected response's completeness no
   assert.equal(out.text, "Complete answer.");
   assert.doesNotMatch(out.incomplete!.join(" "), /cut off at the output limit/);
   assert.match(out.incomplete!.join(" "), /asked the model once more/);
+});
+
+// ---- DSML recovery (src/tool-protocol.ts recoverDsmlCalls; Rai's decision of 2026-11-21) --------------------------------------------
+
+const invoke = (name: string, params: [string, string, boolean?][]) =>
+  tag("invoke", ` name="${name}"`) + params.map(([k, v, json]) => tag("parameter", ` name="${k}" string="${json ? "false" : "true"}"`) + v + tag("parameter", "", true)).join("\n") + tag("invoke", "", true);
+const wrap = (body: string, w = "tool_calls") => tag(w) + "\n" + body + "\n" + tag(w, "", true);
+const offered = [
+  { name: "memory_search", parameters: { type: "object", properties: {} } },
+  { name: "vault_append_section", parameters: { type: "object", properties: { path: { type: "string" }, text: { type: "string" }, n: { type: "integer" } }, required: ["path", "text"], additionalProperties: false } },
+];
+
+test("recovery: well-formed DSML (V4 tool_calls, V3.2 function_calls, ASCII bars, JSON values, several calls, prose before) is read exactly", () => {
+  assert.deepEqual(recoverDsmlCalls(DSML, offered), [{ name: "memory_search", arguments: JSON.stringify({ query: "inbox acknowledge seen server side orbit web dismiss notification" }) }]);
+  assert.deepEqual(recoverDsmlCalls(DSML.replaceAll(BAR, "|"), offered)?.length, 1);
+  const two = wrap(invoke("memory_search", [["query", "a"]]) + "\n" + invoke("vault_append_section", [["path", "Inbox/x.md"], ["text", "line with `code` and <b>tags</b>\n- item"], ["n", "3", true]]), "function_calls");
+  const got = recoverDsmlCalls(`I'll search and then note it.\n\n${two}\n`, offered)!;
+  assert.deepEqual(got.map((c) => [c.name, JSON.parse(c.arguments)]), [
+    ["memory_search", { query: "a" }],
+    ["vault_append_section", { path: "Inbox/x.md", text: "line with `code` and <b>tags</b>\n- item", n: 3 }],
+  ]);
+});
+
+test("recovery: anything not exactly well-formed and offered is refused (left to the retry path)", () => {
+  const ok = invoke("memory_search", [["query", "a"]]);
+  const refuse: [string, string][] = [
+    ["a tool not offered", LEAK],
+    ["truncated", DSML.slice(0, DSML.length - 10)],
+    ["inside a fenced code block", "```\n" + DSML + "\n```"],
+    ["inside an unclosed fence", "```\n" + DSML],
+    ["two wrapper blocks", DSML + "\n" + DSML],
+    ["stray DSML outside the wrapper", DSML + tag("invoke", ' name="memory_search"')],
+    ["mismatched wrapper tags", tag("tool_calls") + ok + tag("function_calls", "", true)],
+    ["text between tags", wrap("first: " + ok)],
+    ["no string attribute", wrap(tag("invoke", ' name="memory_search"') + tag("parameter", ' name="q"') + "a" + tag("parameter", "", true) + tag("invoke", "", true))],
+    ["invalid JSON", wrap(invoke("memory_search", [["q", "{nope", true]]))],
+    ["duplicate parameter", wrap(invoke("memory_search", [["q", "a"], ["q", "b"]]))],
+    ["DSML inside a value", wrap(invoke("memory_search", [["q", tag("invoke", ' name="x"')]]))],
+    ["a parameter the schema forbids", wrap(invoke("vault_append_section", [["path", "p"], ["text", "t"], ["extra", "x"]]))],
+    ["a required parameter missing", wrap(invoke("vault_append_section", [["path", "p"]]))],
+    ["an empty wrapper", wrap("")],
+    ["too many calls", wrap(Array.from({ length: RECOVERED_CALLS_MAX + 1 }, () => ok).join("\n"))],
+    ["not DSML at all", '<function_calls><invoke name="memory_search"><parameter name="q">a</parameter></invoke></function_calls>'],
+  ];
+  for (const [why, text] of refuse) assert.equal(recoverDsmlCalls(text, offered), undefined, why);
+  assert.equal(recoverDsmlCalls(DSML, []), undefined, "nothing offered, nothing recovered");
+});
+
+test("recovery in the tool loop: a DSML call runs once like a structured call, with a note, no retry, and is sent back structured", async () => {
+  const { tool, runs } = counter();
+  const { model, seen } = recorded((n) => (n === 0 ? say(`Let me look.\n${DSML}`) : say("Nothing needs acknowledging.")));
+  const diags: ProtocolDiagnostic[] = [];
+  const done: string[] = [];
+  const out = await runChat({ model, messages: user, limits: [], tools: [tool], onProtocol: (d) => diags.push(d), onCall: (c) => void done.push(c.call_id) });
+  assert.equal(out.text, "Nothing needs acknowledging.");
+  assert.deepEqual(runs, [{ query: "inbox acknowledge seen server side orbit web dismiss notification" }]);
+  assert.equal(out.calls.length, 1);
+  assert.equal(seen.length, 2, "no retry: the recovered call is the step's result");
+  assert.doesNotMatch(seen[1].text, /ORBIT REJECTED/);
+  assert.deepEqual(diags.map((d) => [d.action, d.recoveredCalls]), [["recovered", 1]]);
+  assert.match(out.incomplete!.join(" "), /recovered 1 tool call that the model wrote as DeepSeek DSML text/);
+  assert.deepEqual(done, ["call_dsml_0_0_0"]);
+  const next = JSON.stringify(seen[1].input);
+  assert.equal(next.includes(BAR), false, "the markup itself is not sent on; the call goes back as a structured item");
+  assert.equal(seen[1].input.filter((i) => "type" in i && i.type === "function_call").length, 1);
+});
+
+test("recovery keeps the policy gate: a recovered call the policy refuses does not run", async () => {
+  const { tool, runs } = counter();
+  const model = scripted([say(DSML), say("I was not allowed to search.")]);
+  const out = await runChat({ model, messages: user, limits: [], tools: [tool], allow: () => "refused by policy" });
+  assert.equal(runs.length, 0);
+  assert.equal(out.calls[0]?.ok, false);
+  assert.equal(out.text, "I was not allowed to search.");
+});
+
+test("recovery: after a retry a well-formed DSML response is recovered; a leak on the no-tools final step never is", async () => {
+  const { tool, runs } = counter();
+  const model = scripted([say(LEAK), say(DSML), say("Done.")]);
+  const out = await runChat({ model, messages: user, limits: [], tools: [tool] });
+  assert.equal(out.text, "Done.");
+  assert.equal(runs.length, 1);
+  assert.equal(out.protocol?.map((d) => d.action).join(), "retried,recovered");
+  const { tool: t2, runs: r2 } = counter();
+  const capped = scripted((s) => (s.tools.length ? { text: "", calls: [call("memory_search", { query: String(Math.random()) })] } : say(DSML)));
+  await assert.rejects(runChat({ model: capped, messages: user, limits: [], tools: [t2], maxRounds: 1 }), ModelProtocolError);
+  assert.equal(r2.length, 1, "only the structured call of round 0 ran");
+});
+
+test("fallback path: OpenRouter DSML content (finish stop) is recovered and run once; a complete block cut at the limit is not", async () => {
+  const { model, requests } = fallbackWorld([{ content: DSML }, { content: "Answer from the fallback." }]);
+  const { tool, runs } = counter();
+  const diags: ProtocolDiagnostic[] = [];
+  const out = await runChat({ model, messages: user, limits: [], tools: [tool], fallback: true, onProtocol: (d) => diags.push(d) });
+  assert.equal(out.text, "Answer from the fallback.");
+  assert.equal(runs.length, 1);
+  assert.equal(requests.length, 2, "the call's result went back in the second request; no retry");
+  const sentBack = requests[1].messages.find((m: any) => m.role === "assistant" && m.tool_calls);
+  assert.equal(sentBack.tool_calls[0].function.name, "memory_search");
+  assert.equal(JSON.stringify(requests[1].messages).includes(BAR), false);
+  assert.equal(diags[0].model, "vendor/dsml-model");
+  const cut = fallbackWorld([{ content: DSML, finish: "length" }, { content: "Complete answer." }]);
+  const { tool: t2, runs: r2 } = counter();
+  const out2 = await runChat({ model: cut.model, messages: user, limits: [], tools: [t2], fallback: true });
+  assert.equal(r2.length, 0, "a reply cut off at the output limit is never run, however complete it looks");
+  assert.equal(out2.text, "Complete answer.");
 });
