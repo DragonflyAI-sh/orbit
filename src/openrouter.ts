@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ProviderError } from "./chatgpt.ts";
+import { MAX_RESET_MS, ProviderError } from "./chatgpt.ts";
 import { instructions } from "./model.ts";
 import type { Item, Step, ToolCall, ToolDef, ToolRounds } from "./model.ts";
 import { SpendError, toMicro } from "./spend-ledger.ts";
@@ -36,6 +36,14 @@ export const MAX_TOOL_CALLS = 8;
 // Largest cap accepted: far above any sane value, far below the ledger's integer range (2^53 micro-USD is about 9.0e9 USD).
 export const MAX_CAP_USD = 10_000;
 export const BALANCE_EVERY_MS = 10 * 60_000;
+// HTTP 429 from OpenRouter (docs/openrouter-fallback.md, "Rate limits and balance"). A rate limit is retried once inside the turn, after
+// the provider's reset time when it is this close, or after RETRY_DEFAULT_MS when it gave none. A reset further away is not waited for
+// in a turn (Rai is waiting): the call fails at once with the reset time, and src/fallback.ts holds the route until then.
+export const RETRY_DEFAULT_MS = 2_000;
+export const MAX_RETRY_WAIT_MS = 10_000;
+// The codes ORBIT puts on an OpenRouter limit error (OpenRouterLimit), so the fallback can tell them from every other failure.
+export const RATE_LIMITED = "openrouter_rate_limited";
+export const NO_BALANCE = "openrouter_insufficient_balance";
 
 const MODEL_ID = /^[a-z0-9][a-z0-9_.-]*\/[a-z0-9][a-z0-9_.-]*(:[a-z0-9_-]+)?$/;
 // Suffixes that change what is billed or where the call goes (web search, routing by speed). Never accepted.
@@ -165,6 +173,61 @@ export function sanitize(text: string, key: string, max = 200): string {
   return out.length > max ? `${out.slice(0, max)}…` : out;
 }
 
+// A refusal from OpenRouter that says the route cannot answer for a while: a rate limit (HTTP 429) or an account or key without enough
+// balance (HTTP 402, or a 429 whose code or message says so). `retryable`: the refusal was released in the ledger and its body was
+// read, so one retry is safe and nothing is uncertain. `retried`: this is the second refusal, after ORBIT's one retry.
+export class OpenRouterLimit extends ProviderError {
+  readonly limit: "rate" | "balance";
+  readonly status: number;
+  readonly retryable: boolean;
+  readonly retried: boolean;
+  constructor(o: { limit: "rate" | "balance"; status: number; said: string; bodyProblem?: string; resetsAt?: string; retryable: boolean; retried?: boolean; waitedMs?: number; accounting?: string[] }) {
+    const what =
+      o.limit === "rate"
+        ? `OpenRouter is rate limiting requests${o.retried ? `, also on ORBIT's one retry${o.waitedMs !== undefined ? ` ${Math.round(o.waitedMs / 100) / 10} s later` : ""}` : ""}`
+        : "OpenRouter says the account or key does not have enough balance (credits) for this call";
+    const when = o.resetsAt ? `it gave ${o.resetsAt} as the reset time` : "it gave no reset time";
+    super(o.limit === "rate" ? "rate_limit" : "usage_limit", `OpenRouter: HTTP ${o.status}${o.said ? `: ${o.said}` : ""}${o.bodyProblem ? ` (${o.bodyProblem})` : ""}. ${what}; ${when}.`, o.resetsAt, o.limit === "rate" ? RATE_LIMITED : NO_BALANCE, o.accounting);
+    this.name = "OpenRouterLimit";
+    this.limit = o.limit;
+    this.status = o.status;
+    this.retryable = o.retryable;
+    this.retried = o.retried === true;
+  }
+}
+
+// Words and codes that mark a 429 as "no balance" rather than "too many requests". OpenRouter's own answer for no credits is HTTP 402;
+// some upstream providers and key limits answer 429 with text like these instead.
+const NO_BALANCE_TEXT = /insufficient[\s_-]*(credit|balance|fund|quota)|not enough (credit|balance|fund)|out of credits|more credits|negative balance|credit limit|key limit|payment required|top[\s-]?up|add credits/i;
+
+// When an OpenRouter limit ends, from the response. Sources, first VALID one wins: the standard `Retry-After` header (integer seconds or
+// an IMF-fixdate), an `X-RateLimit-Reset` response header, then `error.metadata.headers["X-RateLimit-Reset"]` in the body (OpenRouter
+// puts the upstream rate-limit headers there). A reset value is epoch milliseconds (>= 1e12), epoch seconds (>= 1e9) or seconds from
+// now (smaller). A value counts only if it is strictly in the future and within MAX_RESET_MS; anything else gives no reset time.
+const IMF_FIXDATE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+export function openrouterReset(headers: Pick<Headers, "get"> | undefined, body: unknown, now: number): string | undefined {
+  const valid = (ms: number | undefined) => ms !== undefined && Number.isFinite(ms) && ms > now && ms - now <= MAX_RESET_MS;
+  const retryAfter = (headers?.get("retry-after") ?? "").trim();
+  const reset = (v: unknown): number | undefined => {
+    const t = typeof v === "number" ? String(v) : typeof v === "string" ? v.trim() : "";
+    if (!/^\d{1,15}$/.test(t)) return undefined;
+    const n = Number(t);
+    return n >= 1e12 ? n : n >= 1e9 ? n * 1000 : now + n * 1000;
+  };
+  const meta = (body as { error?: { metadata?: { headers?: unknown } } } | undefined)?.error?.metadata?.headers;
+  const metaReset = meta && typeof meta === "object" ? Object.entries(meta as Record<string, unknown>).find(([k]) => k.toLowerCase() === "x-ratelimit-reset")?.[1] : undefined;
+  const candidates: Array<() => number | undefined> = [
+    () => (/^\d{1,9}$/.test(retryAfter) ? now + Number(retryAfter) * 1000 : IMF_FIXDATE.test(retryAfter) ? Date.parse(retryAfter) : undefined),
+    () => reset(headers?.get("x-ratelimit-reset")),
+    () => reset(metaReset),
+  ];
+  for (const candidate of candidates) {
+    const ms = candidate();
+    if (valid(ms)) return new Date(ms!).toISOString();
+  }
+  return undefined;
+}
+
 // Why a bounded read stopped before the whole body was in memory.
 export class ReadLimit extends Error {
   readonly why: "size" | "time" | "stream";
@@ -257,7 +320,15 @@ export type OpenRouterClient = {
   balance(): Promise<{ limitUsd: number | null; remainingUsd: number | null; usedUsd: number | null }>;
 };
 
-export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready" }>, ledger: SpendLedger, fetcher: Fetch = fetch): OpenRouterClient {
+// One OpenRouter limit event, for the log (src/fallback.ts logs the hold it starts). Never carries the key or provider text.
+export type LimitEvent = { model: string; status: number; limit: "rate" | "balance"; resetsAt: string | null; attempt: 1 | 2; action: "retry" | "no_retry" | "gave_up"; waitMs?: number; why?: string };
+export type ClientOptions = { now?: () => number; sleep?: (ms: number) => Promise<void>; log?: (e: LimitEvent) => void };
+const logLimit = (e: LimitEvent) => console.log(JSON.stringify({ at: new Date().toISOString(), event: "openrouter_limited", ...e }));
+
+export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready" }>, ledger: SpendLedger, fetcher: Fetch = fetch, opts: ClientOptions = {}): OpenRouterClient {
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const log = opts.log ?? logLimit;
   // `accounting` is carried on the error as data; the owner-visible message also names it, built here once from that data.
   // ProviderError builds the owner-visible "Spend accounting" sentence itself, once, from this list.
   const fail = (message: string, kind: ConstructorParameters<typeof ProviderError>[0] = "failed", accounting: string[] = []) =>
@@ -278,6 +349,119 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
   const whyUnread = (err: unknown, what: string, ms: number): string => {
     const why = err instanceof ReadLimit ? err.why : "stream";
     return why === "size" ? `${what} was too large and was discarded` : why === "time" ? `${what} did not arrive within ${ms / 1000} s` : `${what} could not be read`;
+  };
+
+  // One request to OpenRouter with its own reservation and deadline. `retried`/`waitedMs` only describe a second 429 in its message.
+  const send = async (body: string, bound: number, retried: boolean, waitedMs?: number): Promise<PaidStep> => {
+    let reservation: { id: string; micro: number };
+    try {
+      reservation = ledger.reserve(bound);
+    } catch (err) {
+      // Any failure to reserve (cap, lock, disk) refuses the call before anything is sent. A non-SpendError is a ledger fault too, so
+      // the caller can latch it; the raw error text (it may hold a path) is dropped.
+      throw err instanceof SpendError ? err : new SpendError("ledger", "The spend ledger could not record this call, so no paid call is made.");
+    }
+
+    // One deadline covers the request and reading the whole body, so a provider that sends headers and then stalls cannot hold the turn.
+    const signal = AbortSignal.timeout(cfg.timeoutMs);
+    let res: Response;
+    try {
+      res = await fetcher(`${OPENROUTER_BASE}/chat/completions`, { method: "POST", headers, body, signal });
+    } catch (err) {
+      // The request may have reached OpenRouter and been billed: its bound stays charged.
+      const note = safely(() => ledger.settle(reservation.id, undefined, "no answer (timeout or network): the request may have been billed"));
+      const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+      throw fail(timedOut ? `no answer within ${cfg.timeoutMs / 1000} s` : "the request failed before an answer arrived", "failed", note);
+    }
+
+    // Bounded before anything is buffered or parsed. A refusal (non-2xx) body is small; a completion body has its own larger bound.
+    let text = "";
+    let bodyProblem: string | undefined;
+    try {
+      text = await readBounded(res, res.ok ? MAX_RESPONSE_BYTES : MAX_ERROR_BODY_BYTES, signal);
+    } catch (err) {
+      bodyProblem = whyUnread(err, res.ok ? "the response" : "the error body", cfg.timeoutMs);
+      if (res.ok) {
+        // A 2xx answer that cannot be read may have been billed: its bound stays charged and nothing is retried.
+        const note = safely(() => ledger.settle(reservation.id, undefined, "response unreadable"));
+        throw fail(bodyProblem, "failed", note);
+      }
+    }
+    let json: { error?: { message?: string; code?: unknown; metadata?: unknown }; choices?: { finish_reason?: string; message?: { content?: unknown; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] } }[]; usage?: { cost?: unknown } } | undefined;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = undefined;
+    }
+    const costOf = (): number | undefined => {
+      const c = json?.usage?.cost;
+      return typeof c === "number" && Number.isFinite(c) && c >= 0 ? c : undefined;
+    };
+
+    if (!res.ok || json?.error) {
+      const status = res.status;
+      const said = sanitize(json?.error?.message ?? "", cfg.key);
+      // A refusal before any work (auth, bad request, rate limit) is not billed; a server error is unknown.
+      const note =
+        status === 401 || status === 402 || status === 403 || status === 400 || status === 404 || status === 429
+          ? safely(() => ledger.release(reservation.id))
+          : safely(() => ledger.settle(reservation.id, costOf() === undefined ? undefined : toMicro(costOf()!), `HTTP ${status}, cost unknown`));
+      // A rate limit or a missing balance is its own typed error, so one retry can be made here and src/fallback.ts can stop calling
+      // OpenRouter until the reset. 402 is OpenRouter's "insufficient credits"; a 429 is a rate limit unless its code or text says balance.
+      if (status === 429 || status === 402) {
+        const tag = `${typeof json?.error?.code === "string" ? json.error.code : ""} ${said}`;
+        throw new OpenRouterLimit({
+          limit: status === 402 || NO_BALANCE_TEXT.test(tag) ? "balance" : "rate",
+          status,
+          said,
+          ...(bodyProblem ? { bodyProblem } : {}),
+          resetsAt: openrouterReset(res.headers, json, now()),
+          retryable: !note.length && !bodyProblem,
+          retried,
+          ...(waitedMs !== undefined ? { waitedMs } : {}),
+          accounting: note,
+        });
+      }
+      throw fail(`HTTP ${status}${said ? `: ${said}` : ""}${bodyProblem ? ` (${bodyProblem})` : ""}`, "failed", note);
+    }
+
+    // A good response: charge what the provider says it cost. No cost reported means the bound stays charged.
+    const cost = costOf();
+    // A billed answer is not thrown away because the ledger write failed: it is returned with the failure as structured `accounting`
+    // (also when the answer is only tool calls), and the reservation stays outstanding (charged at its bound after a restart).
+    const settleNote = safely(() => ledger.settle(reservation.id, cost === undefined ? undefined : toMicro(cost), "provider reported no cost"));
+    const choice = json?.choices?.[0];
+    const message = choice?.message;
+    if (!message) throw fail("the response had no message", "failed", settleNote);
+    const rawCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+    const calls: ToolCall[] = rawCalls
+      .filter((c) => c && c.id && c.function?.name)
+      .map((c) => ({ call_id: String(c.id), name: String(c.function!.name), arguments: c.function!.arguments ?? "{}" }));
+    if (calls.length > MAX_TOOL_CALLS) throw fail(`the model asked for ${calls.length} tool calls at once; the limit is ${MAX_TOOL_CALLS}`, "failed", settleNote);
+    const finish = typeof choice?.finish_reason === "string" ? choice.finish_reason : undefined;
+    // A tool call runs only after a finish reason that says the model ended normally. A reply cut off (output limit, content filter,
+    // error), one with no finish reason (absent, null or not a string) and one with a reason ORBIT does not know may all carry half a
+    // tool call: none of them is run, whatever its arguments look like.
+    if (calls.length || rawCalls.length) {
+      if (finish !== undefined && CUT_FINISH.has(finish)) {
+        throw fail(`the reply ended early (finish: ${sanitize(finish, cfg.key, 40)}) in the middle of a tool call, so no tool was run`, "failed", settleNote);
+      }
+      if (finish === undefined || !NORMAL_FINISH.has(finish)) {
+        throw fail(`the reply carried a tool call but ${finish === undefined ? "no finish reason" : `an unrecognised finish reason (${sanitize(finish, cfg.key, 40)})`}, so it cannot be shown complete and no tool was run`, "failed", settleNote);
+      }
+    }
+    const full = typeof message.content === "string" ? message.content : "";
+    const content = full.slice(0, MAX_REPLY_CHARS);
+    if (!content && !calls.length) throw fail(`the response had no text and no tool call${finish ? ` (finish: ${sanitize(finish, cfg.key, 40)})` : ""}`, "failed", settleNote);
+    // Completeness notes are their own structured list, apart from spend accounting and never part of the text or of a tool argument,
+    // so they cannot reach a later model request or change what a tool runs. A normal stop adds nothing.
+    const incomplete: string[] = [];
+    if (finish !== undefined && CUT_FINISH.has(finish)) incomplete.push(finish === "length" ? "The reply was cut off at the output limit (finish: length); it may be incomplete." : `The provider ended the reply early (finish: ${sanitize(finish, cfg.key, 40)}); it may be incomplete.`);
+    else if (finish === undefined) incomplete.push("The provider gave no finish reason, so ORBIT cannot tell whether the reply is complete.");
+    else if (!NORMAL_FINISH.has(finish)) incomplete.push(`The provider gave an unrecognised finish reason (${sanitize(finish, cfg.key, 40)}), not a normal stop; the reply may be incomplete.`);
+    if (full.length > content.length) incomplete.push(`ORBIT shortened the reply to ${MAX_REPLY_CHARS} characters.`);
+    if (rawCalls.length > calls.length) incomplete.push(`${rawCalls.length - calls.length} tool call(s) from the model had no id or name and were dropped; nothing was run for them.`);
+    return { text: content, calls, costUsd: cost, model: cfg.model, reservedMicro: bound, ...(settleNote.length ? { accounting: settleNote } : {}), ...(incomplete.length ? { incomplete } : {}) };
   };
 
   return {
@@ -304,99 +488,29 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
       if (bytes > MAX_REQUEST_BYTES) throw fail(`the conversation is too long to send (${bytes} bytes; the limit is ${MAX_REQUEST_BYTES})`);
       // Upper bound on what this call can be billed: see reservationUsd. Out is the output bound, not max_tokens.
       const bound = toMicro(reservationUsd(bytes, cfg.priceIn, cfg.priceOut, cfg.outputBoundTokens));
-      let reservation: { id: string; micro: number };
+      // A rate limit (HTTP 429) is retried once, with its own reservation and deadline, when the refusal was released and read and the
+      // reset is close (see MAX_RETRY_WAIT_MS). A balance refusal, a far reset and a second 429 are returned as they are.
+      const event = (e: OpenRouterLimit, attempt: 1 | 2, action: LimitEvent["action"], extra: { waitMs?: number; why?: string } = {}) =>
+        log({ model: cfg.model, status: e.status, limit: e.limit, resetsAt: e.resetsAt ?? null, attempt, action, ...extra });
       try {
-        reservation = ledger.reserve(bound);
+        return await send(body, bound, false);
       } catch (err) {
-        // Any failure to reserve (cap, lock, disk) refuses the call before anything is sent. A non-SpendError is a ledger fault too, so
-        // the caller can latch it; the raw error text (it may hold a path) is dropped.
-        throw err instanceof SpendError ? err : new SpendError("ledger", "The spend ledger could not record this call, so no paid call is made.");
-      }
-
-      // One deadline covers the request and reading the whole body, so a provider that sends headers and then stalls cannot hold the turn.
-      const signal = AbortSignal.timeout(cfg.timeoutMs);
-      let res: Response;
-      try {
-        res = await fetcher(`${OPENROUTER_BASE}/chat/completions`, { method: "POST", headers, body, signal });
-      } catch (err) {
-        // The request may have reached OpenRouter and been billed: its bound stays charged.
-        const note = safely(() => ledger.settle(reservation.id, undefined, "no answer (timeout or network): the request may have been billed"));
-        const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-        throw fail(timedOut ? `no answer within ${cfg.timeoutMs / 1000} s` : "the request failed before an answer arrived", "failed", note);
-      }
-
-      // Bounded before anything is buffered or parsed. A refusal (non-2xx) body is small; a completion body has its own larger bound.
-      let text = "";
-      let bodyProblem: string | undefined;
-      try {
-        text = await readBounded(res, res.ok ? MAX_RESPONSE_BYTES : MAX_ERROR_BODY_BYTES, signal);
-      } catch (err) {
-        bodyProblem = whyUnread(err, res.ok ? "the response" : "the error body", cfg.timeoutMs);
-        if (res.ok) {
-          // A 2xx answer that cannot be read may have been billed: its bound stays charged and nothing is retried.
-          const note = safely(() => ledger.settle(reservation.id, undefined, "response unreadable"));
-          throw fail(bodyProblem, "failed", note);
+        if (!(err instanceof OpenRouterLimit)) throw err;
+        const why = err.limit === "balance" ? "no balance: retrying cannot help" : !err.retryable ? "the refusal could not be released or read" : undefined;
+        const waitMs = err.resetsAt ? Math.max(0, Date.parse(err.resetsAt) - now()) : RETRY_DEFAULT_MS;
+        if (why || waitMs > MAX_RETRY_WAIT_MS) {
+          event(err, 1, "no_retry", { why: why ?? `the reset is ${Math.round(waitMs / 1000)} s away, longer than ORBIT waits in a reply` });
+          throw err;
+        }
+        event(err, 1, "retry", { waitMs });
+        await sleep(waitMs);
+        try {
+          return await send(body, bound, true, waitMs);
+        } catch (again) {
+          if (again instanceof OpenRouterLimit) event(again, 2, "gave_up");
+          throw again;
         }
       }
-      let json: { error?: { message?: string; code?: unknown }; choices?: { finish_reason?: string; message?: { content?: unknown; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] } }[]; usage?: { cost?: unknown } } | undefined;
-      try {
-        json = JSON.parse(text);
-      } catch {
-        json = undefined;
-      }
-      const costOf = (): number | undefined => {
-        const c = json?.usage?.cost;
-        return typeof c === "number" && Number.isFinite(c) && c >= 0 ? c : undefined;
-      };
-
-      if (!res.ok || json?.error) {
-        const status = res.status;
-        const said = sanitize(json?.error?.message ?? "", cfg.key);
-        // A refusal before any work (auth, bad request, rate limit) is not billed; a server error is unknown.
-        const note =
-          status === 401 || status === 402 || status === 403 || status === 400 || status === 404 || status === 429
-            ? safely(() => ledger.release(reservation.id))
-            : safely(() => ledger.settle(reservation.id, costOf() === undefined ? undefined : toMicro(costOf()!), `HTTP ${status}, cost unknown`));
-        throw fail(`HTTP ${status}${said ? `: ${said}` : ""}${bodyProblem ? ` (${bodyProblem})` : ""}`, "failed", note);
-      }
-
-      // A good response: charge what the provider says it cost. No cost reported means the bound stays charged.
-      const cost = costOf();
-      // A billed answer is not thrown away because the ledger write failed: it is returned with the failure as structured `accounting`
-      // (also when the answer is only tool calls), and the reservation stays outstanding (charged at its bound after a restart).
-      const settleNote = safely(() => ledger.settle(reservation.id, cost === undefined ? undefined : toMicro(cost), "provider reported no cost"));
-      const choice = json?.choices?.[0];
-      const message = choice?.message;
-      if (!message) throw fail("the response had no message", "failed", settleNote);
-      const rawCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
-      const calls: ToolCall[] = rawCalls
-        .filter((c) => c && c.id && c.function?.name)
-        .map((c) => ({ call_id: String(c.id), name: String(c.function!.name), arguments: c.function!.arguments ?? "{}" }));
-      if (calls.length > MAX_TOOL_CALLS) throw fail(`the model asked for ${calls.length} tool calls at once; the limit is ${MAX_TOOL_CALLS}`, "failed", settleNote);
-      const finish = typeof choice?.finish_reason === "string" ? choice.finish_reason : undefined;
-      // A tool call runs only after a finish reason that says the model ended normally. A reply cut off (output limit, content filter,
-      // error), one with no finish reason (absent, null or not a string) and one with a reason ORBIT does not know may all carry half a
-      // tool call: none of them is run, whatever its arguments look like.
-      if (calls.length || rawCalls.length) {
-        if (finish !== undefined && CUT_FINISH.has(finish)) {
-          throw fail(`the reply ended early (finish: ${sanitize(finish, cfg.key, 40)}) in the middle of a tool call, so no tool was run`, "failed", settleNote);
-        }
-        if (finish === undefined || !NORMAL_FINISH.has(finish)) {
-          throw fail(`the reply carried a tool call but ${finish === undefined ? "no finish reason" : `an unrecognised finish reason (${sanitize(finish, cfg.key, 40)})`}, so it cannot be shown complete and no tool was run`, "failed", settleNote);
-        }
-      }
-      const full = typeof message.content === "string" ? message.content : "";
-      const content = full.slice(0, MAX_REPLY_CHARS);
-      if (!content && !calls.length) throw fail(`the response had no text and no tool call${finish ? ` (finish: ${sanitize(finish, cfg.key, 40)})` : ""}`, "failed", settleNote);
-      // Completeness notes are their own structured list, apart from spend accounting and never part of the text or of a tool argument,
-      // so they cannot reach a later model request or change what a tool runs. A normal stop adds nothing.
-      const incomplete: string[] = [];
-      if (finish !== undefined && CUT_FINISH.has(finish)) incomplete.push(finish === "length" ? "The reply was cut off at the output limit (finish: length); it may be incomplete." : `The provider ended the reply early (finish: ${sanitize(finish, cfg.key, 40)}); it may be incomplete.`);
-      else if (finish === undefined) incomplete.push("The provider gave no finish reason, so ORBIT cannot tell whether the reply is complete.");
-      else if (!NORMAL_FINISH.has(finish)) incomplete.push(`The provider gave an unrecognised finish reason (${sanitize(finish, cfg.key, 40)}), not a normal stop; the reply may be incomplete.`);
-      if (full.length > content.length) incomplete.push(`ORBIT shortened the reply to ${MAX_REPLY_CHARS} characters.`);
-      if (rawCalls.length > calls.length) incomplete.push(`${rawCalls.length - calls.length} tool call(s) from the model had no id or name and were dropped; nothing was run for them.`);
-      return { text: content, calls, costUsd: cost, model: cfg.model, reservedMicro: bound, ...(settleNote.length ? { accounting: settleNote } : {}), ...(incomplete.length ? { incomplete } : {}) };
     },
 
     async balance() {

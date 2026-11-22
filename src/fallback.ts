@@ -2,8 +2,8 @@ import { MAX_RESET_MS, ProviderError, RATE_PAUSE_MS, USAGE_PAUSE_MS } from "./ch
 import { replySource } from "./model.ts";
 import type { FallbackInfo, ImageSupport, Item, Message, ModelPort, Reply, ReplyOptions, Step, ToolDef, ToolRounds } from "./model.ts";
 import { FALLBACK_NO_PHOTOS, withoutPhotos } from "./photo-context.ts";
-import { BALANCE_EVERY_MS, openrouterClient, reservationUsd } from "./openrouter.ts";
-import type { OpenRouterClient, OpenRouterConfig } from "./openrouter.ts";
+import { BALANCE_EVERY_MS, OpenRouterLimit, openrouterClient, reservationUsd } from "./openrouter.ts";
+import type { LimitEvent, OpenRouterClient, OpenRouterConfig } from "./openrouter.ts";
 import { SpendError, toMicro, toUsd } from "./spend-ledger.ts";
 import type { SpendLedger } from "./spend-ledger.ts";
 import type { FallbackRoute, ModelAvailability, PortStatus } from "./ports.ts";
@@ -34,6 +34,13 @@ import type { FallbackRoute, ModelAvailability, PortStatus } from "./ports.ts";
 // refusal of a request larger than one that already succeeded in this window while a request of that size still fits. A second
 // consecutive "busy", and a cap refusal with no smaller request known to fit, are evidence (failed). After the limit time has passed
 // the primary's own state decides: a primary that is down or a mock is never reported available.
+//
+// OpenRouter's own limits (docs/openrouter-fallback.md, "Rate limits and balance"). The client retries one HTTP 429 itself. When OpenRouter
+// still refuses with a rate limit, or says the account or key has no balance (HTTP 402, or a 429 that says so), the route is HELD: no
+// request is sent to OpenRouter until the hold ends, every reply in that time fails at once with both reasons, and status says the
+// fallback is not usable. A rate hold lasts until OpenRouter's reset time, or ORBIT's RATE_PAUSE_MS estimate. A balance hold lasts
+// until OpenRouter's reset time, or else the next UTC day (when ORBIT's daily cap resets), and ends early when a balance read after it
+// began shows the key's remaining balance went up (a top-up). A restart clears it. Each hold and its end is logged.
 
 type Limit = { kind: "usage_limit" | "rate_limit"; until: number; estimated: boolean };
 
@@ -50,6 +57,22 @@ export type FallbackOptions = {
   now?: () => number;
   // A client made elsewhere (tests).
   client?: OpenRouterClient;
+  // Passed to the client this makes (tests): the wait before its one retry, and its limit log.
+  sleep?: (ms: number) => Promise<void>;
+  log?: (e: LimitEvent) => void;
+  // Where the hold events go (default: one JSON line on stdout).
+  logHold?: (e: HoldEvent) => void;
+};
+
+// A hold on the OpenRouter route: OpenRouter itself refused (see the header). `baseline`: the key's remaining balance at the first
+// balance read after a balance hold began (null: the key reports none); a later read above it ends the hold.
+type Hold = { kind: "rate" | "balance"; until: number; estimated: boolean; since: number; status: number; baseline?: number | null };
+export type HoldEvent = { event: "openrouter_fallback_hold" | "openrouter_fallback_hold_ended"; model: string; kind: "rate" | "balance"; until: string; estimated: boolean; status?: number; why?: string };
+const logHoldLine = (e: HoldEvent) => console.log(JSON.stringify({ at: new Date().toISOString(), ...e }));
+// The start of the next UTC day, when the daily spend cap resets.
+const nextUtcDay = (t: number) => {
+  const d = new Date(t);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
 };
 
 const isLimit = (err: unknown): err is ProviderError => err instanceof ProviderError && (err.kind === "usage_limit" || err.kind === "rate_limit");
@@ -59,7 +82,8 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   const { primary, config } = o;
   const now = o.now ?? Date.now;
   let client: OpenRouterClient | undefined = o.client;
-  if (!client && config.state === "ready" && o.ledger) client = openrouterClient(config, o.ledger, o.fetcher);
+  if (!client && config.state === "ready" && o.ledger) client = openrouterClient(config, o.ledger, o.fetcher, { now, ...(o.sleep ? { sleep: o.sleep } : {}), ...(o.log ? { log: o.log } : {}) });
+  const logHold = o.logHold ?? logHoldLine;
   const ledger = o.ledger;
 
   let limit: Limit | undefined;
@@ -112,6 +136,37 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
   let balance: { at: string; text: string } | undefined;
   let balanceTried = 0;
 
+  let hold: Hold | undefined;
+  const held = (): Hold | undefined => (hold && hold.until > now() ? hold : undefined);
+  const holdWhy = (h: Hold) =>
+    h.kind === "rate"
+      ? `OpenRouter is rate limiting the fallback (HTTP ${h.status})`
+      : `OpenRouter says the fallback's account or key has no balance left (HTTP ${h.status})`;
+  const holdEnd = (h: Hold) =>
+    `${iso(h.until)} (${h.estimated ? (h.kind === "rate" ? "ORBIT's own estimate: OpenRouter gave no reset time" : "the next UTC day, when the daily cap resets: OpenRouter gave no reset time") : "OpenRouter's reset time"})${h.kind === "balance" ? " or until a balance check shows the key was topped up" : ""}`;
+  const holdText = (h: Hold) => `${holdWhy(h)}, so ORBIT sends nothing to OpenRouter until ${holdEnd(h)}.`;
+  const endHold = (why: string) => {
+    const h = hold;
+    if (!h) return;
+    hold = undefined;
+    logHold({ event: "openrouter_fallback_hold_ended", model: client?.model ?? "", kind: h.kind, until: iso(h.until), estimated: h.estimated, why });
+  };
+  // A refusal from OpenRouter itself starts (or lengthens) the hold. A hold is never shortened by a later report, and a balance hold is
+  // never turned back into a rate hold.
+  const noteHold = (err: OpenRouterLimit): Hold => {
+    const t = now();
+    const given = err.resetsAt ? Date.parse(err.resetsAt) : NaN;
+    const reliable = Number.isFinite(given) && given > t && given - t <= MAX_RESET_MS;
+    const until = reliable ? given : err.limit === "rate" ? t + RATE_PAUSE_MS : nextUtcDay(t);
+    const cur = held();
+    if (cur && (cur.until >= until || (cur.kind === "balance" && err.limit === "rate"))) return cur;
+    hold = { kind: cur?.kind === "balance" ? "balance" : err.limit, until, estimated: !reliable, since: t, status: err.status };
+    // Read the balance at the next maintenance tick, not ten minutes later: it is free, and it is how a top-up ends a balance hold.
+    balanceTried = 0;
+    logHold({ event: "openrouter_fallback_hold", model: client?.model ?? "", kind: hold.kind, until: iso(until), estimated: hold.estimated, status: err.status, why: err.retried ? "a rate limit again after ORBIT's one retry" : err.limit === "balance" ? "no balance" : "a rate limit with a reset too far away to wait for in a reply" });
+    return hold;
+  };
+
   const unavailable = (): string | undefined => {
     if (config.state !== "ready") return config.reason;
     if (!client || !ledger) return "The spend ledger is not configured.";
@@ -156,6 +211,10 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
     if (!paidOk) throw stand;
     const problem = refusal();
     if (problem) throw augment(stand, problem, []);
+    // OpenRouter itself refused recently: nothing is sent until the hold ends. Not evidence about the route either way (status reads the
+    // hold directly).
+    const h = held();
+    if (h) throw augment(stand, `the fallback is unavailable too. ${holdText(h)} Neither model can answer now.`, []);
     // Photos (docs/photos.md): the paid fallback is not given images in this build. Photos on the newest user message refuse the turn,
     // so they are never silently dropped; older photos in the history are replaced by a note the model sees and the owner is told.
     const photos = withoutPhotos(input);
@@ -193,6 +252,8 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       // A failed paid call whose outcome the ledger could not record is as uncertain as a billed answer that could not be recorded.
       const unrecorded = err instanceof ProviderError ? (err.accounting ?? []) : [];
       if (unrecorded.length) latch("the ledger could not record the outcome of a paid call");
+      // OpenRouter's own rate limit (after the client's one retry, or with a reset too far away to wait for) or no balance: hold the route.
+      if (err instanceof OpenRouterLimit) throw augment(stand, `${err.base} ${holdText(noteHold(err))} Neither model can answer now.`, unrecorded);
       throw augment(stand, err instanceof ProviderError ? err.base : message, unrecorded);
     }
     record(g, seq, true);
@@ -294,8 +355,12 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
       : tooLittle
         ? `The OpenRouter fallback's remaining allowance is below the smallest possible call's reservation`
         : undefined;
+    // OpenRouter itself refused (rate limit or no balance): nothing is sent to it until the hold ends.
+    const h = held();
+    const holdNote = h ? ` Paused: ${holdText(h)}` : "";
+    const why2 = offWhy ?? (h ? `The OpenRouter fallback is paused because ${holdWhy(h)}, until ${iso(h.until)}` : undefined);
     // A used-up cap refuses every paid call until it resets: armed (configured, ledger sound) but not usable now.
-    return { armed: true, usable: !offWhy, ...(offWhy ? { off: offWhy } : {}), text: ` OpenRouter fallback armed: ${client!.model}, used only while ChatGPT is limited.${allowance}${spent}${short}${unverified}${bal}` };
+    return { armed: true, usable: !why2, ...(why2 ? { off: why2 } : {}), text: ` OpenRouter fallback armed: ${client!.model}, used only while ChatGPT is limited.${allowance}${spent}${short}${holdNote}${unverified}${bal}` };
   };
 
   const wrapper: FallbackModel = {
@@ -308,6 +373,16 @@ export function fallbackModel(o: FallbackOptions): FallbackModel {
             balanceTried = now();
             try {
               const b = await client.balance();
+              const h = held();
+              if (h?.kind === "balance") {
+                // The first read after a balance hold began is its baseline; a later one above it is a top-up and ends the hold.
+                if (h.baseline === undefined) h.baseline = b.remainingUsd;
+                else if (b.remainingUsd !== null && b.remainingUsd > 0 && (h.baseline === null || b.remainingUsd > h.baseline)) endHold("a balance check shows the key's remaining balance went up (a top-up)");
+              } else if (h?.kind === "rate" && b.remainingUsd !== null && b.remainingUsd <= 0) {
+                // A "rate limit" while the key has nothing left is a balance problem: hold until the next UTC day (or a top-up) instead.
+                hold = { kind: "balance", until: Math.max(h.until, nextUtcDay(now())), estimated: true, since: now(), status: h.status, baseline: b.remainingUsd };
+                logHold({ event: "openrouter_fallback_hold", model: client.model, kind: "balance", until: iso(hold.until), estimated: true, status: h.status, why: "a balance check shows the key has no balance left" });
+              }
               const usd = (v: number | null) => (v === null ? "unknown" : `$${v.toFixed(2)}`);
               balance = { at: iso(now()), text: `OpenRouter key (account side, not the local allowance): limit ${b.limitUsd === null ? "none" : usd(b.limitUsd)}, remaining ${usd(b.remainingUsd)}, used ${usd(b.usedUsd)}, read ${iso(now())}.` };
             } catch (err) {
