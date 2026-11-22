@@ -747,7 +747,7 @@ export function firstPageCursor(value: unknown, invalid: string): string | undef
   if (typeof value !== "string") throw new SessionError("invalid", invalid);
   return value;
 }
-export const OMITTED = "Only user and assistant message text is returned. Tool call arguments and outputs, proposal cards, memory note paths, error details, accounting, fallback details, summaries, hidden prompts and context records are left out: they are internal or private payloads, not the conversation. toolCalls and cards say how many were left out of a message.";
+export const OMITTED = "Only user and assistant message text is returned. Tool call arguments and outputs, proposal cards, memory note paths, error details, accounting, fallback details, summaries, hidden prompts and context records are left out: they are internal or private payloads, not the conversation. toolCalls and cards say how many were left out of a message. model, on an assistant message, is the model that wrote it, from ORBIT's records (\"fallback: <model>\" when the paid fallback answered).";
 
 // Stored text is masked again (secrets by credential shape) and made inert: control characters other than line breaks and tabs,
 // and bidirectional or invisible format characters, are removed. Line breaks are kept: a transcript is multi-line.
@@ -803,7 +803,7 @@ function decodeReadCursor(cursor: string, sid: string): ReadCursor {
 }
 
 type ReadItem =
-  | { type: "message"; id: string; role: "user" | "assistant"; at: string; status?: string; segment?: number; text: string; chars: { from: number; to: number; total: number }; complete: boolean; digest: string; omitted?: { toolCalls?: number; cards?: number } }
+  | { type: "message"; id: string; role: "user" | "assistant"; at: string; status?: string; segment?: number; model?: string; text: string; chars: { from: number; to: number; total: number }; complete: boolean; digest: string; omitted?: { toolCalls?: number; cards?: number } }
   | { type: "gap"; segment: number; reason: string; detail: string };
 
 const STALE = (what: string) =>
@@ -870,7 +870,7 @@ function walk(t: Transcript, sid: string, from: "start" | "end", c: ReadCursor |
   const size = (item: ReadItem) => JSON.stringify(item).length + 1;
   const item = (m: TranscriptMessage, seg: number, start: number, text: string, n: number): ReadItem => {
     const omitted = { ...(m.toolCalls ? { toolCalls: m.toolCalls } : {}), ...(m.cards ? { cards: m.cards } : {}) };
-    return { type: "message", id: m.id, role: m.role, at: m.at, ...(m.status && m.status !== "done" ? { status: m.status } : {}), ...(t.segmentName === "chunk" ? { segment: seg } : {}), text: text.slice(start, start + n), chars: { from: start, to: start + n, total: text.length }, complete: start + n === text.length, digest: digest(text), ...(Object.keys(omitted).length ? { omitted } : {}) };
+    return { type: "message", id: m.id, role: m.role, at: m.at, ...(m.status && m.status !== "done" ? { status: m.status } : {}), ...(t.segmentName === "chunk" ? { segment: seg } : {}), ...(m.model ? { model: m.model } : {}), text: text.slice(start, start + n), chars: { from: start, to: start + n, total: text.length }, complete: start + n === text.length, digest: digest(text), ...(Object.keys(omitted).length ? { omitted } : {}) };
   };
   const emit = (it: ReadItem, k: number) => {
     items.push(it);

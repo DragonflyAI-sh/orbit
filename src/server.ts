@@ -19,7 +19,7 @@ import type { Job, Jobs } from "./jobs.ts";
 import type { ControlRepo, Routine } from "./launcher.ts";
 import type { MemoryPort } from "./memory.ts";
 import type { Login } from "./chatgpt.ts";
-import { replySource } from "./model.ts";
+import { answeredBy, replySource } from "./model.ts";
 import type { Message, ModelPort } from "./model.ts";
 import { proposals as newProposals, runChat, screenReply } from "./agent.ts";
 import type { ChatTool, Proposals } from "./agent.ts";
@@ -864,8 +864,9 @@ export function buildServer({
       try {
         const protocolLog = (p: object) => console.log(JSON.stringify({ at: new Date().toISOString(), event: "model_protocol_text", route: "chat", ...p }));
         if (!offered.length) {
-          const reply = await model.reply(messages, current, notes);
-          screenReply(reply.value, reply.fallback ? reply.fallback.model : "primary", protocolLog);
+          const r = await model.reply(messages, current, notes);
+          screenReply(r.value, r.fallback ? r.fallback.model : "primary", protocolLog);
+          const reply = { ...r, answeredBy: answeredBy(model.status().impl, r.fallback) };
           return send(res, 200, { reply, memory: used, limits: current, calls: [], proposals: [] });
         }
         const before = new Set(proposals.list().map((p) => p.id));
@@ -882,7 +883,7 @@ export function buildServer({
           abortGraceMs,
           onProtocol: protocolLog,
         });
-        const reply = { value: outcome.text || "(the model returned no text)", provenance: "live" as const, source: replySource(model.status().impl, outcome.fallback, outcome.mixed), ...(outcome.fallback ? { fallback: outcome.fallback } : {}), ...(outcome.accounting?.length ? { accounting: outcome.accounting } : {}), ...(outcome.incomplete?.length ? { incomplete: outcome.incomplete } : {}) };
+        const reply = { value: outcome.text || "(the model returned no text)", provenance: "live" as const, source: replySource(model.status().impl, outcome.fallback, outcome.mixed), ...(outcome.fallback ? { fallback: outcome.fallback } : {}), answeredBy: answeredBy(model.status().impl, outcome.fallback, outcome.mixed), ...(outcome.accounting?.length ? { accounting: outcome.accounting } : {}), ...(outcome.incomplete?.length ? { incomplete: outcome.incomplete } : {}) };
         const fresh = proposals.list().filter((p) => !before.has(p.id));
         return send(res, 200, { reply, memory: used, limits: current, calls: outcome.calls, proposals: fresh, capped: outcome.capped });
       } catch (err) {

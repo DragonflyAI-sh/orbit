@@ -113,6 +113,25 @@ export function replySource(impl: string, fallback?: FallbackInfo, mixed?: boole
   return `model/openrouter/${fallback.model} (FALLBACK, paid: ChatGPT ${limit}, ${l.estimated ? `ORBIT's estimated pause until ${l.until}` : `resets ${l.until}`}${mixed ? `; earlier rounds of this reply came from ${impl}` : ""})`;
 }
 
+// Which model wrote a reply: stored on every finished assistant reply (src/thread-service.ts) and shown beside its time on the page.
+// `model`: the primary's model name (the port's impl without its transport prefix, so `chatgpt-token-sharing/gpt-6.2-sol` is
+// `gpt-6.2-sol`), or the OpenRouter model id when the paid fallback answered. `fallback: true`: the fallback answered, not the primary.
+// `mixed: true`: earlier tool rounds of the same reply came from the primary. It is built only from ORBIT's own records (the port's
+// impl and the FallbackInfo the call returned), never from model text, and it never carries a key, token or account detail.
+export type AnsweredBy = { model: string; fallback?: true; mixed?: true };
+const TRANSPORT_PREFIXES = ["chatgpt-token-sharing/", "openai/"];
+export function primaryModelName(impl: string): string {
+  const prefix = TRANSPORT_PREFIXES.find((p) => impl.startsWith(p) && impl.length > p.length);
+  return prefix ? impl.slice(prefix.length) : impl;
+}
+// Mirrors replySource: when the fallback is set, it is the model the reply is attributed to.
+export function answeredBy(impl: string, fallback?: FallbackInfo, mixed?: boolean): AnsweredBy {
+  if (!fallback) return { model: primaryModelName(impl) };
+  return { model: fallback.model, fallback: true, ...(mixed ? { mixed: true as const } : {}) };
+}
+// The short label the page shows: the model name, or "fallback: <model>" when a non-primary model answered.
+export const modelLabel = (a: AnsweredBy): string => (a.fallback ? `fallback: ${a.model}` : a.model);
+
 export const RECORD_TOOLS = ["jobs_list", "job_status", "research_result", "ops_admin_operations", "ops_sys_operations"];
 
 // The instruction that asks the model to check records before claiming an outcome. This is a request, not a guarantee: ORBIT

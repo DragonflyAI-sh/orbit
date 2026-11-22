@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { ModelProtocolError, runChat, screenReply, TurnInterrupted } from "./agent.ts";
 import type { ChatTool, Proposal, Proposals } from "./agent.ts";
 import type { Jobs } from "./jobs.ts";
-import { replySource } from "./model.ts";
-import type { FallbackInfo, Item, Message, ModelPort } from "./model.ts";
+import { answeredBy, replySource } from "./model.ts";
+import type { AnsweredBy, FallbackInfo, Item, Message, ModelPort } from "./model.ts";
 import type { ProtocolDiagnostic } from "./tool-protocol.ts";
 import type { AdminOps } from "./ops-admin.ts";
 import type { SysOps } from "./ops-sys.ts";
@@ -307,6 +307,8 @@ export function threadService(d: {
       let source: string;
       let capped = false;
       let fallback: FallbackInfo | undefined;
+      // Which model wrote the reply (src/model.ts): from the port's own impl and the fallback record of this call, never model text.
+      let answered: AnsweredBy;
       let accounting: string[] | undefined;
       let incomplete: string[] | undefined;
       if (prep.tools.length && model.step) {
@@ -355,6 +357,7 @@ export function threadService(d: {
         provenance = "live";
         fallback = outcome.fallback;
         source = replySource(model.status().impl, fallback, outcome.mixed);
+        answered = answeredBy(model.status().impl, fallback, outcome.mixed);
         capped = outcome.capped;
         accounting = outcome.accounting;
         incomplete = outcome.incomplete;
@@ -366,11 +369,12 @@ export function threadService(d: {
         provenance = r.provenance;
         source = r.source;
         fallback = r.fallback;
+        answered = answeredBy(model.status().impl, r.fallback);
         accounting = r.accounting;
         incomplete = r.incomplete;
       }
       if (photoNotes.length) incomplete = [...photoNotes, ...(incomplete ?? [])];
-      threads.patchMessage(id, mid, { text: reply, status: "done", provenance, source, memory: prep.memory, ...(capped ? { capped } : {}), ...(fallback ? { fallback } : {}), ...(accounting?.length ? { accounting } : {}), ...(incomplete?.length ? { incomplete } : {}) });
+      threads.patchMessage(id, mid, { text: reply, status: "done", provenance, source, memory: prep.memory, ...(capped ? { capped } : {}), ...(fallback ? { fallback } : {}), answeredBy: answered, ...(accounting?.length ? { accounting } : {}), ...(incomplete?.length ? { incomplete } : {}) });
       recent?.consider(id, { isOwner: prep.isOwner });
       return {};
     } catch (err) {
