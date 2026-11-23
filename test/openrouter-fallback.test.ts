@@ -110,6 +110,7 @@ test("config: disabled by default; every missing or bad setting makes the fallba
   bad({ ORBIT_OPENROUTER_PRICE_OUT_USD_PER_MTOK: "abc" }, /positive number/);
   bad({ ORBIT_OPENROUTER_MAX_OUTPUT_TOKENS: "999999" }, /MAX_OUTPUT_TOKENS/);
   bad({ ORBIT_OPENROUTER_TIMEOUT_MS: "5" }, /TIMEOUT/);
+  bad({ ORBIT_OPENROUTER_SORT: "fastest" }, /ORBIT_OPENROUTER_SORT must be one of throughput, latency, price or off/);
   bad({ ORBIT_OPENROUTER_DAILY_CAP_USD: "200" }, /daily cap cannot exceed/);
   bad({ CREDENTIALS_DIRECTORY: undefined }, /credential directory/);
   assert.match((openrouterConfig(ENV, () => { throw new Error("ENOENT"); }) as { reason: string }).reason, /not installed/);
@@ -139,7 +140,7 @@ test("client: tool-call round trip with every billable option pinned and the cos
   // `usage: {include: true}` is deprecated with no effect (usage is always returned), so it is no longer sent.
   assert.equal(r1.body.usage, undefined);
   assert.deepEqual(r1.body.reasoning, { effort: "none" });
-  assert.deepEqual(r1.body.provider, { max_price: { prompt: 0.2, completion: 0.4 }, data_collection: "deny", allow_fallbacks: false, require_parameters: true });
+  assert.deepEqual(r1.body.provider, { max_price: { prompt: 0.2, completion: 0.4 }, data_collection: "deny", allow_fallbacks: true, require_parameters: true, sort: "throughput" });
   assert.equal(r1.body.models, undefined);
   assert.equal(r1.body.plugins, undefined);
   assert.equal(r1.body.tools[0].function.name, "jobs_list");
@@ -470,9 +471,9 @@ test("ambiguous or missing costs fail closed: the whole bound stays charged, nev
   await neg.step([{ role: "user", content: "hi" }], [], undefined, []);
   assert.equal(ledger.view().uncertainRequests, 2);
   // A server error of unknown cost is also charged.
-  const err = openrouterClient(ready(), ledger, fakeOpenRouter([{ status: 502, body: {} }]).fetcher);
+  const err = openrouterClient(ready(), ledger, fakeOpenRouter([{ status: 502, body: {} }]).fetcher, { sleep: async () => {} });
   await assert.rejects(err.step([{ role: "user", content: "hi" }], [], undefined, []), /HTTP 502/);
-  assert.equal(ledger.view().uncertainRequests, 3);
+  assert.equal(ledger.view().uncertainRequests, 4, "the 502 and its one retry");
   assert.equal(ledger.view().reservedUsd, 0);
 });
 
@@ -518,11 +519,12 @@ test("timeouts are bounded, the answer is an error, and the possibly-billed requ
   const cfg = ready({ ORBIT_OPENROUTER_TIMEOUT_MS: "1000" });
   const ledger = spendLedger(undefined, { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
   const or = fakeOpenRouter([{ hang: true }]);
-  const client = openrouterClient(cfg, ledger, or.fetcher);
+  const client = openrouterClient(cfg, ledger, or.fetcher, { sleep: async () => {} });
   const started = Date.now();
-  await assert.rejects(client.step([{ role: "user", content: "hi" }], [], undefined, []), /no answer within 1 s/);
+  await assert.rejects(client.step([{ role: "user", content: "hi" }], [], undefined, []), /no answer within 1 s \(also on ORBIT's one retry\)/);
   assert.ok(Date.now() - started < 5000);
-  assert.equal(ledger.view().uncertainRequests, 1);
+  assert.equal(or.requests.length, 2, "one retry after no answer");
+  assert.equal(ledger.view().uncertainRequests, 2, "both possibly billed, both charged at their bound");
   assert.ok(ledger.view().lifetimeUsd > 0);
 });
 
@@ -796,4 +798,58 @@ test("readiness: thread compaction never spends OpenRouter while ChatGPT is limi
   assert.equal(threads.get(t.id)!.summary!.method, "extractive");
   assert.equal(w.or.requests.length, 0);
   assert.equal(w.ledger.view().lifetimeUsd, 0);
+});
+
+test("provider sort: throughput by default, configurable, and off leaves OpenRouter's default routing; the bounds do not change", async () => {
+  assert.equal(ready().sort, "throughput");
+  assert.equal(ready({ ORBIT_OPENROUTER_SORT: " Latency " }).sort, "latency");
+  assert.equal(ready({ ORBIT_OPENROUTER_SORT: "price" }).sort, "price");
+  assert.equal(ready({ ORBIT_OPENROUTER_SORT: "off" }).sort, null);
+  for (const [over, want] of [[{}, "throughput"], [{ ORBIT_OPENROUTER_SORT: "off" }, undefined]] as const) {
+    const fake = fakeOpenRouter([answer("ok")]);
+    const ledger = spendLedger(undefined, { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
+    await openrouterClient(ready(over), ledger, fake.fetcher).step([{ role: "user", content: "x" }], [], undefined, []);
+    const p = fake.requests[0].body.provider;
+    assert.equal(p.sort, want);
+    assert.equal(p.allow_fallbacks, true, "provider fallbacks on by default");
+    assert.deepEqual(p.max_price, { prompt: 0.2, completion: 0.4 }, "still under the price ceiling");
+  }
+});
+
+test("retry: no answer or a provider error is sent once more and the second answer is used; a third try never happens", async () => {
+  for (const first of [{ hang: true }, { status: 503, body: { error: { message: "upstream unavailable" } } }, { status: 408, body: {} }]) {
+    const ledger = spendLedger(undefined, { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
+    const or = fakeOpenRouter([first, answer("second time lucky", 0.0002)]);
+    const events: any[] = [];
+    const waits: number[] = [];
+    const client = openrouterClient(ready({ ORBIT_OPENROUTER_TIMEOUT_MS: "1000" }), ledger, or.fetcher, { sleep: async (ms) => void waits.push(ms), log: (e) => events.push(e) });
+    const out = await client.step([{ role: "user", content: "hi" }], [], undefined, []);
+    assert.equal(out.text, "second time lucky");
+    assert.equal(or.requests.length, 2);
+    assert.deepEqual(waits, [2000]);
+    assert.deepEqual(events.map((e) => [e.limit, e.action, e.attempt]), [["transient", "retry", 1]]);
+    assert.equal(ledger.view().uncertainRequests, 1, "the first try stays charged at its bound; the second settles at its cost");
+  }
+  // Both fail: one retry only, and the error says so.
+  const or = fakeOpenRouter([{ status: 500, body: {} }]);
+  const events: any[] = [];
+  await assert.rejects(openrouterClient(ready(), spendLedger(undefined, { dailyMicro: toMicro(5), totalMicro: toMicro(150) }), or.fetcher, { sleep: async () => {}, log: (e) => events.push(e) }).step([{ role: "user", content: "hi" }], [], undefined, []), /HTTP 500 \(also on ORBIT's one retry\)/);
+  assert.equal(or.requests.length, 2);
+  assert.deepEqual(events.map((e) => e.action), ["retry", "gave_up"]);
+});
+
+test("retry: refusals, a cut-off answer and a call the ledger could not record are not retried", async () => {
+  for (const first of [{ status: 400, body: { error: { message: "bad request" } } }, { status: 401, body: {} }, { status: 422, body: {} }]) {
+    const or = fakeOpenRouter([first, answer("never")]);
+    await assert.rejects(openrouterClient(ready(), spendLedger(undefined, { dailyMicro: toMicro(5), totalMicro: toMicro(150) }), or.fetcher, { sleep: async () => {} }).step([{ role: "user", content: "hi" }], [], undefined, []));
+    assert.equal(or.requests.length, 1, `HTTP ${first.status} is not retried`);
+  }
+});
+
+test("provider fallbacks: on by default, ORBIT_OPENROUTER_ALLOW_FALLBACKS=off pins one provider, anything else is refused", () => {
+  assert.equal(ready().allowFallbacks, true);
+  assert.equal(ready({ ORBIT_OPENROUTER_ALLOW_FALLBACKS: "on" }).allowFallbacks, true);
+  assert.equal(ready({ ORBIT_OPENROUTER_ALLOW_FALLBACKS: "OFF" }).allowFallbacks, false);
+  assert.equal(ready({ ORBIT_OPENROUTER_ALLOW_FALLBACKS: "0" }).allowFallbacks, false);
+  assert.match((openrouterConfig({ ...ENV, ORBIT_OPENROUTER_ALLOW_FALLBACKS: "maybe" }, () => KEY) as { reason: string }).reason, /ALLOW_FALLBACKS must be on or off/);
 });

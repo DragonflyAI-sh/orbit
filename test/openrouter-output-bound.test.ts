@@ -85,7 +85,7 @@ test("request: reasoning off, require_parameters on, usage.include not sent; eve
   await openrouterClient(ready(), ledger, or.fetcher).step([{ role: "user", content: "hello" }], [], undefined, []);
   const b = or.requests[0];
   assert.deepEqual(b.reasoning, { effort: "none" });
-  assert.deepEqual(b.provider, { max_price: { prompt: 0.25, completion: 0.6 }, data_collection: "deny", allow_fallbacks: false, require_parameters: true });
+  assert.deepEqual(b.provider, { max_price: { prompt: 0.25, completion: 0.6 }, data_collection: "deny", allow_fallbacks: true, require_parameters: true, sort: "throughput" });
   assert.equal(b.usage, undefined);
   assert.equal(b.max_tokens, 2048);
   assert.equal(b.stream, false);
@@ -127,14 +127,16 @@ test("reservation: the same reasoning-heavy reply under the old max_tokens-only 
 test("timeouts and unknown costs are charged at the full output-bound reservation, never at a max_tokens-sized guess", async () => {
   const ledger = provisioned(dir(), { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
   const hung = fake(() => ({ hang: true }));
-  await assert.rejects(openrouterClient(ready({ ORBIT_OPENROUTER_TIMEOUT_MS: "1000" }), ledger, hung.fetcher).step([{ role: "user", content: "x" }], [], undefined, []), /no answer within 1 s/);
-  const b1 = toMicro(reservationUsd(Buffer.byteLength(JSON.stringify(hung.requests[0])), 0.25, 0.6, 1048576));
+  await assert.rejects(openrouterClient(ready({ ORBIT_OPENROUTER_TIMEOUT_MS: "1000" }), ledger, hung.fetcher, { sleep: async () => {} }).step([{ role: "user", content: "x" }], [], undefined, []), /no answer within 1 s \(also on ORBIT's one retry\)/);
+  // Sent twice (one retry after no answer), each charged at the whole output-bound reservation.
+  assert.equal(hung.requests.length, 2);
+  const b1 = 2 * toMicro(reservationUsd(Buffer.byteLength(JSON.stringify(hung.requests[0])), 0.25, 0.6, 1048576));
   assert.equal(toMicro(ledger.view().lifetimeUsd), b1);
   const noCost = fake(() => ({ body: { choices: [{ finish_reason: "stop", message: { content: "ok" } }], usage: {} } }));
   await openrouterClient(ready(), ledger, noCost.fetcher).step([{ role: "user", content: "x" }], [], undefined, []);
   const b2 = toMicro(reservationUsd(Buffer.byteLength(JSON.stringify(noCost.requests[0])), 0.25, 0.6, 1048576));
   assert.equal(toMicro(ledger.view().lifetimeUsd), b1 + b2);
-  assert.equal(ledger.view().uncertainRequests, 2);
+  assert.equal(ledger.view().uncertainRequests, 3);
 });
 
 test("admission: when less than one full reservation is left today, the call is refused before anything is sent", async () => {
