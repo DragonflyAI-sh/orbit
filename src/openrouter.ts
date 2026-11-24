@@ -26,6 +26,16 @@ export const HARD_MAX_OUTPUT_BOUND_TOKENS = 4_194_304;
 // nothing charged), so such a model simply never answers as the fallback.
 export const REASONING = { effort: "none" } as const;
 export const DEFAULT_TIMEOUT_MS = 60_000;
+// The order in which OpenRouter tries the model's endpoints (ORBIT_OPENROUTER_SORT): with provider fallbacks on
+// (ORBIT_OPENROUTER_ALLOW_FALLBACKS, the default), the first one, then the next when it errors; with them off, the only one. Default routing weighs towards the cheapest endpoint, which for deepseek/deepseek-v4-flash could be one
+// too slow to answer a long conversation within the timeout (2026-11-23: "no answer within 60 s"). "throughput" picks the endpoint with
+// the most tokens per second over OpenRouter's last few minutes. max_price still applies, so the reservation and caps are unchanged.
+export const SORTS = ["throughput", "latency", "price"] as const;
+export type ProviderSort = (typeof SORTS)[number];
+export const DEFAULT_SORT: ProviderSort = "throughput";
+// A call that got no answer (timeout or network) or a provider error (HTTP 408 or 5xx) is sent once more, TRANSIENT_RETRY_MS later,
+// with its own reservation and deadline, when the ledger recorded the first one. At most one such retry per model step.
+export const TRANSIENT_RETRY_MS = 2_000;
 export const MAX_REQUEST_BYTES = 300_000;
 export const MAX_RESPONSE_BYTES = 1_000_000;
 // Error bodies and the key/balance body are small by nature: they get a much smaller bound than a completion.
@@ -67,6 +77,11 @@ export type OpenRouterConfig =
       // Required, no default: without it the reservation could understate a call.
       outputBoundTokens: number;
       timeoutMs: number;
+      // OpenRouter's provider sort (SORTS), or null for its default routing (ORBIT_OPENROUTER_SORT=off).
+      sort: ProviderSort | null;
+      // OpenRouter's provider fallbacks (ORBIT_OPENROUTER_ALLOW_FALLBACKS, default on): when the first endpoint errors, it tries the
+      // next admitted one. Every admitted endpoint is under max_price and inside the output bound, so the reservation is unchanged.
+      allowFallbacks: boolean;
       // USD per UTC calendar day. Always set.
       dailyCapUsd: number;
       // USD per UTC calendar month (ORBIT_OPENROUTER_MONTHLY_CAP_USD); null when not configured.
@@ -124,6 +139,13 @@ export function openrouterConfig(env: NodeJS.ProcessEnv, readKey: (dir: string) 
   if (!Number.isInteger(outputBound) || outputBound < maxOut || outputBound > HARD_MAX_OUTPUT_BOUND_TOKENS) return bad(`ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS must be a whole number from ORBIT_OPENROUTER_MAX_OUTPUT_TOKENS (${maxOut}) to ${HARD_MAX_OUTPUT_BOUND_TOKENS}.`);
   const timeoutMs = num(env.ORBIT_OPENROUTER_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) return bad("ORBIT_OPENROUTER_TIMEOUT_MS must be a whole number from 1000 to 120000.");
+  const sortRaw = (env.ORBIT_OPENROUTER_SORT ?? "").trim().toLowerCase();
+  if (sortRaw && sortRaw !== "off" && !(SORTS as readonly string[]).includes(sortRaw)) return bad(`ORBIT_OPENROUTER_SORT must be one of ${SORTS.join(", ")} or off.`);
+  const sort: ProviderSort | null = sortRaw === "off" ? null : ((sortRaw || DEFAULT_SORT) as ProviderSort);
+  const fbRaw = (env.ORBIT_OPENROUTER_ALLOW_FALLBACKS ?? "").trim().toLowerCase();
+  const fbOn = ["", "1", "on", "true", "yes"], fbOff = ["0", "off", "false", "no"];
+  if (!fbOn.includes(fbRaw) && !fbOff.includes(fbRaw)) return bad("ORBIT_OPENROUTER_ALLOW_FALLBACKS must be on or off.");
+  const allowFallbacks = fbOn.includes(fbRaw);
   // Spend caps. Daily: default 5. Monthly (UTC calendar month): optional, no default. Lifetime: the long-standing
   // ORBIT_OPENROUTER_TOTAL_CAP_USD, never relabelled. With no monthly cap it defaults to 150 as before. With a monthly cap it must be
   // stated (a number, or "off"), so adding a monthly budget never silently brings the old default lifetime cutoff with it.
@@ -153,7 +175,7 @@ export function openrouterConfig(env: NodeJS.ProcessEnv, readKey: (dir: string) 
     // Absent or unreadable is the same to the caller.
   }
   if (!key) return bad("The orbit.openrouter credential is not installed.");
-  return { state: "ready", key, model, priceIn, priceOut, maxOutputTokens: maxOut, outputBoundTokens: outputBound, timeoutMs, dailyCapUsd, monthlyCapUsd, totalCapUsd };
+  return { state: "ready", key, model, priceIn, priceOut, maxOutputTokens: maxOut, outputBoundTokens: outputBound, timeoutMs, sort, allowFallbacks, dailyCapUsd, monthlyCapUsd, totalCapUsd };
 }
 
 // The reservation for one call, in USD: every token in at the input price, the whole output bound at the output price. Tokens in are
@@ -171,6 +193,19 @@ export function sanitize(text: string, key: string, max = 200): string {
   if (key) out = out.split(key).join("[key]");
   out = out.replace(/sk-or-[A-Za-z0-9_-]{8,}/g, "[key]").replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]{12,}/gi, "$1 [token]");
   return out.length > max ? `${out.slice(0, max)}…` : out;
+}
+
+// No answer (timeout or network), or a provider error (HTTP 408 or 5xx): worth one more try. `recorded`: the ledger recorded the
+// failed call (charged at its bound or at the reported cost), so a retry leaves nothing uncertain.
+export class OpenRouterTransient extends ProviderError {
+  readonly status: number;
+  readonly recorded: boolean;
+  constructor(status: number, message: string, accounting: string[]) {
+    super("failed", message, undefined, undefined, accounting);
+    this.name = "OpenRouterTransient";
+    this.status = status;
+    this.recorded = accounting.length === 0;
+  }
 }
 
 // A refusal from OpenRouter that says the route cannot answer for a while: a rate limit (HTTP 429) or an account or key without enough
@@ -321,7 +356,8 @@ export type OpenRouterClient = {
 };
 
 // One OpenRouter limit event, for the log (src/fallback.ts logs the hold it starts). Never carries the key or provider text.
-export type LimitEvent = { model: string; status: number; limit: "rate" | "balance"; resetsAt: string | null; attempt: 1 | 2; action: "retry" | "no_retry" | "gave_up"; waitMs?: number; why?: string };
+// limit "transient": no answer (status 0) or HTTP 408/5xx (OpenRouterTransient).
+export type LimitEvent = { model: string; status: number; limit: "rate" | "balance" | "transient"; resetsAt: string | null; attempt: 1 | 2; action: "retry" | "no_retry" | "gave_up"; waitMs?: number; why?: string };
 export type ClientOptions = { now?: () => number; sleep?: (ms: number) => Promise<void>; log?: (e: LimitEvent) => void };
 const logLimit = (e: LimitEvent) => console.log(JSON.stringify({ at: new Date().toISOString(), event: "openrouter_limited", ...e }));
 
@@ -351,8 +387,9 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
     return why === "size" ? `${what} was too large and was discarded` : why === "time" ? `${what} did not arrive within ${ms / 1000} s` : `${what} could not be read`;
   };
 
-  // One request to OpenRouter with its own reservation and deadline. `retried`/`waitedMs` only describe a second 429 in its message.
-  const send = async (body: string, bound: number, retried: boolean, waitedMs?: number): Promise<PaidStep> => {
+  // One request to OpenRouter with its own reservation and deadline. `retried`/`waitedMs` only describe a second 429 in its message,
+  // `again` a second transient failure (TRANSIENT_RETRY_MS) in its message.
+  const send = async (body: string, bound: number, retried: boolean, waitedMs?: number, again = false): Promise<PaidStep> => {
     let reservation: { id: string; micro: number };
     try {
       reservation = ledger.reserve(bound);
@@ -371,7 +408,7 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
       // The request may have reached OpenRouter and been billed: its bound stays charged.
       const note = safely(() => ledger.settle(reservation.id, undefined, "no answer (timeout or network): the request may have been billed"));
       const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-      throw fail(timedOut ? `no answer within ${cfg.timeoutMs / 1000} s` : "the request failed before an answer arrived", "failed", note);
+      throw new OpenRouterTransient(0, `OpenRouter: ${timedOut ? `no answer within ${cfg.timeoutMs / 1000} s` : "the request failed before an answer arrived"}${again ? " (also on ORBIT's one retry)" : ""}`, note);
     }
 
     // Bounded before anything is buffered or parsed. A refusal (non-2xx) body is small; a completion body has its own larger bound.
@@ -422,6 +459,7 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
           accounting: note,
         });
       }
+      if (status === 408 || status >= 500) throw new OpenRouterTransient(status, `OpenRouter: ${sanitize(`HTTP ${status}${said ? `: ${said}` : ""}${bodyProblem ? ` (${bodyProblem})` : ""}`, cfg.key)}${again ? " (also on ORBIT's one retry)" : ""}`, note);
       throw fail(`HTTP ${status}${said ? `: ${said}` : ""}${bodyProblem ? ` (${bodyProblem})` : ""}`, "failed", note);
     }
 
@@ -482,7 +520,9 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
         reasoning: REASONING,
         stream: false,
         temperature: 0.2,
-        provider: { max_price: { prompt: cfg.priceIn, completion: cfg.priceOut }, data_collection: "deny", allow_fallbacks: false, require_parameters: true },
+        // `sort` orders the admitted endpoints and `allow_fallbacks` lets OpenRouter move to the next when one errors
+        // (ORBIT_OPENROUTER_SORT, ORBIT_OPENROUTER_ALLOW_FALLBACKS); neither changes a bound.
+        provider: { max_price: { prompt: cfg.priceIn, completion: cfg.priceOut }, data_collection: "deny", allow_fallbacks: cfg.allowFallbacks, require_parameters: true, ...(cfg.sort ? { sort: cfg.sort } : {}) },
       });
       const bytes = Buffer.byteLength(body);
       if (bytes > MAX_REQUEST_BYTES) throw fail(`the conversation is too long to send (${bytes} bytes; the limit is ${MAX_REQUEST_BYTES})`);
@@ -490,10 +530,33 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
       const bound = toMicro(reservationUsd(bytes, cfg.priceIn, cfg.priceOut, cfg.outputBoundTokens));
       // A rate limit (HTTP 429) is retried once, with its own reservation and deadline, when the refusal was released and read and the
       // reset is close (see MAX_RETRY_WAIT_MS). A balance refusal, a far reset and a second 429 are returned as they are.
+      // No answer or a provider error (OpenRouterTransient) is sent once more, TRANSIENT_RETRY_MS later, when the ledger recorded the
+      // first call; at most once per step, whichever attempt it happens on. Each try has its own reservation and deadline.
+      let transientLeft = true;
+      const sendOrRetry = async (retried: boolean, waitedMs?: number): Promise<PaidStep> => {
+        try {
+          return await send(body, bound, retried, waitedMs);
+        } catch (err) {
+          if (!(err instanceof OpenRouterTransient) || !transientLeft) throw err;
+          transientLeft = false;
+          if (!err.recorded) {
+            log({ model: cfg.model, status: err.status, limit: "transient", resetsAt: null, attempt: 1, action: "no_retry", why: "the failed call could not be recorded in the ledger" });
+            throw err;
+          }
+          log({ model: cfg.model, status: err.status, limit: "transient", resetsAt: null, attempt: 1, action: "retry", waitMs: TRANSIENT_RETRY_MS });
+          await sleep(TRANSIENT_RETRY_MS);
+          try {
+            return await send(body, bound, retried, waitedMs, true);
+          } catch (again) {
+            if (again instanceof OpenRouterTransient) log({ model: cfg.model, status: again.status, limit: "transient", resetsAt: null, attempt: 2, action: "gave_up" });
+            throw again;
+          }
+        }
+      };
       const event = (e: OpenRouterLimit, attempt: 1 | 2, action: LimitEvent["action"], extra: { waitMs?: number; why?: string } = {}) =>
         log({ model: cfg.model, status: e.status, limit: e.limit, resetsAt: e.resetsAt ?? null, attempt, action, ...extra });
       try {
-        return await send(body, bound, false);
+        return await sendOrRetry(false);
       } catch (err) {
         if (!(err instanceof OpenRouterLimit)) throw err;
         const why = err.limit === "balance" ? "no balance: retrying cannot help" : !err.retryable ? "the refusal could not be released or read" : undefined;
@@ -505,7 +568,7 @@ export function openrouterClient(cfg: Extract<OpenRouterConfig, { state: "ready"
         event(err, 1, "retry", { waitMs });
         await sleep(waitMs);
         try {
-          return await send(body, bound, true, waitMs);
+          return await sendOrRetry(true, waitMs);
         } catch (again) {
           if (again instanceof OpenRouterLimit) event(again, 2, "gave_up");
           throw again;

@@ -47,7 +47,9 @@ const page = (model: PortStatus) =>
 type Primary = "ok" | "limited" | "signed-out" | "mock";
 type Pending = { resolve: (r: Response) => void; reject: (e: unknown) => void };
 const answer = () => new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: "fallback answer" } }], usage: { cost: 0.0001 } }));
-const failure = () => new Response(JSON.stringify({ error: { message: "provider unavailable" } }), { status: 503 });
+// A failed paid call that is not retried: 422 is neither a released refusal nor transient (a 503 is now retried once, see
+// test/openrouter-fallback.test.ts, which would leave these held fakes waiting for a second answer).
+const failure = () => new Response(JSON.stringify({ error: { message: "provider unavailable" } }), { status: 422 });
 
 function world(opts: { lockWaitMs?: number } = {}) {
   const clock = { t: Date.parse("2026-11-18T06:00:00.000Z") };

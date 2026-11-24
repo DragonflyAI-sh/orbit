@@ -139,15 +139,17 @@ test("B11: an oversized ERROR body is bounded, never echoed, and still classifie
   for (const [status, charged] of [[500, true], [429, false]] as const) {
     const ledger = ledgerIn(dir());
     const p = provider({ status, chunks: 1000, chunkBytes: 10_000 }); // 10 MB of error body
-    await assert.rejects(openrouterClient(ready(), ledger, p.fetcher).step(userMsg, [], undefined, []), (e: unknown) => {
+    await assert.rejects(openrouterClient(ready(), ledger, p.fetcher, { sleep: async () => {} }).step(userMsg, [], undefined, []), (e: unknown) => {
       assert.ok(e instanceof ProviderError);
       assert.match(e.message, new RegExp(`HTTP ${status}`));
       assert.ok(!e.message.includes("aaaa") && !e.message.includes(KEY));
       return true;
     });
-    assert.ok(p.log.pulled <= 10, `error body read stopped early, got ${p.log.pulled} chunks`);
-    assert.equal(p.log.cancelled, 1);
-    assert.equal(p.log.requests, 1);
+    // A server error is sent once more (OpenRouterTransient); each body is bounded and cancelled.
+    const tries = status === 500 ? 2 : 1;
+    assert.ok(p.log.pulled <= 10 * tries, `error body read stopped early, got ${p.log.pulled} chunks`);
+    assert.equal(p.log.cancelled, tries);
+    assert.equal(p.log.requests, tries);
     assert.equal(ledger.view().lifetimeUsd > 0, charged);
     assert.equal(ledger.view().reservedUsd, 0);
   }
