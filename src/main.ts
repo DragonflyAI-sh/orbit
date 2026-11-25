@@ -11,7 +11,7 @@ import { fallbackModel } from "./fallback.ts";
 import { modelHealthTracker, observeModel } from "./model-health.ts";
 import type { ModelHealth } from "./model-health.ts";
 import { selectModel } from "./model.ts";
-import { openrouterConfig, spendCapsOf } from "./openrouter.ts";
+import { openrouterConfig, openrouterStartupLog, spendCapsOf } from "./openrouter.ts";
 import { SpendError, spendLedger } from "./spend-ledger.ts";
 import { nodes as devicePresence, tailscaleStatus } from "./nodes.ts";
 import { notifier, selectDiscord } from "./notify.ts";
@@ -94,6 +94,8 @@ if (openrouter.state === "ready" && stateDir) {
     openrouterEffective = { state: "unavailable", reason: `The spend ledger could not be set up: ${err instanceof Error ? err.message : "unknown error"}` };
   }
 }
+// Checked once at startup: the journal says whether the fallback is off, armed, or unusable and why (never the key).
+console.log(openrouterStartupLog(openrouterEffective));
 const builtModel = openrouterEffective.state === "disabled" ? primaryModel : fallbackModel({ primary: primaryModel, config: openrouterEffective, ledger: openrouterLedger });
 // Model health (docs/model-health.md): whether the PRIMARY model is answering or ORBIT is in fallback, from the post-deploy model smoke
 // check and every real call. The watch reads it before sending a "model is live again" notice. <state>/model-health.json.

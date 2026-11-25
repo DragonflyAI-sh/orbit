@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -196,6 +196,9 @@ test("cleanup deletes only unsent uploads past their time; bound photos stay; le
   // A temporary file and a photo without its record (a write that stopped half way) are not attachments.
   writeFileSync(join(dir, `${kept.id}.json.123.tmp`), "{");
   writeFileSync(join(dir, `a${"f".repeat(32)}.jpg`), "x");
+  // Its age is measured on the store's clock, so give it a time on that clock rather than today's date: written now, on the
+  // wall clock, it would look newer than the fake "later" once the real date passes it, and never be removed.
+  utimesSync(join(dir, `a${"f".repeat(32)}.jpg`), clock, clock);
   writeFileSync(join(dir, `a${"e".repeat(32)}.json`), "{broken");
   const later = attachmentStore(dir, { now: () => new Date(clock.getTime() + 10 * 86_400_000), pendingTtlMs: 60_000 });
   assert.ok(later.get(kept.id));
