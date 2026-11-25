@@ -1116,10 +1116,11 @@
   //   down     (red)   a core port (model, policy, channel) is down or mock, or the model is reported not available: no model can
   //                    reply. Wins over everything else, so a real core failure is never shown as a working fallback.
   //   unknown  (grey)  no usable answer (not reachable, an HTTP error, an unreadable body, no entries), or the model port is missing,
-  //                    a core port's state is not one of the four known states, or the model's availability is not known (a
-  //                    fallback that has not been tried yet while ChatGPT is limited, or an unreadable availability).
-  //   degraded (amber) ORBIT still answers, but some entry is not live: the model on the paid fallback or not yet confirmed, or an
-  //                    optional port (memory, notify, jobs, watch, ...) degraded, down, mock or unreadable.
+  //                    a core port's state is not one of the four known states, or the model's availability is not known (null or
+  //                    unreadable). ORBIT in fallback is not "not known": /status reports it as available, degraded (amber).
+  //   degraded (amber) ORBIT still answers, but some entry is not live: the model on the paid fallback, in fallback per the model
+  //                    health record (ChatGPT limited, the fallback not called yet), or not yet confirmed, or an optional port
+  //                    (memory, notify, jobs, watch, ...) degraded, down, mock or unreadable.
   //   ok       (green) every entry's state is exactly "live" and the model is available.
   // `ok` stays true only for green. Never green without an answer. ORBIT answering this request at all shows the process is running;
   // red and grey are about whether a model can reply, and the detail says so. Tests load this block.
@@ -1168,11 +1169,16 @@
     const bad = entries.filter((e) => e.state !== "live");
     if (!bad.length) return { level: "ok", ok: true, label: "All live", detail: `All ${entries.length} status entries are live.` };
     const fb = model.raw.fallback && typeof model.raw.fallback === "object" ? model.raw.fallback : null;
-    const onFallback = model.state === "degraded" && fb && fb.answering === true && (!av || av.via === "fallback");
-    const route = onFallback
+    const answering = model.state === "degraded" && fb && fb.answering === true && (!av || av.via === "fallback");
+    // In fallback per the model health record (src/model-health.ts), not yet confirmed by a fallback answer: amber, with the reason.
+    const health = model.raw.health && typeof model.raw.health === "object" ? model.raw.health : null;
+    const inFallback = !answering && model.state === "degraded" && av && av.available === true && (av.via === "fallback" || (health && health.state === "fallback"));
+    const route = answering
       ? `Replies come from the fallback model ${String(fb.provider || "unknown provider")}/${String(fb.model || "unknown model")}, not ChatGPT: ChatGPT ${fb.reason === "rate_limit" ? "rate" : "usage"} limit until ${String(fb.until || "an unknown time")}${fb.estimated ? " (ORBIT's estimate)" : ""}. `
-      : "";
-    return { level: "degraded", ok: false, label: onFallback ? "Degraded: fallback model" : `Degraded: ${bad.length} not live`, detail: `Working, with degradation. ${route}Not live: ${named(bad)}.` };
+      : inFallback
+        ? `${av.reason} `
+        : "";
+    return { level: "degraded", ok: false, label: answering || inFallback ? "Degraded: fallback model" : `Degraded: ${bad.length} not live`, detail: `Working, with degradation. ${route}Not live: ${named(bad)}.` };
   }
   // The indicator is the side panel's Status tab (the level dot; docs/design-system.md, "Side panel"): the page header shows
   // no status. The level is in the class (colour and dot shape), the accessible name and the hover text, never colour alone,
