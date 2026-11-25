@@ -62,7 +62,18 @@ ports[model].health = {
 }
 ```
 
-`state` keeps its four values and meanings. The page, `pull-deploy.sh` and every other consumer are unchanged.
+`state` keeps its four values and meanings. `pull-deploy.sh` and other consumers are unchanged.
+
+## How `/status` reports fallback
+
+When `health.state` is `fallback`, `/status` treats ORBIT as **in fallback**: working but degraded, not unknown (`src/model-availability.ts`, applied by `/status` to the model entry on every request, so a new smoke check or call result shows at the next `/status` with no restart):
+
+- ChatGPT's limit is recorded by the port and the OpenRouter fallback is usable but not called yet: `state` `degraded`, `availability` `{ available: true, via: fallback }`, reason "ChatGPT is at its usage limit; using the OpenRouter fallback (<model>) until <time>: it has not been called since the limit began, so it is not confirmed yet." (Before, this was `available: null`, shown grey as "Status unknown: model".)
+- The limit is not recorded by the port in this process yet (right after a deploy, before the smoke check answers, while ChatGPT's local login check says `live`): `state` `degraded` (the detail starts "In fallback (model health): ..."), `availability` `{ available: true, via: primary }`, with the tracker's reason and that the next call tries ChatGPT first.
+- A fallback verdict of `true` or `false` from the wrapper is kept, and `down` or `mock` still wins: ChatGPT limited with the fallback failing or unusable is red, since no model can reply.
+- `health.state` `unknown` (nothing recorded yet) changes nothing.
+
+The page's overall indicator reads that availability, so it shows amber, "Degraded: fallback model", with the reason in the detail.
 
 ## Cost
 
@@ -78,7 +89,8 @@ One request per process start to the primary model, using ChatGPT subscription u
 - the smoke check through the real OpenRouter fallback wrapper, which sends no paid request while limited;
 - the registry wiring;
 - three post-deploy watch scenarios: still limited (no false notice), really recovered (one notice), smoke timeout (waits for a real answer);
-- that other ports are unaffected.
+- that other ports are unaffected;
+- `/status` while in fallback: the model entry is `degraded` with the clear reason and the page's overall status is degraded, not unknown (fallback not called yet, and after a deploy before and after the smoke check, with the result visible at the next `/status`); `unknown` only when nothing is recorded; ChatGPT limited with the fallback failing stays red.
 
 Removing the watch gate makes the three post-deploy scenarios fail.
 

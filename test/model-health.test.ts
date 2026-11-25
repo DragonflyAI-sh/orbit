@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { ProviderError } from "../src/chatgpt.ts";
 import { fallbackModel } from "../src/fallback.ts";
 import type { Message, ModelPort, Reply, ReplyOptions, Step } from "../src/model.ts";
+import { modelAvailability, withAvailability } from "../src/model-availability.ts";
 import { MODEL_SMOKE_PROMPT, modelHealthTracker, modelSmokeCheck, observeModel } from "../src/model-health.ts";
 import type { ModelHealth } from "../src/model-health.ts";
 import { notifier } from "../src/notify.ts";
@@ -14,9 +15,12 @@ import { openrouterConfig } from "../src/openrouter.ts";
 import type { PortState, PortStatus } from "../src/ports.ts";
 import { orbitSmokeChecks } from "../src/smoke-checks.ts";
 import { smokeRunner } from "../src/smoke.ts";
+import { toMicro } from "../src/spend-ledger.ts";
 import { jsonStore } from "../src/store.ts";
 import { watcher } from "../src/watch.ts";
 import type { WatchState } from "../src/watch.ts";
+import { provisioned } from "./helpers/ledger.ts";
+import { rig } from "./threads-fixture.ts";
 
 // Post-deploy model smoke check and model health (src/model-health.ts, docs/model-health.md). Every model here is a scripted fake: nothing
 // contacts ChatGPT, OpenRouter or any provider.
@@ -327,4 +331,138 @@ test("the gate only affects the model's recovery notice; other ports and watches
   watch.tick();
   assert.equal(notify.recent().length, 1);
   assert.match(notify.recent()[0]!.text, /"memory" is live again/);
+});
+
+// ---- /status: ORBIT in fallback is degraded, not unknown ---------------------------------------------------------------------------
+
+// The page's own aggregation, loaded from the page as the page tests do.
+type Overall = { level: "ok" | "degraded" | "down" | "unknown"; ok: boolean; label: string; detail: string };
+const pageBlock = readFileSync(new URL("../src/web/index.html", import.meta.url), "utf8").match(/\/\/ <status-dot>([\s\S]*?)\/\/ <\/status-dot>/)![1]!;
+const { aggregateStatus } = new Function(`${pageBlock}; return { aggregateStatus };`)() as { aggregateStatus: (s: unknown) => Overall };
+const livePort = (port: string): PortStatus => ({ port, state: "live", impl: "x", detail: `${port} detail`, verifiedAt: new Date().toISOString() });
+// The overall level with every other port live, so the model alone decides it.
+const overall = (model: PortStatus) => aggregateStatus({ ports: JSON.parse(JSON.stringify([livePort("policy"), livePort("channel"), withAvailability(model), livePort("memory")])) });
+
+// The deployed shape (src/main.ts): ChatGPT behind the OpenRouter fallback wrapper (configured, ledger provisioned, a fake OpenRouter),
+// observed by the health tracker; the smoke check gets the built port and the tracker. Nothing contacts a provider.
+function deployed(o: { saved?: ModelHealth } = {}) {
+  const sw = { limited: true, openrouter: "ok" as "ok" | "error" };
+  let fetches = 0;
+  const fetcher = (async () => {
+    fetches++;
+    if (sw.openrouter === "error") return new Response(JSON.stringify({ error: { message: "provider unavailable" } }), { status: 503 });
+    return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: "fallback answer" } }], usage: { cost: 0.0001 } }));
+  }) as unknown as typeof fetch;
+  const config = openrouterConfig(
+    { ORBIT_OPENROUTER_ENABLED: "1", ORBIT_OPENROUTER_MODEL: "vendor/cheap-model", ORBIT_OPENROUTER_PRICE_IN_USD_PER_MTOK: "0.2", ORBIT_OPENROUTER_PRICE_OUT_USD_PER_MTOK: "0.4", ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS: "2048", CREDENTIALS_DIRECTORY: "/creds" },
+    () => ["k", "x".repeat(20)].join("-"),
+  );
+  const ledger = provisioned(mkdtempSync(join(tmpdir(), "orbit-health-status-")), { dailyMicro: toMicro(5), totalMicro: toMicro(150) });
+  const p = primary(() => {
+    if (sw.limited) throw usageLimit();
+    return "ok";
+  });
+  const built = fallbackModel({ primary: p.model, config, ledger, fetcher, logHold: quiet });
+  const store = mem();
+  if (o.saved) store.write(o.saved);
+  const health = modelHealthTracker(store, { log: quiet });
+  const model = observeModel(built, health);
+  const smoke = () => modelSmokeCheck({ model: built, health, log: quiet }).run!(new AbortController().signal);
+  return { sw, built, model, health, smoke, fetches: () => fetches };
+}
+
+test("/status: ChatGPT limited and the fallback not called yet is degraded with a clear message, and ORBIT's overall status is degraded, not unknown", async () => {
+  const d = deployed();
+  // The post-deploy smoke check hits the limit: the tracker says fallback; nothing is sent to OpenRouter.
+  assert.equal((await d.smoke()).state, "failed");
+  assert.equal(d.health.read().state, "fallback");
+  assert.equal(d.fetches(), 0);
+  const x = rig({ model: d.model });
+  const res = await x.api("/status");
+  assert.equal(res.status, 200);
+  const m = res.data.ports.find((p: PortStatus) => p.port === "model") as PortStatus;
+  assert.equal(m.state, "degraded");
+  assert.equal(m.health?.state, "fallback");
+  assert.deepEqual([m.availability?.available, m.availability?.via], [true, "fallback"]);
+  assert.match(m.availability!.reason, /^ChatGPT is at its usage limit; using the OpenRouter fallback \(vendor\/cheap-model\) until \S+: it has not been called since the limit began, so it is not confirmed yet\.$/);
+  assert.doesNotMatch(m.availability!.reason, /is not known/);
+  // The page's overall status, from the real /status body: degraded (amber), never unknown, with the same message.
+  const r = aggregateStatus(res.data);
+  assert.deepEqual([r.level, r.ok, r.label], ["degraded", false, "Degraded: fallback model"]);
+  assert.match(r.detail, /ChatGPT is at its usage limit; using the OpenRouter fallback \(vendor\/cheap-model\)/);
+  assert.doesNotMatch(r.detail, /Whether a model can reply is not known/);
+  // With the model the only port not live, the overall status is degraded because of it.
+  const only = overall(d.model.status());
+  assert.deepEqual([only.level, only.label], ["degraded", "Degraded: fallback model"]);
+  assert.match(only.detail, /Not live: model: degraded\.$/);
+  // The first fallback answer keeps it amber, now with the route named as before.
+  await d.model.reply([{ role: "user", content: "hi" }], []);
+  assert.equal(d.fetches(), 1);
+  const after = overall(d.model.status());
+  assert.deepEqual([after.level, after.label], ["degraded", "Degraded: fallback model"]);
+  assert.match(after.detail, /Replies come from the fallback model openrouter\/vendor\/cheap-model, not ChatGPT/);
+  x.close();
+});
+
+test("/status after a deploy while in fallback: degraded before the smoke check, and the smoke check's result shows at the next /status", async () => {
+  const at = new Date(Date.now() - 3_600_000).toISOString();
+  // Limited before the restart: the tracker's saved state is fallback; the new process's port reports `live` from the local login check.
+  const d = deployed({ saved: { state: "fallback", since: at, at, source: "call", model: "gpt-x", reason: "ChatGPT usage limit: ChatGPT usage limit reached for this plan." } });
+  const x = rig({ model: d.model });
+  const model = async () => (await x.api("/status")).data.ports.find((p: PortStatus) => p.port === "model") as PortStatus;
+  let m = await model();
+  assert.equal(m.state, "degraded", "the stale local 'live' is not reported while the tracker says fallback");
+  assert.match(m.detail, /^In fallback \(model health\): ChatGPT usage limit/);
+  assert.deepEqual([m.availability?.available, m.availability?.via], [true, "primary"]);
+  assert.match(m.availability!.reason, /^ORBIT is in fallback: ChatGPT usage limit: ChatGPT usage limit reached for this plan \(a model call at \S+\)\. The limit is not recorded in this process yet, so the next call tries ChatGPT first/);
+  assert.equal(overall(m).level, "degraded");
+  assert.equal(overall(m).label, "Degraded: fallback model");
+  // The smoke check still hits the limit: the very next /status shows it (no restart, no cache), from the wrapper's own limit record.
+  await d.smoke();
+  m = await model();
+  assert.equal(m.state, "degraded");
+  assert.equal(m.health?.source, "smoke");
+  assert.equal(m.availability?.via, "fallback");
+  assert.match(m.availability!.reason, /^ChatGPT is at its usage limit; using the OpenRouter fallback/);
+  assert.equal(overall(m).level, "degraded");
+  x.close();
+
+  // A second deploy where ChatGPT answers again: the smoke check makes it healthy and the next /status is live and green.
+  const ok = deployed({ saved: { state: "fallback", since: at, at, source: "call", reason: "ChatGPT usage limit" } });
+  ok.sw.limited = false;
+  const y = rig({ model: ok.model });
+  const first = (await y.api("/status")).data.ports.find((p: PortStatus) => p.port === "model") as PortStatus;
+  assert.equal(first.state, "degraded");
+  assert.equal((await ok.smoke()).state, "passed");
+  const next = (await y.api("/status")).data.ports.find((p: PortStatus) => p.port === "model") as PortStatus;
+  assert.deepEqual([next.state, next.health?.state, next.availability?.available, next.availability?.via], ["live", "healthy", true, "primary"]);
+  assert.deepEqual([overall(next).level, overall(next).label], ["ok", "All live"]);
+  y.close();
+});
+
+test("/status: unknown only when nothing has been recorded; a real dual failure stays down (red) even in fallback", async () => {
+  // Nothing recorded: the tracker is unknown, so it changes nothing (a live port stays live; a limit the tracker never saw stays null).
+  const fresh = deployed();
+  assert.equal(fresh.health.read().state, "unknown");
+  fresh.sw.limited = false;
+  assert.deepEqual([withAvailability(fresh.model.status()).state, modelAvailability(fresh.model.status()).available], ["live", true]);
+  fresh.sw.limited = true;
+  // A background call made straight on the built port (not observed): the wrapper records the limit, the tracker does not.
+  await assert.rejects(fresh.built.step!([{ role: "user", content: "compact" }], [], undefined, []), /usage limit/);
+  assert.equal(fresh.health.read().state, "unknown");
+  const unseen = withAvailability(fresh.model.status());
+  assert.deepEqual([unseen.state, unseen.availability?.available], ["degraded", null]);
+  assert.equal(overall(fresh.model.status()).level, "unknown");
+  // In fallback, then the OpenRouter call fails too: no model can reply, so it is down and red, not amber.
+  const d = deployed();
+  await d.smoke();
+  d.sw.openrouter = "error";
+  await assert.rejects(d.model.reply([{ role: "user", content: "hi" }], []));
+  assert.equal(d.health.read().state, "fallback");
+  const st = withAvailability(d.model.status());
+  assert.deepEqual([st.state, st.availability?.available, st.availability?.via], ["down", false, "none"]);
+  assert.equal(overall(d.model.status()).level, "down");
+  // A mock is never available, whatever the tracker says.
+  const mock: PortStatus = { ...livePort("model"), state: "mock", health: { state: "fallback", since: "t", at: "t", source: "call" } };
+  assert.equal(modelAvailability(mock).available, false);
 });

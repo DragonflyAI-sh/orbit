@@ -180,7 +180,9 @@ test("configured but unusable fallback (no credential, ledger not provisioned, l
   assert.equal(b.or.requests, 0);
 });
 
-test("a configured fallback that has not been tried since the limit began is not known (null), shown grey, never green or amber", async () => {
+// Without model health (no `health` field): the wrapper's own verdict. /status with model health recording `fallback` reports this case as
+// degraded and available via the fallback (amber): test/model-health.test.ts, "/status: ChatGPT limited and the fallback not called yet".
+test("without model health, a configured fallback that has not been tried since the limit began is not known (null), shown grey, never green or amber", async () => {
   const w = world();
   w.sw.limited = true;
   // A background caller (no `fallback: true`) hits the limit: it never spends, so the fallback is not tried.
