@@ -119,9 +119,38 @@ const num = (v: string | undefined): number | undefined => {
   return Number.isFinite(n) ? n : NaN;
 };
 
+// The systemd credential that holds the OpenRouter API key ($CREDENTIALS_DIRECTORY/orbit.openrouter, root only). There is no
+// environment-variable form of the key: a key in orbit.env or the process environment would be readable far more widely.
+export const OPENROUTER_CREDENTIAL = "orbit.openrouter";
+
+// Every orbit.env setting the fallback reads. None of them is secret (the key is only ever the credential above), so the config view
+// shows them as they are running.
+export const OPENROUTER_SETTINGS = [
+  "ORBIT_OPENROUTER_ENABLED",
+  "ORBIT_OPENROUTER_MODEL",
+  "ORBIT_OPENROUTER_PRICE_IN_USD_PER_MTOK",
+  "ORBIT_OPENROUTER_PRICE_OUT_USD_PER_MTOK",
+  "ORBIT_OPENROUTER_MAX_OUTPUT_TOKENS",
+  "ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS",
+  "ORBIT_OPENROUTER_TIMEOUT_MS",
+  "ORBIT_OPENROUTER_SORT",
+  "ORBIT_OPENROUTER_ALLOW_FALLBACKS",
+  "ORBIT_OPENROUTER_DAILY_CAP_USD",
+  "ORBIT_OPENROUTER_MONTHLY_CAP_USD",
+  "ORBIT_OPENROUTER_TOTAL_CAP_USD",
+] as const;
+
+// The one startup log line for the fallback's configuration, so the journal says at each start whether the fallback is off, armed, or
+// set up but unusable (and why: a missing orbit.openrouter credential, a missing price, ...). It never contains the key.
+export function openrouterStartupLog(config: OpenRouterConfig, at: Date = new Date()): string {
+  const base = { at: at.toISOString(), event: "openrouter_fallback_config", state: config.state };
+  if (config.state !== "ready") return JSON.stringify({ ...base, reason: config.reason });
+  return JSON.stringify({ ...base, model: config.model, credential: `${OPENROUTER_CREDENTIAL} loaded`, sort: config.sort ?? "off", allowFallbacks: config.allowFallbacks });
+}
+
 // Reads the settings and the root-only credential orbit.openrouter. Never throws and never returns the key anywhere but in `key`.
 // Anything missing or wrong is "unavailable" with a reason that is safe to show; the fallback then does nothing.
-export function openrouterConfig(env: NodeJS.ProcessEnv, readKey: (dir: string) => string = (d) => readFileSync(join(d, "orbit.openrouter"), "utf8")): OpenRouterConfig {
+export function openrouterConfig(env: NodeJS.ProcessEnv, readKey: (dir: string) => string = (d) => readFileSync(join(d, OPENROUTER_CREDENTIAL), "utf8")): OpenRouterConfig {
   const on = (env.ORBIT_OPENROUTER_ENABLED ?? "").trim().toLowerCase();
   if (on !== "1" && on !== "true") return { state: "disabled", reason: "The OpenRouter fallback is disabled (ORBIT_OPENROUTER_ENABLED is not 1)." };
   const bad = (reason: string): OpenRouterConfig => ({ state: "unavailable", reason });
