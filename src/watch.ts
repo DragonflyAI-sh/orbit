@@ -23,7 +23,10 @@ export type WatchState = { ports: Record<string, Alerted>; jobs?: JobsTold };
 export type JobSource = { all(): Job[]; health(job: Job): string; setCallbackAlert?(id: string, alert: CallbackAlert): void };
 // Storing a first-callback notice is tried at most this many times (one per tick) when it throws, then given up and recorded as such.
 export const MAX_ALERT_ATTEMPTS = 3;
-export type WatchOptions = { inFlight?: EvidenceContext["inFlight"] };
+// modelRecovery: whether a "model is live again" notice may be sent now (src/model-health.ts confirmsRecovery). After a deploy the model
+// port's local login check reports `live` before any call, which is not evidence that the primary answers; while this is false the
+// notice is held (the alert record is kept, so the real recovery is still reported once it is confirmed). Absent: no gate.
+export type WatchOptions = { inFlight?: EvidenceContext["inFlight"]; modelRecovery?: () => boolean };
 
 const isBad = (s: PortStatus) => s.state === "degraded" || s.state === "down";
 // An epoch verifiedAt means "not used yet" (for example the model right after a restart), not "broken".
@@ -44,6 +47,8 @@ export function watcher(store: Store<WatchState>, notify: Notifier, now: () => D
   let source: () => PortStatus[] = () => [];
   const bad = new Map<string, Bad>();
   let lastTick: string | undefined;
+  // A model recovery notice is being held (logged once per hold).
+  let held = false;
   const read = (): WatchState => ({ ports: { ...store.read().ports }, jobs: { ...store.read().jobs } });
 
   function watchPorts(state: WatchState, statuses: PortStatus[]): WatchState {
@@ -72,7 +77,12 @@ export function watcher(store: Store<WatchState>, notify: Notifier, now: () => D
       } else {
         bad.delete(s.port);
         const told = ports[s.port];
-        if (told && s.state === "live") {
+        if (told && s.state === "live" && s.port === "model" && opts.modelRecovery && !opts.modelRecovery()) {
+          // Not confirmed: the primary has not answered in this process (or the latest evidence is a limit). Keep the alert record.
+          if (!held) console.log(JSON.stringify({ at: t.toISOString(), watch: "model recovery notice held: the primary model has not answered in this process yet (src/model-health.ts)", alerted: told.state, since: told.since }));
+          held = true;
+        } else if (told && s.state === "live") {
+          if (s.port === "model") held = false;
           notify.send(`ORBIT part "${s.port}" is live again after ${duration(t.getTime() - new Date(told.since).getTime())} (${told.state} since ${told.since}).`);
           delete ports[s.port];
         } else if (told) {

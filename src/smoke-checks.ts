@@ -1,13 +1,18 @@
 import { decide } from "./policy.ts";
 import type { EmbeddingBudget, EmbeddingsConfig, OpenAIEmbedder } from "./embeddings.ts";
 import { EmbeddingUnavailable } from "./embeddings.ts";
+import { modelSmokeCheck } from "./model-health.ts";
+import type { ModelHealthTracker } from "./model-health.ts";
+import type { ModelPort } from "./model.ts";
 import type { PortStatus } from "./ports.ts";
 import type { CheckOutcome, SmokeCheck } from "./smoke.ts";
 
 // ORBIT's startup smoke checks: one entry per /status port. The matrix (property, probe, dependencies, cost, timeout, skip reason)
 // is docs/smoke-checks.md; keep the two in step. Only checks that are read-only, free or explicitly bounded run automatically.
 // Paid model generation, notification delivery, job launches, tool calls with caller-chosen targets and any write are never invoked
-// here: they are recorded as skipped, with the reason, and their ports keep reporting from real operations.
+// here: they are recorded as skipped, with the reason, and their ports keep reporting from real operations. The one model call is the
+// post-deploy model smoke check (src/model-health.ts): one minimal request to the PRIMARY model (subscription usage, never the paid
+// fallback), made only when the service passes `model`, so the watch can tell a real recovery from a stale local "live".
 
 // The one fixed, non-private, synthetic input the embeddings probe sends: 19 ASCII bytes, so at most 19 input tokens.
 export const SMOKE_EMBED_TEXT = "orbit startup check";
@@ -165,11 +170,13 @@ export function orbitSmokeChecks(o: {
   nodes: { status(): PortStatus };
   watch?: { status(): PortStatus };
   embeddings?: { config: EmbeddingsConfig; embedder: OpenAIEmbedder | undefined; budget: EmbeddingBudget | undefined };
+  // The post-deploy model smoke check (src/model-health.ts). Absent: the model is skipped as before.
+  model?: { port: ModelPort; health: ModelHealthTracker; timeoutMs?: number };
 }): SmokeCheck[] {
   return [
     policyCheck(),
     channelCheck({ base: o.base }),
-    {
+    o.model ? modelSmokeCheck({ model: o.model.port, health: o.model.health, ...(o.model.timeoutMs !== undefined ? { timeoutMs: o.model.timeoutMs } : {}) }) : {
       ...skipped("model", "paid", "the model answers a request", "model generation uses the ChatGPT subscription or a paid fallback, so it is never called automatically; full verification needs separate authorization. The model port reports from real replies and its local login check."),
       ...(o.modelMock() ? { skip: () => ({ kind: "mock" as const, reason: "no model is configured; replies are mock" }) } : {}),
     },

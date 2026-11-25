@@ -81,7 +81,7 @@ Every port `/status` can show, plus the other capabilities, with what (if anythi
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `policy` | `decide()` refuses an owner-only action for a non-owner and an action on an unknown port even for the owner, and allows the owner | In-process calls of `decide()` | none | none | 1 s | local | n/a |
 | `channel` | `GET /` on the listening address returns the web page (200, text/html) | One loopback HTTP GET of `/` | the HTTP server | one local request; no identity lookup, no writes | 5 s | functional | n/a |
-| `model` | the model answers a request | **none** | ChatGPT login or API key; OpenRouter fallback | paid or usage-limited generation | n/a | n/a | `paid`: needs separate authorization; `mock` when no model is configured. The port keeps reporting from real replies and its local login check. |
+| `model` | the primary model answers one minimal request (fixed one-line prompt, no tools, no history; never the paid fallback) | `model.reply([fixed prompt], [], undefined, { fallback: false, signal })` on the port as built (docs/model-health.md) | ChatGPT login; OpenRouter fallback wrapper if enabled | **1 request to the primary per process** (ChatGPT subscription usage, not paid), no retry; answer not stored or shown; while the primary is limited the fallback wrapper refuses at once and nothing is sent to OpenRouter | 8 s (runner backstop 10 s) | functional | `mock` when no model is configured; `unconfigured` when the model is already `down` before any call. The result also sets the model health state the watch reads before a "model is live again" notice. |
 | `memory` | a keyword search over the vault copy answers | `memory.search("orbit", 1)`, result discarded | vault copy or writable clone | local file reads; no network, no writes | 10 s | functional | `unconfigured` when no vault copy exists |
 | `notify` | a notification is delivered | **none** | web inbox, Discord webhook | would send a message | n/a | n/a | `side-effects`: receipts from real notifications are the evidence |
 | `schedule` | the scheduler ticked in this process | reads `schedule.status()` until live with a `verifiedAt` from this process | the service tick | none beyond the normal tick | 15 s | operation | n/a (`untested` if no tick was seen) |
@@ -128,7 +128,8 @@ The smoke suite sends nothing itself. If the embeddings probe meets an auth, quo
 - A real embeddings request, real key, real billing path or real model output.
 - Real tailscaled, a real vault, a real ChatGPT login, Discord, GitHub.
 - The production deploy itself (`pull-deploy.sh` is unchanged and its tests still pass).
-- Functional checks of model generation, notification delivery, job launches, tool calls, vault writes and ops helpers. These are never automated here and need separate authorization.
+- A real model call (the model check is covered with scripted models in `test/model-health.test.ts`).
+- Functional checks of notification delivery, job launches, tool calls, vault writes and ops helpers. These are never automated here and need separate authorization.
 
 ## Operator steps
 
@@ -139,7 +140,7 @@ None are required. The suite ships with the code and runs on the next deploy's r
 After the next deploy, on the host:
 
 - [ ] `curl -s localhost:8790/status | jq '.commit, .smoke.process, .smoke.state'`: the commit is the deployed one, `smoke.process.commit` matches it, and within about a minute `state` is `done`.
-- [ ] `jq '.smoke.checks[] | {id, state, skip, reason}'`: `policy` and `channel` passed; `schedule`, `runs` and `watch` passed; `nodes` passed (or failed with a tailscaled reason worth looking at); `model`, `notify`, `jobs` and `tools` skipped with their reasons.
+- [ ] `jq '.smoke.checks[] | {id, state, skip, reason}'`: `policy` and `channel` passed; `schedule`, `runs` and `watch` passed; `nodes` passed (or failed with a tailscaled reason worth looking at); `model` passed, or failed with `usage_limit`/`rate_limit` while ChatGPT is limited (docs/model-health.md); `notify`, `jobs` and `tools` skipped with their reasons.
 - [ ] If `ORBIT_PHOTO_SEMANTIC=on` with the credential installed: `photo-embeddings` check `passed`, the port `live` with a `verifiedAt` from this process, and the daily count in the port detail up by exactly 1 request. If it `failed`, the reason says auth, quota, config, rate-limit, server, timeout, network or malformed. If semantic search is off: `skipped` / `disabled`, and no `photo-embeddings` port.
 - [ ] `journalctl -u orbit | grep '"smoke":"done"'` shows exactly one line for this start, with no key or token in it.
 - [ ] Reload `/status` a few times: the embeddings daily count does not grow (`/status` never probes).
