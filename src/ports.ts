@@ -1,3 +1,4 @@
+import type { ModelHealth } from "./model-health.ts";
 import type { CheckRecord } from "./smoke.ts";
 
 export type PortState = "live" | "mock" | "degraded" | "down";
@@ -21,6 +22,9 @@ export type PortStatus = {
   // `check`. `/status` always sets it on the model port; the page's overall indicator reads it before `state`. It is about the model,
   // not about the ORBIT process: a status answer at all already shows the process is running.
   availability?: ModelAvailability;
+  // Optional, model port only: whether the PRIMARY model is answering (healthy), ORBIT is in fallback, or it is not known, from the
+  // post-deploy model smoke check and real calls (src/model-health.ts, docs/model-health.md). Additive like `check`.
+  health?: ModelHealth;
 };
 
 export type FallbackRoute = {

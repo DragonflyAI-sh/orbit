@@ -8,6 +8,8 @@ import { selectMemory } from "./memory.ts";
 import { chatgptModel, tokenFile } from "./chatgpt.ts";
 import { proposals as newProposals } from "./agent.ts";
 import { fallbackModel } from "./fallback.ts";
+import { modelHealthTracker, observeModel } from "./model-health.ts";
+import type { ModelHealth } from "./model-health.ts";
 import { selectModel } from "./model.ts";
 import { openrouterConfig, spendCapsOf } from "./openrouter.ts";
 import { SpendError, spendLedger } from "./spend-ledger.ts";
@@ -92,7 +94,11 @@ if (openrouter.state === "ready" && stateDir) {
     openrouterEffective = { state: "unavailable", reason: `The spend ledger could not be set up: ${err instanceof Error ? err.message : "unknown error"}` };
   }
 }
-const model = openrouterEffective.state === "disabled" ? primaryModel : fallbackModel({ primary: primaryModel, config: openrouterEffective, ledger: openrouterLedger });
+const builtModel = openrouterEffective.state === "disabled" ? primaryModel : fallbackModel({ primary: primaryModel, config: openrouterEffective, ledger: openrouterLedger });
+// Model health (docs/model-health.md): whether the PRIMARY model is answering or ORBIT is in fallback, from the post-deploy model smoke
+// check and every real call. The watch reads it before sending a "model is live again" notice. <state>/model-health.json.
+const modelHealth = modelHealthTracker(jsonStore<ModelHealth | null>(stateDir, "model-health", null));
+const model = observeModel(builtModel, modelHealth);
 // The writable vault clone needs a state directory and the orbit.github-vault credential (read when used, never cached). Without
 // either, memory reads the read-only server copy and no vault write tool is offered; /status and the tool results say so.
 const vault = stateDir
@@ -149,7 +155,7 @@ const sys = sysOps({
     }
   },
 });
-const watch = watcher(jsonStore(stateDir, "watch", { ports: {} }), notify, () => new Date(), jobs);
+const watch = watcher(jsonStore(stateDir, "watch", { ports: {} }), notify, () => new Date(), jobs, { modelRecovery: modelHealth.confirmsRecovery });
 const control = selectControl(process.env);
 const routines = selectRoutines(process.env);
 const publicJobUrl = process.env.ORBIT_PUBLIC_JOB_URL || undefined;
@@ -243,6 +249,8 @@ const smoke = smokeRunner({
     nodes,
     watch,
     embeddings: { config: semanticConfig, embedder: semanticEmbedder, budget: semanticBudget },
+    // The one post-deploy model call. It goes to the port as built (not the observed one) and records its own evidence.
+    model: { port: builtModel, health: modelHealth },
   }),
 });
 
