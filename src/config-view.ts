@@ -19,7 +19,7 @@ import { hasUserinfo, maskRemote } from "./vault/remote.ts";
 
 // The orbit.env settings that are non-secret. Anything else in the environment (the owner's identity, credential paths,
 // tokens) is never shown, whatever its name.
-export const ENV_ALLOWLIST: readonly string[] = [...CONFIG_KEYS, ...OPENROUTER_SETTINGS, "ORBIT_RESEARCH_ROUTINES", "HOST", "PORT", "ORBIT_COMMIT", "ORBIT_DEPLOY_STATE", "ORBIT_VAULT", "ORBIT_VAULT_STATE", "ORBIT_VAULT_REMOTE", "ORBIT_VAULT_BRANCH"];
+export const ENV_ALLOWLIST: readonly string[] = [...CONFIG_KEYS, ...OPENROUTER_SETTINGS, "ORBIT_RESEARCH_ROUTINES", "HOST", "PORT", "ORBIT_COMMIT", "ORBIT_DEPLOY_STATE", "ORBIT_VAULT", "ORBIT_VAULT_STATE", "ORBIT_VAULT_REMOTE", "ORBIT_VAULT_BRANCH", "ORBIT_AUTO_FIX_ENABLED", "ORBIT_AUTO_FIX_MAX_RETRIES"];
 
 type Section<T> = { state: "ok"; source: string; value: T } | { state: "unavailable"; source: string; reason: string };
 const unavailable = (source: string, err: unknown): Section<never> => ({ state: "unavailable", source, reason: maskText(err instanceof Error ? err.message : String(err)).slice(0, 240) });

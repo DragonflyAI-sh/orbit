@@ -7,6 +7,7 @@ import { gitReconciler, selectControl, selectRoutines } from "./launcher.ts";
 import { selectMemory } from "./memory.ts";
 import { chatgptModel, tokenFile } from "./chatgpt.ts";
 import { proposals as newProposals } from "./agent.ts";
+import { autoFixConfig, autoFixer, autoFixStartupLog, selectPrHealth } from "./auto-fix.ts";
 import { fallbackModel } from "./fallback.ts";
 import { modelHealthTracker, observeModel } from "./model-health.ts";
 import type { ModelHealth } from "./model-health.ts";
@@ -173,6 +174,12 @@ researchCompletion({ jobs, store: researchReports, notify, control });
 const review = reviewer(jobs, jobLauncher({ jobs, control, routines, notify, publicJobUrl, commit }), selectComments(process.env), notify);
 const prs = pullRequestOpener(jobs, parseRoutineRepos(process.env.ORBIT_ROUTINE_REPOS), selectPulls(process.env), notify, () => new Date(), (job, url, headSha) => void review.start(job, url, headSha), selectComments(process.env));
 const reconcile = control ? gitReconciler(jobs, control) : async () => {};
+// Auto-fix proposals (docs/auto-fix.md): after a PR's review settles, a failed check or a merge conflict becomes a fix-job PROPOSAL on the
+// Jobs page; Rai confirms it like any launch. ORBIT_AUTO_FIX_ENABLED=false turns it off; ORBIT_AUTO_FIX_MAX_RETRIES caps each chain.
+const autoFixSettings = autoFixConfig(process.env);
+const prHealth = selectPrHealth(process.env);
+console.log(autoFixStartupLog(autoFixSettings, Boolean(prHealth)));
+const autoFix = autoFixer({ jobs, proposals, notify, port: prHealth, config: autoFixSettings });
 
 // The job listener binds to localhost only; Tailscale Funnel is what publishes it.
 const ingressPort = process.env.ORBIT_INGRESS_PORT ? Number(process.env.ORBIT_INGRESS_PORT) : undefined;
@@ -210,6 +217,7 @@ const tick = () => {
     .then(() => reconcile())
     .then(() => prs.retry())
     .then(() => review.retry())
+    .then(() => autoFix.sweep())
     .catch((err) => console.error(JSON.stringify({ at: new Date().toISOString(), tick: String(err) })))
     .finally(watchTick);
 };

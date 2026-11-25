@@ -721,7 +721,9 @@ async function execute(
 export type ProposalAction =
   // `duplicates`: recent jobs whose brief matches this one (src/duplicates.ts). A warning only.
   // lane "research": a research_launch proposal (src/research-tools.ts); absent means a build launch. The launcher refuses a routine of the other lane.
-  | { kind: "job_launch"; routine: string; brief: string; lane?: "research"; duplicates?: { job: string; similarity: number; state: string; launchedAt?: string }[] }
+  // `autoFix`: ORBIT proposed this itself because a job's PR failed CI or has a merge conflict (src/auto-fix.ts). Shown on the card;
+  // the launch is confirmed exactly like any other.
+  | { kind: "job_launch"; routine: string; brief: string; lane?: "research"; duplicates?: { job: string; similarity: number; state: string; launchedAt?: string }[]; autoFix?: AutoFixProposal }
   | { kind: "job_steer"; job: string; text: string }
   | { kind: "ops_admin"; action: MutatingAction; summary: string; display: Record<string, string> | null; digest: string }
   // Tier 3 (OS updates, reboot, orbit-jobs Funnel): same shape, plus the impact and recovery warnings the owner must see.
@@ -736,6 +738,7 @@ export type ProposalAction =
 // `origin`: the conversation (session id, `chat:<uuid>` or `assistant:assistant`) whose turn made the proposal, bound by the thread service
 // from the server's own turn context when the card is stored (src/work-sessions.ts). Never taken from a tool's arguments: propose()
 // drops any `origin` an action carries. Absent: not known (for example the legacy /chat route, which stores no card).
+export type AutoFixProposal = { of: string; prUrl: string; attempt: number; maxRetries: number; reason: "checks" | "conflict" | "checks+conflict" };
 export type Proposal = ProposalAction & { id: string; createdAt: string; expiresAt: string; origin?: string };
 
 export const PROPOSAL_TTL_MS = 30 * 60 * 1000;
