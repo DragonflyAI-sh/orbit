@@ -99,6 +99,33 @@ export type ResearchRecord = {
 // resolvedAt/resolution: a runner event (or the job finishing) arrived after the alert, so it no longer applies. Absent: never alerted, or
 // alerted before this field existed (the watch's own record still deduplicates those).
 export type CallbackAlert = { firstAt: string; at: string; count: number; dispatch: string; stage: string; notificationId?: string; queueError?: string; attempts?: number; gaveUp?: boolean; resolvedAt?: string; resolution?: "runner-callback" | "finished" };
+// What ORBIT's auto-fix watch (src/auto-fix.ts) saw on this job's pull request, and what it did: at most one fix proposal per PR, never
+// a launch. Written only by ORBIT. Absent: the PR was never watched (no PR, the feature is off, or the job predates it).
+// state: watching (the review has settled and the PR is read every few minutes), proposed (a fix job was proposed for Rai to confirm),
+// escalated (the retry limit was reached, so Rai was notified instead), closed (the PR was merged or closed), expired (the watch window
+// ended with nothing to fix), lapsed (the proposal ended without a launch: cancelled, expired, or lost in a restart).
+// attempt: which auto-fix attempt this PR is (0 for a job nobody proposed as a fix). failing/conflictFiles: what was seen when it acted.
+export type AutoFixRecord = {
+  state: "watching" | "proposed" | "escalated" | "closed" | "expired" | "lapsed";
+  since: string;
+  attempt: number;
+  checkedAt?: string;
+  headSha?: string;
+  // The last reading while watching: pending (checks still running), passing (no failure, no conflict), unknown (GitHub had not computed it).
+  seen?: "pending" | "passing" | "failing" | "conflict" | "unknown";
+  failingSince?: string;
+  reason?: "checks" | "conflict" | "checks+conflict";
+  failing?: string[];
+  conflictFiles?: string[];
+  proposal?: { id: string; at: string; expiresAt: string; attempt: number; routine: string };
+  fixJob?: string;
+  settledAt?: string;
+  error?: string;
+  errors?: number;
+};
+// Set on a job launched from a confirmed auto-fix proposal: the job whose PR it fixes, that PR, which attempt it is, and the job that
+// began the chain. Written only by ORBIT, from its own proposal record (never from the brief or the runner).
+export type FixOf = { of: string; prUrl: string; attempt: number; root: string; proposal: string };
 export type ResearchVaultAttempt = { at: string; path: string; state: "committed" | "pending-confirmation" | "failed" | "cancelled" | "expired"; commit?: string; proposalId?: string; expiresAt?: string; settledAt?: string; error?: string };
 export type Job = {
   id: string;
@@ -127,6 +154,8 @@ export type Job = {
   eventsDropped?: number;
   steers: Steer[];
   callbackAlert?: CallbackAlert;
+  autoFix?: AutoFixRecord;
+  fixOf?: FixOf;
 };
 
 // A reported tool commit is a full lowercase hex commit id; "unknown", missing and anything else are not recorded.
@@ -345,6 +374,16 @@ export function jobs(store: Store<Job[]>, secret: Buffer, notify: Notifier, now:
       const t = now().getTime();
       if (!job.events.length) return job.launch && t - new Date(job.launch.at).getTime() > NOT_STARTED_AFTER_MS ? "not-started" : "awaiting-first-checkin";
       return job.lastEventAt && t - new Date(job.lastEventAt).getTime() > QUIET_AFTER_MS ? "quiet" : "ok";
+    },
+
+    // The auto-fix watch's record for this job's PR (src/auto-fix.ts). Never touched by runner input.
+    setAutoFix(id: string, autoFix: AutoFixRecord): void {
+      update(id, (j) => ({ ...j, autoFix }));
+    },
+
+    // Links a job to the auto-fix proposal it was launched from, once. Never replaced.
+    setFixOf(id: string, fixOf: FixOf): void {
+      update(id, (j) => (j.fixOf ? j : { ...j, fixOf }));
     },
 
     // The watch's record of the first-callback alert for this job (src/watch.ts). Never touched by runner input.
