@@ -9,7 +9,7 @@ import { chatgptModel, tokenFile } from "./chatgpt.ts";
 import { proposals as newProposals } from "./agent.ts";
 import { fallbackModel } from "./fallback.ts";
 import { selectModel } from "./model.ts";
-import { openrouterConfig, spendCapsOf } from "./openrouter.ts";
+import { openrouterConfig, openrouterStartupLog, spendCapsOf } from "./openrouter.ts";
 import { SpendError, spendLedger } from "./spend-ledger.ts";
 import { nodes as devicePresence, tailscaleStatus } from "./nodes.ts";
 import { notifier, selectDiscord } from "./notify.ts";
@@ -92,6 +92,8 @@ if (openrouter.state === "ready" && stateDir) {
     openrouterEffective = { state: "unavailable", reason: `The spend ledger could not be set up: ${err instanceof Error ? err.message : "unknown error"}` };
   }
 }
+// Checked once at startup: the journal says whether the fallback is off, armed, or unusable and why (never the key).
+console.log(openrouterStartupLog(openrouterEffective));
 const model = openrouterEffective.state === "disabled" ? primaryModel : fallbackModel({ primary: primaryModel, config: openrouterEffective, ledger: openrouterLedger });
 // The writable vault clone needs a state directory and the orbit.github-vault credential (read when used, never cached). Without
 // either, memory reads the read-only server copy and no vault write tool is offered; /status and the tool results say so.

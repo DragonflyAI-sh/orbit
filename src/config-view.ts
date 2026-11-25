@@ -7,6 +7,7 @@ import type { ConfigChanges } from "./ops/admin-protocol.ts";
 import type { PortStatus, Result } from "./ports.ts";
 import type { ImageSupport } from "./model.ts";
 import { maskDeep, maskText } from "./threads.ts";
+import { OPENROUTER_CREDENTIAL, OPENROUTER_SETTINGS } from "./openrouter.ts";
 import { CREDENTIAL_NAME } from "./vault/clone.ts";
 import type { PolicyCheck } from "./vault/policy-check.ts";
 import { hasUserinfo, maskRemote } from "./vault/remote.ts";
@@ -18,7 +19,7 @@ import { hasUserinfo, maskRemote } from "./vault/remote.ts";
 
 // The orbit.env settings that are non-secret. Anything else in the environment (the owner's identity, credential paths,
 // tokens) is never shown, whatever its name.
-export const ENV_ALLOWLIST: readonly string[] = [...CONFIG_KEYS, "ORBIT_RESEARCH_ROUTINES", "HOST", "PORT", "ORBIT_COMMIT", "ORBIT_DEPLOY_STATE", "ORBIT_VAULT", "ORBIT_VAULT_STATE", "ORBIT_VAULT_REMOTE", "ORBIT_VAULT_BRANCH"];
+export const ENV_ALLOWLIST: readonly string[] = [...CONFIG_KEYS, ...OPENROUTER_SETTINGS, "ORBIT_RESEARCH_ROUTINES", "HOST", "PORT", "ORBIT_COMMIT", "ORBIT_DEPLOY_STATE", "ORBIT_VAULT", "ORBIT_VAULT_STATE", "ORBIT_VAULT_REMOTE", "ORBIT_VAULT_BRANCH"];
 
 type Section<T> = { state: "ok"; source: string; value: T } | { state: "unavailable"; source: string; reason: string };
 const unavailable = (source: string, err: unknown): Section<never> => ({ state: "unavailable", source, reason: maskText(err instanceof Error ? err.message : String(err)).slice(0, 240) });
@@ -87,7 +88,16 @@ export function configView(deps: ConfigViewDeps): (ports: PortStatus[]) => Promi
           return { name, sizeBytes: st.isFile() ? st.size : undefined, type: st.isFile() ? "file" : "other" };
         });
       const vault = entries.find((e) => e.name === CREDENTIAL_NAME);
-      return { state: "ok", source, value: { entries, vaultWriteCredential: vault ? "loaded in this process" : `not loaded in this process (${CREDENTIAL_NAME} appears after the next ORBIT restart once it is installed)` } };
+      const openrouter = entries.find((e) => e.name === OPENROUTER_CREDENTIAL);
+      return {
+        state: "ok",
+        source,
+        value: {
+          entries,
+          vaultWriteCredential: vault ? "loaded in this process" : `not loaded in this process (${CREDENTIAL_NAME} appears after the next ORBIT restart once it is installed)`,
+          openrouterFallbackCredential: openrouter ? "loaded in this process" : `not loaded in this process (${OPENROUTER_CREDENTIAL} appears after the next ORBIT restart once it is installed; without it the OpenRouter fallback cannot answer)`,
+        },
+      };
     } catch (err) {
       return unavailable(source, err);
     }

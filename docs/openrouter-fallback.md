@@ -88,7 +88,9 @@ While the fallback answers, the conversation, memory excerpts, tool results and 
 
 Caps nest (daily <= monthly <= lifetime), `0` and malformed values are refused, and at least one of monthly/lifetime is always in force. Full rules, the proposed 5/day + 150/month settings and the migration caveats: `docs/openrouter-spend-caps.md`.
 
-Credential: root-only `/etc/credstore/orbit.openrouter` (0600), picked up by the existing `ImportCredential=orbit.*`, read with `CREDENTIALS_DIRECTORY` like `orbit.openai`. Never read at build time, never logged, redacted from errors. Requires `STATE_DIRECTORY` (the ledger is durable; without it the fallback is unavailable).
+Credential: root-only `/etc/credstore/orbit.openrouter` (0600), picked up by the existing `ImportCredential=orbit.*`, read with `CREDENTIALS_DIRECTORY` like `orbit.openai`. Never read at build time, never logged, redacted from errors. Requires `STATE_DIRECTORY` (the ledger is durable; without it the fallback is unavailable). There is no `OPENROUTER_API_KEY` environment variable: the key is only ever this credential.
+
+Seeing the configuration: `orbit_config_view` shows every `ORBIT_OPENROUTER_*` setting above as the running process has it (none is secret) and, under the credentials this process loaded, `openrouterFallbackCredential` (`loaded in this process` or not, by name and size only). At each start ORBIT logs one `openrouter_fallback_config` line to the journal: `disabled`, `unavailable` with the reason (a missing `orbit.openrouter` credential, a missing price or model, a ledger that cannot be set up), or `ready` with the model. Neither ever contains the key. The settings stay out of `ops_propose_config_change` on purpose: the model, its prices and its output bound must change together after `tools/openrouter-price-check`, by hand (`docs/openrouter-activation-runbook.md`).
 
 ## Spend guard (`src/spend-ledger.ts`)
 
