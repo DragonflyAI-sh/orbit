@@ -142,6 +142,20 @@ test("the gallery routes are owner only, GET only, audited, and read nothing for
   assert.equal((await g.api("/gallery/photos")).status, 200);
 });
 
+test("the gallery routes, search included, refuse cross-site reads as the other photo routes do", async () => {
+  const { g, refs } = await galleryScene();
+  for (const path of ["/gallery/photos", "/gallery/search?q=garden", `/gallery/photos/${refs.desk}`]) {
+    for (const site of ["cross-site", "same-site"]) {
+      const res = await g.api(path, "GET", undefined, { "sec-fetch-site": site });
+      assert.equal(res.status, 403, `${path} from ${site}`);
+      assert.match(res.data.error, /Cross-site requests are refused/);
+      assert.doesNotMatch(JSON.stringify(res.data), /garden|desk|mug|ph_/i, path);
+    }
+    for (const site of ["same-origin", "none"]) assert.equal((await g.api(path, "GET", undefined, { "sec-fetch-site": site })).status, 200, `${path} from ${site}`);
+  }
+  assert.equal((await g.api("/gallery/search?q=garden")).status, 200, "a request without the header (not a browser) is unaffected");
+});
+
 test("GET /sidebar: the Images section is paged and each photo says how many AI observations are saved", async () => {
   const g = await galleryRig();
   // 12 photos: one observed, sent in two messages.

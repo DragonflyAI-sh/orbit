@@ -299,15 +299,19 @@ export function sidebarView(notes: ReadonlyMap<string, string> | undefined, phot
 // bound (saying so). `editable` is true only when the text shown is, byte for byte, the note in the vault: nothing masked, no
 // control characters removed, not cut. Only then is `sha` (SHA-256 of the note) given, which a save must quote back, so the
 // editor can never write a masked placeholder or a shortened note over the real one.
-export type SidebarNote = { path: string; text: string; truncated: boolean; editable: boolean; sha?: string };
+// A note with a carriage return (Windows CRLF line endings, or a lone CR) is never editable and says so (`crlf: true`): a browser
+// textarea turns every CR and CRLF into LF, so the editor would show unsaved changes as soon as it opened and a save would rewrite
+// every line ending in the file.
+export type SidebarNote = { path: string; text: string; truncated: boolean; editable: boolean; sha?: string; crlf?: true };
 export function sidebarNote(notes: ReadonlyMap<string, string>, path: string): SidebarNote | undefined {
   if (typeof path !== "string" || !path.endsWith(".md") || path.includes("\0")) return undefined;
   const text = notes.get(path);
   if (text === undefined) return undefined;
   const masked = maskVaultText(text).replace(/[\u202a-\u202e\u2066-\u2069]/g, "");
-  if (masked.length > SIDEBAR_NOTE_MAX) return { path, text: masked.slice(0, SIDEBAR_NOTE_MAX), truncated: true, editable: false };
-  const editable = masked === text && text.length > 0 && text.length <= MAX_TEXT;
-  return { path, text: masked, truncated: false, editable, ...(editable ? { sha: sha(text) } : {}) };
+  const crlf = text.includes("\r") ? ({ crlf: true } as const) : {};
+  if (masked.length > SIDEBAR_NOTE_MAX) return { path, text: masked.slice(0, SIDEBAR_NOTE_MAX), truncated: true, editable: false, ...crlf };
+  const editable = masked === text && text.length > 0 && text.length <= MAX_TEXT && !("crlf" in crlf);
+  return { path, text: masked, truncated: false, editable, ...(editable ? { sha: sha(text) } : {}), ...crlf };
 }
 
 // A save from the file viewer (POST /sidebar/note {path, sha, text}), checked against the snapshot before anything is written. It
@@ -324,6 +328,7 @@ export function sidebarSave(notes: ReadonlyMap<string, string>, input: Record<st
   if (typeof path !== "string" || typeof quoted !== "string" || typeof text !== "string") return { ok: false, code: 400, error: "A save needs path, sha and text as strings. Nothing was written." };
   const note = sidebarNote(notes, path);
   if (!note) return { ok: false, code: 404, error: "No such note in the vault. Nothing was written." };
+  if (note.crlf) return { ok: false, code: 422, error: "This note uses Windows line endings (CRLF) and cannot be saved from the editor, which would rewrite every line ending in the file. Nothing was written." };
   if (!note.editable || !note.sha) return { ok: false, code: 422, error: "This note cannot be saved from the editor: it is empty, longer than the editor can save, or has text ORBIT masks on the page. Nothing was written." };
   if (quoted !== note.sha) return { ok: false, code: 409, error: "The note changed in the vault since it was opened. Nothing was written; reopen it to see the current text." };
   if (text.length > MAX_TEXT) return { ok: false, code: 413, error: `The editor saves notes of up to ${MAX_TEXT} characters. Nothing was written.` };

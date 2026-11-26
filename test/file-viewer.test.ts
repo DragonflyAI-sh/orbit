@@ -149,6 +149,22 @@ test("sidebarSave: checks the request against the snapshot before anything is wr
   assert.equal(code({ path: "Projects/a.md", sha: sha(text), text: "x", branch: "main" }), 400, "unknown fields are refused, not ignored");
 });
 
+test("sidebarNote and sidebarSave: a note with Windows line endings (CRLF) or a lone CR is read-only and says why", () => {
+  const crlf = "# W\r\n- one\r\n- two\r\n";
+  const notes = new Map([["Projects/windows.md", crlf], ["Projects/cr.md", "# C\r- one\n"], ["Projects/unix.md", "# U\n- one\n"]]);
+  const w = sidebarNote(notes, "Projects/windows.md")!;
+  assert.deepEqual(w, { path: "Projects/windows.md", text: crlf, truncated: false, editable: false, crlf: true }, "shown byte for byte, but with no hash to save against");
+  assert.deepEqual([sidebarNote(notes, "Projects/cr.md")!.editable, sidebarNote(notes, "Projects/cr.md")!.crlf], [false, true]);
+  assert.equal(sidebarNote(notes, "Projects/unix.md")!.crlf, undefined);
+  assert.equal(sidebarNote(notes, "Projects/unix.md")!.editable, true);
+  // A save quoting the real hash with the browser's LF-only text is refused: the line endings are never rewritten.
+  const r = sidebarSave(notes, { path: "Projects/windows.md", sha: sha(crlf), text: crlf.replace(/\r\n/g, "\n") });
+  assert.equal(r.ok, false);
+  assert.equal((r as any).code, 422);
+  assert.match((r as any).error, /Windows line endings \(CRLF\).*Nothing was written/);
+  assert.equal((sidebarSave(notes, { path: "Projects/windows.md", sha: sha(crlf), text: crlf }) as any).code, 422, "even unchanged text");
+});
+
 // ---- the real server over a real vault clone -----------------------------------------------------------------------------------
 
 async function served(seed: Record<string, string> = SEED, writes = true) {
@@ -193,6 +209,19 @@ test("GET /sidebar/note gives the hash and whether the note can be saved; POST /
   const refused = await r.api("/sidebar/note", "POST", { path: "Projects/masked.md", sha: sha(`# Masked\nkey: ${fakeKey()}\n`), text: masked.data.note.text });
   assert.equal(refused.status, 422);
   assert.equal(remote("Projects/masked.md"), `# Masked\nkey: ${fakeKey()}\n`);
+});
+
+test("GET /sidebar/note marks a CRLF note read-only; POST /sidebar/note refuses it and the file keeps its line endings", async () => {
+  const crlf = "# Windows\r\n- step one\r\n- step two\r\n";
+  const { r, remote } = await served({ ...SEED, "Projects/windows.md": crlf });
+  const read = await r.api("/sidebar/note?path=Projects/windows.md");
+  assert.equal(read.status, 200);
+  assert.equal(read.data.writable, true);
+  assert.deepEqual([read.data.note.editable, read.data.note.sha, read.data.note.crlf, read.data.note.text], [false, undefined, true, crlf]);
+  const refused = await r.api("/sidebar/note", "POST", { path: "Projects/windows.md", sha: sha(crlf), text: crlf.replace(/\r\n/g, "\n") });
+  assert.equal(refused.status, 422);
+  assert.match(refused.data.error, /CRLF/);
+  assert.equal(remote("Projects/windows.md"), crlf, "the remote keeps every CRLF");
 });
 
 test("POST /sidebar/note: someone else's change since the snapshot is not overwritten", async () => {

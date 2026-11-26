@@ -51,6 +51,10 @@ notes from the vault for now". Serving other vault files (a raw-file route and a
   (src/vault/filter.ts), no control characters removed, not cut at the 20,000-character bound, not empty. Only then is `sha`
   (SHA-256 of the note) given. `writable` says whether vault writes are on (`vaultEdits` exists). A note that is not editable
   opens read-only, without Save, and says why.
+  A note with a carriage return (Windows CRLF line endings, or a lone CR) is never editable and comes with `note.crlf: true`:
+  a browser textarea turns every CR into LF, so the editor would show unsaved changes as soon as it opened and a save would
+  rewrite every line ending. The page says "Read-only: this file uses Windows line endings (CRLF)…", and a save of such a note
+  is refused with `422`.
 - **Saving:** `POST /sidebar/note {path, sha, text}` (owner only, policy port `vault.editor-save`, same-origin only like every
   POST). The server checks it against the snapshot (`sidebarSave`: known fields only, a note that is editable, the quoted hash,
   at most 20,000 characters), then hands **one `rewrite_note` edit** to the same pipeline the chat's vault tools use
@@ -69,15 +73,15 @@ notes from the vault for now". Serving other vault files (a raw-file route and a
 
 - `test/file-viewer.test.ts`: file types; the highlighter for every language is lossless (tokens join back to the input) and finds
   the main token kinds, and is quick on 20,000 characters; the Markdown reader (blocks, inline nodes, unsafe links, unclosed
-  fences); `sidebarNote` (editable only byte for byte, no hash for masked, cut, bidi or empty notes); `sidebarSave`; and on the real
+  fences); `sidebarNote` (editable only byte for byte, no hash for masked, cut, bidi or empty notes; CRLF and lone-CR notes read-only); `sidebarSave`; and on the real
   server over a real vault clone (a bare git repository, synthetic token): read, save, the exact text on the remote with ORBIT's
-  commit and Log line, read back, a stale hash refused, unchanged text, a masked note refused, a change made on GitHub since the
+  commit and Log line, read back, a stale hash refused, unchanged text, a masked note refused, a CRLF note read-only and refused with its line endings kept, a change made on GitHub since the
   snapshot not overwritten, a `#rai` note turned into a proposal, secret-shaped text refused without echoing it, owner only,
   cross-site refused, writes off, and `/files.js` served with `nosniff`.
 - `test/vault-review-fixes.test.ts`: `rewrite_note` is on the confirmation card in full, and cannot rewrite ORBIT's append-only log.
 - `test/file-viewer-browser.test.ts` (Chromium, real server, real vault clone): open from the sidebar, Edit/Preview, edit and Save
   (button and Ctrl+S) with the remote read back, two files as tabs without duplicates, the sidebar mark, page tabs hiding the
-  viewer, Close back to the conversation; the unsaved-changes question; a change on GitHub not overwritten; a `#rai` note needing
+  viewer, Close back to the conversation; the unsaved-changes question; a change on GitHub not overwritten; a CRLF note opening read-only with the reason, no Save and no unsaved-changes question; a `#rai` note needing
   confirmation; code highlighting and line numbers with the textarea and its copy sharing metrics and scrolling together and the
   editor never growing past the window; plain text; PDF and image view-only without Save; an unreadable file; Markdown that tries
   to be HTML staying text; AA contrast of every syntax colour in Light and Dark; the phone drawer closing on open.

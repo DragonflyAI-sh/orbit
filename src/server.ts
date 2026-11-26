@@ -1414,6 +1414,14 @@ export function buildServer({
     const galleryRoute = url.pathname === "/gallery/photos" || url.pathname === "/gallery/search" ? url.pathname.slice(9) : /^\/gallery\/photos\/[^/]{1,80}$/.test(url.pathname) ? "detail" : undefined;
     if (galleryRoute) {
       if (req.method !== "GET") return send(res, 405, { error: "Use GET for this route." });
+      // Reads are GETs, so the cross-site refusal above does not cover them. As for the other photo routes, a page on another site
+      // must not be able to make Rai's browser list, read or search the photos: a search also sends its text to the embedding
+      // provider when semantic search is configured.
+      const site = req.headers["sec-fetch-site"];
+      if (site && site !== "same-origin" && site !== "none") {
+        audit("policy", "cross-site", { allow: false, reason: `refused a gallery read from ${site}` });
+        return send(res, 403, { error: "Cross-site requests are refused." });
+      }
       const ownerCall = await isOwnerOf(req);
       const photoRead = decide("attachments", "read", ownerCall);
       audit("attachments", "read", photoRead);
