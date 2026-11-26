@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { vaultMemory } from "../src/memory.ts";
@@ -101,6 +101,18 @@ test("the avatar is served for the page and its icons", async () => {
   const res = await fetch(`${base}/avatar.png`);
   assert.equal(res.headers.get("content-type"), "image/png");
   assert.deepEqual([...new Uint8Array(await res.arrayBuffer()).slice(1, 4)], [80, 78, 71]);
+});
+
+test("the component library (vendored Pico CSS) is served by ORBIT itself, the file the page imports", async () => {
+  const res = await fetch(`${base}/vendor/pico.orbit.min.css`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "text/css; charset=utf-8");
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+  const body = await res.text();
+  assert.equal(body, readFileSync(new URL("../src/web/vendor/pico/pico.orbit.min.css", import.meta.url), "utf8"));
+  assert.match(body, /^\/\*!\n \* Pico CSS .* v2\.1\.1/);
+  assert.match(await (await fetch(base)).text(), /@import url\("\/vendor\/pico\.orbit\.min\.css"\) layer\(pico\);/);
+  assert.equal((await fetch(`${base}/vendor/other.css`)).status, 404, "only that file");
 });
 
 test("the web page is served at /", async () => {

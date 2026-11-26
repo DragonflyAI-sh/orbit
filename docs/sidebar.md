@@ -1,20 +1,22 @@
 # Left sidebar
 
-The web page has a left sidebar: Rai's active projects, the plan and related files of the selected project, and the
-photos that name it. It is the page's main navigation and organisation panel. ORBIT's live status and notifications stay
+The web page has a left sidebar: Rai's active projects, an index of the Plan views (docs/plan.md), the related files of
+the selected project, and the photos that name it. It is the page's main navigation and organisation panel. ORBIT's live status and notifications stay
 in the right-hand side panel (docs/design-system.md, "Side panel"), Status first; the two panels can be open together
 ("Both panels" below).
 
 ## What it shows
 
-Read from `GET /sidebar?project=<id>` (owner only; src/sidebar.ts, src/server.ts). Nothing is mock data: the vault parts
+Read from `GET /sidebar?project=<id>` (owner only; src/sidebar.ts, src/plan.ts, src/server.ts). The answer's `overview` is
+the Plan's project cards (docs/plan.md); its older `plan` field (plan headings of now.md or the selected project, and open
+tasks) is still sent but no longer drawn. Nothing is mock data: the vault parts
 come from the same vault snapshot memory search reads (the writable clone, or the read-only copy, as `vault.source` says),
 and the photos from the attachment store.
 
 | Section | Source | Without a project | With a project |
 | --- | --- | --- | --- |
 | **Projects** | Hub notes `Projects/<name>.md` (top level only) whose `status:` is not done, dropped, archived, cancelled, completed, abandoned or closed | — | The selector's choice, remembered in this browser |
-| **Plan** | List items under plan headings (Next actions, Next steps, Plan, Resume here, Now, Focus, Today, Top priorities, To do, Tasks, Actions); checked `[x]` and dropped `[-]` items are left out; a "Resume here" paragraph counts. Then open tasks from `Tasks/*.md` | `now.md`, and every open task (due first) | The project note, and the open tasks whose `project:` names it (`[[id]]`, `[[id\|label]]`, `Projects/id` or `id`) |
+| **Plan** | Every hub note `Projects/<name>.md`, read as a project card (docs/plan.md) | **All projects** (opens the overview in the main area), how many projects need attention, then each open project by priority with a status dot and a priority badge; each opens its detail in the main area | The same list: the Plan does not follow the selector |
 | **Files** | Vault notes, each with an on-demand preview (`GET /sidebar/note?path=`) | `now.md` and every active project's hub note | The project note, its tasks (open or not), every other note that links `[[id]]` (the activity `Log/` aside), and the items under its Locations heading |
 | **Images** | Photos Rai sent in the Assistant or a chat thread that still exists (archived threads aside), the same reach as the Assistant's photo tools; 10 per page (`images=<page>`) | Every photo, newest first | Those whose caption or conversation title contains the project's id (as words), title or an alias as a whole phrase |
 

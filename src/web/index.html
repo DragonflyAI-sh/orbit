@@ -23,6 +23,11 @@
 <link rel="icon" href="/avatar.png">
 <link rel="apple-touch-icon" href="/avatar.png">
 <style>
+  /* The component library: Pico CSS, ORBIT's scoped build, vendored and served by ORBIT (src/web/vendor/pico/README.md,
+     docs/ui-library.md). It styles only inside elements with class="pico" (the selects, the menus and the side panel), and
+     it sits in its own cascade layer, so every rule below wins over it whatever its specificity. */
+  @layer pico;
+  @import url("/vendor/pico.orbit.min.css") layer(pico);
   /* Colors from the ORBIT avatar: deep space, violet and electric-blue ribbons, gold filaments. --live, --mock and --down are
      the status vocabulary (live, degraded or mock, down); the semantic names after the themes map meaning onto them. */
   /* Two first-class themes, each with its own deliberate values (not an inversion). Light: a soft lavender page and
@@ -112,13 +117,41 @@
   /* Laptops and desktops: a roomier gutter. */
   @media (min-width: 900px) { :root { --gutter: var(--space-5); --text-lg: 18px; } }
   * { box-sizing: border-box; }
+  /* The component library (docs/ui-library.md): Pico CSS, scoped to elements with class="pico" and loaded in the `pico`
+     cascade layer. Pico's components read its --pico-* variables; inside every .pico element they are ORBIT's tokens, so
+     the library follows the theme (Light, Dark or System) and the scale above, and nothing has theme-specific rules.
+     Pico supplies the native form controls (the select with its chevron and right padding, checkboxes and radios) and the
+     menu and list variables the menus and the side panel use (--pico-dropdown-*, --pico-card-*). */
+  .pico {
+    --pico-font-family: var(--font-sans); --pico-font-size: var(--text-ui); --pico-line-height: var(--leading); --pico-font-weight: var(--weight-regular);
+    --pico-border-radius: var(--radius-sm); --pico-border-width: 1px; --pico-outline-width: 3px; --pico-spacing: var(--space-3);
+    --pico-form-element-spacing-vertical: 5px; --pico-form-element-spacing-horizontal: var(--space-3); --pico-transition: var(--dur-2) var(--ease);
+    --pico-background-color: var(--card); --pico-color: var(--fg); --pico-muted-color: var(--muted); --pico-muted-border-color: var(--line);
+    --pico-primary: var(--accent); --pico-primary-background: var(--accent); --pico-primary-border: var(--accent); --pico-primary-inverse: var(--on-accent);
+    --pico-primary-hover: var(--accent); --pico-primary-hover-background: var(--accent); --pico-primary-hover-border: var(--accent);
+    --pico-primary-focus: color-mix(in srgb, var(--accent-2) 22%, transparent);
+    --pico-form-element-background-color: var(--card); --pico-form-element-selected-background-color: var(--surface-2);
+    --pico-form-element-border-color: color-mix(in srgb, var(--fg) 22%, var(--line)); --pico-form-element-color: var(--fg);
+    --pico-form-element-placeholder-color: var(--muted); --pico-form-element-active-background-color: var(--card);
+    --pico-form-element-active-border-color: var(--accent-2); --pico-form-element-focus-color: color-mix(in srgb, var(--accent-2) 22%, transparent);
+    --pico-dropdown-background-color: var(--card); --pico-dropdown-border-color: var(--line); --pico-dropdown-color: var(--fg);
+    --pico-dropdown-hover-background-color: var(--surface-hover); --pico-dropdown-box-shadow: var(--elev-2);
+    --pico-card-background-color: var(--card); --pico-card-border-color: var(--line); --pico-card-box-shadow: none;
+    --pico-card-sectioning-background-color: var(--surface-2);
+  }
+  /* Pico's select fills its container and keeps a gap under it; ORBIT's selects size themselves and sit in their rows. */
+  .pico select { margin: 0; font-size: var(--text-ui); }
+  .pico select:not([multiple], [size]) { background-position: center right 10px; }
+  /* Pico's checkbox and radio labels shrink to their text; ORBIT's are full rows (menus) or inline (Jobs). */
+  .pico label { margin: 0; }
+  .pico [type=checkbox]:not([role=switch]) { border-radius: var(--radius-xs); }
   /* The column paddings are worked out on each element that uses them, so a region can set its own --measure (Jobs). Two
      panels hold room at the page's edges: the left sidebar (--nav-room, its width while docked open on laptops and desktops,
      otherwise nothing) and the right side panel (--side-room, its collapsed rail, or the open panel on laptops and desktops).
      These regions keep clear of both (margins below), so their paddings, percentages of the shell's width, take both off
      before centring. Each panel covers its own safe area. */
   :root { --nav-room: 0px; --nav-safe-l: var(--safe-l); }
-  #log, #alog, #jobs, #gallery, #astatus, #form, #aform {
+  #log, #alog, #jobs, #plan, #gallery, #astatus, #form, #aform {
     --col-l: max(calc(var(--gutter) + var(--nav-safe-l)), calc((100% - var(--nav-room) - var(--side-room) - var(--measure)) / 2));
     --col-r: max(var(--gutter), calc((100% - var(--nav-room) - var(--side-room) - var(--measure)) / 2)); }
   /* The app shell. The document itself never scrolls: the page is pinned to the visible area (position: fixed, so iOS
@@ -200,9 +233,8 @@
   #statusline #ports { flex: 1 1 0; min-width: 0; }
   #statusopen { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; border-radius: var(--radius-sm); color: var(--accent-2); border: 1px solid var(--line); background: var(--card); }
   #statusopen:hover { box-shadow: 0 0 0 2px var(--ring); }
-  /* The running release, first in the status line on its own row (Deployed, then Commit, then the status below it): a quiet
-     two-column list (labels, then values), aligned whatever the width. Long values wrap inside their column; nothing scrolls
-     sideways. */
+  /* The running release, last in the Status view under its label (Deployed, then Commit): a quiet two-column list (labels,
+     then values), aligned whatever the width. Long values wrap inside their column; nothing scrolls sideways. */
   #deployinfo { flex: 1 0 100%; display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: baseline; gap: 3px 14px;
                 margin: 0; padding-bottom: 7px; border-bottom: 1px solid var(--line); font-size: var(--text-xs); line-height: 1.5; }
   #deployinfo dt { color: var(--muted); font-size: var(--text-2xs); font-weight: 600; letter-spacing: var(--tracking-caps); text-transform: uppercase; }
@@ -269,8 +301,9 @@
   .navbody[hidden] { display: none; }
   .navnote { margin: 6px 0 0; color: var(--muted); font-size: var(--text-xs); }
   .navnote.err { color: var(--danger); background: var(--danger-soft); border-left: 3px solid var(--danger); padding: 4px 8px; border-radius: var(--radius-xs); }
-  #navproject { width: 100%; min-height: var(--btn-h); padding: 4px 8px; border: var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg);
-                font: inherit; font-size: var(--text-ui); }
+  /* The project selector is Pico's select (class="pico" on its section): the chevron sits 10px in from the right edge and the
+     text keeps clear of it. */
+  #navproject { width: 100%; min-height: var(--btn-h); }
   .navsub { margin: 10px 0 2px; font-size: var(--text-2xs); color: var(--muted); font-weight: var(--weight-strong); letter-spacing: var(--tracking-caps); text-transform: uppercase; }
   .navsub:first-child { margin-top: 2px; }
   .navlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -295,7 +328,7 @@
                                    padding-left: var(--safe-l); border-right: var(--border); box-shadow: 12px 0 28px -20px var(--header-shadow); }
     :root[data-nav="open"] .navtop { display: none; }
     :root[data-nav="open"] { --nav-room: var(--nav-w); --nav-safe-l: 0px; }
-    :root[data-nav="open"] :is(#log, #alog, .latestdock, #jobs, #gallery, #astatus, #form, #aform) { margin-left: var(--nav-room); }
+    :root[data-nav="open"] :is(#log, #alog, .latestdock, #jobs, #plan, #gallery, #astatus, #form, #aform) { margin-left: var(--nav-room); }
     #navhandle { display: inline-flex; align-items: center; justify-content: center; position: fixed; z-index: 3; top: calc(var(--nav-top) + 10px); left: var(--safe-l);
                  width: 22px; height: 40px; padding: 0; border: var(--border); border-left: 0; border-radius: 0 var(--radius-md) var(--radius-md) 0;
                  background: var(--card); color: var(--muted); box-shadow: var(--elev-1); }
@@ -332,7 +365,7 @@
   @media (max-width: 1023.98px) { :root { --side-w: min(400px, calc(100vw - 40px)); } }
   @media (pointer: coarse) { :root { --rail-w: 46px; } }
   @media (min-width: 1024px) { :root[data-side="open"] { --side-room: var(--side-w); } }
-  :is(#log, #alog, .latestdock, #jobs, #gallery, #astatus) { margin-right: var(--side-room); }
+  :is(#log, #alog, .latestdock, #jobs, #plan, #gallery, #astatus) { margin-right: var(--side-room); }
   /* Phones and small tablets keep the composer's full width: there the rail ends above it (placeSide in the script). */
   @media (min-width: 900px) { :is(#form, #aform) { margin-right: var(--side-room); } }
   #side { position: fixed; z-index: calc(var(--z-header) - 1); right: 0; top: var(--side-top, 56px); bottom: var(--side-bottom, 0px);
@@ -389,39 +422,60 @@
     :root[data-side="open"] .sidehead { padding-left: calc(var(--space-2) + 12px); }
   }
   :root[data-side-drag] { cursor: col-resize; user-select: none; -webkit-user-select: none; }
-  /* The views. Each fills the panel under the head and scrolls by itself. */
+  /* The views (docs/ui-library.md, "Side panel"). Each fills the panel under the head and scrolls by itself. The panel is a
+     Pico element (class="pico"); its lists use the Pico card variables, which are ORBIT's tokens.
+     Status, top to bottom: the overall status (the level's dot, its label and detail on a quiet tint of the level's colour),
+     any read error, the services as one list (a dot, the name, the state on the right), then the running release with the
+     /status link beside its label. Small capitals label each group, as in the left sidebar. */
   #statussum { display: none; }
   #side :is(#statusline, #inbox) { flex: 1 1 auto; min-height: 0; max-height: none; margin: 0; padding: var(--space-4); border: 0; border-radius: 0;
                                    background: none; overflow-y: auto; overscroll-behavior: contain; }
-  #side #inbox { gap: var(--space-2); }
-  #side .note { padding: var(--space-2) var(--space-1) var(--space-2) var(--space-3); border-radius: var(--radius-sm); box-shadow: none;
-                background: color-mix(in srgb, var(--attention) 6%, var(--card)); }
-  #side .note .first { font-weight: var(--weight-medium); }
-  #side #statusline { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-content: start; gap: var(--space-3); }
-  #side #statussum { grid-column: 1 / -1; grid-row: 2; display: flex; align-items: flex-start; gap: 10px; padding: 10px var(--space-3); border-radius: var(--radius-md);
-                     background: var(--surface-2); border-left: 3px solid var(--muted); }
-  #side #statussum.ok { border-left-color: var(--green-dot); } #side #statussum.degraded { border-left-color: var(--amber-dot); } #side #statussum.down { border-left-color: var(--red-dot); }
-  #statussum .dot { margin-top: 6px; }
-  #statuslabel { display: block; font-size: var(--text-md); line-height: var(--leading-tight); }
+  #side #statusline { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-content: start; align-items: center; gap: var(--space-2) var(--space-2); }
+  #side #statusline > * { grid-column: 1 / -1; }
+  #side .sidelabel { margin: var(--space-3) 0 0; padding: 0 var(--space-1); font-size: var(--text-2xs); font-weight: var(--weight-strong); letter-spacing: var(--tracking-caps);
+                     text-transform: uppercase; color: var(--muted); }
+  #side #statussum { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-3); border-radius: var(--radius-md); background: var(--surface-2); }
+  #side #statussum.ok { background: color-mix(in srgb, var(--green-dot) 9%, var(--card)); }
+  #side #statussum.degraded { background: color-mix(in srgb, var(--amber-dot) 11%, var(--card)); }
+  #side #statussum.down { background: color-mix(in srgb, var(--red-dot) 10%, var(--card)); }
+  #statussum .dot { margin-top: 5px; }
+  #statuslabel { display: block; font-size: var(--text-md); font-weight: var(--weight-strong); line-height: var(--leading-tight); }
   #statusdetail { margin: 4px 0 0; font-size: var(--text-sm); color: var(--muted); overflow-wrap: anywhere; }
-  #side #statusopen { grid-column: 2; grid-row: 1; align-self: start; min-width: var(--ctl-md); min-height: var(--ctl-md); }
-  #side #statuserr, #side #ports { grid-column: 1 / -1; }
-  #side #ports { flex-direction: column; flex-wrap: nowrap; gap: 0; border: var(--border); border-radius: var(--radius-md); font-size: var(--text-sm); }
+  #side #ports { flex-direction: column; flex-wrap: nowrap; gap: 0; border: 1px solid var(--pico-card-border-color); border-radius: var(--radius-md);
+                 background: var(--pico-card-background-color); font-size: var(--text-sm); }
   #side #ports .empty { padding: var(--space-2) var(--space-3); }
-  #side .pill { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 0; border-radius: 0; background: none; overflow-wrap: anywhere; }
+  #side .pill { display: flex; align-items: center; gap: var(--space-2); min-height: var(--ctl-md); padding: 6px var(--space-3); border: 0; border-radius: 0;
+                background: none; overflow-wrap: anywhere; }
   #side .pill + .pill { border-top: var(--border); }
-  #side .pill::before { margin-right: 0; flex: none; }
-  /* The running release leads the view (row 1, the /status link beside it); the overall status follows on row 2. In a
-     narrow panel (a phone, or dragged narrow) the release takes the whole first row, so its date stays on one line, and
-     the link moves beside the overall status. */
-  #side #deployinfo { grid-column: 1; grid-row: 1; border-bottom: 0; padding: 0 var(--space-1); gap: 6px 14px; }
+  #side .pill::before { margin-right: 0; flex: none; width: 8px; height: 8px; }
+  #side .pill .pname { min-width: 0; color: var(--fg); }
+  #side .pill .pstate { margin-left: auto; text-align: right; font-weight: var(--weight-medium); }
+  #side .pill .psep { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); white-space: nowrap; } /* for screen readers and copying only */
+  /* The release: its label and the /status link share a row; the date and commit follow as a quiet two-column list. */
+  #side #releaselabel { grid-column: 1; }
+  #side #statusopen { grid-column: 2; align-self: end; min-width: var(--ctl-sm); min-height: var(--ctl-sm); border: 0; background: none; color: var(--muted); }
+  #side #statusopen:hover { box-shadow: none; color: var(--fg); background: var(--surface-hover); }
+  #side #deployinfo { border-bottom: 0; padding: 0 var(--space-1); gap: 6px 14px; }
   #side { container-type: inline-size; }
   @container (max-width: 340px) {
     #side :is(#statusline, #inbox) { padding: var(--space-3); }
-    #side #deployinfo { grid-column: 1 / -1; gap: 6px 10px; }
-    #side #statussum { grid-column: 1; }
-    #side #statusopen { grid-row: 2; }
+    #side #deployinfo { gap: 6px 10px; }
   }
+  /* Notifications: one flat list. A note is a row split from the next by a hairline: its first line, then "more" and a
+     dismiss button, both quiet until hovered. No gold edge or tint on every row (gold stays for the count in the tab). */
+  #side #inbox { gap: 0; padding-top: var(--space-2); }
+  #side .note { padding: var(--space-3) 0 var(--space-3) var(--space-1); border: 0; border-radius: 0; box-shadow: none; background: none; }
+  #side .note + .note { border-top: var(--border); }
+  #side .note .top { align-items: flex-start; gap: var(--space-1); }
+  #side .note .first { padding-top: 3px; font-size: var(--text-ui); line-height: var(--leading); }
+  #side .note .rest { margin-top: 6px; color: var(--muted); font-size: var(--text-sm); }
+  #side .note button { min-height: var(--ctl-sm); padding: 0 var(--space-2); border-radius: var(--radius-sm); font-size: var(--text-xs); font-weight: var(--weight-medium); }
+  #side .note button.x { width: var(--ctl-sm); padding: 0; font-size: 18px; }
+  #side .note button:is(:hover, :active):not(:disabled) { text-decoration: none; color: var(--fg); background: var(--surface-hover); }
+  #side #inbox .showall { align-self: stretch; margin-top: var(--space-2); min-height: var(--ctl-md); padding: 0 var(--space-3); border: var(--border); border-radius: var(--radius-md);
+                          background: var(--card); color: var(--fg); font-size: var(--text-sm); font-weight: var(--weight-medium); text-align: center; }
+  #side #inbox .showall:hover:not(:disabled) { text-decoration: none; background: var(--surface-2); }
+  #side #inbox .empty { padding: var(--space-2) var(--space-1); }
   #ports .empty { color: var(--muted); font-size: var(--text-sm); font-style: italic; }
   #statuserr { flex: 1 0 100%; color: var(--danger); font-size: var(--text-sm); background: var(--danger-soft); border-left: 3px solid var(--danger); padding: 4px 10px; border-radius: var(--radius-xs); overflow-wrap: anywhere; }
   #statuserr[hidden] { display: none; }
@@ -437,39 +491,45 @@
   #sesstitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #sessbtn .chev { transition: transform var(--dur-2) var(--ease); }
   #sessbtn[aria-expanded="true"] .chev { transform: rotate(180deg); }
-  #sesspicker { position: fixed; z-index: var(--z-popover); display: flex; flex-direction: column; gap: 6px; padding: var(--space-2); max-height: min(calc(var(--app-1) * 70), 520px);
-                border: var(--border); border-radius: var(--radius-lg); background: var(--card); box-shadow: var(--elev-2); }
-  #sesspicker .prow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-  #sesspicker .prow button { min-height: 36px; padding: 4px 12px; }
-  #sesspicker .pcur { border-top: 1px solid var(--line); padding-top: 6px; }
-  #pcurlabel { flex: 1 1 auto; font-size: var(--text-xs); color: var(--muted); }
-  .parch { font-size: var(--text-sm); color: var(--muted); display: flex; align-items: center; gap: 6px; min-height: 36px; margin-left: auto; }
-  .parch input { width: 18px; height: 18px; margin: 0; }
-  #sesslist { list-style: none; margin: 0; padding: 3px; overflow-y: auto; overscroll-behavior: contain; min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; }
-  #sesslist .sitem { display: block; width: 100%; min-height: 40px; padding: 6px 10px; text-align: left; border-radius: var(--radius-sm); background: none; color: var(--fg);
-                     border: 1px solid transparent; overflow-wrap: anywhere; font-weight: 400; }
-  #sesslist .sitem[aria-current="true"] { background: var(--press-bg); border-color: var(--accent-2); font-weight: 600; }
-  /* Repair 4: a task session whose task needs attention (the row's text says how many; the gold edge is only a cue). */
-  #sesslist .sitem.needs { box-shadow: inset 3px 0 0 var(--attention); }
+  /* The menus (docs/ui-library.md, "Menus"). The session picker and the theme menu are one component: a Pico dropdown card
+     (class="pico", so --pico-dropdown-* are ORBIT's tokens) holding groups split by hairlines. Each group may have a small
+     capitals label; its rows are plain (no box of their own), tint on hover, and the current row is marked by a check and
+     bold text. Pressing does not shrink a row; the keyboard focus ring is drawn just inside it so the list never clips it.
+     The session picker holds New session and Show archived, the list, then Rename and Archive for the open session. */
+  :is(#sesspicker, #themepicker) { padding: var(--space-1); font-size: var(--text-ui); border: 1px solid var(--pico-dropdown-border-color); border-radius: var(--radius-lg);
+      background: var(--pico-dropdown-background-color); color: var(--pico-dropdown-color); box-shadow: var(--pico-dropdown-box-shadow); }
+  #sesspicker { position: fixed; z-index: var(--z-popover); display: flex; flex-direction: column; max-height: min(calc(var(--app-1) * 70), 520px); }
+  #sesspicker .prow { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-1); }
+  #sesspicker .prow button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: var(--ctl-sm); padding: 0 var(--space-3);
+                             border-radius: var(--radius-sm); font-size: var(--text-sm); font-weight: var(--weight-strong); }
+  #tnew .ico { width: 14px; height: 14px; margin-left: -2px; }
+  #sesspicker .pcur { border-top: var(--border); padding-top: var(--space-2); margin-top: var(--space-1); }
+  /* A group label: small capitals, muted. */
+  #pcurlabel, #themepicker legend { flex: 1 1 auto; padding: 0 var(--space-1); font-size: var(--text-2xs); font-weight: var(--weight-strong);
+      letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--muted); }
+  .parch { display: flex; align-items: center; gap: 0; min-height: var(--ctl-sm); margin-left: auto; padding: 0 var(--space-1); font-size: var(--text-sm); color: var(--muted); cursor: pointer; }
+  .parch input { flex: none; width: 16px; height: 16px; margin: 0 var(--space-2) 0 0; }
+  #sesslist { list-style: none; margin: var(--space-1) 0 0; padding: var(--space-1) 0 0; border-top: var(--border); overflow-y: auto; overscroll-behavior: contain;
+              min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 1px; }
+  /* A row: room on the left for the check, so every title starts at the same place. */
+  #sesslist .sitem, .topt { position: relative; display: flex; align-items: center; gap: var(--space-2); width: 100%; min-height: var(--ctl-md);
+      padding: 6px var(--space-3) 6px 30px; border: 0; border-radius: var(--radius-sm); background: none; color: var(--fg);
+      font-size: var(--text-ui); font-weight: var(--weight-regular); text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+  #sesslist .sitem:hover:not(:disabled), .topt:hover { filter: none; box-shadow: none; transform: none; background: var(--pico-dropdown-hover-background-color); }
+  #sesslist .sitem:active:not(:disabled) { filter: none; transform: none; box-shadow: none; background: var(--press-bg); }
+  #sesslist .sitem:focus-visible { outline-offset: -2px; }
+  /* The current row: a check in the accent colour, and bold text. */
+  #sesslist .sitem[aria-current="true"] { font-weight: var(--weight-strong); }
+  #sesslist .sitem[aria-current="true"]::before { content: ""; position: absolute; left: 9px; top: 50%; width: 14px; height: 14px; margin-top: -7px; background: var(--accent);
+      -webkit-mask: var(--icon-check) center / contain no-repeat; mask: var(--icon-check) center / contain no-repeat; }
+  :root { --icon-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E"); }
+  /* Repair 4: a task session whose task needs attention (the row's text says how many; the gold dot is only a cue). */
+  #sesslist .sitem.needs::after { content: ""; flex: none; width: 8px; height: 8px; margin-left: auto; border-radius: 50%; background: var(--attention); }
+  #sesslist .sempty { padding: 6px var(--space-3); font-size: var(--text-sm); color: var(--muted); }
+  @media (pointer: coarse) { #sesslist .sitem, #sesspicker .prow button, .parch, .topt { min-height: var(--tap); } }
   .banner.tasksatt ul { margin: 4px 0 0; padding-left: 18px; }
   .banner.tasksatt .wake { margin-top: 6px; }
   .banner.tasksatt .wake button { margin: 4px 6px 0 0; }
-  #sesslist .sempty { padding: 6px 10px; font-size: var(--text-sm); color: var(--muted); }
-  @media (pointer: coarse) { #sesslist .sitem, #sesspicker .prow button, .parch { min-height: var(--tap); } }
-  /* Laptops and desktops: the menu's sessions are plain aligned rows inside the one menu card. A row tints on hover and the
-     open session has a quiet tint, bold text and a 3px accent bar at its leading edge. No row draws its own outline: the
-     shared button hover ring (and the open session's border) read as a second box nested inside the card. Pressing does not
-     shrink the row. The keyboard focus ring is kept, drawn just inside the row so the list's edge never clips it. Phones keep
-     the look from #148 (docs/design-system.md, "Desktop menu"). */
-  @media (min-width: 900px) {
-    #sesslist { padding: 2px; gap: 1px; }
-    #sesslist .sitem { display: flex; align-items: center; min-height: 40px; padding: 6px var(--space-3); border: 0; border-radius: var(--radius-sm); }
-    #sesslist .sitem:not(:disabled):hover { filter: none; box-shadow: none; background: var(--surface-hover); }
-    #sesslist .sitem:not(:disabled):active { filter: none; transform: none; box-shadow: none; background: var(--press-bg); }
-    #sesslist .sitem[aria-current="true"] { background: var(--info-soft); box-shadow: inset 3px 0 0 var(--accent-2); }
-    #sesslist .sitem[aria-current="true"]:not(:disabled):hover { background: color-mix(in srgb, var(--info) 12%, var(--card)); box-shadow: inset 3px 0 0 var(--accent-2); }
-    #sesslist .sitem:focus-visible { outline-offset: -2px; }
-  }
   #tstatus { margin-top: 6px; font-size: var(--text-xs); color: var(--muted); overflow-wrap: anywhere; }
   #tstatus:empty { display: none; }
   #log[aria-busy="true"] { opacity: 0.6; }
@@ -496,9 +556,78 @@
   #signin button { padding: 4px 12px; margin-top: 4px; }
   #signin code { font-size: 16px; letter-spacing: .12em; color: var(--fg); background: var(--attention-soft); border: 1px solid var(--attention); border-radius: var(--radius-xs); padding: 0 6px; }
   #signin a { color: var(--accent-2); }
-  #log, #alog, #jobs, #gallery { flex: 1 1 0; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
+  #log, #alog, #jobs, #plan, #gallery { flex: 1 1 0; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
                       padding: var(--gutter) var(--col-r) var(--gutter) var(--col-l); display: flex; flex-direction: column; gap: 10px; }
-  #jobs, #gallery { --measure: var(--measure-wide); }
+  #jobs, #plan, #gallery { --measure: var(--measure-wide); }
+  /* The Plan views (docs/plan.md): All projects (cards) at /#plan and one project at /#plan/<id>, in the main area; the
+     sidebar's Plan section is their compact index. Status dots: green on track, yellow needs attention (paused, quiet, no
+     next action), red at risk (blocked, a blocker, past its target), grey done. The dot's meaning is also given as text. */
+  :root { --go: #1d7a3e; --plan-amber: #9a6700; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --go: #5fd38a; --plan-amber: #f2c46d; } }
+  :root[data-theme="dark"] { --go: #5fd38a; --plan-amber: #f2c46d; }
+  .pdot { flex: none; display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .pdot.green { background: var(--go); } .pdot.yellow { background: var(--plan-amber); } .pdot.red { background: var(--danger); } .pdot.grey { background: color-mix(in srgb, var(--muted) 55%, transparent); }
+  .pbadge { flex: none; font-size: var(--text-2xs); font-weight: var(--weight-strong); line-height: 1.5; padding: 0 6px; border-radius: var(--radius-xs); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .pbadge.p1 { color: var(--danger); border-color: var(--danger); } .pbadge.p2 { color: var(--plan-amber); border-color: var(--plan-amber); } .pbadge.p3 { color: var(--accent-2); border-color: var(--accent-2); }
+  .vh { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); white-space: nowrap; }
+  .planall { display: flex; align-items: center; gap: 6px; min-height: 32px; padding: 4px 6px; border-radius: var(--radius-sm); color: var(--fg); text-decoration: none; font-weight: var(--weight-strong); }
+  .planall .navcount { margin-left: auto; font-weight: var(--weight-regular); color: var(--muted); font-size: var(--text-xs); }
+  .planattn { display: inline-block; margin: 2px 0 4px 6px; font-size: var(--text-2xs); font-weight: var(--weight-strong); padding: 0 7px; border-radius: var(--radius-pill); color: var(--danger); background: var(--danger-soft); border: 1px solid var(--danger); }
+  .planlist { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+  .planitem { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 3px 6px; border-radius: var(--radius-sm); color: var(--fg); text-decoration: none; line-height: var(--leading-tight); }
+  .planitem .ptitle { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .planall:hover, .planitem:hover { background: var(--surface-hover); }
+  .planall[aria-current="page"], .planitem[aria-current="page"] { background: var(--surface-2); box-shadow: inset 3px 0 0 var(--accent); }
+  @media (pointer: coarse) { .planall, .planitem { min-height: var(--tap); } }
+  #plan h2.pltitle { margin: 0; font-size: var(--text-xl); font-weight: var(--weight-strong); color: var(--fg); overflow-wrap: anywhere; }
+  #plan h2.pltitle:focus { outline: none; } #plan h2.pltitle:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+  #plan .plsub { margin: 2px 0 0; color: var(--muted); font-size: var(--text-sm); }
+  #plan .empty { color: var(--muted); font-size: var(--text-sm); }
+  #plan .err { color: var(--danger); background: var(--danger-soft); border-left: 3px solid var(--danger); padding: 6px 10px; border-radius: var(--radius-xs); }
+  #plan a.back { align-self: flex-start; color: var(--accent-2); font-size: var(--text-sm); }
+  #plan .plstats { list-style: none; margin: 4px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--space-2); }
+  #plan .plstats li { padding: var(--space-2) var(--space-3); border: var(--border); border-radius: var(--radius-md); background: var(--card); font-size: var(--text-sm); color: var(--muted); }
+  #plan .plstats strong { display: block; font-size: var(--text-xl); color: var(--fg); line-height: 1.2; }
+  #plan .plstats li.hot strong { color: var(--danger); }
+  #plan .plcards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--space-3); }
+  #plan .plcard > a { display: flex; flex-direction: column; gap: 6px; height: 100%; box-sizing: border-box; padding: var(--space-3) var(--space-4); border: var(--border); border-radius: var(--radius-lg);
+                      background: var(--card); color: var(--fg); text-decoration: none; box-shadow: var(--elev-1); }
+  #plan .plcard > a:hover { border-color: var(--accent-2); }
+  #plan .plcard.red > a { border-left: 4px solid var(--danger); } #plan .plcard.yellow > a { border-left: 4px solid var(--plan-amber); } #plan .plcard.green > a { border-left: 4px solid var(--go); }
+  #plan .plhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  #plan .plhead h3 { margin: 0; flex: 1 1 auto; min-width: 0; font-size: var(--text-lg); font-weight: var(--weight-strong); overflow-wrap: anywhere; }
+  #plan .pstate { font-size: var(--text-xs); color: var(--muted); }
+  #plan .plsum { margin: 0; color: var(--fg); font-size: var(--text-sm); }
+  #plan .plnext { margin: 0; font-size: var(--text-sm); }
+  #plan .plnext .lbl, #plan .lbl { color: var(--muted); font-weight: var(--weight-strong); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: var(--tracking-caps); margin-right: 4px; }
+  #plan .plnext.none { color: var(--muted); font-style: italic; }
+  #plan .plmeta { margin: auto 0 0; color: var(--muted); font-size: var(--text-xs); }
+  #plan .plmeta .hot { color: var(--danger); font-weight: var(--weight-strong); }
+  #plan .bar { height: 6px; border-radius: var(--radius-pill); background: var(--surface-2); }
+  #plan .bar > span { display: block; height: 100%; background: var(--accent); border-radius: inherit; }
+  #plan .plprog { display: flex; flex-direction: column; gap: 3px; font-size: var(--text-xs); color: var(--muted); }
+  #plan details.pldone > summary { cursor: pointer; color: var(--muted); font-size: var(--text-sm); min-height: 28px; }
+  #plan .pldetail { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+  #plan .plgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--space-3); align-items: start; }
+  #plan .plsec { padding: var(--space-3) var(--space-4); border: var(--border); border-radius: var(--radius-lg); background: var(--card); min-width: 0; }
+  #plan .plsec h3 { margin: 0 0 6px; font-size: var(--text-2xs); color: var(--muted); font-weight: var(--weight-strong); letter-spacing: var(--tracking-caps); text-transform: uppercase; }
+  #plan .plsec ul, #plan .plsec ol { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 6px; font-size: var(--text-sm); }
+  #plan .plsec p { margin: 0 0 6px; font-size: var(--text-sm); }
+  #plan .pltl { list-style: none; padding: 0 !important; gap: 0 !important; }
+  #plan .pltl li { position: relative; padding: 0 0 10px 18px; }
+  #plan .pltl li::before { content: ""; position: absolute; left: 4px; top: 6px; bottom: -6px; width: 1px; background: var(--line); }
+  #plan .pltl li:last-child::before { display: none; }
+  #plan .pltl li::after { content: ""; position: absolute; left: 0; top: 4px; width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--accent); background: var(--card); box-sizing: border-box; }
+  #plan .pltl li.done::after { background: var(--accent); }
+  #plan .pltl li.today::after { border-color: var(--go); background: var(--go); }
+  #plan .pltl li.target::after { border-color: var(--danger); }
+  #plan .pltl .when { display: block; color: var(--muted); font-size: var(--text-xs); }
+  #plan .pltl li.today { font-weight: var(--weight-strong); }
+  #plan .tstat { font-size: var(--text-2xs); padding: 0 6px; margin-left: 6px; border-radius: var(--radius-xs); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  #plan .tstat.done { color: var(--go); border-color: var(--go); } #plan .tstat.blocked, #plan .tstat.waiting { color: var(--danger); border-color: var(--danger); }
+  #plan .tdone { color: var(--muted); text-decoration: line-through; }
+  #plan .actwhen { display: block; color: var(--muted); font-size: var(--text-xs); }
+  #plan .plsrc { color: var(--muted); font-size: var(--text-xs); margin: 0; }
   /* The photo gallery (docs/photo-gallery.md): the page the sidebar's Images section opens. A search box, then the photos in a
      grid grouped by day or month, each with an "AI" badge when a model observation is saved; a photo opens enlarged over the
      page with its metadata panel beside it (below it on a phone). */
@@ -737,8 +866,11 @@
   #jobs .jlistview, #jobs .jdetail { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
   #jobs .jtools { display: flex; flex-direction: column; gap: 6px; }
   #jobs .jtools input[type=search] { font: inherit; min-height: var(--btn-h); padding: 6px 12px; border-radius: var(--radius-md); border: 1px solid var(--line); background: var(--card); color: var(--fg); width: 100%; box-sizing: border-box; }
-  #jobs select { font: inherit; font-size: var(--text-sm); min-height: var(--btn-h); padding: 4px 8px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--card); color: var(--fg); max-width: 100%; }
-  #jobs .chk { font-size: var(--text-sm); display: inline-flex; align-items: center; gap: 4px; }
+  /* The filter row is a Pico element: its selects and the Needs attention checkbox are Pico's, sized to their text. */
+  #jobs .jtools .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px var(--space-2); }
+  #jobs select { font-size: var(--text-sm); width: auto; max-width: 100%; min-height: var(--btn-h); padding-top: 4px; padding-bottom: 4px; }
+  #jobs .chk { font-size: var(--text-sm); display: inline-flex; align-items: center; gap: 0; min-height: var(--btn-h); padding: 0 var(--space-1); }
+  #jobs .chk input { flex: none; width: 16px; height: 16px; margin: 0 var(--space-2) 0 0; }
   #jobs button.mini { font-size: var(--text-xs); padding: 3px 10px; min-height: 26px; border-radius: var(--radius-sm); }
   #jobs .jlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
   #jobs .jtitle { font-weight: 600; color: var(--fg); text-decoration: none; }
@@ -827,7 +959,7 @@
   .btn-danger, #sesspicker .pcur button.btn-danger { background: var(--card); color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--line)); }
   .btn-danger:not(:disabled):hover, #sesspicker .pcur button.btn-danger:not(:disabled):hover { filter: none; background: var(--danger-soft); border-color: var(--danger);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 35%, transparent); }
-  .proposal button, #sesspicker .prow button, #jobs .steerbox button, .banner button, #signin button, .card button.open, #alog .older {
+  .proposal button, #jobs .steerbox button, .banner button, #signin button, .card button.open, #alog .older {
     display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: var(--btn-h); padding: 0 14px; font-weight: 600; font-size: var(--text-sm); }
   .banner button, #signin button { display: flex; width: max-content; max-width: 100%; }
   button[aria-busy="true"] { cursor: progress; }
@@ -909,16 +1041,15 @@
      and closes on Escape (focus back on the button), a click outside or focus leaving. The button's icon is the choice. */
   #themebtn .ico { display: none; }
   #themebtn[data-mode="system"] .i-system, #themebtn[data-mode="light"] .i-light, #themebtn[data-mode="dark"] .i-dark { display: block; }
-  #themepicker { position: fixed; z-index: var(--z-popover); width: 228px; max-width: calc(100vw - 16px); padding: var(--space-2);
-                 border: var(--border); border-radius: var(--radius-lg); background: var(--card); box-shadow: var(--elev-2); }
-  #themepicker fieldset { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-  #themepicker legend { padding: 2px 8px 6px; font-size: var(--text-2xs); font-weight: var(--weight-strong); letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--muted); }
-  .topt { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 4px 8px; border-radius: var(--radius-sm); cursor: pointer; font-size: var(--text-ui); }
-  .topt:hover { background: var(--surface-hover); }
-  .topt:has(input:checked) { background: var(--info-soft); font-weight: var(--weight-strong); }
-  .topt input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+  /* The menu card and rows are the shared menu component (above, "The menus"); the radios are Pico's, in the row's check
+     column, so the choice reads like the session picker's check. */
+  #themepicker { position: fixed; z-index: var(--z-popover); width: 228px; max-width: calc(100vw - 16px); }
+  #themepicker fieldset { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  #themepicker legend { padding: 6px var(--space-3) var(--space-1); }
+  .topt { padding-left: var(--space-3); gap: var(--space-2); }
+  .topt:has(input:checked) { font-weight: var(--weight-strong); }
+  .topt input { flex: none; width: 16px; height: 16px; margin: 0; }
   .topt small { display: block; font-size: var(--text-xs); font-weight: var(--weight-regular); color: var(--muted); }
-  @media (pointer: coarse) { .topt { min-height: var(--tap); } }
 
   /* Button states, shared by every button: a visible hover ring, a pressed look while the mouse is down, a focus ring
      for keyboard users only, a clearly inert disabled state, and no motion for people who ask for reduced motion. */
@@ -939,14 +1070,15 @@
 </style>
 </head>
 <body>
-<header><div class="bar"><button type="button" id="navbtn" class="hbtn" aria-controls="nav" aria-expanded="false" aria-label="Show the sidebar" title="Show the sidebar"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16 M4 12h16 M4 18h16"/></svg></button><h1 class="brand"><button type="button" id="brandbtn" aria-label="ORBIT: Refresh page" title="Refresh page"><img src="/avatar.png" alt=""><span class="wordmark">ORBIT</span></button></h1><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions<span id="sessionsbadge" class="tbadge"></span></a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="themebtn" class="hbtn" data-mode="system" aria-expanded="false" aria-controls="themepicker" aria-label="Theme: System" title="Theme: System. Choose Light, Dark or System."><svg class="ico i-system" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 5h18v11H3z M8 20h8 M12 16v4"/></svg><svg class="ico i-light" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0z M12 2v2 M12 20v2 M4.9 4.9l1.4 1.4 M17.7 17.7l1.4 1.4 M2 12h2 M20 12h2 M4.9 19.1l1.4-1.4 M17.7 6.3l1.4-1.4"/></svg><svg class="ico i-dark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button></div></div><div id="sesspicker" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew">New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="themepicker" hidden><fieldset><legend>Theme</legend><label class="topt"><input type="radio" name="theme" value="system"><span>System<small>Follows this device</small></span></label><label class="topt"><input type="radio" name="theme" value="light"><span>Light</span></label><label class="topt"><input type="radio" name="theme" value="dark"><span>Dark</span></label></fieldset></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header><aside id="side" aria-label="Side panel"><div class="sidehead"><button type="button" id="sidetoggle" aria-expanded="false" aria-controls="inbox statusline" aria-label="Side panel" title="Open the side panel"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg></button><div class="sidetabs" role="tablist" aria-label="Side panel views" aria-orientation="vertical"><button type="button" role="tab" id="sidetab-status" class="sidetab unknown" aria-selected="true" aria-controls="statusline" aria-label="Status: Status unknown (unknown)" title="Status unknown. ORBIT's status has not been read yet."><span class="dot" aria-hidden="true"></span><span class="tlabel">Status</span></button><button type="button" role="tab" id="sidetab-notes" class="sidetab" aria-selected="false" tabindex="-1" aria-controls="inbox" aria-label="Notifications, not read yet" title="Notifications: not read yet"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span class="tlabel">Notifications</span><span id="notecount" class="count">?</span></button></div></div><div id="statusline" role="tabpanel" aria-label="Status" hidden><dl id="deployinfo" aria-label="Running release"><dt>Deployed</dt><dd id="deployedat"><span class="na">Not read yet</span></dd><dt>Commit</dt><dd id="deploycommit"><span class="na">Not read yet</span></dd></dl><div id="statussum"><span class="dot" aria-hidden="true"></span><div><strong id="statuslabel">Status unknown</strong><p id="statusdetail">ORBIT's status has not been read yet.</p></div></div><div id="statuserr" role="alert" hidden></div><div id="ports"><span class="empty">Reading status…</span></div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a></div><div id="inbox" role="tabpanel" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div><div id="sideresize" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="side" aria-label="Resize the side panel" title="Drag, or use the arrow keys, to make the side panel wider or narrower. Double-click to reset."></div></aside>
-<aside id="nav" aria-label="Sidebar"><div class="navtop"><span class="navtitle" aria-hidden="true">Sidebar</span><button type="button" id="navclose" aria-label="Close the sidebar" title="Close the sidebar (Esc)"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12 M18 6L6 18"/></svg></button></div><div class="navscroll"><section class="navsec" id="navsec-projects" aria-labelledby="navh-projects"><h2 class="navh"><button type="button" class="navtoggle" id="navh-projects" aria-expanded="true" aria-controls="navbody-projects"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Projects</span></button></h2><div class="navbody" id="navbody-projects"><select id="navproject" aria-label="Project" aria-describedby="navprojnote"><option value="">All projects</option></select><p id="navprojnote" class="navnote" role="status">Reading the vault…</p></div></section><section class="navsec" id="navsec-plan" aria-labelledby="navh-plan"><h2 class="navh"><button type="button" class="navtoggle" id="navh-plan" aria-expanded="true" aria-controls="navbody-plan"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Plan</span></button></h2><div class="navbody" id="navbody-plan"><div id="navplan"><p class="navnote">Reading the plan…</p></div></div></section><section class="navsec" id="navsec-files" aria-labelledby="navh-files"><h2 class="navh"><button type="button" class="navtoggle" id="navh-files" aria-expanded="true" aria-controls="navbody-files"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Files</span></button></h2><div class="navbody" id="navbody-files"><div id="navfiles"><p class="navnote">Reading the files…</p></div></div></section><section class="navsec" id="navsec-images" aria-labelledby="navh-images"><h2 class="navh"><button type="button" class="navtoggle" id="navh-images" aria-expanded="true" aria-controls="navbody-images"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Images</span></button></h2><div class="navbody" id="navbody-images"><form id="navimgsearch" class="navimgsearch" role="search" aria-label="Search photos" hidden><input type="search" id="navimgq" name="q" maxlength="200" autocomplete="off" placeholder="Search photos" aria-label="Search photos"><button type="submit">Search</button></form><a class="navgallery" id="navgallery" href="/#gallery" hidden>Open the photo gallery</a><div id="navimages"><p class="navnote">Reading the photos…</p></div></div></section></div><div id="navresize" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="nav" aria-label="Resize the sidebar" aria-valuemin="220" aria-valuemax="480" aria-valuenow="280" title="Drag, or use the arrow keys, to resize the sidebar"></div></aside><button type="button" id="navhandle" aria-controls="nav" aria-expanded="true" aria-label="Collapse the sidebar" title="Collapse the sidebar"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 6l-6 6 6 6"/></svg></button><div id="navscrim" hidden></div>
+<header><div class="bar"><button type="button" id="navbtn" class="hbtn" aria-controls="nav" aria-expanded="false" aria-label="Show the sidebar" title="Show the sidebar"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16 M4 12h16 M4 18h16"/></svg></button><h1 class="brand"><button type="button" id="brandbtn" aria-label="ORBIT: Refresh page" title="Refresh page"><img src="/avatar.png" alt=""><span class="wordmark">ORBIT</span></button></h1><nav id="tabs" aria-label="ORBIT pages"><a href="/#assistant" data-tab="assistant" id="assistanttab" aria-current="page">Assistant</a><a href="/#jobs" data-tab="jobs" id="jobstab" hidden>Jobs <span id="jobsbadge"></span></a><a href="/sessions" data-tab="chat" id="sessionstab">Sessions<span id="sessionsbadge" class="tbadge"></span></a></nav><div id="sesswrap" hidden><button type="button" id="sessbtn" aria-expanded="false" aria-controls="sesspicker" data-session=""><span id="sesstitle">Sessions</span><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button></div><div class="hctl"><button type="button" id="themebtn" class="hbtn" data-mode="system" aria-expanded="false" aria-controls="themepicker" aria-label="Theme: System" title="Theme: System. Choose Light, Dark or System."><svg class="ico i-system" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 5h18v11H3z M8 20h8 M12 16v4"/></svg><svg class="ico i-light" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0z M12 2v2 M12 20v2 M4.9 4.9l1.4 1.4 M17.7 17.7l1.4 1.4 M2 12h2 M20 12h2 M4.9 19.1l1.4-1.4 M17.7 6.3l1.4-1.4"/></svg><svg class="ico i-dark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button></div></div><div id="sesspicker" class="pico" role="group" aria-label="Sessions" hidden><div class="prow"><button type="button" id="tnew"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14 M5 12h14"/></svg>New session</button><label class="parch"><input type="checkbox" id="tshowarch"> Show archived</label></div><ul id="sesslist" aria-label="Sessions"></ul><div class="prow pcur" role="group" aria-labelledby="pcurlabel"><span id="pcurlabel">This session</span><button type="button" id="trename">Rename</button><button type="button" id="tarchive">Archive</button></div></div><div id="themepicker" class="pico" hidden><fieldset><legend>Theme</legend><label class="topt"><input type="radio" name="theme" value="system"><span>System<small>Follows this device</small></span></label><label class="topt"><input type="radio" name="theme" value="light"><span>Light</span></label><label class="topt"><input type="radio" name="theme" value="dark"><span>Dark</span></label></fieldset></div><div id="tstatus" role="status" aria-live="polite"></div><div id="signin"></div></header><aside id="side" class="pico" aria-label="Side panel"><div class="sidehead"><button type="button" id="sidetoggle" aria-expanded="false" aria-controls="inbox statusline" aria-label="Side panel" title="Open the side panel"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg></button><div class="sidetabs" role="tablist" aria-label="Side panel views" aria-orientation="vertical"><button type="button" role="tab" id="sidetab-status" class="sidetab unknown" aria-selected="true" aria-controls="statusline" aria-label="Status: Status unknown (unknown)" title="Status unknown. ORBIT's status has not been read yet."><span class="dot" aria-hidden="true"></span><span class="tlabel">Status</span></button><button type="button" role="tab" id="sidetab-notes" class="sidetab" aria-selected="false" tabindex="-1" aria-controls="inbox" aria-label="Notifications, not read yet" title="Notifications: not read yet"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0"/></svg><span class="tlabel">Notifications</span><span id="notecount" class="count">?</span></button></div></div><div id="statusline" role="tabpanel" aria-label="Status" hidden><div id="statussum"><span class="dot" aria-hidden="true"></span><div><strong id="statuslabel">Status unknown</strong><p id="statusdetail">ORBIT's status has not been read yet.</p></div></div><div id="statuserr" role="alert" hidden></div><div class="sidelabel" id="serviceslabel">Services</div><div id="ports"><span class="empty">Reading status…</span></div><div class="sidelabel" id="releaselabel">Release</div><a id="statusopen" href="/status" target="_blank" rel="noopener noreferrer" title="Open the status page (raw JSON: running commit, deploy and port states) in a new tab" aria-label="Open the status page (raw JSON) in a new tab"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a><dl id="deployinfo" aria-label="Running release"><dt>Deployed</dt><dd id="deployedat"><span class="na">Not read yet</span></dd><dt>Commit</dt><dd id="deploycommit"><span class="na">Not read yet</span></dd></dl></div><div id="inbox" role="tabpanel" aria-label="Notifications" hidden><div class="empty">Reading notifications…</div></div><div id="sideresize" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="side" aria-label="Resize the side panel" title="Drag, or use the arrow keys, to make the side panel wider or narrower. Double-click to reset."></div></aside>
+<aside id="nav" aria-label="Sidebar"><div class="navtop"><span class="navtitle" aria-hidden="true">Sidebar</span><button type="button" id="navclose" aria-label="Close the sidebar" title="Close the sidebar (Esc)"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12 M18 6L6 18"/></svg></button></div><div class="navscroll"><section class="navsec" id="navsec-projects" aria-labelledby="navh-projects"><h2 class="navh"><button type="button" class="navtoggle" id="navh-projects" aria-expanded="true" aria-controls="navbody-projects"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Projects</span></button></h2><div class="navbody pico" id="navbody-projects"><select id="navproject" aria-label="Project" aria-describedby="navprojnote"><option value="">All projects</option></select><p id="navprojnote" class="navnote" role="status">Reading the vault…</p></div></section><section class="navsec" id="navsec-plan" aria-labelledby="navh-plan"><h2 class="navh"><button type="button" class="navtoggle" id="navh-plan" aria-expanded="true" aria-controls="navbody-plan"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Plan</span></button></h2><div class="navbody" id="navbody-plan"><div id="navplan"><p class="navnote">Reading the plan…</p></div></div></section><section class="navsec" id="navsec-files" aria-labelledby="navh-files"><h2 class="navh"><button type="button" class="navtoggle" id="navh-files" aria-expanded="true" aria-controls="navbody-files"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Files</span></button></h2><div class="navbody" id="navbody-files"><div id="navfiles"><p class="navnote">Reading the files…</p></div></div></section><section class="navsec" id="navsec-images" aria-labelledby="navh-images"><h2 class="navh"><button type="button" class="navtoggle" id="navh-images" aria-expanded="true" aria-controls="navbody-images"><svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg><span>Images</span></button></h2><div class="navbody" id="navbody-images"><form id="navimgsearch" class="navimgsearch" role="search" aria-label="Search photos" hidden><input type="search" id="navimgq" name="q" maxlength="200" autocomplete="off" placeholder="Search photos" aria-label="Search photos"><button type="submit">Search</button></form><a class="navgallery" id="navgallery" href="/#gallery" hidden>Open the photo gallery</a><div id="navimages"><p class="navnote">Reading the photos…</p></div></div></section></div><div id="navresize" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="nav" aria-label="Resize the sidebar" aria-valuemin="220" aria-valuemax="480" aria-valuenow="280" title="Drag, or use the arrow keys, to resize the sidebar"></div></aside><button type="button" id="navhandle" aria-controls="nav" aria-expanded="true" aria-label="Collapse the sidebar" title="Collapse the sidebar"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 6l-6 6 6 6"/></svg></button><div id="navscrim" hidden></div>
 <main id="log" hidden></main>
 <div class="latestdock"><button type="button" class="tolatest" id="tolatest" title="Scroll to the latest message" hidden><span aria-hidden="true">↓</span> click to latest</button></div>
 <main id="alog" aria-label="Assistant conversation"></main>
 <div class="latestdock"><button type="button" class="tolatest" id="atolatest" title="Scroll to the latest message" hidden><span aria-hidden="true">↓</span> click to latest</button></div>
 <section id="jobs" hidden aria-live="off"></section>
 <section id="gallery" hidden aria-label="Photo gallery"></section>
+<section id="plan" hidden aria-label="Plan"></section>
 <form id="form" hidden><div id="tray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="pick" accept="image/*" multiple hidden><button type="button" class="phbtn" id="pickbtn" title="Add image (up to 10)" aria-label="Add image"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14 M5 12h14"/></svg></button><textarea id="input" rows="1" placeholder="Message ORBIT" aria-label="Message ORBIT"></textarea><button id="send" class="sendbtn" title="Send" aria-label="Send"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13 M22 2l-7 20-4-9-9-4z"/></svg></button></form>
 <div id="astatus" role="status" aria-live="polite"></div>
 <form id="aform"><div id="atray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="apick" accept="image/*" multiple hidden><button type="button" class="phbtn" id="apickbtn" title="Add image (up to 10)" aria-label="Add image"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14 M5 12h14"/></svg></button><textarea id="ainput" rows="1" placeholder="Message the Assistant" aria-label="Message the Assistant"></textarea><button id="asend" class="sendbtn" title="Send" aria-label="Send"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13 M22 2l-7 20-4-9-9-4z"/></svg></button></form>
@@ -1102,7 +1234,10 @@
       box.replaceChildren(...s.ports.map((p) => {
         const el = document.createElement("span");
         el.className = `pill ${p.state}`;
-        el.textContent = `${p.port}: ${p.state}`;
+        // One text, "model: live"; the name and the state are spans so the list can put the state on the right.
+        el.append(Object.assign(document.createElement("span"), { className: "pname", textContent: p.port }),
+          Object.assign(document.createElement("span"), { className: "psep", textContent: ": " }),
+          Object.assign(document.createElement("span"), { className: "pstate", textContent: p.state }));
         // The startup smoke record, when there is one (docs/smoke-checks.md): shown on hover, never changes the pill's state.
         const c = p.check;
         el.title = c && typeof c.state === "string" ? `${p.detail}\nStartup check: ${c.state}${c.superseded ? " (newer real result shown above)" : ""}${c.reason ? `: ${c.reason}` : ""}` : p.detail;
@@ -1546,7 +1681,7 @@
     return threadList.length ? "No session open" : "No sessions yet";
   }
   function updateTitle() {
-    document.title = tab === "chat" ? (threadMode === "server" ? `${sessionLabel()} · Sessions · ORBIT` : "Sessions · ORBIT") : tab === "jobs" ? (openJob ? `${jv.detail?.data?.overview?.title?.text ? jv.detail.data.overview.title.text.slice(0, 60) + " · " : ""}${openJob} · Jobs · ORBIT` : "Jobs · ORBIT") : tab === "gallery" ? "Photos · ORBIT" : "ORBIT";
+    document.title = tab === "chat" ? (threadMode === "server" ? `${sessionLabel()} · Sessions · ORBIT` : "Sessions · ORBIT") : tab === "plan" ? planTitle() : tab === "jobs" ? (openJob ? `${jv.detail?.data?.overview?.title?.text ? jv.detail.data.overview.title.text.slice(0, 60) + " · " : ""}${openJob} · Jobs · ORBIT` : "Jobs · ORBIT") : tab === "gallery" ? "Photos · ORBIT" : "ORBIT";
   }
   function renderBar() {
     // The picker marks where the reader is going (a pending navigation), otherwise the session that is drawn.
@@ -2620,24 +2755,32 @@
     // Forget the remembered project only when the vault was read and it is not active: an unreadable vault keeps it.
     if (vaultOk && b.unknownProject && navPrefs.project) { navPrefs.project = ""; writeSidebar(localStore, navPrefs); }
 
-    // Plan: the plan sections of the project note (or now.md), then the open tasks.
+    // Plan (docs/plan.md): a compact index of the open projects (status dot, title, priority badge), All projects at the top,
+    // and how many need attention. Each opens its view in the main area (drawPlan below).
+    lastSidebar = b;
     const plan = document.getElementById("navplan");
     if (!vaultOk) plan.replaceChildren(navNote(vaultWhy, true));
     else {
-      const p = b.plan || {};
-      const items = Array.isArray(p.items) ? p.items : [];
-      const tasks = Array.isArray(p.tasks) ? p.tasks : [];
-      const kids = [];
-      if (p.source) kids.push(el("span", { className: "navmeta", textContent: `From ${str(p.source, 200)}` }));
-      const bySection = new Map();
-      for (const it of items) { const k = str(it.section, 60) || "Plan"; if (!bySection.has(k)) bySection.set(k, []); bySection.get(k).push(str(it.text)); }
-      for (const [sec, list] of bySection) kids.push(el("h3", { className: "navsub", textContent: sec }), el("ul", { className: "navlist bul" }, ...list.map((t) => el("li", { textContent: t }))));
-      if (!items.length) kids.push(navNote(p.source ? `No next actions found in ${str(p.source, 200)} (under a heading such as Next actions, Plan or Resume here).` : "No now.md in the vault."));
-      kids.push(el("h3", { className: "navsub", textContent: current ? "Open tasks for this project" : "Open tasks" }));
-      if (tasks.length) kids.push(el("ul", { className: "navlist bul" }, ...tasks.map((t) => el("li", {}, str(t.title, 100), el("span", { className: "navmeta", textContent: [t.status ? str(t.status, 40) : "", t.due ? `due ${str(t.due, 30)}` : ""].filter(Boolean).join(" · ") || str(t.path, 200) })))));
-      else kids.push(navNote(current ? "No open tasks name this project." : "No open tasks in the vault."));
+      const ov = b.overview && Array.isArray(b.overview.projects) ? b.overview : { projects: [], stats: {} };
+      const open = ov.projects.filter((c) => c && typeof c.id === "string" && c.state !== "done");
+      const st = ov.stats || {};
+      const kids = [el("a", { className: "planall", href: planHref(""), id: "navplan-all" }, el("span", { textContent: "All projects" }), el("span", { className: "navcount", textContent: `${open.length} open` }))];
+      const attn = Number(st.attention) || 0;
+      if (attn) kids.push(el("span", { className: "planattn", textContent: `${attn} need${attn === 1 ? "s" : ""} attention`, title: "Projects that are blocked, past their target, paused, quiet for a month or without a next action" }));
+      if (open.length) kids.push(el("ul", { className: "planlist", ariaLabel: "Open projects" }, ...open.map((c) => {
+        const a = el("a", { className: "planitem", href: planHref(c.id), title: `${str(c.title, 100)}: ${PLAN_HEALTH[c.health] || ""}${c.why ? ` (${str(c.why, 80)})` : ""}` },
+          el("span", { className: `pdot ${PLAN_HEALTH[c.health] ? c.health : ""}`, ariaHidden: "true" }),
+          el("span", { className: "ptitle", textContent: str(c.title, 100) || c.id }),
+          el("span", { className: "vh", textContent: `, ${PLAN_HEALTH[c.health] || "status unknown"}` }));
+        a.dataset.id = c.id;
+        if (c.priority) a.append(el("span", { className: `pbadge p${Number(c.priority)}`, textContent: `P${Number(c.priority)}`, title: `Priority ${Number(c.priority)}` }));
+        return el("li", {}, a);
+      })));
+      else kids.push(navNote("No open projects in the vault (Projects/)."));
       plan.replaceChildren(...kids);
+      showPlanCurrent();
     }
+    if (tab === "plan" && !planTarget(location.hash)?.id) drawPlan();
 
     // Files: the related notes, each with a preview, then the locations the project note lists.
     const files = document.getElementById("navfiles");
@@ -2727,6 +2870,213 @@
       if (goGallery()) galleryCtl.search(q);
     });
   }
+  // ---- The Plan views (docs/plan.md), in the main area: All projects (/#plan) is cards from the last /sidebar answer's
+  // overview; one project (/#plan/<id>) is read from GET /sidebar/project?id=<id> each time it opens. Dates are shown relative
+  // to today in Rai's time zone (the server's `today`), with the full date on hover; every value is set as text.
+  // <plan-lib>
+  const PLAN_ID = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,119}$/;
+  // What a Plan address names: { id: "" } for all projects, { id } for one, { invalid: true } for anything else after "#plan/".
+  function planTarget(hash) {
+    if (hash === "#plan") return { id: "" };
+    if (!String(hash).startsWith("#plan/")) return null;
+    let id;
+    try { id = decodeURIComponent(hash.slice("#plan/".length)); } catch { return { invalid: true }; }
+    return PLAN_ID.test(id) ? { id } : { invalid: true };
+  }
+  const planHref = (id) => (id ? `/#plan/${encodeURIComponent(id)}` : "/#plan");
+  const dayNum = (iso) => (/^\d{4}-\d{2}-\d{2}$/.test(String(iso)) ? Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)) / 86400000 : NaN);
+  // "today", "yesterday", "in 3 days", "2 weeks ago", "in 10 months", "1 year ago".
+  function relDay(iso, today) {
+    const d = dayNum(iso), t = dayNum(today);
+    if (!Number.isFinite(d) || !Number.isFinite(t)) return "";
+    const n = Math.round(d - t), a = Math.abs(n);
+    if (n === 0) return "today";
+    if (n === -1) return "yesterday";
+    if (n === 1) return "tomorrow";
+    const [k, unit] = a < 14 ? [a, "day"] : a < 60 ? [Math.round(a / 7), "week"] : a < 548 ? [Math.round(a / 30.44), "month"] : [Math.round(a / 365.25), "year"];
+    const span = `${k} ${unit}${k === 1 ? "" : "s"}`;
+    return n < 0 ? `${span} ago` : `in ${span}`;
+  }
+  // "Thu, Nov 26, 2026" for a calendar day; "Nov 14, 2026, 2:53 PM PST" for an instant, in Rai's zone.
+  const longDay = (iso) => (Number.isFinite(dayNum(iso)) ? new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(dayNum(iso) * 86400000)) : "");
+  const shortDay = (iso, today) => (Number.isFinite(dayNum(iso)) ? new Intl.DateTimeFormat("en-US", { timeZone: "UTC", month: "short", day: "numeric", ...(String(iso).slice(0, 4) !== String(today).slice(0, 4) ? { year: "numeric" } : {}) }).format(new Date(dayNum(iso) * 86400000)) : "");
+  function zonedTime(at, zone) {
+    const d = new Date(at);
+    if (Number.isNaN(d.getTime())) return "";
+    try { return new Intl.DateTimeFormat("en-US", { timeZone: zone || "America/Los_Angeles", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(d); } catch { return ""; }
+  }
+  // Calendar dates inside a line of text ("due 2026-11-30") read as "Nov 30" (with the year when it is not this one).
+  const humanDates = (text, today) => String(text).replace(/\b(\d{4}-\d{2}-\d{2})\b/g, (d) => shortDay(d, today) || d);
+  const PLAN_HEALTH = { green: "on track", yellow: "needs attention", red: "at risk", grey: "done" };
+  const PLAN_STATE = { active: "Active", paused: "Paused", blocked: "Blocked", done: "Done" };
+  // </plan-lib>
+  const planBox = document.getElementById("plan");
+  let lastSidebar = null;
+  let planShown = "";      // the address drawn last, so a re-draw of the same one keeps the scroll position
+  let planGen = 0;
+  let planFocus = false;   // a click on a Plan link: the new view's heading takes focus
+  let planDetailTitle = "";
+  function planTitle() {
+    const t = planTarget(location.hash);
+    return t && t.id ? `${planDetailTitle ? planDetailTitle.slice(0, 60) + " · " : ""}Plan · ORBIT` : "All projects · Plan · ORBIT";
+  }
+  // The sidebar's Plan links mark the view that is open.
+  function showPlanCurrent() {
+    const t = tab === "plan" ? planTarget(location.hash) : null;
+    for (const a of document.querySelectorAll("#navplan a.planall, #navplan a.planitem")) {
+      const on = Boolean(t && !t.invalid && (a.classList.contains("planall") ? t.id === "" : a.dataset.id === t.id));
+      if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    }
+  }
+  const planDated = (label, iso, today, cls) => el("span", { className: cls || "", title: longDay(iso), textContent: `${label}${relDay(iso, today)}` });
+  function planHeading(text) {
+    const h = el("h2", { className: "pltitle", textContent: text, tabIndex: -1 });
+    return h;
+  }
+  function placeFocus(root) {
+    if (!planFocus) return;
+    planFocus = false;
+    const h = root.querySelector("h2.pltitle");
+    if (h) h.focus({ preventScroll: true });
+  }
+  function progressBlock(p) {
+    if (!p || !(Number(p.total) > 0)) return null;
+    const done = Math.max(0, Math.min(Number(p.done) || 0, Number(p.total))), total = Number(p.total);
+    const pct = Math.round((done / total) * 100);
+    const bar = el("div", { className: "bar", role: "progressbar", ariaValueMin: "0", ariaValueMax: String(total), ariaValueNow: String(done), ariaLabel: `${done} of ${total} ${str(p.label, 40)}` }, el("span", { style: `width:${pct}%` }));
+    return el("div", { className: "plprog" }, bar, el("span", { textContent: `${done}/${total} ${str(p.label, 40)} (${pct}%)` }));
+  }
+  function cardOf(c, today) {
+    const head = el("div", { className: "plhead" },
+      el("span", { className: `pdot ${PLAN_HEALTH[c.health] ? c.health : ""}`, ariaHidden: "true" }),
+      el("h3", { textContent: str(c.title, 100) || c.id }));
+    if (c.priority) head.append(el("span", { className: `pbadge p${Number(c.priority)}`, textContent: `P${Number(c.priority)}`, title: `Priority ${Number(c.priority)}` }));
+    head.append(el("span", { className: "pstate", textContent: `${PLAN_STATE[c.state] || "Active"} · ${PLAN_HEALTH[c.health] || ""}` }));
+    const kids = [head];
+    if (c.summary) kids.push(el("p", { className: "plsum", textContent: humanDates(str(c.summary, 200), today) }));
+    kids.push(c.next ? el("p", { className: "plnext" }, el("span", { className: "lbl", textContent: "Next" }), " ", humanDates(str(c.next, 240), today)) : el("p", { className: "plnext none", textContent: c.state === "done" ? "Finished." : "No next action written down." }));
+    const prog = progressBlock(c.progress);
+    if (prog) kids.push(prog);
+    const meta = el("p", { className: "plmeta" });
+    const bits = [c.lastActivity ? planDated("Last activity ", c.lastActivity, today) : el("span", { textContent: "No recorded activity" })];
+    if (c.target) bits.push(el("span", { className: c.overdue ? "hot" : "", title: longDay(c.target), textContent: `${c.overdue ? "Overdue: target was" : "Target"} ${shortDay(c.target, today)} (${relDay(c.target, today)})` }));
+    if (c.blockers > 0 && c.state !== "done") bits.push(el("span", { className: "hot", textContent: `${Number(c.blockers)} blocker${Number(c.blockers) === 1 ? "" : "s"}` }));
+    if (c.why && (c.health === "yellow" || c.state === "blocked") && !c.overdue && !(c.blockers > 1)) bits.push(el("span", { textContent: humanDates(str(c.why, 80), today) }));
+    bits.forEach((b, i) => { if (i) meta.append(" · "); meta.append(b); });
+    kids.push(meta);
+    const a = el("a", { href: planHref(c.id) }, ...kids);
+    a.dataset.id = c.id;
+    return el("li", { className: `plcard ${PLAN_HEALTH[c.health] ? c.health : ""}` }, a);
+  }
+  function drawOverview() {
+    const b = lastSidebar;
+    if (!b) { planBox.replaceChildren(planHeading("All projects"), el("p", { className: "empty", textContent: "Reading the projects…" })); return; }
+    if (!(b.vault && b.vault.ok === true)) { planBox.replaceChildren(planHeading("All projects"), el("p", { className: "err", role: "alert", textContent: str(b.vault && b.vault.error) || "The vault could not be read." })); return; }
+    const ov = b.overview && Array.isArray(b.overview.projects) ? b.overview : { projects: [], stats: {}, today: "" };
+    const today = str(ov.today, 10);
+    const st = ov.stats || {};
+    const cards = ov.projects.filter((c) => c && typeof c.id === "string");
+    const open = cards.filter((c) => c.state !== "done"), done = cards.filter((c) => c.state === "done");
+    const stat = (n, label, hot) => el("li", { className: hot && n ? "hot" : "" }, el("strong", { textContent: String(Number(n) || 0) }), label);
+    const kids = [planHeading("All projects"),
+      el("p", { className: "plsub", textContent: `Open projects by priority, then most recent activity.${today ? ` Today is ${longDay(today)}.` : ""}` }),
+      el("ul", { className: "plstats", ariaLabel: "Summary" }, stat(st.active, "active projects"), stat(st.overdue, "overdue", true), stat(st.blocked, "with blockers", true), stat(st.paused, "paused"))];
+    if (open.length) kids.push(el("ul", { className: "plcards", ariaLabel: "Open projects" }, ...open.map((c) => cardOf(c, today))));
+    else kids.push(el("p", { className: "empty", textContent: "No open projects in the vault (Projects/)." }));
+    if (done.length) kids.push(el("details", { className: "pldone" }, el("summary", { textContent: `Finished (${done.length})` }), el("ul", { className: "plcards", ariaLabel: "Finished projects" }, ...done.map((c) => cardOf(c, today)))));
+    const top = planShown === "#plan" ? planBox.scrollTop : 0;
+    const openDone = planBox.querySelector("details.pldone")?.open;
+    planBox.replaceChildren(...kids);
+    if (openDone) planBox.querySelector("details.pldone").open = true;
+    planBox.scrollTop = top;
+    placeFocus(planBox);
+  }
+  const planSection = (title, ...kids) => el("section", { className: "plsec", ariaLabel: title }, el("h3", { textContent: title }), ...kids);
+  const planList = (items, tag, empty, map) => (items.length ? el(tag, {}, ...items.map(map)) : el("p", { className: "empty", textContent: empty }));
+  function drawDetail(d, today) {
+    planDetailTitle = str(d.title, 100);
+    updateTitle();
+    const head = el("div", { className: "plhead" }, el("span", { className: `pdot ${PLAN_HEALTH[d.health] ? d.health : ""}`, ariaHidden: "true" }), planHeading(planDetailTitle || d.id));
+    if (d.priority) head.append(el("span", { className: `pbadge p${Number(d.priority)}`, textContent: `P${Number(d.priority)}`, title: `Priority ${Number(d.priority)}` }));
+    head.append(el("span", { className: "pstate", textContent: `${PLAN_STATE[d.state] || "Active"} · ${PLAN_HEALTH[d.health] || ""}${d.why && d.health !== "green" ? ` (${humanDates(str(d.why, 80), today)})` : ""}${d.area ? ` · ${str(d.area, 40)}` : ""}` }));
+    const kids = [el("a", { className: "back", href: planHref(""), textContent: "← All projects" }), head];
+    if (d.outcome || d.summary) kids.push(el("p", { className: "plsum", textContent: humanDates(str(d.outcome || d.summary, 520), today) }));
+
+    const status = [];
+    const prog = progressBlock(d.progress);
+    if (prog) status.push(prog);
+    status.push(el("p", {}, el("span", { className: "lbl", textContent: "State" }), " ", `${PLAN_STATE[d.state] || "Active"}${d.status && d.status !== d.state ? ` (${str(d.status, 40)})` : ""}`));
+    status.push(el("p", {}, el("span", { className: "lbl", textContent: "Last activity" }), " ", d.lastActivity ? planDated("", d.lastActivity, today) : "none recorded"));
+    if (d.completion) status.push(el("p", {}, el("span", { className: "lbl", textContent: "Done means" }), " ", humanDates(str(d.completion, 520), today)));
+
+    const tl = Array.isArray(d.timeline) ? d.timeline : [];
+    const timeline = [];
+    if (d.started && d.target && dayNum(d.target) > dayNum(d.started)) {
+      const span = dayNum(d.target) - dayNum(d.started), gone = Math.max(0, Math.min(span, dayNum(today) - dayNum(d.started)));
+      const pct = Math.round((gone / span) * 100);
+      timeline.push(el("p", { textContent: `Day ${Math.round(gone)} of ${Math.round(span)} (${pct}% of the time to the target)` }), el("div", { className: "bar", role: "img", ariaLabel: `${pct}% of the time from start to target has passed` }, el("span", { style: `width:${pct}%` })));
+    }
+    timeline.push(planList(tl, "ol", "No dates recorded (started, target or milestones).", (t) => el("li", { className: `${t.kind === "today" ? "today" : ""}${t.done ? " done" : ""}${t.kind === "target" ? " target" : ""}` },
+      el("span", { textContent: `${humanDates(str(t.label, 140), today)}${t.kind === "due" ? " (task due)" : ""}${t.done && t.kind === "milestone" ? " ✓" : ""}` }),
+      el("span", { className: "when", title: longDay(t.date), textContent: t.kind === "today" ? longDay(t.date) : `${longDay(t.date)} · ${relDay(t.date, today)}` }))));
+    const tlList = timeline.at(-1);
+    if (tlList.tagName === "OL") tlList.className = "pltl";
+
+    const tasks = Array.isArray(d.tasks) ? d.tasks : [];
+    const taskList = planList(tasks, "ul", "No ORBIT tasks name this project.", (t) => el("li", {},
+      el("span", { className: t.done ? "tdone" : "", textContent: str(t.title, 100) }), " ",
+      el("span", { className: `tstat ${t.done ? "done" : str(t.status, 20)}`, textContent: str(t.status, 40) || "open" }),
+      t.due && !t.done ? el("span", { className: "actwhen", title: longDay(t.due), textContent: `due ${shortDay(t.due, today)} (${relDay(t.due, today)})` }) : ""));
+    const acts = Array.isArray(d.activity) ? d.activity : [];
+    kids.push(el("div", { className: "plgrid" },
+      planSection("Status", ...status),
+      planSection("Next steps", planList(Array.isArray(d.nextSteps) ? d.nextSteps : [], "ol", "No next action written down in the project note.", (t) => el("li", { textContent: humanDates(str(t, 240), today) }))),
+      planSection("Blockers", planList(Array.isArray(d.blockerList) ? d.blockerList : [], "ul", d.state === "blocked" ? "Marked blocked; the note does not say on what." : "No blockers recorded.", (t) => el("li", { textContent: humanDates(str(t, 240), today) }))),
+      planSection("Timeline", ...timeline),
+      planSection("Recent activity", planList(acts, "ul", "No dated updates in the note.", (a) => el("li", {},
+        el("span", { className: "actwhen", title: a.at ? zonedTime(a.at, lastSidebar?.overview?.zone) : longDay(a.date), textContent: `${relDay(a.date, today)} · ${shortDay(a.date, today)}` }), humanDates(str(a.text, 240), today)))),
+      planSection("Linked tasks", taskList, ...(d.tasksMore > 0 ? [el("p", { className: "empty", textContent: `${Number(d.tasksMore)} more not shown.` })] : [])),
+      planSection("Notes", planList(Array.isArray(d.notes) ? d.notes : [], "ul", "No notes yet. Notes written under a “Notes” heading in the project note show here.", (t) => el("li", { textContent: humanDates(str(t, 520), today) })))));
+    kids.push(el("p", { className: "plsrc", textContent: `From ${str(d.path, 200)} in the vault (read-only here).` }));
+    planBox.replaceChildren(el("div", { className: "pldetail" }, ...kids));
+    planBox.scrollTop = 0;
+    placeFocus(planBox);
+  }
+  async function drawPlan() {
+    const t = planTarget(location.hash);
+    if (!t) return;
+    const key = location.hash;
+    if (t.invalid) { planShown = key; planDetailTitle = ""; planBox.replaceChildren(el("a", { className: "back", href: planHref(""), textContent: "← All projects" }), planHeading("No such project"), el("p", { className: "err", role: "alert", textContent: "This address does not name a project." })); placeFocus(planBox); return; }
+    if (!t.id) { planDetailTitle = ""; drawOverview(); planShown = key; updateTitle(); return; }
+    if (planShown === key && planBox.querySelector(".pldetail")) { placeFocus(planBox); return; }
+    planShown = key;
+    const gen = ++planGen;
+    // Draw what the overview already knows at once, then the full detail.
+    const known = lastSidebar?.overview?.projects?.find?.((c) => c && c.id === t.id);
+    planDetailTitle = known ? str(known.title, 100) : "";
+    updateTitle();
+    planBox.replaceChildren(el("a", { className: "back", href: planHref(""), textContent: "← All projects" }), planHeading(planDetailTitle || t.id), el("p", { className: "empty", textContent: "Reading the project…" }));
+    let res, body = null;
+    try { res = await fetch(`/sidebar/project?id=${encodeURIComponent(t.id)}`); } catch { res = null; }
+    if (gen !== planGen) return;
+    if (res) { try { body = await res.json(); } catch { body = null; } }
+    if (gen !== planGen) return;
+    if (!res || !res.ok || !body || !body.project) {
+      const why = !res ? "ORBIT could not be reached for this project." : res.status === 404 ? `No project “${t.id}” in the vault (Projects/${t.id}.md).` : res.status === 403 ? "The Plan is for ORBIT's owner; this sign-in cannot read it." : str(body && body.error) || `The project could not be read (HTTP ${res.status}).`;
+      planShown = "";
+      planBox.replaceChildren(el("a", { className: "back", href: planHref(""), textContent: "← All projects" }), planHeading(planDetailTitle || t.id), el("p", { className: "err", role: "alert", textContent: why }));
+      placeFocus(planBox);
+      return;
+    }
+    drawDetail(body.project, str(body.today, 10) || str(lastSidebar?.overview?.today, 10));
+  }
+  // A click on a Plan link (the sidebar, a card, Back): the new view's heading takes focus, and the phone drawer closes.
+  document.addEventListener("click", (e) => {
+    const a = e.target instanceof Element ? e.target.closest('a[href^="/#plan"]') : null;
+    if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    planFocus = true;
+    if (nav.contains(a) && !docked() && drawerOpen) closeNav();
+  }, true);
   async function togglePreview(btn, path, pre) {
     if (btn.getAttribute("aria-expanded") === "true") { btn.setAttribute("aria-expanded", "false"); pre.hidden = true; return; }
     btn.setAttribute("aria-expanded", "true");
@@ -2830,6 +3180,9 @@
     jobsBox.hidden = next !== "jobs";
     galleryBox.hidden = next !== "gallery";
     if (next !== "gallery" && galleryCtl) galleryCtl.close();
+    planBox.hidden = next !== "plan";
+    if (next === "plan") drawPlan();
+    showPlanCurrent();
     document.getElementById("alog").hidden = document.getElementById("aform").hidden = document.getElementById("astatus").hidden = next !== "assistant";
     // The page that opens is drawn once now, even in a hidden tab; the pollers then refresh it only while it is visible.
     if (next === "jobs") jobsPoller.open(() => tab === "jobs");
@@ -2851,13 +3204,17 @@
   const isSessionsPath = (path) => path === "/sessions" || path.startsWith("/sessions/");
   // The Jobs page is #jobs; one job is #jobs/<job id>.
   const isJobsHash = (hash) => hash === "#jobs" || hash.startsWith("#jobs/");
+  // The Plan views (docs/plan.md) are #plan (all projects) and #plan/<project id>. They read the vault, which is the owner's,
+  // so they open only where the Assistant does.
+  const isPlanHash = (hash) => hash === "#plan" || hash.startsWith("#plan/");
   // The photo gallery (docs/photo-gallery.md) is #gallery, owner only like the Assistant; without the Assistant it falls back.
   const isGalleryHash = (hash) => hash === "#gallery";
   function pageFor(path, hash, jobsAvailable, assistantAvailable) {
     if (isLegacyChat(hash)) return "chat";
     if (isJobsHash(hash) && jobsAvailable) return "jobs";
+    if (isPlanHash(hash) && assistantAvailable) return "plan";
     if (isGalleryHash(hash) && assistantAvailable) return "gallery";
-    if (hash !== "#assistant" && !isJobsHash(hash) && !isGalleryHash(hash) && isSessionsPath(path)) return "chat";
+    if (hash !== "#assistant" && !isJobsHash(hash) && !isPlanHash(hash) && !isGalleryHash(hash) && isSessionsPath(path)) return "chat";
     return assistantAvailable ? "assistant" : "chat";
   }
   // One session is addressed as /sessions/<session id> (the canonical form: lowercase, unencoded). Plain /sessions (or
@@ -2892,7 +3249,7 @@
       const t = chatTarget(hash);
       return t.kind === "invalid" ? null : sessionPath(t.kind === "thread" ? t.id : null) + search;
     }
-    if ((hash === "#assistant" || isJobsHash(hash) || isGalleryHash(hash)) && path !== "/") return `/${search}${hash}`;
+    if ((hash === "#assistant" || isJobsHash(hash) || isPlanHash(hash) || isGalleryHash(hash)) && path !== "/") return `/${search}${hash}`;
     if (path === "/sessions/") return `/sessions${search}${hash}`;
     if (!isSessionsPath(path)) return null;
     const t = sessionTarget(path, hash);
@@ -3169,7 +3526,7 @@
     });
     const toolbar = el("div", { className: "jtools", role: "search" },
       search,
-      el("div", { className: "row" }, state.s, health.s, lane.s, kind.s, routine.s, el("label", { className: "chk" }, attention, " Needs attention"), clear));
+      el("div", { className: "row pico" }, state.s, health.s, lane.s, kind.s, routine.s, el("label", { className: "chk" }, attention, " Needs attention"), clear));
     const proposals = el("div", { className: "jprops" });
     const status = el("div", { className: "meta jstatus", role: "status", ariaLive: "polite" });
     const results = el("ul", { className: "jlist", ariaLabel: "Jobs" });

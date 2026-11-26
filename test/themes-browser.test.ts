@@ -16,7 +16,7 @@ test("markup: a pre-paint theme script in <head>, the theme menu is native radio
   const pre = head.indexOf('localStorage.getItem("orbit.theme")');
   assert.ok(pre > 0 && pre < head.indexOf("<style>"), "the stored theme is applied in <head>, before the stylesheet and the body");
   assert.match(html, /<button type="button" id="themebtn" class="hbtn" data-mode="system" aria-expanded="false" aria-controls="themepicker" aria-label="Theme: System"/);
-  assert.match(html, /<div id="themepicker" hidden><fieldset><legend>Theme<\/legend>/);
+  assert.match(html, /<div id="themepicker" class="pico" hidden><fieldset><legend>Theme<\/legend>/);
   assert.deepEqual([...html.matchAll(/<input type="radio" name="theme" value="(\w+)">/g)].map((m) => m[1]), ["system", "light", "dark"]);
   // The dark palette is written twice (device route and explicit choice); the two must not drift apart.
   const media = html.match(/@media \(prefers-color-scheme: dark\) \{\s*:root:not\(\[data-theme="light"\]\) \{([^}]*)\}/)![1]!;

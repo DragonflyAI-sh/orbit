@@ -20,7 +20,7 @@ const TEXT_MAX = 240;
 const TITLE_MAX = 100;
 
 // Statuses that mean a project or task is no longer active (AGENTS.md: done and dropped stay in place, finished work is archived).
-const CLOSED = new Set(["done", "dropped", "archived", "cancelled", "canceled", "completed", "complete", "abandoned", "closed"]);
+export const CLOSED = new Set(["done", "dropped", "archived", "cancelled", "canceled", "completed", "complete", "abandoned", "closed"]);
 // Headings in a project note (or now.md) whose list items are the plan, in the order they are read.
 const PLAN_HEADING = /^(next actions?|next steps?|next up|next|plan|the plan|resume here|resume point|now|focus|today|today'?s plan|top priorities|priorities|to ?do|todo|open tasks?|tasks|actions?)$/i;
 const LOCATION_HEADING = /^(locations?|where( it lives)?|repos?|repositories|links)$/i;
@@ -75,13 +75,13 @@ function splitInline(s: string): string[] {
   if (cur.trim()) out.push(cur);
   return out.map((x) => x.trim());
 }
-const first = (v: string | string[] | undefined): string => (Array.isArray(v) ? (v[0] ?? "") : (v ?? ""));
-const all = (v: string | string[] | undefined): string[] => (Array.isArray(v) ? v : v ? [v] : []);
+export const first = (v: string | string[] | undefined): string => (Array.isArray(v) ? (v[0] ?? "") : (v ?? ""));
+export const all = (v: string | string[] | undefined): string[] => (Array.isArray(v) ? v : v ? [v] : []);
 
 // Text for the page: secret-shaped values masked (src/vault/filter.ts), control and bidi characters removed, one line, bounded.
-const clean = (text: string, max = TEXT_MAX): string => untrustedText(maskVaultText(text), max).text;
+export const clean = (text: string, max = TEXT_MAX): string => untrustedText(maskVaultText(text), max).text;
 // Wiki links and Markdown links read as their visible text; emphasis and code marks are dropped.
-const plain = (text: string): string =>
+export const plain = (text: string): string =>
   text
     .replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?\|([^\]]+)\]\]/g, "$2")
     .replace(/\[\[([^\]|#]+)(?:#[^\]]*)?\]\]/g, (_, t: string) => t.split("/").pop()!)
@@ -111,17 +111,17 @@ export type SidebarOptions = { imagesPage?: number; aiOf?: (ref: string) => { ob
 // A located photo as src/photo-access.ts reachablePhotos gives it, reduced to what the sidebar reads.
 export type SidebarPhoto = { ref: string; sentAt: string; sentLocal: string; caption: string; conversation: { title: string; kind: "assistant" | "chat"; id: string }; present: boolean };
 
-const titleOf = (path: string, text: string, data: Frontmatter): string => {
+export const titleOf = (path: string, text: string, data: Frontmatter): string => {
   const alias = first(data.aliases) || first(data.alias) || first(data.title);
   if (alias) return clean(plain(alias), TITLE_MAX);
   const h = /^#\s+(.+)$/m.exec(text);
   if (h) return clean(plain(h[1]!), TITLE_MAX);
   return clean(path.split("/").pop()!.replace(/\.md$/, "").replace(/-/g, " "), TITLE_MAX);
 };
-const statusOf = (data: Frontmatter): string => clean(first(data.status).toLowerCase(), 40);
-const projectNote = (path: string) => /^Projects\/[^/]+\.md$/.test(path);
-const taskNote = (path: string) => /^Tasks\/[^/]+\.md$/.test(path);
-const idOf = (path: string) => path.split("/").pop()!.replace(/\.md$/, "");
+export const statusOf = (data: Frontmatter): string => clean(first(data.status).toLowerCase(), 40);
+export const projectNote = (path: string) => /^Projects\/[^/]+\.md$/.test(path);
+export const taskNote = (path: string) => /^Tasks\/[^/]+\.md$/.test(path);
+export const idOf = (path: string) => path.split("/").pop()!.replace(/\.md$/, "");
 const STATUS_ORDER = ["active", "in-progress", "doing", "", "waiting", "blocked", "paused", "someday"];
 const rank = (s: string) => {
   const i = STATUS_ORDER.indexOf(s);
@@ -142,7 +142,7 @@ export function projectsOf(notes: ReadonlyMap<string, string>): SidebarProject[]
 }
 
 // The note's sections as (heading, lines), headings of any level.
-function sections(body: string): { heading: string; lines: string[] }[] {
+export function sections(body: string): { heading: string; lines: string[] }[] {
   const out: { heading: string; lines: string[] }[] = [{ heading: "", lines: [] }];
   let fence = false;
   for (const line of body.split(/\r?\n/)) {
@@ -155,7 +155,7 @@ function sections(body: string): { heading: string; lines: string[] }[] {
   }
   return out;
 }
-const headingKey = (h: string) => plain(h).replace(/[^\p{L}\p{N}' -]+/gu, " ").replace(/\s+/g, " ").trim();
+export const headingKey = (h: string) => plain(h).replace(/[^\p{L}\p{N}' -]+/gu, " ").replace(/\s+/g, " ").trim();
 
 // The open list items (bullets, numbered items and unchecked boxes; checked boxes are done) under the plan headings, and a
 // paragraph under "Resume here", which is often prose.
@@ -181,7 +181,7 @@ export function planOf(text: string): PlanItem[] {
 
 // Does this front-matter value or note text link to the project (by [[id]], [[Projects/id]], [[id|label]] or the bare id)?
 const linkTo = (id: string) => new RegExp(`\\[\\[(?:Projects/)?${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\.md)?(?:[|#][^\\]]*)?\\]\\]`, "i");
-const valueNames = (v: string, id: string) => linkTo(id).test(v) || v.trim().toLowerCase() === id.toLowerCase() || v.trim().toLowerCase() === `projects/${id.toLowerCase()}`;
+export const valueNames = (v: string, id: string) => linkTo(id).test(v) || v.trim().toLowerCase() === id.toLowerCase() || v.trim().toLowerCase() === `projects/${id.toLowerCase()}`;
 
 function tasksOf(notes: ReadonlyMap<string, string>, id: string | undefined): TaskItem[] {
   const out: TaskItem[] = [];

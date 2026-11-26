@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
+import { serveWebAsset } from "./helpers/web-assets.ts";
 
 // The per-message Details footer in a real browser (Playwright's Chromium), for the Assistant and for Chat, against a
 // scripted fake of ORBIT's routes: closed by default, opened with the keyboard (with a visible focus ring), revealing every
@@ -57,6 +58,7 @@ const server = createServer((req, res) => {
   const url = new URL(req.url!, "http://x");
   const json = (code: number, body: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
   if (url.pathname === "/" || url.pathname === "/sessions" || url.pathname.startsWith("/sessions/")) { res.writeHead(200, { "content-type": "text/html" }); return res.end(html); }
+  if (serveWebAsset(url.pathname, res)) return;
   if (url.pathname === "/avatar.png") { res.writeHead(200, { "content-type": "image/png" }); return res.end(avatar); }
   if (url.pathname === "/status") return json(200, { ports: [{ port: "model", state: "live" }] });
   if (url.pathname === "/notifications") return json(200, { inbox: [] });
