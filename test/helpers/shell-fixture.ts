@@ -52,6 +52,13 @@ const sidebarPhotos = (at: (n: number) => string): SidebarPhoto[] => [
   { ref: SIDEBAR_REFS[2]!, sentAt: at(10), sentLocal: "Nov 17, 9:10 PM", caption: "", conversation: { id: "assistant:assistant", kind: "assistant", title: "Assistant" }, present: true },
 ];
 
+// The same photos as the gallery page reads them (GET /gallery/photos, docs/photo-gallery.md): no saved observations.
+const galleryPhoto = (ph: SidebarPhoto) => ({
+  ref: ph.ref, src: `/assistant/photos/${ph.ref}`, status: "ok", sentAt: ph.sentAt, sentLocal: ph.sentLocal, day: ph.sentAt.slice(0, 10), month: ph.sentAt.slice(0, 7), caption: ph.caption,
+  conversation: ph.conversation, message: { id: "m1", photo: 1, of: 1 }, link: ph.conversation.kind === "assistant" ? "#assistant" : `#chat/${ph.conversation.id.slice(5)}`,
+  image: { type: "image/jpeg", width: 64, height: 48, bytes: 2048 }, ai: { observations: 0, corrections: 0 },
+});
+
 export type ShellOpts = { exchanges?: number; pending?: boolean; notes?: number; card?: boolean; html?: string; longNotes?: boolean; sidebar?: "ok" | "vault-down" | 500 };
 
 export function shellServer(opts: ShellOpts = {}) {
@@ -88,6 +95,7 @@ export function shellServer(opts: ShellOpts = {}) {
     const p = url.pathname;
     if (p === "/" || p === "/sessions" || p.startsWith("/sessions/") || p === "/chat") { res.writeHead(200, { "content-type": "text/html" }); return res.end(page()); }
     if (p === "/avatar.png") { res.writeHead(200, { "content-type": "image/png" }); return res.end(avatar); }
+    if (p === "/gallery.js") { res.writeHead(200, { "content-type": "text/javascript" }); return res.end(readFileSync(new URL("../../src/web/gallery.js", import.meta.url))); }
     if (serveWebAsset(p, res)) return;
     if (p === "/photos.js") { res.writeHead(200, { "content-type": "text/javascript" }); return res.end(readFileSync(new URL("../../src/web/photos.js", import.meta.url))); }
     if (p === "/files.js") { res.writeHead(200, { "content-type": "text/javascript" }); return res.end(readFileSync(new URL("../../src/web/files.js", import.meta.url))); }
@@ -105,6 +113,8 @@ export function shellServer(opts: ShellOpts = {}) {
       const d = projectDetail(SIDEBAR_NOTES, url.searchParams.get("id") ?? "", PLAN_NOW);
       return d ? json(200, { project: d, today: dayIn(PLAN_NOW) }) : json(404, { error: "No such project in the vault (Projects/)." });
     }
+    if (p === "/gallery/photos") { const ps = sidebarPhotos(at).map(galleryPhoto); return json(200, { total: ps.length, returned: ps.length, nextCursor: null, zone: "UTC", photos: ps }); }
+    if (p.startsWith("/gallery/photos/")) { const ph = sidebarPhotos(at).find((x) => x.ref === p.slice(16)); return ph ? json(200, { photo: galleryPhoto(ph), observations: [], corrections: [], labels: {} }) : json(404, { error: "No such photo is visible to the Assistant." }); }
     if (p === "/sidebar/note") { const n = sidebarNote(SIDEBAR_NOTES, url.searchParams.get("path") ?? ""); return n ? json(200, { note: n }) : json(404, { error: "No such note in the vault." }); }
     if (/^\/assistant\/photos\/ph_[0-9a-f]{32}$/.test(p)) { res.writeHead(200, { "content-type": "image/png" }); return res.end(avatar); }
     if (p === "/model/login") return json(403, { error: "no" });

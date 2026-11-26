@@ -209,13 +209,16 @@ test("browser 1280px: choosing a project scopes the files and images to it, open
   await page.click("#fileview .fclose");
   assert.equal(await page.getAttribute(file, "aria-current"), null);
   assert.equal(await shown(page, "#alog"), true);
-  // A photo opens the photo viewer; Escape closes it and focus returns to the thumbnail.
+  // A photo opens the photo gallery (docs/photo-gallery.md) in the centre with that photo enlarged; Escape closes it and focus
+  // goes to the photo in the gallery.
   await page.click("#navimages button");
-  assert.equal(await shown(page, ".gviewer"), true);
-  assert.match(await page.getAttribute(".gviewer", "aria-label"), /The alpha garden beds after rain · Assistant · sent/);
+  await page.waitForSelector(".glight");
+  assert.equal(await shown(page, "#gallery"), true);
+  assert.match(await page.getAttribute(".glight", "aria-label"), /^Photo 1 of 3: The alpha garden beds after rain/);
   await page.keyboard.press("Escape");
-  assert.equal(await shown(page, ".gviewer"), false);
-  assert.equal(await page.evaluate(() => document.activeElement!.closest("#navimages") !== null), true);
+  assert.equal(await shown(page, ".glight"), false);
+  assert.equal(await page.evaluate(() => document.activeElement!.closest("#gallery .gcell") !== null), true);
+  await page.goto(url + "/#assistant");
   // Remembered: a reload asks for the same project.
   await page.reload();
   await page.waitForFunction(() => (document.getElementById("navproject") as HTMLSelectElement).value === "alpha-garden");
