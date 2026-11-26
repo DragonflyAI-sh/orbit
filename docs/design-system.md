@@ -5,6 +5,11 @@ a few shared component rules that use them. This note has the brand audit behind
 component reference, what was verified, and what is still open. The app shell itself (no page scrolling, safe areas,
 keyboard handling) is in [web-shell.md](web-shell.md) and is unchanged.
 
+*Update (November 2026): the selects, the two menus (sessions and theme) and the side panel's views now use a vendored
+component library, Pico CSS, scoped to those areas and mapped onto the tokens below. What it is, why, and what changed on
+screen (including the menu rows and the Status view's order, which replace the descriptions further down) are in
+[ui-library.md](ui-library.md).*
+
 ## Brand audit (November 2026)
 
 Looked at on `main` (after #148) with synthetic content at 1280, 1440 and 390px.
@@ -198,7 +203,8 @@ Notifications and Status felt awkward as cards inside the header; and on a phone
 
 - **Desktop menu.** The extra border was two things: the shared button hover ring (a 2px ring) drawn around each session
   row as the mouse passed over it, and a 1px accent border around the open session. Both read as a box nested inside
-  the menu card. From 900px the rows are plain aligned rows (same left edge and padding, 40px tall); a row tints on hover
+  the menu card. *(Superseded by [ui-library.md](ui-library.md), "Menus": rows are 36px on every width and the open
+  session is marked by a check and bold text, not a bar.)* From 900px the rows are plain aligned rows (same left edge and padding, 40px tall); a row tints on hover
   (`--surface-hover`), and the open session has the info tint, bold text and a 3px accent bar at its leading edge. Pressing
   no longer shrinks the row. The 2px keyboard focus ring stays, drawn just inside the row (`outline-offset: -2px`) so the
   list's edge cannot clip it. The page tabs lose their outline and the current tab its inner border (it stays raised by

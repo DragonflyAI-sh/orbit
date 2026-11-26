@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import { isPagePath } from "./helpers/sessions-ui.ts";
+import { serveWebAsset } from "./helpers/web-assets.ts";
 
 // The Assistant page (docs/assistant.md). The pure helpers (status aggregation, routing) are loaded from the page and always run;
 // the page itself runs in a real browser (Playwright's Chromium) against a scripted fake of ORBIT's routes, and is skipped, saying
@@ -166,6 +167,7 @@ const server = createServer(async (req, res) => {
   const json = (code: number, body: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
   const read = () => new Promise<any>((r) => { let d = ""; req.on("data", (c) => (d += c)); req.on("end", () => r(d ? JSON.parse(d) : {})); });
   if (isPagePath(url.pathname)) { res.writeHead(200, { "content-type": "text/html" }); return res.end(html); }
+  if (serveWebAsset(url.pathname, res)) return;
   if (url.pathname === "/avatar.png") { res.writeHead(404); return res.end(); }
   if (url.pathname === "/status") return status.code === 0 ? req.socket.destroy() : json(status.code, status.body);
   if (url.pathname === "/notifications") return json(200, { inbox: [] });

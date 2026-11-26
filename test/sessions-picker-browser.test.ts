@@ -116,7 +116,7 @@ for (const size of SIZES) {
       assert.equal(await noSideways(page), true);
       // Each list entry is a usable target; the focused one shows a visible focus ring.
       const item = await page.evaluate((id: string) => { const b = document.querySelector(`#sesslist .sitem[data-id="${id}"]`)!; const cs = getComputedStyle(b); return { h: b.getBoundingClientRect().height, ring: cs.outlineStyle, ringW: parseFloat(cs.outlineWidth) }; }, made[0]!.id);
-      assert.ok(item.h >= (size.phone ? 44 : 40), `list entries are at least ${size.phone ? 44 : 40}px tall (${item.h})`);
+      assert.ok(item.h >= (size.phone ? 44 : 36), `list entries are at least ${size.phone ? 44 : 36}px tall (${item.h})`);
       await shot(page, `${size.name}-picker-open`);
       // Escape closes it and puts focus back on the button.
       await page.keyboard.press("Escape");

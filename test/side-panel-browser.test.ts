@@ -142,12 +142,13 @@ test("browser 1280px: the tabs switch views; the collapse button collapses and r
   assert.equal(await shown(page, "#statusline"), true);
   assert.equal(await shown(page, "#inbox"), false);
   assert.equal(await shown(page, "#statussum"), true, "the status view shows the overall status");
-  // Order: the running release (Deployed, then Commit) first, then the overall status, then the pills; the /status link
-  // stays at the top right.
+  // Order (docs/ui-library.md, "Side panel"): the overall status first, then the services, then the running release (Deployed,
+  // then Commit); the /status link sits at the right of the release's label.
   const order = await page.evaluate(() => {
     const r = (sel: string) => document.querySelector(sel)!.getBoundingClientRect();
     const dts = [...document.querySelectorAll("#deployinfo dt")].map((d) => d.textContent);
-    return { dts, release: r("#deployinfo").bottom <= r("#statussum").top, status: r("#statussum").bottom <= r("#ports").top, link: r("#statusopen").top < r("#statussum").top && r("#statusopen").left >= r("#deployinfo").right };
+    return { dts, release: r("#deployinfo").top >= r("#ports").bottom, status: r("#statussum").bottom <= r("#ports").top,
+      link: r("#statusopen").top < r("#releaselabel").bottom && r("#statusopen").bottom > r("#releaselabel").top && r("#statusopen").left >= r("#releaselabel").right };
   });
   assert.deepEqual(order, { dts: ["Deployed", "Commit"], release: true, status: true, link: true });
   assert.match(await page.textContent("#statusdetail"), /Not live: jobs: degraded/);
@@ -520,8 +521,16 @@ test("browser 1280px: the session menu's rows are plain aligned rows: no hover r
   const cur = '#sesslist .sitem[aria-current="true"]', other = '#sesslist .sitem:not([aria-current="true"])';
   const c = await rowLook(page, cur);
   assert.equal(c.border, "0px", "the open session has no border box");
-  assert.match(c.shadow, /inset/, "it is marked by an inset accent bar instead");
-  assert.ok(c.h >= 40);
+  // The shared menu rows (docs/ui-library.md, "Menus"): the open session is marked by a check in the accent colour and bold
+  // text, not by a bar or a box.
+  assert.equal(c.shadow, "none", "no bar or ring on the open session");
+  const mark = await page.$eval(cur, (b: HTMLElement) => { const m = getComputedStyle(b, "::before"); return { content: m.content, mask: m.maskImage || (m as any).webkitMaskImage, w: m.width, weight: getComputedStyle(b).fontWeight }; });
+  assert.equal(mark.content, '""');
+  assert.match(mark.mask, /^url\("data:image\/svg\+xml/, "a check drawn from an inline icon (no request)");
+  assert.equal(mark.w, "14px");
+  assert.equal(mark.weight, "600", "bold");
+  assert.equal(await page.$eval(other, (b: HTMLElement) => getComputedStyle(b, "::before").content), "none", "other rows have no check");
+  assert.ok(c.h >= 36);
   const rest = await rowLook(page, other);
   await page.hover(other);
   await page.waitForTimeout(200);
@@ -553,13 +562,14 @@ test("browser: the page tabs have no inner borders on desktop; phones keep their
   const p = await open(390, 844, "/#assistant", { phone: true });
   const m = await p.page.evaluate(() => { const a = getComputedStyle(document.getElementById("assistanttab")!), line = getComputedStyle(document.documentElement).getPropertyValue("--line").trim(); const probe = document.createElement("i"); probe.style.color = line; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return { cur: a.borderTopColor, line: c }; });
   assert.equal(m.cur, m.line, "the phone's current tab keeps its edge");
-  // The phone menu rows keep their look too: the open session still has its border.
+  // Phones use the same menu rows: the open session is marked by its check, with no border box.
   await p.ctx.close();
   const s = await open(390, 844, "/sessions", { phone: true });
   await s.page.waitForFunction(() => !document.getElementById("sesswrap")!.hidden);
   await s.page.click("#sessbtn");
   await s.page.waitForFunction(() => document.querySelectorAll("#sesslist .sitem").length === 2);
-  assert.equal((await rowLook(s.page, '#sesslist .sitem[aria-current="true"]')).border, "1px");
+  assert.equal((await rowLook(s.page, '#sesslist .sitem[aria-current="true"]')).border, "0px");
+  assert.equal(await s.page.$eval('#sesslist .sitem[aria-current="true"]', (b: HTMLElement) => getComputedStyle(b, "::before").content), '""');
   await s.ctx.close();
 });
 
