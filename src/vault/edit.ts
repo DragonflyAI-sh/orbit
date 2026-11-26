@@ -39,20 +39,23 @@ export class VaultError extends Error {
 export type VaultValue = string | number | boolean | string[];
 
 // One requested change. `rewrite_body` is not offered to the model as a tool: the rolling-note writer uses it, through the same
-// policy, secret check, log line and git pipeline as every other edit.
+// policy, secret check, log line and git pipeline as every other edit. `rewrite_note` is not a chat tool either: the page's file
+// editor saves a whole note with it (POST /sidebar/note), and it applies only while the note is still exactly the text the
+// editor opened (the SHA-256 it quotes), so nobody's change since is overwritten or merged unseen.
 export type VaultEdit =
   | { op: "create_note"; path: string; content: string }
   | { op: "append_section"; path: string; heading: string; text: string }
   | { op: "replace_text"; path: string; find: string; replace: string }
   | { op: "set_frontmatter"; path: string; key: string; value: VaultValue }
   | { op: "archive_note"; path: string }
-  | { op: "rewrite_body"; path: string; expectBodySha: string; text: string };
+  | { op: "rewrite_body"; path: string; expectBodySha: string; text: string }
+  | { op: "rewrite_note"; path: string; expectSha: string; text: string };
 
 export const MAX_TEXT = 20_000;
 export const MAX_NOTE = 256 * 1024;
 export const MAX_EDITS = 3;
 
-const OPS = new Set(["create_note", "append_section", "replace_text", "set_frontmatter", "archive_note", "rewrite_body"]);
+const OPS = new Set(["create_note", "append_section", "replace_text", "set_frontmatter", "archive_note", "rewrite_body", "rewrite_note"]);
 export const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 export const bodyShaOf = (text: string) => sha(splitFrontmatter(text).body);
 
@@ -297,6 +300,12 @@ export function parseEdit(op: string, a: Record<string, unknown>): VaultEdit {
     case "archive_note":
       exactKeys(a, ["path"]);
       return { op, path };
+    case "rewrite_note": {
+      exactKeys(a, ["path", "expectSha", "text"]);
+      const expectSha = textOf(a.expectSha, "expectSha");
+      need(/^[0-9a-f]{64}$/.test(expectSha), "expectSha is the SHA-256 of the note as it was read (64 hex characters).");
+      return { op, path, expectSha, text: textOf(a.text, "text") };
+    }
     default:
       throw new VaultError("invalid_input", "That operation is not available as a tool.");
   }
@@ -360,6 +369,13 @@ export function applyEdit(edit: VaultEdit, read: Read): Applied {
       if (after === before) throw new VaultError("no_change", "The note already says this.");
       writes.set(path, after);
       return { edit, writes, inserted: [edit.text], before, after, describe: `rewrote the body of ${path}` };
+    }
+    case "rewrite_note": {
+      const before = needFile(read, path);
+      if (sha(before) !== edit.expectSha) throw new VaultError("precondition_failed", `${path} changed since it was opened in the editor; the editor's text was not saved.`);
+      if (edit.text === before) throw new VaultError("no_change", "The note already says this.");
+      writes.set(path, edit.text);
+      return { edit, writes, inserted: [edit.text], before, after: edit.text, describe: `saved ${path} from the file editor` };
     }
     case "archive_note": {
       const before = needFile(read, path);
@@ -473,6 +489,8 @@ export function cardChange(edit: VaultEdit): string {
       return `moves to ${archivePathOf(edit.path)}`;
     case "rewrite_body":
       return `body hash it expects: ${edit.expectBodySha}\nnew body:\n${edit.text}`;
+    case "rewrite_note":
+      return `note hash it expects: ${edit.expectSha}\nnew text:\n${edit.text}`;
   }
 }
 
@@ -505,5 +523,7 @@ export function summarize(edit: VaultEdit): string {
       return `Move ${edit.path} to ${archivePathOf(edit.path)}`;
     case "rewrite_body":
       return `Rewrite the body of ${edit.path}`;
+    case "rewrite_note":
+      return `Save ${edit.path} from the file editor`;
   }
 }

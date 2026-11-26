@@ -1,3 +1,4 @@
+import { MAX_TEXT, sha } from "./vault/edit.ts";
 import { maskVaultText } from "./vault/filter.ts";
 import { untrustedText } from "./sessions.ts";
 
@@ -279,11 +280,39 @@ export function sidebarView(notes: ReadonlyMap<string, string> | undefined, phot
   };
 }
 
-// One note for the sidebar's file preview: only a note in the snapshot, masked, and cut to a bound (saying so).
-export function sidebarNote(notes: ReadonlyMap<string, string>, path: string): { path: string; text: string; truncated: boolean } | undefined {
+// One note for the page's file viewer (and the sidebar's preview before it): only a note in the snapshot, masked, and cut to a
+// bound (saying so). `editable` is true only when the text shown is, byte for byte, the note in the vault: nothing masked, no
+// control characters removed, not cut. Only then is `sha` (SHA-256 of the note) given, which a save must quote back, so the
+// editor can never write a masked placeholder or a shortened note over the real one.
+export type SidebarNote = { path: string; text: string; truncated: boolean; editable: boolean; sha?: string };
+export function sidebarNote(notes: ReadonlyMap<string, string>, path: string): SidebarNote | undefined {
   if (typeof path !== "string" || !path.endsWith(".md") || path.includes("\0")) return undefined;
   const text = notes.get(path);
   if (text === undefined) return undefined;
-  const masked = maskVaultText(text).replace(/[‪-‮⁦-⁩]/g, "");
-  return masked.length > SIDEBAR_NOTE_MAX ? { path, text: masked.slice(0, SIDEBAR_NOTE_MAX), truncated: true } : { path, text: masked, truncated: false };
+  const masked = maskVaultText(text).replace(/[\u202a-\u202e\u2066-\u2069]/g, "");
+  if (masked.length > SIDEBAR_NOTE_MAX) return { path, text: masked.slice(0, SIDEBAR_NOTE_MAX), truncated: true, editable: false };
+  const editable = masked === text && text.length > 0 && text.length <= MAX_TEXT;
+  return { path, text: masked, truncated: false, editable, ...(editable ? { sha: sha(text) } : {}) };
+}
+
+// A save from the file viewer (POST /sidebar/note {path, sha, text}), checked against the snapshot before anything is written. It
+// becomes one `rewrite_note` edit through the vault write pipeline (path rules, policy, secret refusal, Log line, remote
+// verification), which applies only while the note in the clone still has the quoted hash: a note that changed in the vault
+// since it was read, in the snapshot or on GitHub, is never overwritten or merged.
+export type SidebarSave =
+  | { ok: true; path: string; expectSha: string; text: string; unchanged: boolean }
+  | { ok: false; code: number; error: string };
+export function sidebarSave(notes: ReadonlyMap<string, string>, input: Record<string, unknown>): SidebarSave {
+  const keys = Object.keys(input ?? {});
+  if (keys.some((k) => !["path", "sha", "text"].includes(k))) return { ok: false, code: 400, error: "A save takes path, sha and text only. Nothing was written." };
+  const { path, sha: quoted, text } = input as { path: unknown; sha: unknown; text: unknown };
+  if (typeof path !== "string" || typeof quoted !== "string" || typeof text !== "string") return { ok: false, code: 400, error: "A save needs path, sha and text as strings. Nothing was written." };
+  const note = sidebarNote(notes, path);
+  if (!note) return { ok: false, code: 404, error: "No such note in the vault. Nothing was written." };
+  if (!note.editable || !note.sha) return { ok: false, code: 422, error: "This note cannot be saved from the editor: it is empty, longer than the editor can save, or has text ORBIT masks on the page. Nothing was written." };
+  if (quoted !== note.sha) return { ok: false, code: 409, error: "The note changed in the vault since it was opened. Nothing was written; reopen it to see the current text." };
+  if (text.length > MAX_TEXT) return { ok: false, code: 413, error: `The editor saves notes of up to ${MAX_TEXT} characters. Nothing was written.` };
+  if (text.includes("\0")) return { ok: false, code: 400, error: "The text has a NUL character. Nothing was written." };
+  const raw = notes.get(path)!;
+  return { ok: true, path, expectSha: note.sha, text, unchanged: text === raw };
 }

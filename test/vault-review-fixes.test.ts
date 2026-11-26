@@ -12,7 +12,7 @@ import type { RecentContext, RecentContextPort } from "../src/recent-context.ts"
 import { threadService } from "../src/thread-service.ts";
 import { threadStore } from "../src/threads.ts";
 import { BACKOFF_MS, isNonFastForward } from "../src/vault/clone.ts";
-import { CARD_MAX_CHARS, cardChange, cardDisplay, digestOfEdit, parseEdit, VaultError } from "../src/vault/edit.ts";
+import { CARD_MAX_CHARS, cardChange, cardDisplay, digestOfEdit, parseEdit, sha, VaultError } from "../src/vault/edit.ts";
 import type { VaultEdit } from "../src/vault/edit.ts";
 import { checkPolicy } from "../src/vault/policy-check.ts";
 import { hasUserinfo, maskRemote, scrubUserinfo } from "../src/vault/remote.ts";
@@ -113,6 +113,7 @@ test("1: every field the digest covers is on the card, for every operation", () 
     { op: "set_frontmatter", path: "System/a.md", key: "KEY-MARK", value: ["v1", "v2"] },
     { op: "archive_note", path: "Journal/2026/a.md" },
     { op: "rewrite_body", path: "System/a.md", expectBodySha: "f".repeat(40), text: "BODY-MARK" },
+    { op: "rewrite_note", path: "System/a.md", expectSha: "e".repeat(64), text: "NOTE-MARK" },
   ];
   for (const edit of edits) {
     const shown = cardDisplay(edit, ["why"]);
@@ -462,6 +463,8 @@ test("5: any replacement or rewrite of existing log text is refused, by every op
     ["archive_note moves it away", E("archive_note", { path: LOG })],
     ["create_note over the existing file", E("create_note", { path: LOG, content: "# fresh\n" })],
     ["rewrite_body", { op: "rewrite_body", path: LOG, expectBodySha: "0".repeat(64), text: "wiped" }],
+    ["rewrite_note with the right hash", { op: "rewrite_note", path: LOG, expectSha: sha(log), text: "# wiped\n" }],
+    ["rewrite_note that removes a line", { op: "rewrite_note", path: LOG, expectSha: sha(log), text: log.replace("- 08:00 orbit: first line (chat)\n", "") }],
   ];
   for (const [what, edit] of attempts) {
     const err = (await clone.write([edit], direct, meta).catch((e) => e)) as VaultError;

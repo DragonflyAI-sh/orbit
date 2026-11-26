@@ -15,11 +15,11 @@ and the photos from the attachment store.
 | --- | --- | --- | --- |
 | **Projects** | Hub notes `Projects/<name>.md` (top level only) whose `status:` is not done, dropped, archived, cancelled, completed, abandoned or closed | — | The selector's choice, remembered in this browser |
 | **Plan** | List items under plan headings (Next actions, Next steps, Plan, Resume here, Now, Focus, Today, Top priorities, To do, Tasks, Actions); checked `[x]` and dropped `[-]` items are left out; a "Resume here" paragraph counts. Then open tasks from `Tasks/*.md` | `now.md`, and every open task (due first) | The project note, and the open tasks whose `project:` names it (`[[id]]`, `[[id\|label]]`, `Projects/id` or `id`) |
-| **Files** | Vault notes, each with an on-demand preview (`GET /sidebar/note?path=`) | `now.md` and every active project's hub note | The project note, its tasks (open or not), every other note that links `[[id]]` (the activity `Log/` aside), and the items under its Locations heading |
+| **Files** | Vault notes; clicking one opens it in the centre pane in the file viewer (docs/file-viewer.md), read on demand (`GET /sidebar/note?path=`), and marks it here while it shows | `now.md` and every active project's hub note | The project note, its tasks (open or not), every other note that links `[[id]]` (the activity `Log/` aside), and the items under its Locations heading |
 | **Images** | Photos Rai sent in the Assistant or a chat thread that still exists (archived threads aside), the same reach as the Assistant's photo tools | The newest 24 | Those whose caption or conversation title contains the project's id (as words), title or an alias as a whole phrase |
 
 Every vault string is masked for secret-shaped values (src/vault/filter.ts), flattened to one line and bounded; a note
-preview is masked and cut at 20,000 characters, and only a note in the snapshot can be previewed. Photo captions and
+note read for the viewer is masked and cut at 20,000 characters, and only a note in the snapshot can be read (or saved: docs/file-viewer.md). Photo captions and
 titles are untrusted text and only ever set as text. A photo is shown only from its validated ref through
 `/assistant/photos/<ref>`, which re-authorizes every fetch; its "Open" link goes only to the Assistant or a chat thread.
 
@@ -64,7 +64,7 @@ src/web/index.html). Storage that is blocked or unreadable falls back to the def
   masking and bounds, the note preview; `GET /sidebar` and `/sidebar/note` on the real server with a vault and real photo
   uploads (owner only, nothing of the vault to anyone else, a vault that cannot be read); the remembered layout.
 - `test/sidebar-browser.test.ts` (Chromium): docked at 1024, 1280 and 1440 with every section filled from the real
-  `sidebarView`; collapse and reopen; resize by keyboard and drag; per-section collapse; choosing a project, a preview and
+  `sidebarView`; collapse and reopen; resize by keyboard and drag; per-section collapse; choosing a project, opening a note in the centre pane and
   the photo viewer; fallback and error states; no status or notifications in it; the phone drawer (modal, inert page,
   focus return, scrim); crossing 1024px; Light and Dark contrast.
 - `test/side-panel-browser.test.ts` (Chromium): the right-hand side panel (rail, tabs with Status first, resize, keyboard,

@@ -54,6 +54,15 @@
     --live: #6fc3ff; --mock: #f2c46d; --down: #ff7a8a; --gold: #f2c46d;
     --header-shadow: rgba(0, 0, 0, .8);
   }
+  /* Syntax colours for the file editor and Markdown code blocks (docs/file-viewer.md), AA on the card in both themes. */
+  :root { --tk-comment: #615c86; --tk-keyword: #7136b8; --tk-string: #1d6a37; --tk-number: #94460a; --tk-fn: #165d8a; --tk-type: #8c2f6c;
+          --tk-prop: #1a5f86; --tk-tag: #a8223f; --tk-meta: #7a5400; --tk-var: #8c2f6c; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --tk-comment: #9590bf; --tk-keyword: #c7adff; --tk-string: #8fd6a0; --tk-number: #f2b47a; --tk-fn: #82caff;
+                                      --tk-type: #f2a8d4; --tk-prop: #6fc3ff; --tk-tag: #ff95a8; --tk-meta: #f2c46d; --tk-var: #f2a8d4; }
+  }
+  :root[data-theme="dark"] { --tk-comment: #9590bf; --tk-keyword: #c7adff; --tk-string: #8fd6a0; --tk-number: #f2b47a; --tk-fn: #82caff;
+                             --tk-type: #f2a8d4; --tk-prop: #6fc3ff; --tk-tag: #ff95a8; --tk-meta: #f2c46d; --tk-var: #f2a8d4; }
   /* Semantic colours: components use these, so a meaning has one colour everywhere. Each has a soft tint for backgrounds.
      --info is the link/accent blue, --ok the live blue, --warn amber, --danger red, --attention ORBIT's gold (waiting on Rai). */
   :root {
@@ -281,10 +290,10 @@
   .navfile { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; min-height: 32px; padding: 4px 6px; border: 0; border-radius: var(--radius-sm);
              background: none; color: var(--fg); font: inherit; font-size: var(--text-sm); text-align: left; overflow-wrap: anywhere; }
   .navfile:not(:disabled):hover { filter: none; box-shadow: none; background: var(--surface-hover); }
-  .navfile[aria-expanded="true"] { background: var(--surface-2); }
   .navfile .path { font: var(--text-2xs)/1.4 var(--font-mono); color: var(--muted); }
-  .navpreview { margin: 2px 0 6px; max-height: 280px; overflow: auto; padding: 8px; border: var(--border); border-radius: var(--radius-sm); background: var(--bg);
-                font: var(--text-xs)/var(--leading-code) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* The file showing in the centre pane: a tint, an accent bar at its start and its name underlined. */
+  .navfile.open { background: var(--surface-2); box-shadow: inset 3px 0 0 var(--accent); }
+  .navfile.open > span:first-child { text-decoration: underline; text-decoration-color: var(--accent); text-decoration-thickness: 2px; text-underline-offset: 3px; }
   .navimgs { list-style: none; margin: 6px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 6px; }
   .navimgs button { display: block; width: 100%; aspect-ratio: 1 / 1; padding: 0; border: var(--border); border-radius: var(--radius-sm); background: var(--bg); line-height: 0; cursor: zoom-in; }
   .navimgs img { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: calc(var(--radius-sm) - 1px); }
@@ -499,6 +508,85 @@
   #log, #alog, #jobs { flex: 1 1 0; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
                       padding: var(--gutter) var(--col-r) var(--gutter) var(--col-l); display: flex; flex-direction: column; gap: 10px; }
   #jobs { --measure: var(--measure-wide); }
+  /* The file viewer (docs/file-viewer.md): a file from the sidebar opens in the centre pane in place of the conversation or Jobs,
+     which are hidden (not closed) while it shows, so Close returns to them as they were. It keeps clear of both panels like
+     they do, and its column is the wide measure. */
+  #fileview { --measure: var(--measure-wide); display: none; flex: 1 1 0; min-height: 0; min-width: 0; flex-direction: column; gap: 8px;
+              --col-l: max(calc(var(--gutter) + var(--nav-safe-l)), calc((100% - var(--nav-room) - var(--side-room) - var(--measure)) / 2));
+              --col-r: max(var(--gutter), calc((100% - var(--nav-room) - var(--side-room) - var(--measure)) / 2));
+              padding: var(--gutter) var(--col-r) calc(var(--gutter) + var(--safe-b)) var(--col-l); margin-right: var(--side-room); }
+  :root[data-file="open"] #fileview { display: flex; }
+  :root[data-file="open"] :is(#log, #alog, .latestdock, #jobs, #astatus, #form, #aform) { display: none !important; }
+  @media (min-width: 1024px) { :root[data-nav="open"] #fileview { margin-left: var(--nav-room); } }
+  #fileview .ftabs { display: flex; gap: 2px; overflow-x: auto; border-bottom: 1px solid var(--line); flex: none; }
+  #fileview .ftabwrap { display: flex; align-items: center; flex: none; border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
+  #fileview .ftabwrap.on { background: var(--card); box-shadow: inset 0 -2px 0 var(--accent); }
+  #fileview :is(.ftab, .ftabx, .fmode) { background: none; color: var(--muted); border: 0; border-radius: 0; box-shadow: none; filter: none; transform: none; }
+  #fileview :is(.ftab, .ftabx) { min-height: 30px; padding: 2px 8px; font-size: var(--text-sm); }
+  #fileview .ftabx { padding: 2px 8px 2px 2px; }
+  #fileview :is(.ftab, .ftabx, .fmode):not(:disabled):hover { color: var(--fg); background: var(--surface-hover); }
+  #fileview .ftabwrap.on .ftab { color: var(--fg); font-weight: 600; }
+  #fileview .fdirty { color: var(--attention); }
+  #fileview .fhead { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 8px 12px; flex: none; }
+  #fileview .fpath { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+  #fileview .fdir { order: -1; flex-basis: 100%; font: var(--text-xs)/1.4 var(--font-mono); color: var(--muted); overflow-wrap: anywhere; }
+  #fileview .ftitle { margin: 0; font-size: var(--text-lg); line-height: var(--leading-tight); font-weight: 650; overflow-wrap: anywhere; }
+  #fileview .fkind { font-size: var(--text-xs); color: var(--muted); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 0 6px; white-space: nowrap; }
+  #fileview .factions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  #fileview .fmodes { display: inline-flex; border: var(--border); border-radius: var(--radius-md); background: var(--card); }
+  #fileview .fmode:first-child { border-radius: calc(var(--radius-md) - 1px) 0 0 calc(var(--radius-md) - 1px); }
+  #fileview .fmode:last-child { border-radius: 0 calc(var(--radius-md) - 1px) calc(var(--radius-md) - 1px) 0; }
+  #fileview .fmode { min-height: var(--btn-h); padding: 0 14px; font-size: var(--text-sm); }
+  #fileview .fmode[aria-selected="true"] { color: var(--fg); font-weight: 600; background: var(--surface-2); box-shadow: inset 0 -2px 0 var(--accent); }
+  #fileview :is(.fsave, .fclose) { display: inline-flex; align-items: center; min-height: var(--btn-h); padding: 0 14px; font-weight: 600; font-size: var(--text-sm); }
+  #fileview .fmsg { margin: 0; font-size: var(--text-sm); color: var(--muted); flex: none; }
+  #fileview .fmsg.ok { color: var(--ok); } #fileview .fmsg.warn { color: var(--warn); } #fileview .fmsg.err { color: var(--danger); }
+  #fileview .fbody, #fileview .fview { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+  #fileview .fnote { margin: 0; color: var(--muted); } #fileview .fnote.err { color: var(--danger); }
+  /* The editor: the textarea is the one scroll region (both scrollbars are its own). The line numbers and the highlighted copy
+     under it follow its scroll position by transform, so their boxes clip what the textarea has scrolled away; nothing is
+     cut off that its scrollbars do not reach. */
+  .fed { flex: 1 1 0; min-height: 220px; display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); border: var(--border); border-radius: var(--radius-md);
+         background: var(--card); font: 13px/1.6 var(--font-mono); }
+  .fed[hidden] { display: none; }
+  .fed:focus-within { outline: var(--focus-ring); outline-offset: 1px; border-color: var(--accent-2); }
+  .fgutter { overflow: clip; min-height: 0; border-radius: calc(var(--radius-md) - 1px) 0 0 calc(var(--radius-md) - 1px); padding: 10px 10px 10px 12px; min-width: calc(var(--fgutter-ch, 2) * 1ch + 22px); text-align: right; color: var(--muted);
+             background: var(--bg); border-right: 1px solid var(--line); user-select: none; }
+  .fnums { white-space: pre; }
+  .farea { position: relative; overflow: clip; min-width: 0; min-height: 0; border-radius: 0 calc(var(--radius-md) - 1px) calc(var(--radius-md) - 1px) 0; }
+  .fed .fta, .fed .fhl { margin: 0; padding: 10px 14px; border: 0; border-radius: 0; font: inherit; letter-spacing: normal; word-spacing: normal; tab-size: 4;
+                         white-space: pre; overflow-wrap: normal; text-align: left; }
+  .fed .fta { position: absolute; inset: 0; width: 100%; height: 100%; display: block; resize: none; overflow: auto; background: transparent; color: var(--fg);
+              box-shadow: none; outline: none; transition: none; }
+  .fed .fta:focus, .fed .fta:hover { outline: none; box-shadow: none; border: 0; }
+  .fed.hl .fta { color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--fg); }
+  .fed.hl .fta::selection { background: color-mix(in srgb, var(--accent-2) 32%, transparent); }
+  .fed .fhl { position: absolute; top: 0; left: 0; min-width: 100%; color: var(--fg); pointer-events: none; will-change: transform; }
+  .fed .fta[readonly] { cursor: default; }
+  .tk-comment { color: var(--tk-comment); font-style: italic; } .tk-keyword { color: var(--tk-keyword); } .tk-string { color: var(--tk-string); }
+  .tk-number, .tk-literal { color: var(--tk-number); } .tk-fn { color: var(--tk-fn); } .tk-type { color: var(--tk-type); } .tk-property { color: var(--tk-prop); }
+  .tk-tag { color: var(--tk-tag); } .tk-meta { color: var(--tk-meta); } .tk-var { color: var(--tk-var); }
+  #fileview .fmd { flex: 1 1 0; min-height: 220px; overflow: auto; padding: 12px 18px; border: var(--border); border-radius: var(--radius-md); background: var(--card);
+                   line-height: var(--leading); overflow-wrap: anywhere; }
+  #fileview .fmd[hidden] { display: none; }
+  #fileview .fmd :is(h1, h2, h3, h4, h5, h6) { margin: 1.1em 0 .4em; line-height: var(--leading-tight); }
+  #fileview .fmd > :first-child { margin-top: 0; }
+  #fileview .fmd h1 { font-size: 1.6em; } #fileview .fmd h2 { font-size: 1.3em; } #fileview .fmd h3 { font-size: 1.12em; }
+  #fileview .fmd :is(p, ul, ol, blockquote, pre) { margin: .5em 0; }
+  #fileview .fmd :is(ul, ol) { padding-left: 1.5em; }
+  #fileview .fmd li.ftask { list-style: none; margin-left: -1.3em; }
+  #fileview .fmd code { font: .92em/1.4 var(--font-mono); background: var(--surface-2); border-radius: var(--radius-xs); padding: 0 4px; }
+  #fileview .fmd pre { padding: 10px 12px; background: var(--bg); border: var(--border); border-radius: var(--radius-sm); overflow-x: auto; }
+  #fileview .fmd pre code { background: none; padding: 0; font-size: 13px; line-height: 1.55; }
+  #fileview .fmd pre.ffront { font-size: var(--text-xs); }
+  #fileview .fmd blockquote { padding-left: 12px; border-left: 3px solid var(--line); color: var(--muted); }
+  #fileview .fmd hr { border: 0; border-top: 1px solid var(--line); margin: 1em 0; }
+  #fileview .fmd a { color: var(--accent-2); }
+  #fileview .fmd .fwiki { color: var(--accent-2); border-bottom: 1px dotted currentColor; }
+  #fileview .fpdf { flex: 1 1 0; min-height: 60vh; width: 100%; border: var(--border); border-radius: var(--radius-md); background: var(--card); }
+  #fileview .fimgbox { flex: 1 1 0; min-height: 0; overflow: auto; display: flex; align-items: flex-start; justify-content: center; padding: 12px;
+                       border: var(--border); border-radius: var(--radius-md); background: var(--bg); }
+  #fileview .fimg { max-width: 100%; height: auto; }
   @media (min-width: 900px) { #log, #alog { gap: var(--space-3); } }
   /* Messages, in Chat and the Assistant alike: one left-aligned list, no bubbles. Every row is the sender's icon in a
      narrow first column and everything else (name and time, then the content parts) in one content column. The sender
@@ -869,10 +957,12 @@
 <main id="alog" aria-label="Assistant conversation"></main>
 <div class="latestdock"><button type="button" class="tolatest" id="atolatest" title="Scroll to the latest message" hidden><span aria-hidden="true">↓</span> click to latest</button></div>
 <section id="jobs" hidden aria-live="off"></section>
+<section id="fileview" hidden aria-label="Open file"></section>
 <form id="form" hidden><div id="tray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="pick" accept="image/*" multiple hidden><button type="button" class="phbtn" id="pickbtn" title="Add image (up to 10)" aria-label="Add image"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14 M5 12h14"/></svg></button><textarea id="input" rows="1" placeholder="Message ORBIT" aria-label="Message ORBIT"></textarea><button id="send" class="sendbtn" title="Send" aria-label="Send"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13 M22 2l-7 20-4-9-9-4z"/></svg></button></form>
 <div id="astatus" role="status" aria-live="polite"></div>
 <form id="aform"><div id="atray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="apick" accept="image/*" multiple hidden><button type="button" class="phbtn" id="apickbtn" title="Add image (up to 10)" aria-label="Add image"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14 M5 12h14"/></svg></button><textarea id="ainput" rows="1" placeholder="Message the Assistant" aria-label="Message the Assistant"></textarea><button id="asend" class="sendbtn" title="Send" aria-label="Send"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13 M22 2l-7 20-4-9-9-4z"/></svg></button></form>
 <script src="/photos.js"></script>
+<script src="/files.js"></script>
 <script>
   // ---- The app shell's height (docs/web-shell.md). CSS sizes the shell to 100dvh (100vh where dvh is unknown). That is
   // right everywhere except iOS Safari with the on-screen keyboard open: Safari never shrinks the layout viewport or dvh
@@ -2558,21 +2648,19 @@
       const f = b.files || {};
       const list = (Array.isArray(f.items) ? f.items : []).filter((x) => x && typeof x.path === "string");
       const kids = [];
-      if (list.length) kids.push(el("ul", { className: "navlist files" }, ...list.map((x, i) => {
-        const id = `navprev-${i}`;
-        const pre = el("pre", { className: "navpreview", id, tabIndex: 0, hidden: true });
-        pre.setAttribute("aria-label", `Preview of ${str(x.path, 200)}`);
-        const btn = el("button", { type: "button", className: "navfile", onclick: () => togglePreview(btn, x.path, pre) },
-          el("span", { textContent: `${str(x.title, 100)}${x.kind === "project" ? " (project note)" : x.kind === "task" ? " (task)" : ""}` }), el("span", { className: "path", textContent: str(x.path, 200) }));
-        btn.setAttribute("aria-expanded", "false");
-        btn.setAttribute("aria-controls", id);
-        return el("li", {}, btn, pre);
+      if (list.length) kids.push(el("ul", { className: "navlist files" }, ...list.map((x) => {
+        const path = str(x.path, 200);
+        const btn = el("button", { type: "button", className: "navfile", title: `Open ${path}`, onclick: () => openFile(path) },
+          el("span", { textContent: `${str(x.title, 100)}${x.kind === "project" ? " (project note)" : x.kind === "task" ? " (task)" : ""}` }), el("span", { className: "path", textContent: path }));
+        btn.dataset.path = path;
+        return el("li", {}, btn);
       })));
       else kids.push(navNote(current ? "No notes link to this project." : "No notes found."));
       if (f.more > 0) kids.push(navNote(`${Number(f.more)} more not shown.`));
       const locs = Array.isArray(f.locations) ? f.locations : [];
       if (locs.length) kids.push(el("h3", { className: "navsub", textContent: "Locations" }), el("ul", { className: "navlist bul" }, ...locs.slice(0, 10).map((t) => el("li", { textContent: str(t) }))));
       files.replaceChildren(...kids);
+      markOpenFile(fileViewer ? fileViewer.active : null);
     }
 
     // Images: thumbnails of the photos (enlarged in the photo viewer), each with a link to its conversation.
@@ -2593,17 +2681,63 @@
     } else if (!b.photoError) ikids.push(navNote(current ? "No photos name this project in their caption or conversation title." : "No photos sent yet."));
     imgs.replaceChildren(...ikids);
   }
-  async function togglePreview(btn, path, pre) {
-    if (btn.getAttribute("aria-expanded") === "true") { btn.setAttribute("aria-expanded", "false"); pre.hidden = true; return; }
-    btn.setAttribute("aria-expanded", "true");
-    pre.hidden = false;
-    pre.textContent = "Reading the note…";
-    try {
-      const res = await fetch(`/sidebar/note?path=${encodeURIComponent(path)}`);
-      let j = null;
-      try { j = await res.json(); } catch { j = null; }
-      pre.textContent = res.ok && j && j.note && typeof j.note.text === "string" ? `${j.note.text}${j.note.truncated ? "\n\n[The note is longer; the rest is not shown here.]" : ""}` : str(j && j.error) || `The note could not be read (HTTP ${res.status}).`;
-    } catch { pre.textContent = "ORBIT could not be reached for this note."; }
+  // ---- The file viewer (docs/file-viewer.md, src/web/files.js): a file chosen in the sidebar opens in the centre pane, in an
+  // editor or viewer for its type, with Save for an editable note and Close back to what was showing. Notes are read from
+  // GET /sidebar/note and saved with POST /sidebar/note, which writes only through the vault pipeline the chat tools use. The
+  // sidebar marks the file that is showing. Moving to another page (a tab, a link, Back) hides the viewer and keeps the open
+  // files, with any unsaved text, until they are closed.
+  const fileBox = document.getElementById("fileview");
+  async function readVaultFile(path) {
+    if (!/\.md$/i.test(path)) return { ok: false, error: "ORBIT reads only Markdown notes from the vault for now, so this file cannot be opened here." };
+    let res;
+    try { res = await fetch(`/sidebar/note?path=${encodeURIComponent(path)}`); } catch { return { ok: false, error: "ORBIT could not be reached for this file." }; }
+    let j = null;
+    try { j = await res.json(); } catch { j = null; }
+    if (!res.ok || !j || !j.note || typeof j.note.text !== "string") return { ok: false, error: str(j && j.error) || (res.status === 403 ? "Files are for ORBIT's owner; this sign-in cannot read them." : `The file could not be read (HTTP ${res.status}).`) };
+    const n = j.note;
+    const writable = j.writable === true;
+    const editable = writable && n.editable === true && typeof n.sha === "string" && /^[0-9a-f]{64}$/.test(n.sha);
+    const why = editable ? "" : !writable ? "Read-only: vault writes are not enabled on this ORBIT."
+      : n.truncated ? "Read-only: the note is longer than the editor shows, so only its start is here."
+      : "Read-only: this note is empty, longer than the editor can save, or has a value ORBIT masks on the page, so saving it from here could change it.";
+    return { ok: true, text: n.truncated ? `${n.text}\n\n[The note is longer; the rest is not shown here.]` : n.text, editable, sha: editable ? n.sha : null, why };
+  }
+  async function saveVaultFile(path, sha, text) {
+    let res;
+    try { res = await fetch("/sidebar/note", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path, sha, text }) }); } catch { return { ok: false, error: "ORBIT could not be reached. Nothing was saved." }; }
+    let j = null;
+    try { j = await res.json(); } catch { j = null; }
+    if ((res.status === 200 || res.status === 202) && j && typeof j.status === "string") return { ok: true, status: j.status, commit: str(j.commit, 64), reasons: Array.isArray(j.reasons) ? j.reasons.map((r) => str(r, 200)) : [] };
+    return { ok: false, error: str(j && j.error, 600) || (res.status === 403 ? "Saving is for ORBIT's owner; this sign-in cannot write the vault." : `The file could not be saved (HTTP ${res.status}). Nothing was written.`) };
+  }
+  function markOpenFile(path) {
+    for (const b of document.querySelectorAll("#navfiles .navfile")) {
+      const on = typeof path === "string" && b.dataset.path === path;
+      b.classList.toggle("open", on);
+      if (on) b.setAttribute("aria-current", "true"); else b.removeAttribute("aria-current");
+    }
+  }
+  const fileViewer = window.OrbitFiles ? window.OrbitFiles.createViewer(document, fileBox, { load: readVaultFile, save: saveVaultFile, fileUrl: () => null, onChange: markOpenFile }) : null;
+  function openFile(path) {
+    if (!fileViewer) return;
+    const wasDrawer = !docked() && drawerOpen;
+    fileViewer.open(path);
+    if (wasDrawer) closeNav();
+    if (wasDrawer || !nav.contains(document.activeElement)) {
+      const title = fileBox.querySelector(".ftitle");
+      if (title) { title.tabIndex = -1; title.focus({ preventScroll: true }); }
+    }
+  }
+  if (fileViewer) {
+    // Another page: hide the viewer (the open files stay open).
+    tabs.addEventListener("click", (e) => { if (e.target instanceof Element && e.target.closest("a[data-tab]")) fileViewer.hide(); });
+    document.addEventListener("click", (e) => {
+      const a = e.target instanceof Element ? e.target.closest("a[href]") : null;
+      if (a && !fileBox.contains(a) && (!a.target || a.target === "_self")) fileViewer.hide();
+    }, true);
+    window.addEventListener("hashchange", () => fileViewer.hide());
+    window.addEventListener("popstate", () => fileViewer.hide());
+    window.addEventListener("beforeunload", (e) => { if (fileViewer.dirty()) { e.preventDefault(); e.returnValue = ""; } });
   }
   document.getElementById("navproject").addEventListener("change", (e) => {
     navPrefs.project = validProject(e.target.value) ? e.target.value : "";
