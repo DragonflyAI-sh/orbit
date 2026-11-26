@@ -40,6 +40,9 @@ box opens the gallery with that search. Read-only: nothing on the page edits, de
 
 `GET` routes, owner only (src/server.ts, src/photo-gallery.ts). Each request is audited as attachment reading and session
 reading, the decisions the Assistant's photo tools and the sidebar need; anyone else gets 403 and nothing of the photos.
+Like the other photo routes, they are same-site only: a request a browser marks as coming from another site (`Sec-Fetch-Site`
+other than `same-origin` or `none`) gets 403 and is audited, so a page elsewhere cannot make Rai's browser list, read or search
+the photos (a search sends its text to the embedding provider when semantic search is configured).
 
 | Route | Answer | Built from |
 | --- | --- | --- |
@@ -65,7 +68,7 @@ Differences from the tools, on purpose:
 - `test/photo-gallery.test.ts`: the routes on the real server with photos, observations saved by `photos_observe` and a
   correction relayed by `photos_correct` through the real tools: paging every photo exactly once, AI counts, search by
   caption, title, observation, correction and context (a superseded observation does not match), the detail with
-  limitations, scope, context and the superseded original, refusals (owner only, GET only, bad cursor, limit and query,
+  limitations, scope, context and the superseded original, refusals (owner only, GET only, cross-site, bad cursor, limit and query,
   unknown refs); the sidebar's paged Images list; the page's pure helpers.
 - `test/photo-gallery-browser.test.ts` (Chromium, desktop 1280px and phone 390px): opening a photo from the sidebar, the
   metadata panel, arrow keys, Escape and focus return, inert background, layout (beside or below), date and month

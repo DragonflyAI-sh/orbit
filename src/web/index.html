@@ -3186,6 +3186,7 @@
     const writable = j.writable === true;
     const editable = writable && n.editable === true && typeof n.sha === "string" && /^[0-9a-f]{64}$/.test(n.sha);
     const why = editable ? "" : !writable ? "Read-only: vault writes are not enabled on this ORBIT."
+      : n.crlf === true ? "Read-only: this file uses Windows line endings (CRLF), so it is read-only to prevent accidentally rewriting every line ending on save."
       : n.truncated ? "Read-only: the note is longer than the editor shows, so only its start is here."
       : "Read-only: this note is empty, longer than the editor can save, or has a value ORBIT masks on the page, so saving it from here could change it.";
     return { ok: true, text: n.truncated ? `${n.text}\n\n[The note is longer; the rest is not shown here.]` : n.text, editable, sha: editable ? n.sha : null, why };

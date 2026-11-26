@@ -23,8 +23,8 @@ let browser: any;
 before(async () => { if (!skip) browser = await playwright.chromium.launch(); });
 after(async () => { await browser?.close(); });
 
-async function served() {
-  const fx = makeFixture(SEED);
+async function served(seed: Record<string, string> = SEED) {
+  const fx = makeFixture(seed);
   const clone = fx.make();
   const memory = cloneMemory(clone, undefined);
   await memory.refresh!(0);
@@ -182,6 +182,31 @@ test("browser: unsaved changes ask before closing; a protected note needs confir
     assert.equal(s.remote("Projects/secret-rai.md"), SEED["Projects/secret-rai.md"]);
     assert.equal(s.proposals().list().length, 1);
     assert.equal(await page.isDisabled("#fileview .fsave"), false, "the draft is kept and can be saved again");
+    assert.deepEqual(errors, []);
+  } finally {
+    await ctx.close();
+    s.r.close();
+  }
+});
+
+test("browser: a note with Windows line endings (CRLF) opens read-only, says why, shows no unsaved changes and has no Save", { skip }, async () => {
+  const crlf = "# Windows\r\n- step one\r\n- step two\r\n";
+  const s = await served({ ...SEED, "Projects/windows.md": crlf });
+  const { page, ctx, errors } = await openPage(s.base);
+  try {
+    await page.click(fileButton("Projects/windows.md"));
+    await page.waitForFunction(() => (document.querySelector("#fileview .fta") as HTMLTextAreaElement | null)?.value.includes("step two"));
+    assert.equal(await page.textContent("#fileview .fkind"), "Markdown · read-only");
+    assert.equal(await page.getAttribute("#fileview .fta", "readonly"), "", "the editor is read-only");
+    assert.equal(await visible(page, "#fileview .fsave"), false, "no Save button");
+    assert.match(await msg(page), /Read-only: this file uses Windows line endings \(CRLF\), so it is read-only to prevent accidentally rewriting every line ending on save\./);
+    // Closing asks nothing: the browser's CRLF-to-LF conversion is not an unsaved change.
+    let asked = "";
+    page.once("dialog", (d: any) => { asked = d.message(); void d.accept(); });
+    await page.click("#fileview .fclose");
+    await page.waitForFunction(() => !document.documentElement.dataset.file);
+    assert.equal(asked, "");
+    assert.equal(s.remote("Projects/windows.md"), crlf, "the vault keeps every CRLF");
     assert.deepEqual(errors, []);
   } finally {
     await ctx.close();
