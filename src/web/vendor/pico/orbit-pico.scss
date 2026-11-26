@@ -1,0 +1,49 @@
+// ORBIT's build of Pico CSS 2.1.1 (MIT, https://picocss.com). See README.md in this folder for why and how to rebuild.
+// Every rule is scoped under .pico ($parent-selector), and the modules that would style the whole page (the document
+// root, landmarks, containers, grid) or that ORBIT does not use are off, so nothing outside a .pico element changes.
+// Buttons are ORBIT's own (primary, secondary and destructive; docs/design-system.md), so Pico's button module is off too.
+@use "pico/scss/index" with (
+  $parent-selector: ".pico",
+  $theme-color: "violet",
+  $enable-semantic-container: false,
+  $enable-responsive-spacings: false,
+  $enable-responsive-typography: false,
+  $enable-viewport: false,
+  $enable-transitions: true,
+  $enable-important: false,
+  $modules: (
+    "themes/default": true,
+    "layout/document": false,
+    "layout/landmarks": false,
+    "layout/container": false,
+    "layout/section": false,
+    "layout/grid": false,
+    "layout/overflow-auto": false,
+    "content/link": false,
+    "content/typography": false,
+    "content/embedded": false,
+    "content/button": false,
+    "content/table": false,
+    "content/code": false,
+    "content/figure": false,
+    "content/misc": false,
+    "forms/basics": true,
+    "forms/checkbox-radio-switch": true,
+    "forms/input-color": false,
+    "forms/input-date": false,
+    "forms/input-file": false,
+    "forms/input-range": false,
+    "forms/input-search": false,
+    "components/accordion": false,
+    "components/card": true,
+    "components/dropdown": true,
+    "components/group": false,
+    "components/loading": true,
+    "components/modal": false,
+    "components/nav": true,
+    "components/progress": false,
+    "components/tooltip": false,
+    "utilities/accessibility": false,
+    "utilities/reduce-motion": true
+  )
+);

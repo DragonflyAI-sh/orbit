@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import { pickSession, sessionAction, isPagePath } from "./helpers/sessions-ui.ts";
+import { serveWebAsset } from "./helpers/web-assets.ts";
 
 // Session addresses, /sessions/<session id>, and the legacy Chat addresses /#chat and /#chat/<id> that now lead there
 // (docs/threads.md, "Addresses"). The pure parsers are loaded from the page and always run. The rest drives the real page in
@@ -127,6 +128,7 @@ const server = createServer(async (req, res) => {
   inflight++; res.on("close", () => inflight--);
   const json = (code: number, body: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
   if (isPagePath(url.pathname)) { res.writeHead(200, { "content-type": "text/html" }); return res.end(html); }
+  if (serveWebAsset(url.pathname, res)) return;
   if (url.pathname === "/status") return json(200, { ports: [] });
   if (url.pathname === "/notifications") return json(200, { inbox: [] });
   // The Jobs page is offered only when a test asks for it (jobsOn); the Assistant is always refused here.

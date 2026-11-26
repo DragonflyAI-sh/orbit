@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import { isPagePath } from "./helpers/sessions-ui.ts";
+import { serveWebAsset } from "./helpers/web-assets.ts";
 
 // The page header and the side panel's views: page links and the theme toggle in the bar, and no notifications or status
 // indicator there; those are the side panel's two tabs (docs/design-system.md, "Side panel"): the Notifications tab with the
@@ -125,9 +126,10 @@ test("the markup: page links in the header bar with no Status link and no indica
   assert.doesNotMatch(html, /id="notesbtn"|id="health"|id="sidetitle"|id="sideclose"/);
   assert.doesNotMatch(header, /id="(side|inbox|statusline|notecount)"|Notifications|All live|Status unknown/);
   // The side panel follows the header: a labelled complementary region whose head is the collapse button and the tab list.
-  const side = html.match(/<aside id="side" aria-label="Side panel">[\s\S]*?<\/aside>/)![0];
+  const side = html.match(/<aside id="side" class="pico" aria-label="Side panel">[\s\S]*?<\/aside>/)![0];
   assert.ok(html.indexOf(side) > html.indexOf("</header>"), "after the header");
-  assert.match(side, /^<aside id="side" aria-label="Side panel"><div class="sidehead"><button type="button" id="sidetoggle" aria-expanded="false" aria-controls="inbox statusline" aria-label="Side panel"[^>]*>/);
+  // class="pico": the panel is a component-library element (docs/ui-library.md).
+  assert.match(side, /^<aside id="side" class="pico" aria-label="Side panel"><div class="sidehead"><button type="button" id="sidetoggle" aria-expanded="false" aria-controls="inbox statusline" aria-label="Side panel"[^>]*>/);
   assert.match(side, /<div class="sidetabs" role="tablist" aria-label="Side panel views" aria-orientation="vertical">/);
   for (const [tab, panel, label] of [["sidetab-notes", "inbox", "Notifications"], ["sidetab-status", "statusline", "Status"]]) {
     const b = side.match(new RegExp(`<button type="button" role="tab" id="${tab}"[^>]*>`))?.[0] ?? "";
@@ -137,9 +139,9 @@ test("the markup: page links in the header bar with no Status link and no indica
   }
   assert.match(side, /<span id="notecount" class="count">\?<\/span>/, "the count starts unknown, never 0");
   assert.match(side, /<div id="sideresize" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="side" aria-label="Resize the side panel"/);
-  // The status line holds the running release (Deployed, then Commit) first, then the overall summary, a read-error line, the
-  // pills (saying they are being read until the first answer) and the page link.
-  assert.match(side, /<div id="statusline"[^>]*><dl id="deployinfo"[^>]*>[\s\S]*?<\/dl><div id="statussum">[\s\S]*?<div id="statuserr" role="alert" hidden><\/div><div id="ports"><span class="empty">Reading status…<\/span><\/div><a id="statusopen" href="\/status" target="_blank" rel="noopener noreferrer"/);
+  // The status line holds the overall summary first, then a read-error line, the services (saying they are being read until
+  // the first answer), then the running release (its label and the page link, then Deployed and Commit).
+  assert.match(side, /<div id="statusline"[^>]*><div id="statussum">[\s\S]*?<div id="statuserr" role="alert" hidden><\/div><div class="sidelabel" id="serviceslabel">Services<\/div><div id="ports"><span class="empty">Reading status…<\/span><\/div><div class="sidelabel" id="releaselabel">Release<\/div><a id="statusopen" href="\/status" target="_blank" rel="noopener noreferrer"[^>]*>[\s\S]*?<\/a><dl id="deployinfo"[^>]*>[\s\S]*?<\/dl><\/div>/);
   // Before the first /status request the Status tab says the status has not been read yet, not that reading it failed.
   const status = side.match(/<button type="button" role="tab" id="sidetab-status"[^>]*>/)![0];
   assert.match(status, /class="sidetab unknown"/);
@@ -166,6 +168,7 @@ const server = createServer((req, res) => {
   const url = new URL(req.url!, "http://x");
   const json = (code: number, body: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
   if (isPagePath(url.pathname)) { res.writeHead(200, { "content-type": "text/html" }); return res.end(html); }
+  if (serveWebAsset(url.pathname, res)) return;
   if (url.pathname === "/status") { statusGets++; return json(200, { commit: "abc", ports }); }
   if (url.pathname === "/notifications") return json(200, { inbox: current.filter((n) => !acks.includes(n.id)), current });
   const ack = url.pathname.match(/^\/notifications\/([\w-]+)\/ack$/);

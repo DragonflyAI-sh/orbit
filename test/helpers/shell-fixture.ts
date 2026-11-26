@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { sidebarNote, sidebarView } from "../../src/sidebar.ts";
 import type { SidebarPhoto } from "../../src/sidebar.ts";
+import { serveWebAsset } from "./web-assets.ts";
 
 // A scripted fake of the routes the web page reads, with synthetic conversations of any length, for the app-shell layout
 // checks (test/app-shell-browser.test.ts) and the screenshot script (test/helpers/shell-screens.ts). Nothing here is real
@@ -83,6 +84,7 @@ export function shellServer(opts: ShellOpts = {}) {
     const p = url.pathname;
     if (p === "/" || p === "/sessions" || p.startsWith("/sessions/") || p === "/chat") { res.writeHead(200, { "content-type": "text/html" }); return res.end(page()); }
     if (p === "/avatar.png") { res.writeHead(200, { "content-type": "image/png" }); return res.end(avatar); }
+    if (serveWebAsset(p, res)) return;
     if (p === "/photos.js") { res.writeHead(200, { "content-type": "text/javascript" }); return res.end(readFileSync(new URL("../../src/web/photos.js", import.meta.url))); }
     if (p === "/status") return json(200, { ports: [{ port: "model", state: "live" }, { port: "vault", state: "live" }, { port: "jobs", state: "degraded" }], deploy: { at: at(0), commit: "0123456789abcdef0123456789abcdef01234567" } });
     if (p === "/notifications") return json(200, { inbox: notes() });

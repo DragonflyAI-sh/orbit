@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import { pickSession, sessionAction, isPagePath } from "./helpers/sessions-ui.ts";
+import { serveWebAsset } from "./helpers/web-assets.ts";
 
 // The chat page in a real browser (Playwright's Chromium), against a scripted fake of ORBIT's thread routes. It checks
 // what the fake-DOM tests cannot: that a text selection, keyboard focus and scroll positions really survive polls,
@@ -70,6 +71,7 @@ const server = createServer(async (req, res) => {
   inflight++; res.on("close", () => inflight--);
   const json = (code: number, body: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
   if (isPagePath(url.pathname)) { res.writeHead(200, { "content-type": "text/html" }); return res.end(html); }
+  if (serveWebAsset(url.pathname, res)) return;
   if (url.pathname === "/status") return json(200, { ports: [] });
   if (url.pathname === "/notifications") return json(200, { inbox: [] });
   if (url.pathname === "/model/login" || url.pathname === "/chat/proposals") return json(403, { error: "no" });

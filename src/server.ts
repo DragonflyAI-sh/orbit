@@ -98,6 +98,10 @@ export const pageHtml = (html: string, zone: string): string => html.replace(ZON
 const page = pageHtml(readFileSync(new URL("./web/index.html", import.meta.url), "utf8"), ZONE);
 const avatar = readFileSync(new URL("./web/avatar.png", import.meta.url));
 const photosJs = readFileSync(new URL("./web/photos.js", import.meta.url), "utf8");
+// The page's component library: ORBIT's scoped build of Pico CSS, vendored (src/web/vendor/pico/README.md). Served from
+// here, never from a CDN, so the page makes no third-party request.
+export const PICO_CSS_PATH = "/vendor/pico.orbit.min.css";
+const picoCss = readFileSync(new URL("./web/vendor/pico/pico.orbit.min.css", import.meta.url), "utf8");
 
 // The page's own addresses: / and the Sessions section, /sessions and /sessions/<one path segment>. Deeper paths are not
 // page addresses (404 as before). A bad segment still gets the page, which says the address names no session.
@@ -837,6 +841,11 @@ export function buildServer({
     if (req.method === "GET" && url.pathname === "/photos.js") {
       res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff" });
       return res.end(photosJs);
+    }
+
+    if (req.method === "GET" && url.pathname === PICO_CSS_PATH) {
+      res.writeHead(200, { "content-type": "text/css; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff" });
+      return res.end(picoCss);
     }
 
     if (req.method === "GET" && url.pathname === "/avatar.png") {
