@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import { isPagePath } from "./helpers/sessions-ui.ts";
 import { pageHtml } from "../src/server.ts";
+import { serveWebAsset } from "./helpers/web-assets.ts";
 
 // The running release in the expanded status line (the deployinfo block in src/web/index.html): "Deployed" is the time
 // deploy/pull-deploy.sh recorded for the running commit (/status deploy.lastDeployed.at), "Commit" is the commit the process
@@ -105,10 +106,10 @@ test("deploy info: absent or invalid metadata says Unavailable, with the reason,
   }
 });
 
-test("the markup: the deployment rows are a labelled list that leads the status line, before the status, the pills and the /status link", () => {
-  const line = html.match(/<div id="statusline"[^>]*>[\s\S]*?<\/a><\/div>/)?.[0] ?? "";
-  // Order: Deployed, then Commit, then the status (summary, read error, pills), then the /status link.
-  assert.match(line, /^<div id="statusline"[^>]*><dl id="deployinfo" aria-label="Running release"><dt>Deployed<\/dt><dd id="deployedat">[\s\S]*?<\/dd><dt>Commit<\/dt><dd id="deploycommit">[\s\S]*?<\/dd><\/dl><div id="statussum">[\s\S]*?<div id="statuserr" role="alert" hidden><\/div><div id="ports"><span class="empty">Reading status…<\/span><\/div><a id="statusopen"[\s\S]*?<\/a><\/div>$/);
+test("the markup: the status line leads with the status, then the services, then the release (a labelled list) with the /status link beside its label", () => {
+  const line = html.match(/<div id="statusline"[^>]*>[\s\S]*?<\/dl><\/div>/)?.[0] ?? "";
+  // Order (docs/ui-library.md, "Side panel"): the status (summary, read error), the services (label, pills), then the release (label, the /status link, Deployed and Commit).
+  assert.match(line, /^<div id="statusline"[^>]*><div id="statussum">[\s\S]*?<div id="statuserr" role="alert" hidden><\/div><div class="sidelabel" id="serviceslabel">Services<\/div><div id="ports"><span class="empty">Reading status…<\/span><\/div><div class="sidelabel" id="releaselabel">Release<\/div><a id="statusopen"[\s\S]*?<\/a><dl id="deployinfo" aria-label="Running release"><dt>Deployed<\/dt><dd id="deployedat">[\s\S]*?<\/dd><dt>Commit<\/dt><dd id="deploycommit">[\s\S]*?<\/dd><\/dl><\/div>$/);
   assert.doesNotMatch(grab("deployinfo"), /Date\.now|new Date\(\)|performance\.now|mtime|lastModified/, "no time from the page's clock or a file");
 });
 
@@ -126,6 +127,7 @@ const server = createServer((req, res) => {
   const url = new URL(req.url!, "http://x");
   const json = (code: number, body: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
   if (isPagePath(url.pathname)) { res.writeHead(200, { "content-type": "text/html" }); return res.end(page0); }
+  if (serveWebAsset(url.pathname, res)) return;
   if (url.pathname === "/status") return json(answer.code, answer.body);
   if (url.pathname === "/notifications") return json(200, { inbox: [], current: [] });
   if (url.pathname === "/model/login") return json(403, { error: "no" });
@@ -159,7 +161,7 @@ const visible = (sel: string) => page.evaluate((s: string) => { const e = docume
 // What each row shows on screen.
 const rows = () => page.$$eval("#deployinfo > *", (es: HTMLElement[]) => es.map((e) => `${e.tagName}:${e.textContent}`));
 
-test("browser: collapsed shows only the indicator; the Status view shows Deployed and Commit above the pills, in the configured zone", { skip }, async () => {
+test("browser: collapsed shows only the indicator; the Status view shows Deployed and Commit below the services, in the configured zone", { skip }, async () => {
   answer = { code: 200, body: good() };
   await open();
   assert.equal(await page.getAttribute("#sidetoggle", "aria-expanded"), "false");
@@ -187,12 +189,13 @@ test("browser: collapsed shows only the indicator; the Status view shows Deploye
   const x = await page.$$eval("#deployinfo dt, #deployinfo dd", (es: HTMLElement[]) => es.map((e) => Math.round(e.getBoundingClientRect().left)));
   assert.equal(x[0], x[2], "labels aligned");
   assert.equal(x[1], x[3], "values aligned");
-  // It comes first, on its own row above the pills (the status), not beside them; the /status link sits at its right.
+  // It comes last, on its own rows under the services (the status leads the view); the /status link sits at the right of its label.
   const order = await page.evaluate(() => {
     const r = (id: string) => document.getElementById(id)!.getBoundingClientRect();
-    return { above: r("deployinfo").bottom <= r("ports").top, first: document.getElementById("statusline")!.firstElementChild!.id, linkBeside: r("statusopen").top < r("deployinfo").bottom && r("statusopen").left >= r("deployinfo").right };
+    return { below: r("deployinfo").top >= r("ports").bottom, first: document.getElementById("statusline")!.firstElementChild!.id,
+      linkBeside: r("statusopen").bottom > r("releaselabel").top && r("statusopen").top < r("releaselabel").bottom && r("statusopen").left >= r("releaselabel").right };
   });
-  assert.deepEqual(order, { above: true, first: "deployinfo", linkBeside: true });
+  assert.deepEqual(order, { below: true, first: "statussum", linkBeside: true });
   // Collapsing hides it again.
   await page.click("#sidetoggle");
   assert.equal(await visible("#deployinfo"), false);
@@ -242,13 +245,13 @@ test("browser: phone and desktop widths, light and dark: no sideways scroll, not
         const line = document.getElementById("statusline")!.getBoundingClientRect();
         const kids = [...document.querySelectorAll("#deployinfo dt, #deployinfo dd")].map((e) => { const r = e.getBoundingClientRect(); return r.right <= box.right + 0.5 && r.left >= box.left - 0.5; });
         const dd = getComputedStyle(document.getElementById("deployedat")!);
-        return { page: document.documentElement.scrollWidth <= document.documentElement.clientWidth, inside: box.right <= line.right + 0.5 && box.left >= line.left - 0.5, kids: kids.every(Boolean), fg: dd.color, bg: getComputedStyle(document.body).backgroundColor, oneLine: document.getElementById("deployedat")!.getBoundingClientRect().height < 30, linkBeside: document.getElementById("statusopen")!.getBoundingClientRect().top < document.getElementById("ports")!.getBoundingClientRect().bottom };
+        return { page: document.documentElement.scrollWidth <= document.documentElement.clientWidth, inside: box.right <= line.right + 0.5 && box.left >= line.left - 0.5, kids: kids.every(Boolean), fg: dd.color, bg: getComputedStyle(document.body).backgroundColor, oneLine: document.getElementById("deployedat")!.getBoundingClientRect().height < 30, linkBeside: (() => { const a = document.getElementById("statusopen")!.getBoundingClientRect(), l = document.getElementById("releaselabel")!.getBoundingClientRect(); return a.bottom > l.top && a.top < l.bottom && a.left >= l.right; })() };
       });
       assert.equal(m.page, true, `no horizontal overflow at ${width}px ${colorScheme}`);
       assert.equal(m.inside, true, `rows inside the status line at ${width}px ${colorScheme}`);
       assert.equal(m.kids, true, `every label and value inside the list at ${width}px ${colorScheme}`);
       assert.equal(m.oneLine, true, `the date fits one line at ${width}px ${colorScheme}`);
-      assert.equal(m.linkBeside, true, `the /status link stays beside the pills at ${width}px ${colorScheme}`);
+      assert.equal(m.linkBeside, true, `the /status link stays beside the release label at ${width}px ${colorScheme}`);
       assert.notEqual(m.fg, m.bg);
       if (process.env.ORBIT_SCREENSHOTS) await page.locator("header").screenshot({ path: `${process.env.ORBIT_SCREENSHOTS}/deploy-${colorScheme}-${width}.png` });
     }

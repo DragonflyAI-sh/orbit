@@ -60,6 +60,7 @@ import { resolutionSummary } from "./model-capability.ts";
 import { AttachmentError, attachmentStore, isAttachmentId, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments.ts";
 import { localTime, PHOTO_TOOL_NAMES, photoDisplay, photoTools, reachablePhotos } from "./photo-access.ts";
 import { sidebarNote, sidebarSave, sidebarView } from "./sidebar.ts";
+import { dayIn, planOverview, projectDetail } from "./plan.ts";
 import type { SidebarPhoto } from "./sidebar.ts";
 import { isPhotoRef, safeGalleries } from "./photo-ref.ts";
 import type { PhotoSources } from "./photo-access.ts";
@@ -99,6 +100,10 @@ const page = pageHtml(readFileSync(new URL("./web/index.html", import.meta.url),
 const avatar = readFileSync(new URL("./web/avatar.png", import.meta.url));
 const photosJs = readFileSync(new URL("./web/photos.js", import.meta.url), "utf8");
 const filesJs = readFileSync(new URL("./web/files.js", import.meta.url), "utf8");
+// The page's component library: ORBIT's scoped build of Pico CSS, vendored (src/web/vendor/pico/README.md). Served from
+// here, never from a CDN, so the page makes no third-party request.
+export const PICO_CSS_PATH = "/vendor/pico.orbit.min.css";
+const picoCss = readFileSync(new URL("./web/vendor/pico/pico.orbit.min.css", import.meta.url), "utf8");
 
 // The page's own addresses: / and the Sessions section, /sessions and /sessions/<one path segment>. Deeper paths are not
 // page addresses (404 as before). A bad segment still gets the page, which says the address names no session.
@@ -844,6 +849,11 @@ export function buildServer({
       return res.end(filesJs);
     }
 
+    if (req.method === "GET" && url.pathname === PICO_CSS_PATH) {
+      res.writeHead(200, { "content-type": "text/css; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff" });
+      return res.end(picoCss);
+    }
+
     if (req.method === "GET" && url.pathname === "/avatar.png") {
       res.writeHead(200, { "content-type": "image/png", "cache-control": "public, max-age=86400" });
       return res.end(avatar);
@@ -1328,7 +1338,7 @@ export function buildServer({
         return send(res, code, { error: message.slice(0, 600) });
       }
     }
-    if (url.pathname === "/sidebar" || url.pathname === "/sidebar/note") {
+    if (url.pathname === "/sidebar" || url.pathname === "/sidebar/note" || url.pathname === "/sidebar/project") {
       if (req.method !== "GET") return send(res, 405, { error: "Use GET for this route." });
       if (!(await owned("memory", "read"))) return;
       await memory.refresh?.(60_000);
@@ -1347,6 +1357,12 @@ export function buildServer({
         if (!notes) return send(res, 503, { error: vaultError });
         const note = sidebarNote(notes, url.searchParams.get("path") ?? "");
         return note ? send(res, 200, { note, source, writable: Boolean(vaultEdits) }) : send(res, 404, { error: "No such note in the vault." });
+      }
+      // One project's Plan detail (docs/plan.md): read from its hub note and the tasks that name it.
+      if (url.pathname === "/sidebar/project") {
+        if (!notes) return send(res, 503, { error: vaultError });
+        const project = projectDetail(notes, url.searchParams.get("id") ?? "");
+        return project ? send(res, 200, { project, today: dayIn(new Date()), source }) : send(res, 404, { error: "No such project in the vault (Projects/)." });
       }
       let photos: SidebarPhoto[] = [];
       let photoError: string | undefined;
@@ -1371,7 +1387,7 @@ export function buildServer({
         }
       }
       const project = url.searchParams.get("project") || undefined;
-      return send(res, 200, { ...sidebarView(notes, photos, project), vault: notes ? { ok: true, source } : { ok: false, error: vaultError }, ...(photoError ? { photoError } : {}) });
+      return send(res, 200, { ...sidebarView(notes, photos, project), overview: planOverview(notes), vault: notes ? { ok: true, source } : { ok: false, error: vaultError }, ...(photoError ? { photoError } : {}) });
     }
     if (url.pathname === "/notifications" && req.method === "GET") {
       if (!(await owned("notify", "inbox"))) return;

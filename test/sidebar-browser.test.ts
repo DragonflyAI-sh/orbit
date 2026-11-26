@@ -77,10 +77,18 @@ for (const [width, height] of [[1024, 700], [1280, 800], [1440, 900]] as const) 
     assert.deepEqual(await words(page, "#nav .navtoggle"), ["Projects", "Plan", "Files", "Images"]);
     for (const name of ["projects", "plan", "files", "images"]) assert.equal(await page.getAttribute(`#navh-${name}`, "aria-controls"), `navbody-${name}`);
     // Real data from the vault: active projects only (the done one is left out), the plan from now.md, the related files, the photos.
-    assert.deepEqual(await texts(page, "#navproject option"), ["All projects", "Alpha Garden", "Beta Desk (paused)"]);
-    assert.equal(await page.textContent("#navprojnote"), "2 active projects in the vault.");
-    assert.deepEqual(await texts(page, "#navplan .navlist li"), ["Ship the synthetic release", "Review the fixture plan", "Buy seeds todo · due 2026-11-30", "Fix the drawer todo"]);
-    assert.deepEqual(await texts(page, "#navfiles .navfile .path"), ["now.md", "Projects/alpha-garden.md", "Projects/beta-desk.md"]);
+    assert.deepEqual(await texts(page, "#navproject option"), ["All projects", "Alpha Garden", "Gamma Roof", "Beta Desk (paused)"]);
+    assert.equal(await page.textContent("#navprojnote"), "3 active projects in the vault.");
+    // Plan (docs/plan.md): All projects, how many need attention, then the open projects by priority with a status dot and a
+    // priority badge, the dot's meaning also given as text.
+    assert.deepEqual(await texts(page, "#navplan .planall"), ["All projects 3 open"]);
+    assert.equal(await page.textContent("#navplan .planattn"), "2 need attention");
+    assert.deepEqual(await words(page, "#navplan .planitem .ptitle"), ["Alpha Garden", "Gamma Roof", "Beta Desk"]);
+    assert.deepEqual(await words(page, "#navplan .planitem .pbadge"), ["P1", "P2", "P3"]);
+    assert.deepEqual(await page.$$eval("#navplan .planitem .pdot", (ds: Element[]) => ds.map((d) => d.className)), ["pdot green", "pdot red", "pdot yellow"]);
+    assert.deepEqual(await words(page, "#navplan .planitem .vh"), [", on track", ", at risk", ", needs attention"]);
+    assert.deepEqual(await page.$$eval("#navplan a", (as: HTMLAnchorElement[]) => as.map((a) => a.getAttribute("href"))), ["/#plan", "/#plan/alpha-garden", "/#plan/gamma-roof", "/#plan/beta-desk"]);
+    assert.deepEqual(await texts(page, "#navfiles .navfile .path"), ["now.md", "Projects/alpha-garden.md", "Projects/gamma-roof.md", "Projects/beta-desk.md"]);
     assert.equal(await page.$$eval("#navimages img", (is: HTMLImageElement[]) => is.length), 3);
     // Status and notifications live in the right side panel, Status first; neither the sidebar nor the header holds them.
     assert.equal(await page.evaluate(() => document.getElementById("nav")!.contains(document.getElementById("statusline")) || document.getElementById("nav")!.contains(document.getElementById("inbox"))), false);
@@ -177,15 +185,15 @@ test("browser 1280px: each section collapses on its own, keeps its header, works
   await ctx.close();
 });
 
-test("browser 1280px: choosing a project scopes the plan, files and images to it, opens a note, enlarges a photo, and is remembered", { skip }, async () => {
+test("browser 1280px: choosing a project scopes the files and images to it, opens a note, enlarges a photo, and is remembered", { skip }, async () => {
   fixture.sidebarReads.length = 0;
   const { page, ctx } = await open(1280, 800);
+  const planBefore = await texts(page, "#navplan a");
   await page.selectOption("#navproject", "alpha-garden");
-  await page.waitForFunction(() => document.getElementById("navplan")!.textContent!.includes("Projects/alpha-garden.md"));
+  await page.waitForFunction(() => document.getElementById("navfiles")!.textContent!.includes("Tasks/buy-seeds.md"));
   assert.ok(fixture.sidebarReads.includes("?project=alpha-garden"), "the server is asked for that project");
-  // Plan: the project note's open next actions (the checked one is done), its resume point, and its open task.
-  assert.deepEqual(await words(page, "#navplan .navsub"), ["Next actions", "Resume here", "Open tasks for this project"]);
-  assert.deepEqual(await texts(page, "#navplan .navlist li"), ["Order the synthetic seeds", "Draw the watering plan", "Pick up at the trellis sketch.", "Buy seeds todo · due 2026-11-30"]);
+  // Plan: the same index of every open project (one opens in the main area; docs/plan.md), whatever the selector says.
+  assert.deepEqual(await texts(page, "#navplan a"), planBefore);
   // Files: the project note, its task, the note that links to it, and the locations it lists.
   assert.deepEqual(await texts(page, "#navfiles .navfile .path"), ["Projects/alpha-garden.md", "Tasks/buy-seeds.md", "Resources/soil-notes.md"]);
   assert.deepEqual(await texts(page, "#navfiles .navsub + .navlist li"), ["~/projects/alpha-garden"]);
@@ -213,7 +221,7 @@ test("browser 1280px: choosing a project scopes the plan, files and images to it
   await page.waitForFunction(() => (document.getElementById("navproject") as HTMLSelectElement).value === "alpha-garden");
   // Back to all projects.
   await page.selectOption("#navproject", "");
-  await page.waitForFunction(() => document.getElementById("navplan")!.textContent!.includes("From now.md"));
+  await page.waitForFunction(() => document.getElementById("navfiles")!.textContent!.includes("now.md"));
   await ctx.close();
 });
 
@@ -279,7 +287,7 @@ test("browser (390 phone): the sidebar is a drawer, closed by default; the menu 
   assert.deepEqual(inert, [true, true, true], "the page behind is inert");
   const g = await geo(page);
   assert.ok(g.nav.left === 0 && g.nav.top === 0 && Math.abs(g.nav.bottom - g.vh) <= 1 && g.nav.width <= 360, `a full-height drawer from the left (${JSON.stringify(g.nav)})`);
-  assert.deepEqual(await texts(page, "#navproject option"), ["All projects", "Alpha Garden", "Beta Desk (paused)"], "the same real sections");
+  assert.deepEqual(await texts(page, "#navproject option"), ["All projects", "Alpha Garden", "Gamma Roof", "Beta Desk (paused)"], "the same real sections");
   assert.equal(await sideways(page), false);
   await page.keyboard.press("Escape");
   assert.equal(await shown(page, "#nav"), false);
@@ -332,8 +340,16 @@ test("browser 1280px: the session menu's rows are plain aligned rows: no hover r
   const cur = '#sesslist .sitem[aria-current="true"]', other = '#sesslist .sitem:not([aria-current="true"])';
   const c = await rowLook(page, cur);
   assert.equal(c.border, "0px", "the open session has no border box");
-  assert.match(c.shadow, /inset/, "it is marked by an inset accent bar instead");
-  assert.ok(c.h >= 40);
+  // The shared menu rows (docs/ui-library.md, "Menus"): the open session is marked by a check in the accent colour and bold
+  // text, not by a bar or a box.
+  assert.equal(c.shadow, "none", "no bar or ring on the open session");
+  const mark = await page.$eval(cur, (b: HTMLElement) => { const m = getComputedStyle(b, "::before"); return { content: m.content, mask: m.maskImage || (m as any).webkitMaskImage, w: m.width, weight: getComputedStyle(b).fontWeight }; });
+  assert.equal(mark.content, '""');
+  assert.match(mark.mask, /^url\("data:image\/svg\+xml/, "a check drawn from an inline icon (no request)");
+  assert.equal(mark.w, "14px");
+  assert.equal(mark.weight, "600", "bold");
+  assert.equal(await page.$eval(other, (b: HTMLElement) => getComputedStyle(b, "::before").content), "none", "other rows have no check");
+  assert.ok(c.h >= 36);
   const rest = await rowLook(page, other);
   await page.hover(other);
   await page.waitForTimeout(200);
@@ -365,13 +381,14 @@ test("browser: the page tabs have no inner borders on desktop; phones keep their
   const p = await open(390, 844, "/#assistant", { phone: true });
   const m = await p.page.evaluate(() => { const a = getComputedStyle(document.getElementById("assistanttab")!), line = getComputedStyle(document.documentElement).getPropertyValue("--line").trim(); const probe = document.createElement("i"); probe.style.color = line; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return { cur: a.borderTopColor, line: c }; });
   assert.equal(m.cur, m.line, "the phone's current tab keeps its edge");
-  // The phone menu rows keep their look too: the open session still has its border.
+  // Phones use the same menu rows: the open session is marked by its check, with no border box.
   await p.ctx.close();
   const s = await open(390, 844, "/sessions", { phone: true });
   await s.page.waitForFunction(() => !document.getElementById("sesswrap")!.hidden);
   await s.page.click("#sessbtn");
   await s.page.waitForFunction(() => document.querySelectorAll("#sesslist .sitem").length === 2);
-  assert.equal((await rowLook(s.page, '#sesslist .sitem[aria-current="true"]')).border, "1px");
+  assert.equal((await rowLook(s.page, '#sesslist .sitem[aria-current="true"]')).border, "0px");
+  assert.equal(await s.page.$eval('#sesslist .sitem[aria-current="true"]', (b: HTMLElement) => getComputedStyle(b, "::before").content), '""');
   await s.ctx.close();
 });
 

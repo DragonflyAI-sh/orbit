@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
+import { serveWebAsset } from "./helpers/web-assets.ts";
 
 // The message list in a real browser (Playwright's Chromium), for the Assistant and for Chat, against a scripted fake of
 // ORBIT's routes: one left-aligned list with no bubbles, every row with its sender's icon, name and stored time; the time
@@ -65,6 +66,7 @@ const server = createServer(async (req, res) => {
   const read = () => new Promise<any>((r) => { let d = ""; req.on("data", (c) => (d += c)); req.on("end", () => r(d ? JSON.parse(d) : {})); });
   // The page itself, also at session addresses (/sessions/<id>), so a reload draws it whichever address form the page uses.
   if (url.pathname === "/" || url.pathname === "/sessions" || url.pathname.startsWith("/sessions/")) { res.writeHead(200, { "content-type": "text/html" }); return res.end(html); }
+  if (serveWebAsset(url.pathname, res)) return;
   if (url.pathname === "/avatar.png") { res.writeHead(200, { "content-type": "image/png" }); return res.end(avatar); }
   if (url.pathname === "/status") return json(200, { ports: [{ port: "model", state: "live" }] });
   if (url.pathname === "/notifications") return json(200, { inbox: [] });

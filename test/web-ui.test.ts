@@ -266,10 +266,10 @@ test("the main content uses the full available width: no fixed cap on rows, card
     assert.ok(r, `${sel} has a rule`);
     assert.doesNotMatch(r, /max-width:\s*(?!100%)\S/, `${sel} is not capped below the log's width`);
   }
-  // The three scrollers share one rule; their edge padding is the --gutter token (16px, 12px on a phone) plus the safe area.
-  const scrollers = css.match(/#log, #alog, #jobs \{([^}]*)\}/)?.[1] ?? "";
-  assert.ok(scrollers, "one shared rule for #log, #alog and #jobs");
-  assert.doesNotMatch(scrollers, /max-width|(?<![-\w])width:\s*\d/, "the conversation and Jobs span the page");
+  // The four scrollers share one rule; their edge padding is the --gutter token (16px, 12px on a phone) plus the safe area.
+  const scrollers = css.match(/#log, #alog, #jobs, #plan \{([^}]*)\}/)?.[1] ?? "";
+  assert.ok(scrollers, "one shared rule for #log, #alog, #jobs and #plan");
+  assert.doesNotMatch(scrollers, /max-width|(?<![-\w])width:\s*\d/, "the conversation, Jobs and Plan span the page");
   assert.match(scrollers, /padding:\s*var\(--gutter\)/, "they keep their edge padding");
   assert.match(css, /--gutter:\s*var\(--space-4\)/);
   assert.match(css, /--space-4:\s*16px/);
@@ -378,7 +378,7 @@ test("navigation is real links to the page's views, nothing invented; the status
   assert.match(server, /return pathname === "\/" \|\| pathname === "\/sessions" \|\|/);
   assert.match(server, /req\.method === "GET" && url\.pathname === "\/status"\)/);
   assert.match(server, /url\.pathname === "\/jobs" && req\.method === "GET"/, "the Jobs view has its owner-only data route");
-  const statusLine = html.match(/<div id="statusline"[^>]*>(?:<dl id="deployinfo"[\s\S]*?<\/dl>)?[\s\S]*?<\/a><\/div>/)?.[0] ?? "";
+  const statusLine = html.match(/<div id="statusline"[^>]*>[\s\S]*?<\/dl><\/div>/)?.[0] ?? "";
   const status = statusLine.match(/<a ([^>]*)>/)?.[1] ?? "";
   assert.match(status, /href="\/status"/);
   assert.match(status, /target="_blank"/);
