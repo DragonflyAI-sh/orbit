@@ -77,10 +77,18 @@ for (const [width, height] of [[1024, 700], [1280, 800], [1440, 900]] as const) 
     assert.deepEqual(await words(page, "#nav .navtoggle"), ["Projects", "Plan", "Files", "Images"]);
     for (const name of ["projects", "plan", "files", "images"]) assert.equal(await page.getAttribute(`#navh-${name}`, "aria-controls"), `navbody-${name}`);
     // Real data from the vault: active projects only (the done one is left out), the plan from now.md, the related files, the photos.
-    assert.deepEqual(await texts(page, "#navproject option"), ["All projects", "Alpha Garden", "Beta Desk (paused)"]);
-    assert.equal(await page.textContent("#navprojnote"), "2 active projects in the vault.");
-    assert.deepEqual(await texts(page, "#navplan .navlist li"), ["Ship the synthetic release", "Review the fixture plan", "Buy seeds todo · due 2026-11-30", "Fix the drawer todo"]);
-    assert.deepEqual(await texts(page, "#navfiles .navfile .path"), ["now.md", "Projects/alpha-garden.md", "Projects/beta-desk.md"]);
+    assert.deepEqual(await texts(page, "#navproject option"), ["All projects", "Alpha Garden", "Gamma Roof", "Beta Desk (paused)"]);
+    assert.equal(await page.textContent("#navprojnote"), "3 active projects in the vault.");
+    // Plan (docs/plan.md): All projects, how many need attention, then the open projects by priority with a status dot and a
+    // priority badge, the dot's meaning also given as text.
+    assert.deepEqual(await texts(page, "#navplan .planall"), ["All projects 3 open"]);
+    assert.equal(await page.textContent("#navplan .planattn"), "2 need attention");
+    assert.deepEqual(await words(page, "#navplan .planitem .ptitle"), ["Alpha Garden", "Gamma Roof", "Beta Desk"]);
+    assert.deepEqual(await words(page, "#navplan .planitem .pbadge"), ["P1", "P2", "P3"]);
+    assert.deepEqual(await page.$$eval("#navplan .planitem .pdot", (ds: Element[]) => ds.map((d) => d.className)), ["pdot green", "pdot red", "pdot yellow"]);
+    assert.deepEqual(await words(page, "#navplan .planitem .vh"), [", on track", ", at risk", ", needs attention"]);
+    assert.deepEqual(await page.$$eval("#navplan a", (as: HTMLAnchorElement[]) => as.map((a) => a.getAttribute("href"))), ["/#plan", "/#plan/alpha-garden", "/#plan/gamma-roof", "/#plan/beta-desk"]);
+    assert.deepEqual(await texts(page, "#navfiles .navfile .path"), ["now.md", "Projects/alpha-garden.md", "Projects/gamma-roof.md", "Projects/beta-desk.md"]);
     assert.equal(await page.$$eval("#navimages img", (is: HTMLImageElement[]) => is.length), 3);
     // Status and notifications live in the right side panel, Status first; neither the sidebar nor the header holds them.
     assert.equal(await page.evaluate(() => document.getElementById("nav")!.contains(document.getElementById("statusline")) || document.getElementById("nav")!.contains(document.getElementById("inbox"))), false);
@@ -177,15 +185,15 @@ test("browser 1280px: each section collapses on its own, keeps its header, works
   await ctx.close();
 });
 
-test("browser 1280px: choosing a project scopes the plan, files and images to it, previews a note, enlarges a photo, and is remembered", { skip }, async () => {
+test("browser 1280px: choosing a project scopes the files and images to it, previews a note, enlarges a photo, and is remembered", { skip }, async () => {
   fixture.sidebarReads.length = 0;
   const { page, ctx } = await open(1280, 800);
+  const planBefore = await texts(page, "#navplan a");
   await page.selectOption("#navproject", "alpha-garden");
-  await page.waitForFunction(() => document.getElementById("navplan")!.textContent!.includes("Projects/alpha-garden.md"));
+  await page.waitForFunction(() => document.getElementById("navfiles")!.textContent!.includes("Tasks/buy-seeds.md"));
   assert.ok(fixture.sidebarReads.includes("?project=alpha-garden"), "the server is asked for that project");
-  // Plan: the project note's open next actions (the checked one is done), its resume point, and its open task.
-  assert.deepEqual(await words(page, "#navplan .navsub"), ["Next actions", "Resume here", "Open tasks for this project"]);
-  assert.deepEqual(await texts(page, "#navplan .navlist li"), ["Order the synthetic seeds", "Draw the watering plan", "Pick up at the trellis sketch.", "Buy seeds todo · due 2026-11-30"]);
+  // Plan: the same index of every open project (one opens in the main area; docs/plan.md), whatever the selector says.
+  assert.deepEqual(await texts(page, "#navplan a"), planBefore);
   // Files: the project note, its task, the note that links to it, and the locations it lists.
   assert.deepEqual(await texts(page, "#navfiles .navfile .path"), ["Projects/alpha-garden.md", "Tasks/buy-seeds.md", "Resources/soil-notes.md"]);
   assert.deepEqual(await texts(page, "#navfiles .navsub + .navlist li"), ["~/projects/alpha-garden"]);
@@ -211,7 +219,7 @@ test("browser 1280px: choosing a project scopes the plan, files and images to it
   await page.waitForFunction(() => (document.getElementById("navproject") as HTMLSelectElement).value === "alpha-garden");
   // Back to all projects.
   await page.selectOption("#navproject", "");
-  await page.waitForFunction(() => document.getElementById("navplan")!.textContent!.includes("From now.md"));
+  await page.waitForFunction(() => document.getElementById("navfiles")!.textContent!.includes("now.md"));
   await ctx.close();
 });
 
@@ -277,7 +285,7 @@ test("browser (390 phone): the sidebar is a drawer, closed by default; the menu 
   assert.deepEqual(inert, [true, true, true], "the page behind is inert");
   const g = await geo(page);
   assert.ok(g.nav.left === 0 && g.nav.top === 0 && Math.abs(g.nav.bottom - g.vh) <= 1 && g.nav.width <= 360, `a full-height drawer from the left (${JSON.stringify(g.nav)})`);
-  assert.deepEqual(await texts(page, "#navproject option"), ["All projects", "Alpha Garden", "Beta Desk (paused)"], "the same real sections");
+  assert.deepEqual(await texts(page, "#navproject option"), ["All projects", "Alpha Garden", "Gamma Roof", "Beta Desk (paused)"], "the same real sections");
   assert.equal(await sideways(page), false);
   await page.keyboard.press("Escape");
   assert.equal(await shown(page, "#nav"), false);
