@@ -2963,7 +2963,8 @@
   // overview; one project (/#plan/<id>) is read from GET /sidebar/project?id=<id> each time it opens. Dates are shown relative
   // to today in Rai's time zone (the server's `today`), with the full date on hover; every value is set as text.
   // <plan-lib>
-  const PLAN_ID = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,119}$/;
+  // Any id the overview can give a card (the file name of Projects/<id>.md): anything without a "/".
+  const PLAN_ID = /^[^/]+$/;
   // What a Plan address names: { id: "" } for all projects, { id } for one, { invalid: true } for anything else after "#plan/".
   function planTarget(hash) {
     if (hash === "#plan") return { id: "" };
@@ -3135,8 +3136,10 @@
     const t = planTarget(location.hash);
     if (!t) return;
     const key = location.hash;
-    if (t.invalid) { planShown = key; planDetailTitle = ""; planBox.replaceChildren(el("a", { className: "back", href: planHref(""), textContent: "← All projects" }), planHeading("No such project"), el("p", { className: "err", role: "alert", textContent: "This address does not name a project." })); placeFocus(planBox); return; }
-    if (!t.id) { planDetailTitle = ""; drawOverview(); planShown = key; updateTitle(); return; }
+    // Every change of view (a project, All projects, a bad address) starts a new generation, so a project's answer that
+    // arrives after Back (or after another project opened) is dropped instead of replacing the view that is showing.
+    if (t.invalid) { ++planGen; planShown = key; planDetailTitle = ""; planBox.replaceChildren(el("a", { className: "back", href: planHref(""), textContent: "← All projects" }), planHeading("No such project"), el("p", { className: "err", role: "alert", textContent: "This address does not name a project." })); placeFocus(planBox); return; }
+    if (!t.id) { ++planGen; planDetailTitle = ""; drawOverview(); planShown = key; updateTitle(); return; }
     if (planShown === key && planBox.querySelector(".pldetail")) { placeFocus(planBox); return; }
     planShown = key;
     const gen = ++planGen;

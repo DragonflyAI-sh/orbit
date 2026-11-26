@@ -59,13 +59,15 @@ const galleryPhoto = (ph: SidebarPhoto) => ({
   image: { type: "image/jpeg", width: 64, height: 48, bytes: 2048 }, ai: { observations: 0, corrections: 0 },
 });
 
-export type ShellOpts = { exchanges?: number; pending?: boolean; notes?: number; card?: boolean; html?: string; longNotes?: boolean; sidebar?: "ok" | "vault-down" | 500 };
+export type ShellOpts = { exchanges?: number; pending?: boolean; notes?: number; card?: boolean; html?: string; longNotes?: boolean; sidebar?: "ok" | "vault-down" | 500; planNotes?: ReadonlyMap<string, string> };
 
 export function shellServer(opts: ShellOpts = {}) {
   let o: ShellOpts = { exchanges: 2, pending: false, notes: 3, card: false, sidebar: "ok", ...opts };
   const sidebarReads: string[] = [];
   const base = Date.parse("2026-11-18T05:00:00Z");
   const at = (n: number) => new Date(base + n * 60_000).toISOString();
+  // The synthetic vault, with any extra Plan notes a test adds.
+  const vaultNotes = () => (o.planNotes ? new Map([...SIDEBAR_NOTES, ...o.planNotes]) : SIDEBAR_NOTES);
   const page = () => o.html ?? readFileSync(new URL("../../src/web/index.html", import.meta.url), "utf8");
   const messages = () => {
     const out: Record<string, unknown>[] = [];
@@ -106,11 +108,12 @@ export function shellServer(opts: ShellOpts = {}) {
       sidebarReads.push(url.search);
       if (typeof o.sidebar === "number") return json(o.sidebar, { error: "synthetic failure" });
       const down = o.sidebar === "vault-down";
-      return json(200, { ...sidebarView(down ? undefined : SIDEBAR_NOTES, sidebarPhotos(at), url.searchParams.get("project") || undefined), overview: planOverview(down ? undefined : SIDEBAR_NOTES, PLAN_NOW), vault: down ? { ok: false, error: "The vault could not be read: synthetic outage" } : { ok: true, source: "memory/vault@fixture" } });
+      const vault = vaultNotes();
+      return json(200, { ...sidebarView(down ? undefined : vault, sidebarPhotos(at), url.searchParams.get("project") || undefined), overview: planOverview(down ? undefined : vault, PLAN_NOW), vault: down ? { ok: false, error: "The vault could not be read: synthetic outage" } : { ok: true, source: "memory/vault@fixture" } });
     }
     if (p === "/sidebar/project") {
       if (o.sidebar === "vault-down") return json(503, { error: "The vault could not be read: synthetic outage" });
-      const d = projectDetail(SIDEBAR_NOTES, url.searchParams.get("id") ?? "", PLAN_NOW);
+      const d = projectDetail(vaultNotes(), url.searchParams.get("id") ?? "", PLAN_NOW);
       return d ? json(200, { project: d, today: dayIn(PLAN_NOW) }) : json(404, { error: "No such project in the vault (Projects/)." });
     }
     if (p === "/gallery/photos") { const ps = sidebarPhotos(at).map(galleryPhoto); return json(200, { total: ps.length, returned: ps.length, nextCursor: null, zone: "UTC", photos: ps }); }

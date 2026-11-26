@@ -135,6 +135,64 @@ test("browser 1440px: a card opens the project's detail; Back and the browser's 
   await ctx.close();
 });
 
+test("browser 1440px: Back before a project's detail arrives keeps All projects; the late answer is dropped", { skip }, async () => {
+  const { page, ctx, errors } = await open(1440, 900, "/#plan");
+  await page.waitForSelector("#plan .plcard");
+  // Hold the project's answer until the view has gone back to All projects.
+  let release!: () => void;
+  const held = new Promise<void>((r) => { release = r; });
+  await page.route("**/sidebar/project?**", async (route: any) => { await held; await route.continue(); });
+  await page.click("#plan .plcard a[data-id='alpha-garden']");
+  await page.waitForFunction(() => document.querySelector("#plan .empty")?.textContent === "Reading the project…");
+  await page.click("#plan a.back");
+  await page.waitForFunction(() => location.hash === "#plan" && document.querySelector("#plan .plcard"));
+  const answered = page.waitForResponse((r: any) => r.url().includes("/sidebar/project?"));
+  release();
+  await answered;
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 200)));
+  assert.equal(await page.textContent("#plan h2.pltitle"), "All projects");
+  assert.equal(await page.$("#plan .pldetail"), null, "the late detail does not replace the overview");
+  assert.ok((await page.$$("#plan .plcard")).length > 0);
+  assert.equal(await page.title(), "All projects · Plan · ORBIT");
+  assert.deepEqual(await current(page), ["/#plan"]);
+  // The project still opens once asked again.
+  await page.unroute("**/sidebar/project?**");
+  await page.click("#plan .plcard a[data-id='alpha-garden']");
+  await page.waitForSelector("#plan .pldetail");
+  assert.equal(await page.textContent("#plan h2.pltitle"), "Alpha Garden");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("browser 1440px: projects named with spaces, commas, brackets, apostrophes and accents open from their card and the sidebar", { skip }, async () => {
+  const names = ["Café Rebuild, Q4 (plan)", "Mom's 70th"];
+  fixture.set({ planNotes: new Map(names.map((n) => [`Projects/${n}.md`, `---\nstatus: active\npriority: 1\n---\n# ${n}\n\n## Next actions\n- Book the hall\n`])) });
+  const { page, ctx, errors } = await open(1440, 900, "/#plan");
+  try {
+    await page.waitForSelector("#plan .plcard");
+    for (const id of names) {
+      await page.goto(`${url}/#plan`);
+      await page.waitForSelector("#plan .plcard");
+      await page.locator("#plan .plcard a").filter({ hasText: id }).first().click();
+      await page.waitForSelector("#plan .pldetail");
+      assert.equal(await page.textContent("#plan h2.pltitle"), id);
+      assert.equal(await page.$("#plan .err"), null, `${id}: no error`);
+      assert.deepEqual(await words(page, "#plan .plsec[aria-label='Next steps'] li"), ["Book the hall"]);
+      assert.equal(decodeURIComponent(new URL(page.url()).hash), `#plan/${id}`);
+      assert.equal(await page.title(), `${id} · Plan · ORBIT`);
+    }
+    // From the sidebar's Plan index too.
+    await page.goto(`${url}/#plan`);
+    await page.waitForSelector("#navplan a.planitem");
+    await page.locator("#navplan a.planitem").filter({ hasText: names[0]! }).click();
+    await page.waitForFunction((t: string) => document.querySelector("#plan h2.pltitle")?.textContent === t && document.querySelector("#plan .pldetail"), names[0]);
+    assert.deepEqual(errors, []);
+  } finally {
+    await ctx.close();
+    fixture.set({ planNotes: undefined });
+  }
+});
+
 test("browser 1280px: an unknown project, a bad address and an unreadable vault are said plainly, never blank", { skip }, async () => {
   let { page, ctx } = await open(1280, 800, "/#plan/no-such-project");
   await page.waitForSelector("#plan .err");

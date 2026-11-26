@@ -125,6 +125,24 @@ test("detail: timeline, blockers, next steps, recent activity in Rai's time, lin
   for (const bad of ["../now", "inner/nested", "", ".hidden"]) assert.equal(projectDetail(notes(VAULT), bad, NOW), undefined, bad);
 });
 
+// Names people give projects: every card the overview draws opens (a regression from the first Plan views, which turned
+// these away as "No such project").
+const ODD_NAMES = ["Café Rebuild, Q4 (plan)", "Mom's 70th", "  spaced  out ", "50% & more + [draft] #2", "Ünïcødé 漢字 ✓", ".dotted", "a".repeat(200)];
+
+test("detail: any id the overview gives a card opens it (spaces, commas, brackets, apostrophes, accents); a '/' never does", () => {
+  const v = notes(Object.fromEntries(ODD_NAMES.map((n) => [`Projects/${n}.md`, `---\nstatus: active\n---\n# ${n.trim() || "x"}\n\n## Next actions\n- Step one\n`])));
+  const ids = planOverview(v, NOW).projects.map((c) => c.id);
+  assert.deepEqual([...ids].sort(), [...ODD_NAMES].sort());
+  for (const id of ids) {
+    const d = projectDetail(v, id, NOW);
+    assert.ok(d, `${JSON.stringify(id)} opens`);
+    assert.equal(d.path, `Projects/${id}.md`);
+    assert.deepEqual(d.nextSteps, ["Step one"]);
+  }
+  for (const bad of ["Café Rebuild, Q4 (plan)/x", "../Mom's 70th", "/", ""]) assert.equal(projectDetail(v, bad, NOW), undefined, bad);
+  assert.equal(projectDetail(v, 42 as unknown as string, NOW), undefined);
+});
+
 test("plan text is masked, flattened and bounded", () => {
   const secret = fakeSecret();
   const v = notes({ "Projects/p.md": `---\nstatus: active\n---\n# P\n\n## Outcome\nKeep ${secret} safe.\n\n## Next actions\n- rotate it: ${secret}\n- ${"long ".repeat(100)}‮\n\n## Log\n- 2026-11-20: ${"word ".repeat(80)}\n` });
@@ -152,6 +170,15 @@ test("GET /sidebar carries the plan overview; GET /sidebar/project gives one pro
   assert.match(one.data.today, /^\d{4}-\d{2}-\d{2}$/);
   assert.equal((await r.api("/sidebar/project?id=nope")).status, 404);
   assert.equal((await r.api("/sidebar/project?id=..%2Fnow")).status, 404);
+  // An id with spaces, a comma, brackets, an apostrophe and an accent, sent URL-encoded as the page sends it.
+  const odd = rig({ vault: { ...VAULT, "Projects/Café Rebuild, Q4 (plan).md": "---\nstatus: active\n---\n# Café Rebuild\n", "Projects/Mom's 70th.md": "---\nstatus: active\n---\n# Mom's 70th\n" } });
+  const oddIds = (await odd.api("/sidebar")).data.overview.projects.map((c: any) => c.id);
+  for (const id of ["Café Rebuild, Q4 (plan)", "Mom's 70th"]) {
+    assert.ok(oddIds.includes(id), id);
+    const res = await odd.api(`/sidebar/project?id=${encodeURIComponent(id)}`);
+    assert.equal(res.status, 200, `${id}: ${JSON.stringify(res.data)}`);
+    assert.equal(res.data.project.path, `Projects/${id}.md`);
+  }
   assert.equal((await r.api("/sidebar/project?id=roof", "POST", {})).status, 405);
   r.caller.who = "someone@example.com";
   for (const path of ["/sidebar/project?id=roof", "/sidebar"]) {
@@ -180,6 +207,10 @@ test("the page's Plan helpers: addresses, relative days, dates in text", () => {
   assert.deepEqual(lib.planTarget("#plan"), { id: "" });
   assert.deepEqual(lib.planTarget("#plan/alpha-garden"), { id: "alpha-garden" });
   assert.deepEqual(lib.planTarget("#plan/50%20adventures"), { id: "50 adventures" });
+  // Every id the overview can give a card survives the page's address and back, as the card link writes it.
+  for (const id of ODD_NAMES) assert.deepEqual(lib.planTarget(lib.planHref(id).slice(1)), { id }, id);
+  assert.deepEqual(lib.planTarget("#plan/Mom's%2070th"), { id: "Mom's 70th" });
+  assert.deepEqual(lib.planTarget("#plan/Caf%C3%A9%20Rebuild%2C%20Q4%20(plan)"), { id: "Café Rebuild, Q4 (plan)" });
   for (const bad of ["#plan/", "#plan/..%2Fx", "#plan/%E0%A4%A", "#plan/a/b"]) assert.deepEqual(lib.planTarget(bad), { invalid: true }, bad);
   assert.equal(lib.planTarget("#jobs"), null);
   assert.equal(lib.planHref(""), "/#plan");
