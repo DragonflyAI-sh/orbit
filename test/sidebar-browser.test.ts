@@ -185,7 +185,7 @@ test("browser 1280px: each section collapses on its own, keeps its header, works
   await ctx.close();
 });
 
-test("browser 1280px: choosing a project scopes the files and images to it, previews a note, enlarges a photo, and is remembered", { skip }, async () => {
+test("browser 1280px: choosing a project scopes the files and images to it, opens a note, enlarges a photo, and is remembered", { skip }, async () => {
   fixture.sidebarReads.length = 0;
   const { page, ctx } = await open(1280, 800);
   const planBefore = await texts(page, "#navplan a");
@@ -200,13 +200,15 @@ test("browser 1280px: choosing a project scopes the files and images to it, prev
   // Images: only the photo whose caption names the project.
   assert.deepEqual(await page.$$eval("#navimages img", (is: HTMLImageElement[]) => is.map((i) => new URL(i.src).pathname)), [`/assistant/photos/${SIDEBAR_REFS[0]}`]);
   assert.match(await page.textContent("#navimages"), /Photos whose caption or conversation names this project\./);
-  // A file's preview: read on demand, as text, and toggled.
+  // A file opens in the centre pane (docs/file-viewer.md), read on demand, and the sidebar marks it; Close goes back.
   const file = "#navfiles .navfile >> nth=2";
   await page.click(file);
-  await page.waitForFunction(() => /loam, not clay/.test(document.querySelector("#navfiles .navpreview:not([hidden])")?.textContent ?? ""));
-  assert.equal(await page.getAttribute(file, "aria-expanded"), "true");
-  await page.click(file);
-  assert.equal(await page.getAttribute(file, "aria-expanded"), "false");
+  await page.waitForFunction(() => /loam, not clay/.test((document.querySelector("#fileview .fta") as HTMLTextAreaElement | null)?.value ?? ""));
+  assert.equal(await page.getAttribute(file, "aria-current"), "true");
+  assert.equal(await shown(page, "#alog"), false);
+  await page.click("#fileview .fclose");
+  assert.equal(await page.getAttribute(file, "aria-current"), null);
+  assert.equal(await shown(page, "#alog"), true);
   // A photo opens the photo gallery (docs/photo-gallery.md) in the centre with that photo enlarged; Escape closes it and focus
   // goes to the photo in the gallery.
   await page.click("#navimages button");

@@ -59,7 +59,7 @@ import type { Chunk } from "./assistant-store.ts";
 import { resolutionSummary } from "./model-capability.ts";
 import { AttachmentError, attachmentStore, isAttachmentId, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments.ts";
 import { localTime, PHOTO_TOOL_NAMES, photoDisplay, photoTools, reachablePhotos } from "./photo-access.ts";
-import { sidebarNote, sidebarView } from "./sidebar.ts";
+import { sidebarNote, sidebarSave, sidebarView } from "./sidebar.ts";
 import { dayIn, planOverview, projectDetail } from "./plan.ts";
 import type { SidebarPhoto } from "./sidebar.ts";
 import { isPhotoRef, safeGalleries } from "./photo-ref.ts";
@@ -100,6 +100,7 @@ export const pageHtml = (html: string, zone: string): string => html.replace(ZON
 const page = pageHtml(readFileSync(new URL("./web/index.html", import.meta.url), "utf8"), ZONE);
 const avatar = readFileSync(new URL("./web/avatar.png", import.meta.url));
 const photosJs = readFileSync(new URL("./web/photos.js", import.meta.url), "utf8");
+const filesJs = readFileSync(new URL("./web/files.js", import.meta.url), "utf8");
 const galleryJs = readFileSync(new URL("./web/gallery.js", import.meta.url), "utf8");
 // The page's component library: ORBIT's scoped build of Pico CSS, vendored (src/web/vendor/pico/README.md). Served from
 // here, never from a CDN, so the page makes no third-party request.
@@ -847,6 +848,10 @@ export function buildServer({
       res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff" });
       return res.end(photosJs);
     }
+    if (req.method === "GET" && url.pathname === "/files.js") {
+      res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff" });
+      return res.end(filesJs);
+    }
     if (req.method === "GET" && url.pathname === "/gallery.js") {
       res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff" });
       return res.end(galleryJs);
@@ -1310,6 +1315,37 @@ export function buildServer({
     // search reads (read-only, masked); the images are the photos the Assistant may show (every owner conversation that still
     // exists, archived ones aside), each fetched through /assistant/photos/<ref>, which re-authorizes it. A vault that cannot be
     // read is reported in `vault.error` with the photos still listed; nothing is made up in its place.
+    // ---- Saving a note from the file viewer (docs/file-viewer.md): owner only, and only through the vault write pipeline the chat
+    // tools use (vaultEdits.apply, one `rewrite_note` edit: same policy, proposals, secret refusal, Log line and verification). The
+    // page quotes the note's hash from GET /sidebar/note; a note that changed, is masked on the page or was cut is refused.
+    if (url.pathname === "/sidebar/note" && req.method === "POST") {
+      if (!(await owned("vault", "editor-save"))) return;
+      if (!vaultEdits) return send(res, 503, { error: "Vault writes are not enabled on this ORBIT. Nothing was written." });
+      const input = await body();
+      if (!input) return;
+      await memory.refresh?.(60_000);
+      let notes: ReadonlyMap<string, string>;
+      try {
+        if (!memory.notes) throw new Error("this vault copy cannot list its notes");
+        notes = memory.notes().value;
+      } catch (err) {
+        return send(res, 503, { error: `The vault could not be read, so nothing was written: ${err instanceof Error ? err.message : String(err)}` });
+      }
+      const plan = sidebarSave(notes, input);
+      if (!plan.ok) return send(res, plan.code, { error: plan.error });
+      if (plan.unchanged) return send(res, 200, { status: "unchanged", saved: false, note: "The note already says this; nothing was written." });
+      try {
+        const out = await vaultEdits.apply("rewrite_note", { path: plan.path, expectSha: plan.expectSha, text: plan.text });
+        const v = out.value as Record<string, unknown>;
+        if (v.status === "committed") return send(res, 200, { status: "committed", saved: true, commit: v.commit, source: out.source });
+        if (v.status === "pending-confirmation") return send(res, 202, { status: "pending-confirmation", saved: false, proposalId: v.proposalId, summary: v.summary, reasons: v.reasons, expiresAt: v.expiresAt });
+        return send(res, 502, { error: "The vault write gave an answer ORBIT does not recognise. Treat it as NOT saved." });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const code = /^NOT saved \((conflict|precondition_failed)\)/.test(message) ? 409 : /^NOT saved \(/.test(message) ? 422 : 502;
+        return send(res, code, { error: message.slice(0, 600) });
+      }
+    }
     if (url.pathname === "/sidebar" || url.pathname === "/sidebar/note" || url.pathname === "/sidebar/project") {
       if (req.method !== "GET") return send(res, 405, { error: "Use GET for this route." });
       if (!(await owned("memory", "read"))) return;
@@ -1328,7 +1364,7 @@ export function buildServer({
       if (url.pathname === "/sidebar/note") {
         if (!notes) return send(res, 503, { error: vaultError });
         const note = sidebarNote(notes, url.searchParams.get("path") ?? "");
-        return note ? send(res, 200, { note, source }) : send(res, 404, { error: "No such note in the vault." });
+        return note ? send(res, 200, { note, source, writable: Boolean(vaultEdits) }) : send(res, 404, { error: "No such note in the vault." });
       }
       // One project's Plan detail (docs/plan.md): read from its hub note and the tasks that name it.
       if (url.pathname === "/sidebar/project") {

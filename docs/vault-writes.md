@@ -43,7 +43,7 @@ chat tool call ──► policy port (agent.<tool>, vault.<tool>: owner only)
 | `vault_archive_note {path}` | Moves the note to `Archive/<same path>`; never overwrites; nothing is ever deleted. Links are not rewritten. |
 | `orbit_config_view {}` | Read-only config view (below). |
 
-There is no delete, no shell, no arbitrary file write, and no tool takes a branch, remote, commit message or author. A rolling-note rewrite uses an internal `rewrite_body` edit (expected body hash, so it fails if the note changed) that is not exposed as a tool; it goes through the identical pipeline.
+There is no delete, no shell, no arbitrary file write, and no tool takes a branch, remote, commit message or author. A rolling-note rewrite uses an internal `rewrite_body` edit (expected body hash, so it fails if the note changed) that is not exposed as a tool; it goes through the identical pipeline. The page's file editor (docs/file-viewer.md) saves a whole note with `rewrite_note {path, expectSha, text}`, also not a chat tool: it applies only while the note still has the SHA-256 the editor read, and goes through the identical pipeline (areas, proposals, secret refusal, Log line, verification).
 
 ## Policy
 

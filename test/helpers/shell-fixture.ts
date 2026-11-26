@@ -98,6 +98,7 @@ export function shellServer(opts: ShellOpts = {}) {
     if (p === "/gallery.js") { res.writeHead(200, { "content-type": "text/javascript" }); return res.end(readFileSync(new URL("../../src/web/gallery.js", import.meta.url))); }
     if (serveWebAsset(p, res)) return;
     if (p === "/photos.js") { res.writeHead(200, { "content-type": "text/javascript" }); return res.end(readFileSync(new URL("../../src/web/photos.js", import.meta.url))); }
+    if (p === "/files.js") { res.writeHead(200, { "content-type": "text/javascript" }); return res.end(readFileSync(new URL("../../src/web/files.js", import.meta.url))); }
     if (p === "/status") return json(200, { ports: [{ port: "model", state: "live" }, { port: "vault", state: "live" }, { port: "jobs", state: "degraded" }], deploy: { at: at(0), commit: "0123456789abcdef0123456789abcdef01234567" } });
     if (p === "/notifications") return json(200, { inbox: notes() });
     if (p.startsWith("/notifications/")) { await drain(); return json(200, { ok: true }); }
