@@ -116,6 +116,12 @@ test("routing: the root and unknown hashes open the Assistant; /sessions, legacy
   assert.equal(pageFor("/", "", false, false), "chat", "not the owner: Sessions (the stateless chat), as before");
   assert.equal(pageFor("/", "#assistant", false, false), "chat");
   assert.equal(pageFor("/", "#chat", false, false), "chat");
+  // The Plan views (docs/plan.md) read the vault: the owner's, like the Assistant.
+  assert.equal(pageFor("/", "#plan", true, true), "plan");
+  assert.equal(pageFor("/", "#plan/alpha-garden", false, true), "plan");
+  assert.equal(pageFor("/sessions/x", "#plan", true, true), "plan", "a fragment link to the Plan wins over the path");
+  assert.equal(pageFor("/", "#plan", true, false), "chat", "not the owner: no Plan");
+  assert.equal(pageFor("/", "#planet", true, true), "assistant");
 });
 
 test("the page markup: Assistant first in the nav, then Jobs, Sessions (no Status link); the logo header stays; the status dot is the side panel's Status tab", () => {

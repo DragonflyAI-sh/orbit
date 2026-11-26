@@ -151,7 +151,7 @@
      These regions keep clear of both (margins below), so their paddings, percentages of the shell's width, take both off
      before centring. Each panel covers its own safe area. */
   :root { --nav-room: 0px; --nav-safe-l: var(--safe-l); }
-  #log, #alog, #jobs, #astatus, #form, #aform {
+  #log, #alog, #jobs, #plan, #astatus, #form, #aform {
     --col-l: max(calc(var(--gutter) + var(--nav-safe-l)), calc((100% - var(--nav-room) - var(--side-room) - var(--measure)) / 2));
     --col-r: max(var(--gutter), calc((100% - var(--nav-room) - var(--side-room) - var(--measure)) / 2)); }
   /* The app shell. The document itself never scrolls: the page is pinned to the visible area (position: fixed, so iOS
@@ -328,7 +328,7 @@
                                    padding-left: var(--safe-l); border-right: var(--border); box-shadow: 12px 0 28px -20px var(--header-shadow); }
     :root[data-nav="open"] .navtop { display: none; }
     :root[data-nav="open"] { --nav-room: var(--nav-w); --nav-safe-l: 0px; }
-    :root[data-nav="open"] :is(#log, #alog, .latestdock, #jobs, #astatus, #form, #aform) { margin-left: var(--nav-room); }
+    :root[data-nav="open"] :is(#log, #alog, .latestdock, #jobs, #plan, #astatus, #form, #aform) { margin-left: var(--nav-room); }
     #navhandle { display: inline-flex; align-items: center; justify-content: center; position: fixed; z-index: 3; top: calc(var(--nav-top) + 10px); left: var(--safe-l);
                  width: 22px; height: 40px; padding: 0; border: var(--border); border-left: 0; border-radius: 0 var(--radius-md) var(--radius-md) 0;
                  background: var(--card); color: var(--muted); box-shadow: var(--elev-1); }
@@ -365,7 +365,7 @@
   @media (max-width: 1023.98px) { :root { --side-w: min(400px, calc(100vw - 40px)); } }
   @media (pointer: coarse) { :root { --rail-w: 46px; } }
   @media (min-width: 1024px) { :root[data-side="open"] { --side-room: var(--side-w); } }
-  :is(#log, #alog, .latestdock, #jobs, #astatus) { margin-right: var(--side-room); }
+  :is(#log, #alog, .latestdock, #jobs, #plan, #astatus) { margin-right: var(--side-room); }
   /* Phones and small tablets keep the composer's full width: there the rail ends above it (placeSide in the script). */
   @media (min-width: 900px) { :is(#form, #aform) { margin-right: var(--side-room); } }
   #side { position: fixed; z-index: calc(var(--z-header) - 1); right: 0; top: var(--side-top, 56px); bottom: var(--side-bottom, 0px);
@@ -556,9 +556,78 @@
   #signin button { padding: 4px 12px; margin-top: 4px; }
   #signin code { font-size: 16px; letter-spacing: .12em; color: var(--fg); background: var(--attention-soft); border: 1px solid var(--attention); border-radius: var(--radius-xs); padding: 0 6px; }
   #signin a { color: var(--accent-2); }
-  #log, #alog, #jobs { flex: 1 1 0; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
+  #log, #alog, #jobs, #plan { flex: 1 1 0; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
                       padding: var(--gutter) var(--col-r) var(--gutter) var(--col-l); display: flex; flex-direction: column; gap: 10px; }
-  #jobs { --measure: var(--measure-wide); }
+  #jobs, #plan { --measure: var(--measure-wide); }
+  /* The Plan views (docs/plan.md): All projects (cards) at /#plan and one project at /#plan/<id>, in the main area; the
+     sidebar's Plan section is their compact index. Status dots: green on track, yellow needs attention (paused, quiet, no
+     next action), red at risk (blocked, a blocker, past its target), grey done. The dot's meaning is also given as text. */
+  :root { --go: #1d7a3e; --plan-amber: #9a6700; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --go: #5fd38a; --plan-amber: #f2c46d; } }
+  :root[data-theme="dark"] { --go: #5fd38a; --plan-amber: #f2c46d; }
+  .pdot { flex: none; display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .pdot.green { background: var(--go); } .pdot.yellow { background: var(--plan-amber); } .pdot.red { background: var(--danger); } .pdot.grey { background: color-mix(in srgb, var(--muted) 55%, transparent); }
+  .pbadge { flex: none; font-size: var(--text-2xs); font-weight: var(--weight-strong); line-height: 1.5; padding: 0 6px; border-radius: var(--radius-xs); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .pbadge.p1 { color: var(--danger); border-color: var(--danger); } .pbadge.p2 { color: var(--plan-amber); border-color: var(--plan-amber); } .pbadge.p3 { color: var(--accent-2); border-color: var(--accent-2); }
+  .vh { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); white-space: nowrap; }
+  .planall { display: flex; align-items: center; gap: 6px; min-height: 32px; padding: 4px 6px; border-radius: var(--radius-sm); color: var(--fg); text-decoration: none; font-weight: var(--weight-strong); }
+  .planall .navcount { margin-left: auto; font-weight: var(--weight-regular); color: var(--muted); font-size: var(--text-xs); }
+  .planattn { display: inline-block; margin: 2px 0 4px 6px; font-size: var(--text-2xs); font-weight: var(--weight-strong); padding: 0 7px; border-radius: var(--radius-pill); color: var(--danger); background: var(--danger-soft); border: 1px solid var(--danger); }
+  .planlist { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+  .planitem { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 3px 6px; border-radius: var(--radius-sm); color: var(--fg); text-decoration: none; line-height: var(--leading-tight); }
+  .planitem .ptitle { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .planall:hover, .planitem:hover { background: var(--surface-hover); }
+  .planall[aria-current="page"], .planitem[aria-current="page"] { background: var(--surface-2); box-shadow: inset 3px 0 0 var(--accent); }
+  @media (pointer: coarse) { .planall, .planitem { min-height: var(--tap); } }
+  #plan h2.pltitle { margin: 0; font-size: var(--text-xl); font-weight: var(--weight-strong); color: var(--fg); overflow-wrap: anywhere; }
+  #plan h2.pltitle:focus { outline: none; } #plan h2.pltitle:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+  #plan .plsub { margin: 2px 0 0; color: var(--muted); font-size: var(--text-sm); }
+  #plan .empty { color: var(--muted); font-size: var(--text-sm); }
+  #plan .err { color: var(--danger); background: var(--danger-soft); border-left: 3px solid var(--danger); padding: 6px 10px; border-radius: var(--radius-xs); }
+  #plan a.back { align-self: flex-start; color: var(--accent-2); font-size: var(--text-sm); }
+  #plan .plstats { list-style: none; margin: 4px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--space-2); }
+  #plan .plstats li { padding: var(--space-2) var(--space-3); border: var(--border); border-radius: var(--radius-md); background: var(--card); font-size: var(--text-sm); color: var(--muted); }
+  #plan .plstats strong { display: block; font-size: var(--text-xl); color: var(--fg); line-height: 1.2; }
+  #plan .plstats li.hot strong { color: var(--danger); }
+  #plan .plcards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--space-3); }
+  #plan .plcard > a { display: flex; flex-direction: column; gap: 6px; height: 100%; box-sizing: border-box; padding: var(--space-3) var(--space-4); border: var(--border); border-radius: var(--radius-lg);
+                      background: var(--card); color: var(--fg); text-decoration: none; box-shadow: var(--elev-1); }
+  #plan .plcard > a:hover { border-color: var(--accent-2); }
+  #plan .plcard.red > a { border-left: 4px solid var(--danger); } #plan .plcard.yellow > a { border-left: 4px solid var(--plan-amber); } #plan .plcard.green > a { border-left: 4px solid var(--go); }
+  #plan .plhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  #plan .plhead h3 { margin: 0; flex: 1 1 auto; min-width: 0; font-size: var(--text-lg); font-weight: var(--weight-strong); overflow-wrap: anywhere; }
+  #plan .pstate { font-size: var(--text-xs); color: var(--muted); }
+  #plan .plsum { margin: 0; color: var(--fg); font-size: var(--text-sm); }
+  #plan .plnext { margin: 0; font-size: var(--text-sm); }
+  #plan .plnext .lbl, #plan .lbl { color: var(--muted); font-weight: var(--weight-strong); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: var(--tracking-caps); margin-right: 4px; }
+  #plan .plnext.none { color: var(--muted); font-style: italic; }
+  #plan .plmeta { margin: auto 0 0; color: var(--muted); font-size: var(--text-xs); }
+  #plan .plmeta .hot { color: var(--danger); font-weight: var(--weight-strong); }
+  #plan .bar { height: 6px; border-radius: var(--radius-pill); background: var(--surface-2); }
+  #plan .bar > span { display: block; height: 100%; background: var(--accent); border-radius: inherit; }
+  #plan .plprog { display: flex; flex-direction: column; gap: 3px; font-size: var(--text-xs); color: var(--muted); }
+  #plan details.pldone > summary { cursor: pointer; color: var(--muted); font-size: var(--text-sm); min-height: 28px; }
+  #plan .pldetail { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+  #plan .plgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--space-3); align-items: start; }
+  #plan .plsec { padding: var(--space-3) var(--space-4); border: var(--border); border-radius: var(--radius-lg); background: var(--card); min-width: 0; }
+  #plan .plsec h3 { margin: 0 0 6px; font-size: var(--text-2xs); color: var(--muted); font-weight: var(--weight-strong); letter-spacing: var(--tracking-caps); text-transform: uppercase; }
+  #plan .plsec ul, #plan .plsec ol { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 6px; font-size: var(--text-sm); }
+  #plan .plsec p { margin: 0 0 6px; font-size: var(--text-sm); }
+  #plan .pltl { list-style: none; padding: 0 !important; gap: 0 !important; }
+  #plan .pltl li { position: relative; padding: 0 0 10px 18px; }
+  #plan .pltl li::before { content: ""; position: absolute; left: 4px; top: 6px; bottom: -6px; width: 1px; background: var(--line); }
+  #plan .pltl li:last-child::before { display: none; }
+  #plan .pltl li::after { content: ""; position: absolute; left: 0; top: 4px; width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--accent); background: var(--card); box-sizing: border-box; }
+  #plan .pltl li.done::after { background: var(--accent); }
+  #plan .pltl li.today::after { border-color: var(--go); background: var(--go); }
+  #plan .pltl li.target::after { border-color: var(--danger); }
+  #plan .pltl .when { display: block; color: var(--muted); font-size: var(--text-xs); }
+  #plan .pltl li.today { font-weight: var(--weight-strong); }
+  #plan .tstat { font-size: var(--text-2xs); padding: 0 6px; margin-left: 6px; border-radius: var(--radius-xs); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  #plan .tstat.done { color: var(--go); border-color: var(--go); } #plan .tstat.blocked, #plan .tstat.waiting { color: var(--danger); border-color: var(--danger); }
+  #plan .tdone { color: var(--muted); text-decoration: line-through; }
+  #plan .actwhen { display: block; color: var(--muted); font-size: var(--text-xs); }
+  #plan .plsrc { color: var(--muted); font-size: var(--text-xs); margin: 0; }
   @media (min-width: 900px) { #log, #alog { gap: var(--space-3); } }
   /* Messages, in Chat and the Assistant alike: one left-aligned list, no bubbles. Every row is the sender's icon in a
      narrow first column and everything else (name and time, then the content parts) in one content column. The sender
@@ -931,6 +1000,7 @@
 <main id="alog" aria-label="Assistant conversation"></main>
 <div class="latestdock"><button type="button" class="tolatest" id="atolatest" title="Scroll to the latest message" hidden><span aria-hidden="true">↓</span> click to latest</button></div>
 <section id="jobs" hidden aria-live="off"></section>
+<section id="plan" hidden aria-label="Plan"></section>
 <form id="form" hidden><div id="tray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="pick" accept="image/*" multiple hidden><button type="button" class="phbtn" id="pickbtn" title="Add image (up to 10)" aria-label="Add image"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14 M5 12h14"/></svg></button><textarea id="input" rows="1" placeholder="Message ORBIT" aria-label="Message ORBIT"></textarea><button id="send" class="sendbtn" title="Send" aria-label="Send"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13 M22 2l-7 20-4-9-9-4z"/></svg></button></form>
 <div id="astatus" role="status" aria-live="polite"></div>
 <form id="aform"><div id="atray" class="phototray" hidden aria-label="Photos to send"></div><input type="file" id="apick" accept="image/*" multiple hidden><button type="button" class="phbtn" id="apickbtn" title="Add image (up to 10)" aria-label="Add image"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14 M5 12h14"/></svg></button><textarea id="ainput" rows="1" placeholder="Message the Assistant" aria-label="Message the Assistant"></textarea><button id="asend" class="sendbtn" title="Send" aria-label="Send"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13 M22 2l-7 20-4-9-9-4z"/></svg></button></form>
@@ -1532,7 +1602,7 @@
     return threadList.length ? "No session open" : "No sessions yet";
   }
   function updateTitle() {
-    document.title = tab === "chat" ? (threadMode === "server" ? `${sessionLabel()} · Sessions · ORBIT` : "Sessions · ORBIT") : tab === "jobs" ? (openJob ? `${jv.detail?.data?.overview?.title?.text ? jv.detail.data.overview.title.text.slice(0, 60) + " · " : ""}${openJob} · Jobs · ORBIT` : "Jobs · ORBIT") : "ORBIT";
+    document.title = tab === "chat" ? (threadMode === "server" ? `${sessionLabel()} · Sessions · ORBIT` : "Sessions · ORBIT") : tab === "plan" ? planTitle() : tab === "jobs" ? (openJob ? `${jv.detail?.data?.overview?.title?.text ? jv.detail.data.overview.title.text.slice(0, 60) + " · " : ""}${openJob} · Jobs · ORBIT` : "Jobs · ORBIT") : "ORBIT";
   }
   function renderBar() {
     // The picker marks where the reader is going (a pending navigation), otherwise the session that is drawn.
@@ -2597,24 +2667,32 @@
     // Forget the remembered project only when the vault was read and it is not active: an unreadable vault keeps it.
     if (vaultOk && b.unknownProject && navPrefs.project) { navPrefs.project = ""; writeSidebar(localStore, navPrefs); }
 
-    // Plan: the plan sections of the project note (or now.md), then the open tasks.
+    // Plan (docs/plan.md): a compact index of the open projects (status dot, title, priority badge), All projects at the top,
+    // and how many need attention. Each opens its view in the main area (drawPlan below).
+    lastSidebar = b;
     const plan = document.getElementById("navplan");
     if (!vaultOk) plan.replaceChildren(navNote(vaultWhy, true));
     else {
-      const p = b.plan || {};
-      const items = Array.isArray(p.items) ? p.items : [];
-      const tasks = Array.isArray(p.tasks) ? p.tasks : [];
-      const kids = [];
-      if (p.source) kids.push(el("span", { className: "navmeta", textContent: `From ${str(p.source, 200)}` }));
-      const bySection = new Map();
-      for (const it of items) { const k = str(it.section, 60) || "Plan"; if (!bySection.has(k)) bySection.set(k, []); bySection.get(k).push(str(it.text)); }
-      for (const [sec, list] of bySection) kids.push(el("h3", { className: "navsub", textContent: sec }), el("ul", { className: "navlist bul" }, ...list.map((t) => el("li", { textContent: t }))));
-      if (!items.length) kids.push(navNote(p.source ? `No next actions found in ${str(p.source, 200)} (under a heading such as Next actions, Plan or Resume here).` : "No now.md in the vault."));
-      kids.push(el("h3", { className: "navsub", textContent: current ? "Open tasks for this project" : "Open tasks" }));
-      if (tasks.length) kids.push(el("ul", { className: "navlist bul" }, ...tasks.map((t) => el("li", {}, str(t.title, 100), el("span", { className: "navmeta", textContent: [t.status ? str(t.status, 40) : "", t.due ? `due ${str(t.due, 30)}` : ""].filter(Boolean).join(" · ") || str(t.path, 200) })))));
-      else kids.push(navNote(current ? "No open tasks name this project." : "No open tasks in the vault."));
+      const ov = b.overview && Array.isArray(b.overview.projects) ? b.overview : { projects: [], stats: {} };
+      const open = ov.projects.filter((c) => c && typeof c.id === "string" && c.state !== "done");
+      const st = ov.stats || {};
+      const kids = [el("a", { className: "planall", href: planHref(""), id: "navplan-all" }, el("span", { textContent: "All projects" }), el("span", { className: "navcount", textContent: `${open.length} open` }))];
+      const attn = Number(st.attention) || 0;
+      if (attn) kids.push(el("span", { className: "planattn", textContent: `${attn} need${attn === 1 ? "s" : ""} attention`, title: "Projects that are blocked, past their target, paused, quiet for a month or without a next action" }));
+      if (open.length) kids.push(el("ul", { className: "planlist", ariaLabel: "Open projects" }, ...open.map((c) => {
+        const a = el("a", { className: "planitem", href: planHref(c.id), title: `${str(c.title, 100)}: ${PLAN_HEALTH[c.health] || ""}${c.why ? ` (${str(c.why, 80)})` : ""}` },
+          el("span", { className: `pdot ${PLAN_HEALTH[c.health] ? c.health : ""}`, ariaHidden: "true" }),
+          el("span", { className: "ptitle", textContent: str(c.title, 100) || c.id }),
+          el("span", { className: "vh", textContent: `, ${PLAN_HEALTH[c.health] || "status unknown"}` }));
+        a.dataset.id = c.id;
+        if (c.priority) a.append(el("span", { className: `pbadge p${Number(c.priority)}`, textContent: `P${Number(c.priority)}`, title: `Priority ${Number(c.priority)}` }));
+        return el("li", {}, a);
+      })));
+      else kids.push(navNote("No open projects in the vault (Projects/)."));
       plan.replaceChildren(...kids);
+      showPlanCurrent();
     }
+    if (tab === "plan" && !planTarget(location.hash)?.id) drawPlan();
 
     // Files: the related notes, each with a preview, then the locations the project note lists.
     const files = document.getElementById("navfiles");
@@ -2658,6 +2736,213 @@
     } else if (!b.photoError) ikids.push(navNote(current ? "No photos name this project in their caption or conversation title." : "No photos sent yet."));
     imgs.replaceChildren(...ikids);
   }
+  // ---- The Plan views (docs/plan.md), in the main area: All projects (/#plan) is cards from the last /sidebar answer's
+  // overview; one project (/#plan/<id>) is read from GET /sidebar/project?id=<id> each time it opens. Dates are shown relative
+  // to today in Rai's time zone (the server's `today`), with the full date on hover; every value is set as text.
+  // <plan-lib>
+  const PLAN_ID = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,119}$/;
+  // What a Plan address names: { id: "" } for all projects, { id } for one, { invalid: true } for anything else after "#plan/".
+  function planTarget(hash) {
+    if (hash === "#plan") return { id: "" };
+    if (!String(hash).startsWith("#plan/")) return null;
+    let id;
+    try { id = decodeURIComponent(hash.slice("#plan/".length)); } catch { return { invalid: true }; }
+    return PLAN_ID.test(id) ? { id } : { invalid: true };
+  }
+  const planHref = (id) => (id ? `/#plan/${encodeURIComponent(id)}` : "/#plan");
+  const dayNum = (iso) => (/^\d{4}-\d{2}-\d{2}$/.test(String(iso)) ? Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)) / 86400000 : NaN);
+  // "today", "yesterday", "in 3 days", "2 weeks ago", "in 10 months", "1 year ago".
+  function relDay(iso, today) {
+    const d = dayNum(iso), t = dayNum(today);
+    if (!Number.isFinite(d) || !Number.isFinite(t)) return "";
+    const n = Math.round(d - t), a = Math.abs(n);
+    if (n === 0) return "today";
+    if (n === -1) return "yesterday";
+    if (n === 1) return "tomorrow";
+    const [k, unit] = a < 14 ? [a, "day"] : a < 60 ? [Math.round(a / 7), "week"] : a < 548 ? [Math.round(a / 30.44), "month"] : [Math.round(a / 365.25), "year"];
+    const span = `${k} ${unit}${k === 1 ? "" : "s"}`;
+    return n < 0 ? `${span} ago` : `in ${span}`;
+  }
+  // "Thu, Nov 26, 2026" for a calendar day; "Nov 14, 2026, 2:53 PM PST" for an instant, in Rai's zone.
+  const longDay = (iso) => (Number.isFinite(dayNum(iso)) ? new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(dayNum(iso) * 86400000)) : "");
+  const shortDay = (iso, today) => (Number.isFinite(dayNum(iso)) ? new Intl.DateTimeFormat("en-US", { timeZone: "UTC", month: "short", day: "numeric", ...(String(iso).slice(0, 4) !== String(today).slice(0, 4) ? { year: "numeric" } : {}) }).format(new Date(dayNum(iso) * 86400000)) : "");
+  function zonedTime(at, zone) {
+    const d = new Date(at);
+    if (Number.isNaN(d.getTime())) return "";
+    try { return new Intl.DateTimeFormat("en-US", { timeZone: zone || "America/Los_Angeles", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(d); } catch { return ""; }
+  }
+  // Calendar dates inside a line of text ("due 2026-11-30") read as "Nov 30" (with the year when it is not this one).
+  const humanDates = (text, today) => String(text).replace(/\b(\d{4}-\d{2}-\d{2})\b/g, (d) => shortDay(d, today) || d);
+  const PLAN_HEALTH = { green: "on track", yellow: "needs attention", red: "at risk", grey: "done" };
+  const PLAN_STATE = { active: "Active", paused: "Paused", blocked: "Blocked", done: "Done" };
+  // </plan-lib>
+  const planBox = document.getElementById("plan");
+  let lastSidebar = null;
+  let planShown = "";      // the address drawn last, so a re-draw of the same one keeps the scroll position
+  let planGen = 0;
+  let planFocus = false;   // a click on a Plan link: the new view's heading takes focus
+  let planDetailTitle = "";
+  function planTitle() {
+    const t = planTarget(location.hash);
+    return t && t.id ? `${planDetailTitle ? planDetailTitle.slice(0, 60) + " · " : ""}Plan · ORBIT` : "All projects · Plan · ORBIT";
+  }
+  // The sidebar's Plan links mark the view that is open.
+  function showPlanCurrent() {
+    const t = tab === "plan" ? planTarget(location.hash) : null;
+    for (const a of document.querySelectorAll("#navplan a.planall, #navplan a.planitem")) {
+      const on = Boolean(t && !t.invalid && (a.classList.contains("planall") ? t.id === "" : a.dataset.id === t.id));
+      if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    }
+  }
+  const planDated = (label, iso, today, cls) => el("span", { className: cls || "", title: longDay(iso), textContent: `${label}${relDay(iso, today)}` });
+  function planHeading(text) {
+    const h = el("h2", { className: "pltitle", textContent: text, tabIndex: -1 });
+    return h;
+  }
+  function placeFocus(root) {
+    if (!planFocus) return;
+    planFocus = false;
+    const h = root.querySelector("h2.pltitle");
+    if (h) h.focus({ preventScroll: true });
+  }
+  function progressBlock(p) {
+    if (!p || !(Number(p.total) > 0)) return null;
+    const done = Math.max(0, Math.min(Number(p.done) || 0, Number(p.total))), total = Number(p.total);
+    const pct = Math.round((done / total) * 100);
+    const bar = el("div", { className: "bar", role: "progressbar", ariaValueMin: "0", ariaValueMax: String(total), ariaValueNow: String(done), ariaLabel: `${done} of ${total} ${str(p.label, 40)}` }, el("span", { style: `width:${pct}%` }));
+    return el("div", { className: "plprog" }, bar, el("span", { textContent: `${done}/${total} ${str(p.label, 40)} (${pct}%)` }));
+  }
+  function cardOf(c, today) {
+    const head = el("div", { className: "plhead" },
+      el("span", { className: `pdot ${PLAN_HEALTH[c.health] ? c.health : ""}`, ariaHidden: "true" }),
+      el("h3", { textContent: str(c.title, 100) || c.id }));
+    if (c.priority) head.append(el("span", { className: `pbadge p${Number(c.priority)}`, textContent: `P${Number(c.priority)}`, title: `Priority ${Number(c.priority)}` }));
+    head.append(el("span", { className: "pstate", textContent: `${PLAN_STATE[c.state] || "Active"} · ${PLAN_HEALTH[c.health] || ""}` }));
+    const kids = [head];
+    if (c.summary) kids.push(el("p", { className: "plsum", textContent: humanDates(str(c.summary, 200), today) }));
+    kids.push(c.next ? el("p", { className: "plnext" }, el("span", { className: "lbl", textContent: "Next" }), " ", humanDates(str(c.next, 240), today)) : el("p", { className: "plnext none", textContent: c.state === "done" ? "Finished." : "No next action written down." }));
+    const prog = progressBlock(c.progress);
+    if (prog) kids.push(prog);
+    const meta = el("p", { className: "plmeta" });
+    const bits = [c.lastActivity ? planDated("Last activity ", c.lastActivity, today) : el("span", { textContent: "No recorded activity" })];
+    if (c.target) bits.push(el("span", { className: c.overdue ? "hot" : "", title: longDay(c.target), textContent: `${c.overdue ? "Overdue: target was" : "Target"} ${shortDay(c.target, today)} (${relDay(c.target, today)})` }));
+    if (c.blockers > 0 && c.state !== "done") bits.push(el("span", { className: "hot", textContent: `${Number(c.blockers)} blocker${Number(c.blockers) === 1 ? "" : "s"}` }));
+    if (c.why && (c.health === "yellow" || c.state === "blocked") && !c.overdue && !(c.blockers > 1)) bits.push(el("span", { textContent: humanDates(str(c.why, 80), today) }));
+    bits.forEach((b, i) => { if (i) meta.append(" · "); meta.append(b); });
+    kids.push(meta);
+    const a = el("a", { href: planHref(c.id) }, ...kids);
+    a.dataset.id = c.id;
+    return el("li", { className: `plcard ${PLAN_HEALTH[c.health] ? c.health : ""}` }, a);
+  }
+  function drawOverview() {
+    const b = lastSidebar;
+    if (!b) { planBox.replaceChildren(planHeading("All projects"), el("p", { className: "empty", textContent: "Reading the projects…" })); return; }
+    if (!(b.vault && b.vault.ok === true)) { planBox.replaceChildren(planHeading("All projects"), el("p", { className: "err", role: "alert", textContent: str(b.vault && b.vault.error) || "The vault could not be read." })); return; }
+    const ov = b.overview && Array.isArray(b.overview.projects) ? b.overview : { projects: [], stats: {}, today: "" };
+    const today = str(ov.today, 10);
+    const st = ov.stats || {};
+    const cards = ov.projects.filter((c) => c && typeof c.id === "string");
+    const open = cards.filter((c) => c.state !== "done"), done = cards.filter((c) => c.state === "done");
+    const stat = (n, label, hot) => el("li", { className: hot && n ? "hot" : "" }, el("strong", { textContent: String(Number(n) || 0) }), label);
+    const kids = [planHeading("All projects"),
+      el("p", { className: "plsub", textContent: `Open projects by priority, then most recent activity.${today ? ` Today is ${longDay(today)}.` : ""}` }),
+      el("ul", { className: "plstats", ariaLabel: "Summary" }, stat(st.active, "active projects"), stat(st.overdue, "overdue", true), stat(st.blocked, "with blockers", true), stat(st.paused, "paused"))];
+    if (open.length) kids.push(el("ul", { className: "plcards", ariaLabel: "Open projects" }, ...open.map((c) => cardOf(c, today))));
+    else kids.push(el("p", { className: "empty", textContent: "No open projects in the vault (Projects/)." }));
+    if (done.length) kids.push(el("details", { className: "pldone" }, el("summary", { textContent: `Finished (${done.length})` }), el("ul", { className: "plcards", ariaLabel: "Finished projects" }, ...done.map((c) => cardOf(c, today)))));
+    const top = planShown === "#plan" ? planBox.scrollTop : 0;
+    const openDone = planBox.querySelector("details.pldone")?.open;
+    planBox.replaceChildren(...kids);
+    if (openDone) planBox.querySelector("details.pldone").open = true;
+    planBox.scrollTop = top;
+    placeFocus(planBox);
+  }
+  const planSection = (title, ...kids) => el("section", { className: "plsec", ariaLabel: title }, el("h3", { textContent: title }), ...kids);
+  const planList = (items, tag, empty, map) => (items.length ? el(tag, {}, ...items.map(map)) : el("p", { className: "empty", textContent: empty }));
+  function drawDetail(d, today) {
+    planDetailTitle = str(d.title, 100);
+    updateTitle();
+    const head = el("div", { className: "plhead" }, el("span", { className: `pdot ${PLAN_HEALTH[d.health] ? d.health : ""}`, ariaHidden: "true" }), planHeading(planDetailTitle || d.id));
+    if (d.priority) head.append(el("span", { className: `pbadge p${Number(d.priority)}`, textContent: `P${Number(d.priority)}`, title: `Priority ${Number(d.priority)}` }));
+    head.append(el("span", { className: "pstate", textContent: `${PLAN_STATE[d.state] || "Active"} · ${PLAN_HEALTH[d.health] || ""}${d.why && d.health !== "green" ? ` (${humanDates(str(d.why, 80), today)})` : ""}${d.area ? ` · ${str(d.area, 40)}` : ""}` }));
+    const kids = [el("a", { className: "back", href: planHref(""), textContent: "← All projects" }), head];
+    if (d.outcome || d.summary) kids.push(el("p", { className: "plsum", textContent: humanDates(str(d.outcome || d.summary, 520), today) }));
+
+    const status = [];
+    const prog = progressBlock(d.progress);
+    if (prog) status.push(prog);
+    status.push(el("p", {}, el("span", { className: "lbl", textContent: "State" }), " ", `${PLAN_STATE[d.state] || "Active"}${d.status && d.status !== d.state ? ` (${str(d.status, 40)})` : ""}`));
+    status.push(el("p", {}, el("span", { className: "lbl", textContent: "Last activity" }), " ", d.lastActivity ? planDated("", d.lastActivity, today) : "none recorded"));
+    if (d.completion) status.push(el("p", {}, el("span", { className: "lbl", textContent: "Done means" }), " ", humanDates(str(d.completion, 520), today)));
+
+    const tl = Array.isArray(d.timeline) ? d.timeline : [];
+    const timeline = [];
+    if (d.started && d.target && dayNum(d.target) > dayNum(d.started)) {
+      const span = dayNum(d.target) - dayNum(d.started), gone = Math.max(0, Math.min(span, dayNum(today) - dayNum(d.started)));
+      const pct = Math.round((gone / span) * 100);
+      timeline.push(el("p", { textContent: `Day ${Math.round(gone)} of ${Math.round(span)} (${pct}% of the time to the target)` }), el("div", { className: "bar", role: "img", ariaLabel: `${pct}% of the time from start to target has passed` }, el("span", { style: `width:${pct}%` })));
+    }
+    timeline.push(planList(tl, "ol", "No dates recorded (started, target or milestones).", (t) => el("li", { className: `${t.kind === "today" ? "today" : ""}${t.done ? " done" : ""}${t.kind === "target" ? " target" : ""}` },
+      el("span", { textContent: `${humanDates(str(t.label, 140), today)}${t.kind === "due" ? " (task due)" : ""}${t.done && t.kind === "milestone" ? " ✓" : ""}` }),
+      el("span", { className: "when", title: longDay(t.date), textContent: t.kind === "today" ? longDay(t.date) : `${longDay(t.date)} · ${relDay(t.date, today)}` }))));
+    const tlList = timeline.at(-1);
+    if (tlList.tagName === "OL") tlList.className = "pltl";
+
+    const tasks = Array.isArray(d.tasks) ? d.tasks : [];
+    const taskList = planList(tasks, "ul", "No ORBIT tasks name this project.", (t) => el("li", {},
+      el("span", { className: t.done ? "tdone" : "", textContent: str(t.title, 100) }), " ",
+      el("span", { className: `tstat ${t.done ? "done" : str(t.status, 20)}`, textContent: str(t.status, 40) || "open" }),
+      t.due && !t.done ? el("span", { className: "actwhen", title: longDay(t.due), textContent: `due ${shortDay(t.due, today)} (${relDay(t.due, today)})` }) : ""));
+    const acts = Array.isArray(d.activity) ? d.activity : [];
+    kids.push(el("div", { className: "plgrid" },
+      planSection("Status", ...status),
+      planSection("Next steps", planList(Array.isArray(d.nextSteps) ? d.nextSteps : [], "ol", "No next action written down in the project note.", (t) => el("li", { textContent: humanDates(str(t, 240), today) }))),
+      planSection("Blockers", planList(Array.isArray(d.blockerList) ? d.blockerList : [], "ul", d.state === "blocked" ? "Marked blocked; the note does not say on what." : "No blockers recorded.", (t) => el("li", { textContent: humanDates(str(t, 240), today) }))),
+      planSection("Timeline", ...timeline),
+      planSection("Recent activity", planList(acts, "ul", "No dated updates in the note.", (a) => el("li", {},
+        el("span", { className: "actwhen", title: a.at ? zonedTime(a.at, lastSidebar?.overview?.zone) : longDay(a.date), textContent: `${relDay(a.date, today)} · ${shortDay(a.date, today)}` }), humanDates(str(a.text, 240), today)))),
+      planSection("Linked tasks", taskList, ...(d.tasksMore > 0 ? [el("p", { className: "empty", textContent: `${Number(d.tasksMore)} more not shown.` })] : [])),
+      planSection("Notes", planList(Array.isArray(d.notes) ? d.notes : [], "ul", "No notes yet. Notes written under a “Notes” heading in the project note show here.", (t) => el("li", { textContent: humanDates(str(t, 520), today) })))));
+    kids.push(el("p", { className: "plsrc", textContent: `From ${str(d.path, 200)} in the vault (read-only here).` }));
+    planBox.replaceChildren(el("div", { className: "pldetail" }, ...kids));
+    planBox.scrollTop = 0;
+    placeFocus(planBox);
+  }
+  async function drawPlan() {
+    const t = planTarget(location.hash);
+    if (!t) return;
+    const key = location.hash;
+    if (t.invalid) { planShown = key; planDetailTitle = ""; planBox.replaceChildren(el("a", { className: "back", href: planHref(""), textContent: "← All projects" }), planHeading("No such project"), el("p", { className: "err", role: "alert", textContent: "This address does not name a project." })); placeFocus(planBox); return; }
+    if (!t.id) { planDetailTitle = ""; drawOverview(); planShown = key; updateTitle(); return; }
+    if (planShown === key && planBox.querySelector(".pldetail")) { placeFocus(planBox); return; }
+    planShown = key;
+    const gen = ++planGen;
+    // Draw what the overview already knows at once, then the full detail.
+    const known = lastSidebar?.overview?.projects?.find?.((c) => c && c.id === t.id);
+    planDetailTitle = known ? str(known.title, 100) : "";
+    updateTitle();
+    planBox.replaceChildren(el("a", { className: "back", href: planHref(""), textContent: "← All projects" }), planHeading(planDetailTitle || t.id), el("p", { className: "empty", textContent: "Reading the project…" }));
+    let res, body = null;
+    try { res = await fetch(`/sidebar/project?id=${encodeURIComponent(t.id)}`); } catch { res = null; }
+    if (gen !== planGen) return;
+    if (res) { try { body = await res.json(); } catch { body = null; } }
+    if (gen !== planGen) return;
+    if (!res || !res.ok || !body || !body.project) {
+      const why = !res ? "ORBIT could not be reached for this project." : res.status === 404 ? `No project “${t.id}” in the vault (Projects/${t.id}.md).` : res.status === 403 ? "The Plan is for ORBIT's owner; this sign-in cannot read it." : str(body && body.error) || `The project could not be read (HTTP ${res.status}).`;
+      planShown = "";
+      planBox.replaceChildren(el("a", { className: "back", href: planHref(""), textContent: "← All projects" }), planHeading(planDetailTitle || t.id), el("p", { className: "err", role: "alert", textContent: why }));
+      placeFocus(planBox);
+      return;
+    }
+    drawDetail(body.project, str(body.today, 10) || str(lastSidebar?.overview?.today, 10));
+  }
+  // A click on a Plan link (the sidebar, a card, Back): the new view's heading takes focus, and the phone drawer closes.
+  document.addEventListener("click", (e) => {
+    const a = e.target instanceof Element ? e.target.closest('a[href^="/#plan"]') : null;
+    if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    planFocus = true;
+    if (nav.contains(a) && !docked() && drawerOpen) closeNav();
+  }, true);
   async function togglePreview(btn, path, pre) {
     if (btn.getAttribute("aria-expanded") === "true") { btn.setAttribute("aria-expanded", "false"); pre.hidden = true; return; }
     btn.setAttribute("aria-expanded", "true");
@@ -2758,6 +3043,9 @@
     document.getElementById("log").hidden = next !== "chat";
     chatForm.hidden = next !== "chat";
     jobsBox.hidden = next !== "jobs";
+    planBox.hidden = next !== "plan";
+    if (next === "plan") drawPlan();
+    showPlanCurrent();
     document.getElementById("alog").hidden = document.getElementById("aform").hidden = document.getElementById("astatus").hidden = next !== "assistant";
     // The page that opens is drawn once now, even in a hidden tab; the pollers then refresh it only while it is visible.
     if (next === "jobs") jobsPoller.open(() => tab === "jobs");
@@ -2778,10 +3066,14 @@
   const isSessionsPath = (path) => path === "/sessions" || path.startsWith("/sessions/");
   // The Jobs page is #jobs; one job is #jobs/<job id>.
   const isJobsHash = (hash) => hash === "#jobs" || hash.startsWith("#jobs/");
+  // The Plan views (docs/plan.md) are #plan (all projects) and #plan/<project id>. They read the vault, which is the owner's,
+  // so they open only where the Assistant does.
+  const isPlanHash = (hash) => hash === "#plan" || hash.startsWith("#plan/");
   function pageFor(path, hash, jobsAvailable, assistantAvailable) {
     if (isLegacyChat(hash)) return "chat";
     if (isJobsHash(hash) && jobsAvailable) return "jobs";
-    if (hash !== "#assistant" && !isJobsHash(hash) && isSessionsPath(path)) return "chat";
+    if (isPlanHash(hash) && assistantAvailable) return "plan";
+    if (hash !== "#assistant" && !isJobsHash(hash) && !isPlanHash(hash) && isSessionsPath(path)) return "chat";
     return assistantAvailable ? "assistant" : "chat";
   }
   // One session is addressed as /sessions/<session id> (the canonical form: lowercase, unencoded). Plain /sessions (or
@@ -2816,7 +3108,7 @@
       const t = chatTarget(hash);
       return t.kind === "invalid" ? null : sessionPath(t.kind === "thread" ? t.id : null) + search;
     }
-    if ((hash === "#assistant" || isJobsHash(hash)) && path !== "/") return `/${search}${hash}`;
+    if ((hash === "#assistant" || isJobsHash(hash) || isPlanHash(hash)) && path !== "/") return `/${search}${hash}`;
     if (path === "/sessions/") return `/sessions${search}${hash}`;
     if (!isSessionsPath(path)) return null;
     const t = sessionTarget(path, hash);

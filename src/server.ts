@@ -60,6 +60,7 @@ import { resolutionSummary } from "./model-capability.ts";
 import { AttachmentError, attachmentStore, isAttachmentId, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments.ts";
 import { localTime, PHOTO_TOOL_NAMES, photoDisplay, photoTools, reachablePhotos } from "./photo-access.ts";
 import { sidebarNote, sidebarView } from "./sidebar.ts";
+import { dayIn, planOverview, projectDetail } from "./plan.ts";
 import type { SidebarPhoto } from "./sidebar.ts";
 import { isPhotoRef, safeGalleries } from "./photo-ref.ts";
 import type { PhotoSources } from "./photo-access.ts";
@@ -1301,7 +1302,7 @@ export function buildServer({
     // search reads (read-only, masked); the images are the photos the Assistant may show (every owner conversation that still
     // exists, archived ones aside), each fetched through /assistant/photos/<ref>, which re-authorizes it. A vault that cannot be
     // read is reported in `vault.error` with the photos still listed; nothing is made up in its place.
-    if (url.pathname === "/sidebar" || url.pathname === "/sidebar/note") {
+    if (url.pathname === "/sidebar" || url.pathname === "/sidebar/note" || url.pathname === "/sidebar/project") {
       if (req.method !== "GET") return send(res, 405, { error: "Use GET for this route." });
       if (!(await owned("memory", "read"))) return;
       await memory.refresh?.(60_000);
@@ -1320,6 +1321,12 @@ export function buildServer({
         if (!notes) return send(res, 503, { error: vaultError });
         const note = sidebarNote(notes, url.searchParams.get("path") ?? "");
         return note ? send(res, 200, { note, source }) : send(res, 404, { error: "No such note in the vault." });
+      }
+      // One project's Plan detail (docs/plan.md): read from its hub note and the tasks that name it.
+      if (url.pathname === "/sidebar/project") {
+        if (!notes) return send(res, 503, { error: vaultError });
+        const project = projectDetail(notes, url.searchParams.get("id") ?? "");
+        return project ? send(res, 200, { project, today: dayIn(new Date()), source }) : send(res, 404, { error: "No such project in the vault (Projects/)." });
       }
       let photos: SidebarPhoto[] = [];
       let photoError: string | undefined;
@@ -1344,7 +1351,7 @@ export function buildServer({
         }
       }
       const project = url.searchParams.get("project") || undefined;
-      return send(res, 200, { ...sidebarView(notes, photos, project), vault: notes ? { ok: true, source } : { ok: false, error: vaultError }, ...(photoError ? { photoError } : {}) });
+      return send(res, 200, { ...sidebarView(notes, photos, project), overview: planOverview(notes), vault: notes ? { ok: true, source } : { ok: false, error: vaultError }, ...(photoError ? { photoError } : {}) });
     }
     if (url.pathname === "/notifications" && req.method === "GET") {
       if (!(await owned("notify", "inbox"))) return;

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { sidebarNote, sidebarView } from "../../src/sidebar.ts";
+import { dayIn, planOverview, projectDetail } from "../../src/plan.ts";
 import type { SidebarPhoto } from "../../src/sidebar.ts";
 import { serveWebAsset } from "./web-assets.ts";
 
@@ -31,11 +32,14 @@ function exchange(i: number, at: (n: number) => string) {
   return [user, reply];
 }
 
-// Synthetic vault notes and photos for the left sidebar (docs/sidebar.md), read through the real sidebarView.
+// Synthetic vault notes and photos for the left sidebar (docs/sidebar.md), read through the real sidebarView, and for the
+// Plan views (docs/plan.md), read through the real planOverview and projectDetail on a fixed day, so relative dates are stable.
+export const PLAN_NOW = new Date("2026-11-26T20:00:00Z");
 export const SIDEBAR_NOTES = new Map<string, string>([
   ["now.md", "# Now\n\n## Top priorities\n- Ship the synthetic release\n- Review the fixture plan\n"],
-  ["Projects/alpha-garden.md", "---\nstatus: active\naliases: [Alpha Garden]\ntags: [project]\n---\n# Alpha Garden\n\n## Next actions\n- [ ] Order the synthetic seeds\n- [x] Measure the beds\n- Draw the watering plan\n\n## Resume here\nPick up at the trellis sketch.\n\n## Locations\n- ~/projects/alpha-garden\n"],
-  ["Projects/beta-desk.md", "---\nstatus: paused\n---\n# Beta Desk\n\n## Plan\n- Sand the top\n"],
+  ["Projects/alpha-garden.md", "---\nstatus: active\npriority: 1\narea: home\nstarted: 2026-09-01\ntarget: 2026-12-15\nupdated: 2026-11-20\naliases: [Alpha Garden]\ntags: [project]\n---\n# Alpha Garden\n\n## Outcome\nA synthetic vegetable garden that feeds the household through winter. Beds, watering and a trellis.\n\n## Next actions\n- [ ] Order the synthetic seeds\n- [x] Measure the beds\n- Draw the watering plan\n\n## Milestones\n- [x] 2026-10-01: Beds built\n- [ ] 2026-12-01: First planting\n\n## Beds\n| # | Bed | Status |\n| --- | --- | --- |\n| 1 | North bed | done |\n| 2 | South bed | idea |\n| 3 | Herb box | idea |\n\n## Resume here\nPick up at the trellis sketch.\n\n## Log\n- 2026-11-24 18:30 UTC: Trellis sketch drafted (#orbit1234567890123456789).\n- 2026-11-10: Soil delivered.\n\n## Notes\n- Ask about the community seed swap.\n\n## Locations\n- ~/projects/alpha-garden\n"],
+  ["Projects/beta-desk.md", "---\nstatus: paused\npriority: 3\nupdated: 2026-10-02\n---\n# Beta Desk\n\n## Plan\n- Sand the top\n"],
+  ["Projects/gamma-roof.md", "---\nstatus: active\npriority: 2\ntarget: 2026-11-01\nupdated: 2026-11-25\n---\n# Gamma Roof\n\n## Outcome\nA dry synthetic shed roof.\n\n## Blockers\n- Waiting on the roofer's quote\n\n## Next steps\n- Call the roofer\n"],
   ["Projects/old-shed.md", "---\nstatus: done\n---\n# Old Shed\n"],
   ["Tasks/buy-seeds.md", "---\nstatus: todo\nproject: \"[[alpha-garden]]\"\ndue: 2026-11-30\n---\n# Buy seeds\n"],
   ["Tasks/fix-drawer.md", "---\nstatus: todo\nproject: \"[[beta-desk]]\"\n---\n# Fix the drawer\n"],
@@ -93,7 +97,12 @@ export function shellServer(opts: ShellOpts = {}) {
       sidebarReads.push(url.search);
       if (typeof o.sidebar === "number") return json(o.sidebar, { error: "synthetic failure" });
       const down = o.sidebar === "vault-down";
-      return json(200, { ...sidebarView(down ? undefined : SIDEBAR_NOTES, sidebarPhotos(at), url.searchParams.get("project") || undefined), vault: down ? { ok: false, error: "The vault could not be read: synthetic outage" } : { ok: true, source: "memory/vault@fixture" } });
+      return json(200, { ...sidebarView(down ? undefined : SIDEBAR_NOTES, sidebarPhotos(at), url.searchParams.get("project") || undefined), overview: planOverview(down ? undefined : SIDEBAR_NOTES, PLAN_NOW), vault: down ? { ok: false, error: "The vault could not be read: synthetic outage" } : { ok: true, source: "memory/vault@fixture" } });
+    }
+    if (p === "/sidebar/project") {
+      if (o.sidebar === "vault-down") return json(503, { error: "The vault could not be read: synthetic outage" });
+      const d = projectDetail(SIDEBAR_NOTES, url.searchParams.get("id") ?? "", PLAN_NOW);
+      return d ? json(200, { project: d, today: dayIn(PLAN_NOW) }) : json(404, { error: "No such project in the vault (Projects/)." });
     }
     if (p === "/sidebar/note") { const n = sidebarNote(SIDEBAR_NOTES, url.searchParams.get("path") ?? ""); return n ? json(200, { note: n }) : json(404, { error: "No such note in the vault." }); }
     if (/^\/assistant\/photos\/ph_[0-9a-f]{32}$/.test(p)) { res.writeHead(200, { "content-type": "image/png" }); return res.end(avatar); }

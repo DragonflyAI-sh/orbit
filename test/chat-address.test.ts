@@ -83,6 +83,8 @@ test("canonical addresses: legacy /#chat links move to /sessions with the same s
   assert.equal(canonicalAddress("/sessions", "", ""), null);
   assert.equal(canonicalAddress("/", "", ""), null);
   assert.equal(canonicalAddress("/", "", "#assistant"), null);
+  assert.equal(canonicalAddress("/", "", "#plan/alpha-garden"), null);
+  assert.equal(canonicalAddress("/sessions", "?q", "#plan/alpha-garden"), "/?q#plan/alpha-garden", "the Plan lives at /");
   assert.equal(canonicalAddress("/sessions/not-a-thread", "", ""), null);
   // Canonical forms of Sessions paths, and fragment links to the other pages followed from a Sessions page.
   assert.equal(canonicalAddress(`/sessions/${T1.replace(/-/g, "%2D")}`, "?q", "#h"), `/sessions/${T1}?q#h`);
