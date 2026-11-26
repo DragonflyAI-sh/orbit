@@ -267,9 +267,9 @@ test("the main content uses the full available width: no fixed cap on rows, card
     assert.doesNotMatch(r, /max-width:\s*(?!100%)\S/, `${sel} is not capped below the log's width`);
   }
   // The four scrollers share one rule; their edge padding is the --gutter token (16px, 12px on a phone) plus the safe area.
-  const scrollers = css.match(/#log, #alog, #jobs, #plan \{([^}]*)\}/)?.[1] ?? "";
-  assert.ok(scrollers, "one shared rule for #log, #alog, #jobs and #plan");
-  assert.doesNotMatch(scrollers, /max-width|(?<![-\w])width:\s*\d/, "the conversation, Jobs and Plan span the page");
+  const scrollers = css.match(/#log, #alog, #jobs, #plan, #gallery \{([^}]*)\}/)?.[1] ?? "";
+  assert.ok(scrollers, "one shared rule for #log, #alog, #jobs, #plan and #gallery");
+  assert.doesNotMatch(scrollers, /max-width|(?<![-\w])width:\s*\d/, "the conversation, Jobs, Plan and the photo gallery span the page");
   assert.match(scrollers, /padding:\s*var\(--gutter\)/, "they keep their edge padding");
   assert.match(css, /--gutter:\s*var\(--space-4\)/);
   assert.match(css, /--space-4:\s*16px/);
