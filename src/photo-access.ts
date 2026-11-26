@@ -289,8 +289,12 @@ export function photoDisplay(d: { attachments: Attachments; sources: PhotoSource
 export type PhotoDisplay = ReturnType<typeof photoDisplay>;
 
 // Newest first; within one message, in the order it was sent; then by ref, so the order is total and stable while paging.
-type Key = { s: string; c: string; p: number; r: string };
-const keyOf = (l: Located): Key => ({ s: l.sentAt, c: l.conversation.id, p: l.message?.photo ?? 0, r: l.ref });
+// Exported for the page's photo gallery (src/photo-gallery.ts), which pages through the same order.
+export type PhotoKey = { s: string; c: string; p: number; r: string };
+type Key = PhotoKey;
+export const photoKey = (l: Located): Key => ({ s: l.sentAt, c: l.conversation.id, p: l.message?.photo ?? 0, r: l.ref });
+const keyOf = photoKey;
+export const comparePhotoKeys = (a: Key, b: Key) => cmp(a, b);
 const cmp = (a: Key, b: Key) => (a.s !== b.s ? (a.s < b.s ? 1 : -1) : a.c !== b.c ? (a.c < b.c ? -1 : 1) : a.p !== b.p ? a.p - b.p : a.r < b.r ? -1 : a.r > b.r ? 1 : 0);
 
 const strictKeys = (a: Record<string, unknown>, allowed: string[]) => {

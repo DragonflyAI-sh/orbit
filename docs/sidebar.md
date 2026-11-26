@@ -16,7 +16,13 @@ and the photos from the attachment store.
 | **Projects** | Hub notes `Projects/<name>.md` (top level only) whose `status:` is not done, dropped, archived, cancelled, completed, abandoned or closed | — | The selector's choice, remembered in this browser |
 | **Plan** | List items under plan headings (Next actions, Next steps, Plan, Resume here, Now, Focus, Today, Top priorities, To do, Tasks, Actions); checked `[x]` and dropped `[-]` items are left out; a "Resume here" paragraph counts. Then open tasks from `Tasks/*.md` | `now.md`, and every open task (due first) | The project note, and the open tasks whose `project:` names it (`[[id]]`, `[[id\|label]]`, `Projects/id` or `id`) |
 | **Files** | Vault notes, each with an on-demand preview (`GET /sidebar/note?path=`) | `now.md` and every active project's hub note | The project note, its tasks (open or not), every other note that links `[[id]]` (the activity `Log/` aside), and the items under its Locations heading |
-| **Images** | Photos Rai sent in the Assistant or a chat thread that still exists (archived threads aside), the same reach as the Assistant's photo tools | The newest 24 | Those whose caption or conversation title contains the project's id (as words), title or an alias as a whole phrase |
+| **Images** | Photos Rai sent in the Assistant or a chat thread that still exists (archived threads aside), the same reach as the Assistant's photo tools; 10 per page (`images=<page>`) | Every photo, newest first | Those whose caption or conversation title contains the project's id (as words), title or an alias as a whole phrase |
+
+Each photo in **Images** is a row: its thumbnail, the day it was sent, its caption, an **AI** badge and count when a model
+observation is saved for it (counted for the page shown only, from the records the Assistant may read), and an "Open" link
+to its conversation. **Previous** and **Next** page through the list (the page is kept while the sidebar refreshes and
+goes back to the first when the project changes). A thumbnail opens the photo gallery (docs/photo-gallery.md) in the
+centre pane with that photo enlarged; the section's search box and "Open the photo gallery" open the gallery too.
 
 Every vault string is masked for secret-shaped values (src/vault/filter.ts), flattened to one line and bounded; a note
 preview is masked and cut at 20,000 characters, and only a note in the snapshot can be previewed. Photo captions and

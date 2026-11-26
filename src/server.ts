@@ -62,8 +62,9 @@ import { localTime, PHOTO_TOOL_NAMES, photoDisplay, photoTools, reachablePhotos 
 import { sidebarNote, sidebarView } from "./sidebar.ts";
 import type { SidebarPhoto } from "./sidebar.ts";
 import { isPhotoRef, safeGalleries } from "./photo-ref.ts";
-import type { PhotoSources } from "./photo-access.ts";
+import type { Located, PhotoSources } from "./photo-access.ts";
 import { observationStore, observationTools } from "./photo-observations.ts";
+import { aiCounts, GalleryError, photoGallery } from "./photo-gallery.ts";
 import type { ObservationSources, ObservationStore } from "./photo-observations.ts";
 import { photoSearchTool, photoSemantic as semanticSearch } from "./photo-semantic.ts";
 import type { SemanticSources } from "./photo-semantic.ts";
@@ -98,6 +99,7 @@ export const pageHtml = (html: string, zone: string): string => html.replace(ZON
 const page = pageHtml(readFileSync(new URL("./web/index.html", import.meta.url), "utf8"), ZONE);
 const avatar = readFileSync(new URL("./web/avatar.png", import.meta.url));
 const photosJs = readFileSync(new URL("./web/photos.js", import.meta.url), "utf8");
+const galleryJs = readFileSync(new URL("./web/gallery.js", import.meta.url), "utf8");
 
 // The page's own addresses: / and the Sessions section, /sessions and /sessions/<one path segment>. Deeper paths are not
 // page addresses (404 as before). A bad segment still gets the page, which says the address names no session.
@@ -447,6 +449,8 @@ export function buildServer({
   // Galleries photos_show displayed (docs/photo-recall.md): resolved again at every view and every image fetch, under the policy of
   // the conversation that shows them.
   const display = photoDisplay({ attachments, sources: photoSources, zone: ZONE });
+  // The page's photo gallery (docs/photo-gallery.md): read-only, under the Assistant's reach, built from the photo tools' own parts.
+  const gallery = photoGallery({ attachments, sources: semanticSources, store: photoObservations, semantic, zone: ZONE });
   // The service that owns a proposal's card: the Assistant's when its card is there, otherwise the chat threads'.
   const cardSvc = (proposalId: string) => (assistant.threadOfCard(proposalId) ? asvc : svc);
 
@@ -837,6 +841,10 @@ export function buildServer({
     if (req.method === "GET" && url.pathname === "/photos.js") {
       res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff" });
       return res.end(photosJs);
+    }
+    if (req.method === "GET" && url.pathname === "/gallery.js") {
+      res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff" });
+      return res.end(galleryJs);
     }
 
     if (req.method === "GET" && url.pathname === "/avatar.png") {
@@ -1313,6 +1321,7 @@ export function buildServer({
         return note ? send(res, 200, { note, source }) : send(res, 404, { error: "No such note in the vault." });
       }
       let photos: SidebarPhoto[] = [];
+      const located = new Map<string, Located>();
       let photoError: string | undefined;
       const ownerCall = await isOwnerOf(req);
       // Listing photos across conversations is attachment reading and session reading (as for the photo tools); both are audited.
@@ -1322,7 +1331,7 @@ export function buildServer({
       if (sessionRead) audit("sessions", "read", sessionRead);
       if (photoRead.allow && sessionRead?.allow) {
         try {
-          photos = reachablePhotos({ attachments, sources: photoSources }, assistantSessionId(), false).photos.map((l) => ({
+          photos = reachablePhotos({ attachments, sources: photoSources }, assistantSessionId(), false).photos.map((l) => (located.set(l.ref, l), {
             ref: l.ref,
             sentAt: l.sentAt,
             sentLocal: localTime(l.sentAt, ZONE),
@@ -1335,7 +1344,43 @@ export function buildServer({
         }
       }
       const project = url.searchParams.get("project") || undefined;
-      return send(res, 200, { ...sidebarView(notes, photos, project), vault: notes ? { ok: true, source } : { ok: false, error: vaultError }, ...(photoError ? { photoError } : {}) });
+      const imagesPage = Number(url.searchParams.get("images") ?? "1");
+      // The AI badge: counted only for the photos on the page shown, from the records the Assistant may read (photos_recall's read).
+      const aiOf = (ref: string) => {
+        const l = located.get(ref);
+        try {
+          return l ? aiCounts(photoObservations, observationSources, assistantSessionId(), l) : undefined;
+        } catch {
+          return undefined;
+        }
+      };
+      return send(res, 200, { ...sidebarView(notes, photos, project, { imagesPage: Number.isInteger(imagesPage) ? imagesPage : 1, aiOf }), vault: notes ? { ok: true, source } : { ok: false, error: vaultError }, ...(photoError ? { photoError } : {}) });
+    }
+    // ---- The photo gallery (docs/photo-gallery.md): GET only, owner only. Listing, searching and reading a photo's records across
+    // conversations is attachment reading and session reading, as for the Assistant's photo tools and the sidebar; both are audited.
+    // JSON only: images are fetched through /assistant/photos/<ref>, which re-authorizes every fetch.
+    const galleryRoute = url.pathname === "/gallery/photos" || url.pathname === "/gallery/search" ? url.pathname.slice(9) : /^\/gallery\/photos\/[^/]{1,80}$/.test(url.pathname) ? "detail" : undefined;
+    if (galleryRoute) {
+      if (req.method !== "GET") return send(res, 405, { error: "Use GET for this route." });
+      const ownerCall = await isOwnerOf(req);
+      const photoRead = decide("attachments", "read", ownerCall);
+      audit("attachments", "read", photoRead);
+      if (!photoRead.allow) return send(res, 403, { error: photoRead.reason });
+      const sessionRead = decide("sessions", "read", ownerCall);
+      audit("sessions", "read", sessionRead);
+      if (!sessionRead.allow) return send(res, 403, { error: sessionRead.reason });
+      try {
+        if (galleryRoute === "photos") {
+          const raw = url.searchParams.get("limit");
+          return send(res, 200, gallery.list({ cursor: url.searchParams.get("cursor") || undefined, limit: raw === null ? undefined : Number(raw) }));
+        }
+        if (galleryRoute === "search") return send(res, 200, await gallery.search(url.searchParams.get("q") ?? ""));
+        const got = gallery.detail(url.pathname.slice("/gallery/photos/".length));
+        return got ? send(res, 200, got) : send(res, 404, { error: "No such photo is visible to the Assistant." });
+      } catch (err) {
+        if (err instanceof GalleryError) return send(res, 400, { error: err.message });
+        return send(res, 500, { error: "The photos could not be read." });
+      }
     }
     if (url.pathname === "/notifications" && req.method === "GET") {
       if (!(await owned("notify", "inbox"))) return;

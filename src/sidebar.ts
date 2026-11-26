@@ -12,7 +12,9 @@ export const SIDEBAR_PLAN_MAX = 12;
 export const SIDEBAR_TASKS_MAX = 10;
 export const SIDEBAR_FILES_MAX = 30;
 export const SIDEBAR_LOCATIONS_MAX = 10;
-export const SIDEBAR_IMAGES_MAX = 24;
+// Photos per page of the Images section (docs/sidebar.md): the page asks for one page at a time (`images=<page>`, from 1).
+export const SIDEBAR_IMAGES_PAGE = 10;
+export const SIDEBAR_IMAGES_PAGES_MAX = 1000;
 export const SIDEBAR_NOTE_MAX = 20_000;
 const TEXT_MAX = 240;
 const TITLE_MAX = 100;
@@ -91,7 +93,9 @@ export type SidebarProject = { id: string; path: string; title: string; status: 
 export type PlanItem = { text: string; section: string };
 export type TaskItem = { path: string; title: string; status: string; due?: string };
 export type FileItem = { path: string; title: string; kind: "project" | "task" | "note" };
-export type SidebarImage = { ref: string; src: string; sentAt: string; sentLocal: string; caption: string; conversation: string; link: string };
+// `ai`: how many saved model observations and corrections the Assistant may read about this photo (photos_recall's read), when the
+// server could count them; the page shows an "AI" badge for observations.
+export type SidebarImage = { ref: string; src: string; sentAt: string; sentLocal: string; caption: string; conversation: string; link: string; ai?: { observations: number; corrections: number } };
 export type SidebarView = {
   projects: SidebarProject[];
   project: SidebarProject | null;
@@ -99,8 +103,10 @@ export type SidebarView = {
   unknownProject?: string;
   plan: { source: string | null; items: PlanItem[]; tasks: TaskItem[] };
   files: { items: FileItem[]; locations: string[]; more: number };
-  images: { items: SidebarImage[]; more: number; matched: "all" | "project" };
+  // One page of the matching photos: `page` from 1 of `pages`, `total` matching in all, `more` after this page.
+  images: { items: SidebarImage[]; more: number; matched: "all" | "project"; page: number; pages: number; total: number; perPage: number };
 };
+export type SidebarOptions = { imagesPage?: number; aiOf?: (ref: string) => { observations: number; corrections: number } | undefined };
 
 // A located photo as src/photo-access.ts reachablePhotos gives it, reduced to what the sidebar reads.
 export type SidebarPhoto = { ref: string; sentAt: string; sentLocal: string; caption: string; conversation: { title: string; kind: "assistant" | "chat"; id: string }; present: boolean };
@@ -220,7 +226,7 @@ const mentions = (phrases: string[], text: string) => {
   return phrases.some((ph) => new RegExp(`(^|[^\\p{L}\\p{N}])${ph.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^\\p{L}\\p{N}])`, "u").test(t));
 };
 
-export function sidebarView(notes: ReadonlyMap<string, string> | undefined, photos: readonly SidebarPhoto[], requested: string | undefined): SidebarView {
+export function sidebarView(notes: ReadonlyMap<string, string> | undefined, photos: readonly SidebarPhoto[], requested: string | undefined, opts: SidebarOptions = {}): SidebarView {
   const map = notes ?? new Map<string, string>();
   const projects = projectsOf(map);
   const project = requested ? (projects.find((p) => p.id === requested) ?? null) : null;
@@ -259,7 +265,12 @@ export function sidebarView(notes: ReadonlyMap<string, string> | undefined, phot
   // Images: newest first; with a project, only photos whose caption or conversation title names it.
   const phrases = project ? projectPhrases(project, text) : [];
   const matching = photos.filter((ph) => ph.present && (!project || mentions(phrases, `${ph.caption}\n${ph.conversation.title}`))).sort((a, b) => (a.sentAt < b.sentAt ? 1 : a.sentAt > b.sentAt ? -1 : 0));
-  const images = matching.slice(0, SIDEBAR_IMAGES_MAX).map((ph): SidebarImage => ({
+  // Paged: a page past the last shows the last one, so a list that shrank between reads still shows photos.
+  const pages = Math.max(1, Math.ceil(matching.length / SIDEBAR_IMAGES_PAGE));
+  const asked = Number.isInteger(opts.imagesPage) && opts.imagesPage! >= 1 ? Math.min(opts.imagesPage!, SIDEBAR_IMAGES_PAGES_MAX) : 1;
+  const page = Math.min(asked, pages);
+  const start = (page - 1) * SIDEBAR_IMAGES_PAGE;
+  const images = matching.slice(start, start + SIDEBAR_IMAGES_PAGE).map((ph): SidebarImage => ({
     ref: ph.ref,
     src: `/assistant/photos/${ph.ref}`,
     sentAt: ph.sentAt,
@@ -267,6 +278,10 @@ export function sidebarView(notes: ReadonlyMap<string, string> | undefined, phot
     caption: untrustedText(ph.caption, 140).text,
     conversation: untrustedText(ph.conversation.title, TITLE_MAX).text,
     link: ph.conversation.kind === "assistant" ? "#assistant" : `#chat/${ph.conversation.id.slice("chat:".length)}`,
+    ...(() => {
+      const ai = opts.aiOf?.(ph.ref);
+      return ai ? { ai: { observations: ai.observations, corrections: ai.corrections } } : {};
+    })(),
   }));
 
   return {
@@ -275,7 +290,7 @@ export function sidebarView(notes: ReadonlyMap<string, string> | undefined, phot
     ...(unknownProject ? { unknownProject } : {}),
     plan,
     files: { items: files.slice(0, SIDEBAR_FILES_MAX), locations, more },
-    images: { items: images, more: Math.max(0, matching.length - SIDEBAR_IMAGES_MAX), matched: project ? "project" : "all" },
+    images: { items: images, more: Math.max(0, matching.length - start - images.length), matched: project ? "project" : "all", page, pages, total: matching.length, perPage: SIDEBAR_IMAGES_PAGE },
   };
 }
 
