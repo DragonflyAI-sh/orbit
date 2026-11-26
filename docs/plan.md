@@ -24,7 +24,8 @@ Read-only, from the same vault snapshot as the sidebar (src/plan.ts):
 - `GET /sidebar` carries `overview`: `{ today, zone, projects: ProjectCard[], stats }` for every hub note
   `Projects/<name>.md` (top level only, open and done).
 - `GET /sidebar/project?id=<id>` (owner only, GET only) answers `{ project: ProjectDetail, today }`, 404 for no such hub
-  note (or an id that is not a plain file name), 503 when the vault cannot be read.
+  note (or an id with a `/` in it), 503 when the vault cannot be read. The id is the hub note's file name, so any id a card
+  has opens, spaces, commas, brackets, apostrophes and accents included; the page sends it URL-encoded.
 
 What is read from a project note:
 

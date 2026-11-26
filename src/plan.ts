@@ -424,7 +424,9 @@ export function planOverview(notes: ReadonlyMap<string, string> | undefined, now
 
 // One project's detail, or undefined when the vault has no such hub note.
 export function projectDetail(notes: ReadonlyMap<string, string>, id: string, now = new Date(), zone = ZONE): ProjectDetail | undefined {
-  if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,119}$/.test(id)) return undefined;
+  // Any id the overview can give a card: the file name of a hub note Projects/<id>.md, so anything without a "/" (spaces,
+  // commas, brackets, apostrophes and accented letters included). It is only a key into the snapshot, never a disk path.
+  if (typeof id !== "string" || !projectNote(`Projects/${id}.md`)) return undefined;
   const path = `Projects/${id}.md`;
   const text = notes.get(path);
   if (text === undefined) return undefined;
