@@ -9,8 +9,8 @@
 //     ... --index-only
 //
 // Never builds or uses the paid fallback, never changes configuration, never describes a photo from its caption. Prints one JSON
-// report (refs, statuses, reasons, counts; never observation text or image data). Exit 0 done, 1 stopped or some items failed,
-// 2 refused (nothing was read or sent).
+// report (refs, statuses, reasons, counts; never observation text or image data). Exit 0 done, 1 stopped, some items failed, or an
+// error after photos were read (the report then says how many were read, sent and saved), 2 refused (nothing was read or sent).
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import { assistantStore } from "../../src/assistant-store.ts";
@@ -53,13 +53,24 @@ const num = (n: string, d: number) => {
   const x = Number(v);
   return Number.isInteger(x) ? x : refuse(`${n} must be an integer`);
 };
+// Every option is checked before the lock is taken, so a refusal never leaves the lock behind.
+const limit = num("--limit", BACKFILL_LIMIT_DEFAULT), intervalMs = num("--interval-ms", 5000), attempts = num("--attempts", 3);
 
 const env = process.env;
 const modelName = env.ORBIT_MODEL ?? "";
-const release = lock(join(state!, "photo-backfill"), ".backfill.lock");
+let release: () => void = () => {};
+try {
+  release = lock(join(state!, "photo-backfill"), ".backfill.lock");
+} catch (err) {
+  refuse(err instanceof Error ? err.message.slice(0, 300) : "the backfill lock could not be taken");
+}
 const ac = new AbortController();
 process.on("SIGINT", () => ac.abort());
 process.on("SIGTERM", () => ac.abort());
+const progress = { read: 0, sent: 0, saved: 0 };
+// The primary model exactly as ORBIT builds it (src/main.ts), WITHOUT the OpenRouter fallback wrapper; stopped however the run ends.
+const chatgpt: { current?: ReturnType<typeof chatgptModel> } = {};
+let failure: string | undefined;
 try {
   const threads = threadStore(join(state!, "threads"));
   const assistant = assistantStore(join(state!, "assistant"));
@@ -71,8 +82,6 @@ try {
     message: (c, m) => (c === "assistant:assistant" ? assistant.messageState(m) : /^chat:/.test(c) ? threads.messageState(c.slice(5), m) : "gone"),
     discussion: (c, m) => (c === "assistant:assistant" ? assistant.photoDiscussion(m) : /^chat:/.test(c) ? threads.photoDiscussion(c.slice(5), m) : undefined),
   };
-  // The primary model exactly as ORBIT builds it (src/main.ts), WITHOUT the OpenRouter fallback wrapper.
-  const chatgpt: { current?: ReturnType<typeof chatgptModel> } = {};
   const model = selectModel(env, (name) => (chatgpt.current = chatgptModel(name, tokenFile(state), { capabilities: { operatorFile: env.ORBIT_MODEL_CAPABILITIES || undefined } })));
   // Upkeep the service also does before replies (login renewal, capability metadata); never with a photo.
   await model.maintain?.();
@@ -89,15 +98,24 @@ try {
     }
   }
   const report = await runBackfill(
-    { attachments: attachmentStore(join(state!, "attachments")), sources, store: observationStore(join(state!, "photo-observations")), model, modelName, checkpoint: checkpoint(join(state!, "photo-backfill")), index, signal: ac.signal, log: (l) => process.stderr.write(`${JSON.stringify({ at: new Date().toISOString(), ...l })}\n`) },
-    { dryRun: !flag("--apply") && !flag("--index-only"), indexOnly: flag("--index-only"), limit: num("--limit", BACKFILL_LIMIT_DEFAULT), intervalMs: num("--interval-ms", 5000), attempts: num("--attempts", 3), includeArchived: flag("--include-archived") },
+    { attachments: attachmentStore(join(state!, "attachments")), sources, store: observationStore(join(state!, "photo-observations")), model, modelName, checkpoint: checkpoint(join(state!, "photo-backfill")), index, signal: ac.signal, progress, log: (l) => process.stderr.write(`${JSON.stringify({ at: new Date().toISOString(), ...l })}\n`) },
+    { dryRun: !flag("--apply") && !flag("--index-only"), indexOnly: flag("--index-only"), limit, intervalMs, attempts, includeArchived: flag("--include-archived") },
   );
   out(report);
   process.exitCode = report.stopped || report.counts.failed ? 1 : 0;
-  await chatgpt.current?.stop?.();
 } catch (err) {
-  release();
-  refuse(err instanceof Error ? err.message.slice(0, 300) : "unknown error");
+  failure = err instanceof Error ? err.message.slice(0, 300) : "unknown error";
 } finally {
+  try {
+    await chatgpt.current?.stop?.();
+  } catch {
+    // stopping is best effort; the run's own outcome is what is reported
+  }
   release();
+}
+if (failure !== undefined) {
+  // Nothing read or sent: a refusal. After that, never "nothing was sent": say what was done, so the operator knows.
+  if (!progress.read && !progress.sent && !progress.saved) refuse(failure);
+  out({ failed: true, why: failure, ...progress, next: "The run stopped on an error after it began. The checkpoint keeps every photo finished before it, so a rerun resumes; --index-only retries indexing." });
+  process.exitCode = 1;
 }

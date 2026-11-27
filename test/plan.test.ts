@@ -147,6 +147,14 @@ test("sidebar summary: the card with its next steps, first blocker, next date an
   assert.deepEqual([m.openTasks, m.tasksMore], [5, 2]);
   assert.deepEqual(m.milestone, { date: "2026-12-02", label: "Task A", kind: "due", done: false }, "without a milestone or target, the next task due date");
 
+  // PR #181 review: a task that is already a next step (with its due date) is not shown again as the next date; a later
+  // due task that is not a next step still is, and with neither there is no next date.
+  const twice = (tasks: Record<string, string>) => projectSummary(notes({ "Projects/solo.md": "---\nstatus: active\n---\n# Solo\n", ...tasks }), "solo", NOW)!;
+  const one = twice({ "Tasks/q.md": "---\nstatus: todo\nproject: solo\ndue: 2026-12-04\n---\n# Chase the quote\n" });
+  assert.deepEqual(one.nextSteps, ["Chase the quote (due 2026-12-04)"]);
+  assert.equal(one.milestone, null, "the only dated task is already a next step");
+  assert.deepEqual([one.tasks, one.openTasks], [[], 1]);
+
   // A sparse note: nothing is made up.
   const sparse = projectSummary(notes({ "Projects/bare.md": "---\nstatus: active\n---\n" }), "bare", NOW)!;
   assert.deepEqual([sparse.title, sparse.summary, sparse.nextSteps, sparse.blocker, sparse.milestone, sparse.openTasks, sparse.tasks, sparse.progress, sparse.target, sparse.priority],

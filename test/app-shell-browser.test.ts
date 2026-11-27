@@ -275,6 +275,61 @@ test("browser (568x320): the side panel fits the shortest screen: its view scrol
   fixture.set({ notes: 3 });
 });
 
+// Short landscape phones (PR #187 review): with Home as the fourth page link, the links pushed the theme button onto a second
+// row at 568x320 and the header grew from 57px to 99px on Home, the Assistant and Jobs. The top bar must stay one row there,
+// with every page link visible, named and reachable.
+test("browser (568x320, 600x360, 667x375 landscape): Home, the Assistant and Jobs keep a one-row header with all four page links and the theme button", { skip }, async () => {
+  for (const size of [SIZES[4]!, { name: "600 landscape", width: 600, height: 360, phone: true }, { name: "667 landscape", width: 667, height: 375, phone: true }]) {
+    const ctx = await chromium.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: 1, isMobile: true, hasTouch: true });
+    const page = await ctx.newPage();
+    for (const route of ["/", "/#assistant", "/#jobs"]) {
+      await page.goto(url + route);
+      await page.waitForFunction(() => !document.getElementById("jobstab")!.hidden);
+      await page.waitForTimeout(100);
+      const m = await page.evaluate(() => {
+        const box = (e: Element) => e.getBoundingClientRect();
+        const links = [...document.querySelectorAll<HTMLAnchorElement>("#tabs a")].map(a => ({ name: a.textContent!.trim(), top: box(a).top, right: box(a).right, hidden: a.hidden }));
+        return { header: box(document.querySelector("header")!).height, theme: box(document.getElementById("themebtn")!), brand: box(document.getElementById("brandbtn")!).top,
+          links, label: document.getElementById("tabs")!.getAttribute("aria-label"), current: document.querySelector("#tabs a[aria-current=page]")?.id ?? "", vw: window.innerWidth,
+          sideways: document.documentElement.scrollWidth > window.innerWidth };
+      });
+      const where = `${size.name} ${route}`;
+      const links: { name: string; top: number; right: number; hidden: boolean }[] = m.links;
+      assert.deepEqual(links.map((l) => l.name.replace(/\s+/g, " ")), ["Home", "Assistant", "Jobs", "Sessions"], `${where}: the four page links, in order`);
+      assert.ok(links.every((l) => !l.hidden && l.right <= m.vw), `${where}: every page link is shown on screen`);
+      assert.equal(m.label, "ORBIT pages", `${where}: the page links keep their navigation landmark name`);
+      assert.equal(m.current, { "/": "hometab", "/#assistant": "assistanttab", "/#jobs": "jobstab" }[route], `${where}: the current page is marked`);
+      const tops = new Set(links.map((l) => Math.round(l.top)));
+      assert.equal(tops.size, 1, `${where}: the page links share one row (${[...tops]})`);
+      assert.ok(Math.abs(m.theme.top - m.brand) <= 8, `${where}: the theme button stays on the brand's row (theme ${m.theme.top}, brand ${m.brand})`);
+      assert.ok(m.theme.right <= m.vw, `${where}: the theme button is on screen`);
+      assert.ok(m.header <= 60, `${where}: the header is one row, no taller than before Home was added (${m.header}px, was 57px)`);
+      assert.equal(m.sideways, false, `${where}: nothing overflows sideways`);
+    }
+    await ctx.close();
+  }
+});
+
+// docs/home.md: at 360px and below the four page links and the sidebar's menu button share one row (the narrowest: 320px).
+test("browser (320 portrait): the four page links and the sidebar's menu button share one row on Home, the Assistant and Sessions", { skip }, async () => {
+  const ctx = await chromium.newContext({ viewport: { width: 320, height: 568 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true });
+  const page = await ctx.newPage();
+  for (const route of ["/", "/#assistant", "/sessions"]) {
+    await page.goto(url + route);
+    await page.waitForFunction(() => !document.getElementById("jobstab")!.hidden);
+    await page.waitForTimeout(100);
+    const m = await page.evaluate(() => ({ links: [...document.querySelectorAll("#tabs a")].map(a => { const r = a.getBoundingClientRect(); return { top: r.top, right: r.right }; }),
+      menu: document.getElementById("navbtn")!.getBoundingClientRect().top, vw: window.innerWidth }));
+    assert.equal(m.links.length, 4, `${route}: four page links`);
+    for (const l of m.links) {
+      assert.ok(Math.abs(l.top - m.links[0]!.top) <= 2, `${route}: the page links share one row`);
+      assert.ok(l.right <= m.vw, `${route}: every page link is on screen`);
+    }
+    assert.ok(Math.abs(m.menu - m.links[0]!.top) <= 6, `${route}: the menu button starts the links' row (menu ${m.menu}, links ${m.links[0]!.top})`);
+  }
+  await ctx.close();
+});
+
 // A stand-in visualViewport (installed before the page's script runs), so the page's keyboard/toolbar logic can be driven
 // here. This simulates what iOS Safari reports; it is not iOS Safari.
 const FAKE_VV = `(() => {

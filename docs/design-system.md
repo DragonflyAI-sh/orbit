@@ -101,7 +101,9 @@ All tokens are on `:root`. The theme (dark media query or `data-theme`) changes 
 - **Header brand:** the logo and the ORBIT name are one quiet link (accessible name "ORBIT: Refresh page") to the
   current page. A plain click, or Enter, reloads it at the same address, path, query and hash, as the browser's reload
   does; nothing is sent or cleared. Its href is that address, so the browser's own link actions (Ctrl or Command+click,
-  middle-click, Shift+click, "Open link in new tab") open the same page natively; the page never forces a new tab. It has
+  middle-click, Shift+click, "Open link in new tab") open the same page natively; the page never forces a new tab. Alt+click
+  is left to the browser too (desktop Chromium saves the page as a file); it no longer reloads, as the old button did. None
+  of these modified clicks touch the original tab: an open file stays in front (docs/file-viewer.md). It has
   no underline or chrome at rest, only the shared hover ring, pressed look and focus ring, and a 44px tap area on touch
   screens.
 - **Header (phones):** as in #148. The tabs sit on their own row as a borderless segmented track, and the header stays

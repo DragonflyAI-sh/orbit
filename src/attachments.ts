@@ -151,7 +151,11 @@ export function attachmentStore(dir: string | undefined, opts: { now?: () => Dat
     // are never stored twice: the existing attachment is returned with `reused: true` and nothing is written. The storage bound applies.
     putImported(bytes: Buffer, facts: { width: number; height: number }, at: string): { meta: AttachmentMeta; reused: boolean } {
       const sha256 = createHash("sha256").update(bytes).digest("hex");
-      const same = [...metas.values()].find((m) => m.sha256 === sha256 && m.state === "bound") ?? [...metas.values()].find((m) => m.sha256 === sha256 && m.scope === IMPORT_SCOPE);
+      // An imported copy first (an interrupted import's photo is then finished, even when the same bytes were also sent in a
+      // conversation), else a copy bound in a conversation; the lowest id when there are several, so the choice never depends on order.
+      const byId = (a: AttachmentMeta, b: AttachmentMeta) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+      const copies = [...metas.values()].filter((m) => m.sha256 === sha256).sort(byId);
+      const same = copies.find((m) => m.scope === IMPORT_SCOPE) ?? copies.find((m) => m.state === "bound");
       if (same) return { meta: { ...same }, reused: true };
       if (totalBytes() + bytes.length > maxTotal) throw new AttachmentError(507, "ORBIT's photo storage is full. Nothing was stored.");
       const meta: AttachmentMeta = { id: `a${randomBytes(16).toString("hex")}`, scope: IMPORT_SCOPE, state: "bound", type: "image/jpeg", bytes: bytes.length, width: facts.width, height: facts.height, sha256, createdAt: at, boundAt: at };

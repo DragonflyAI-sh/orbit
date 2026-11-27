@@ -190,6 +190,9 @@ export type BackfillDeps = {
   sleep?: (ms: number) => Promise<void>;
   signal?: AbortSignal;
   log?: (line: Record<string, unknown>) => void;
+  // Counted as the run goes, so a caller can say what was done even if the run ends in an unexpected error: photos read from the
+  // store, photos sent to the model, observations saved.
+  progress?: { read: number; sent: number; saved: number };
 };
 export type BackfillOptions = { dryRun: boolean; limit?: number; intervalMs?: number; attempts?: number; includeArchived?: boolean; indexOnly?: boolean; run?: string };
 export type BackfillItem = { ref: string; status: ItemState["status"] | "would-describe"; observation?: string; reason?: string; index?: ItemState["index"]; indexError?: string };
@@ -287,6 +290,7 @@ export async function runBackfill(d: BackfillDeps, o: BackfillOptions): Promise<
       break;
     }
     const got = d.attachments.load(l.meta.id, l.meta.scope);
+    if (got.ok && d.progress) d.progress.read++;
     if (!got.ok) {
       put({ status: "unavailable", reason: got.reason === "corrupt" ? "the stored photo failed its integrity check" : "the stored photo file is missing" });
       continue;
@@ -295,6 +299,7 @@ export async function runBackfill(d: BackfillDeps, o: BackfillOptions): Promise<
     calls++;
     let text: string;
     try {
+      if (d.progress) d.progress.sent++;
       const reply = await d.model.reply([{ role: "user", content: BACKFILL_PROMPT, images: [{ id: l.meta.id, data: got.bytes.toString("base64") }] }], [], undefined, { fallback: false, signal: d.signal });
       if (reply.fallback) throw new Error("the answer came from a fallback model, which is never given photos");
       text = reply.value;
@@ -328,6 +333,7 @@ export async function runBackfill(d: BackfillDeps, o: BackfillOptions): Promise<
         at: now().toISOString(),
       });
       if (r.saved) {
+        if (d.progress) d.progress.saved++;
         put({ status: "saved", attempts: tries + 1, observation: r.id, index: d.index ? "pending" : "not-configured" });
         saved.push(l.ref);
         log({ event: "photo_backfill_saved", ref: l.ref, observation: r.id });

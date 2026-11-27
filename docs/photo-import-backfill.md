@@ -105,8 +105,11 @@ The report holds item ids, statuses, reasons, refs, hashes and project paths. It
 
 ### Apply, retry and reversal
 
-- **Apply** needs `--apply --reviewed-manifest-sha256 <sha> --orbit-stopped`, and the process must own the state directory. Each file is read and normalized again, and must still match the reviewed hash; a changed file fails that item. The attachment (bound, 0600) is written first, then the ledger entry. A crash between the two leaves an invisible copy, which the next dry run reports as importable ("interrupted import") and the next apply finishes, without a second copy. Every batch has an id `ib_…` in the ledger.
-- **Retry:** apply again. Already-imported items are skipped. One run at a time per state directory, enforced by the lock file `<state>/photo-imports/.import.lock`. A stale lock is reported, never broken automatically.
+- **Apply** needs `--apply --reviewed-plan-sha256 <planSha256> --orbit-stopped`, and the process must own the state directory. The dry run prints `planSha256`, a digest of exactly what apply would do: the manifest's and the approvals file's SHA-256 and, for every item, its status, the SHA-256 of the normalized bytes it would store, the photo ref it is (or is already stored as) and its project link. Apply builds the plan again from the files, the approvals and the stores as they are then, and refuses the whole run, changing nothing, unless that digest is the reviewed one. So a photo swapped in the bundle, a different approvals file or a store that changed since the review never goes through unreviewed: run the dry run again and review it. (`--reviewed-manifest-sha256 <manifestSha256>` is still accepted as an extra check; on its own it no longer applies anything.) Each file is then read and normalized once more, and must still match the reviewed hash; a file changed during the run fails that item. The attachment (bound, 0600) is written first, then the ledger entry. A crash between the two leaves an invisible copy, which the next dry run reports as importable ("interrupted import") and the next apply finishes, without a second copy. Every batch has an id `ib_…` in the ledger.
+- **Retry:** apply again (after a new dry run and review: the stored photos are part of the plan, so the earlier digest no longer matches). Already-imported items are skipped. One run at a time per state directory, enforced by the lock file `<state>/photo-imports/.import.lock`. A stale lock is reported, never broken automatically.
+- **Duplicates already stored twice.** If an imported photo is later sent again in a conversation, the same bytes are stored twice (an `import` copy and a conversation copy). The importer always counts the imported copy first, then the lowest id, whatever order the store lists them in, so the dry run and apply agree and a rerun reports the item as `already-imported`.
+- **The ledger is never rewritten while damaged.** If the ledger file is unreadable, or some of its entries break the contract (they are not served, and `problem` says how many), every change is refused and the file is left for the operator to look at, so no entry is lost by a rewrite.
+- **Reports never claim less than happened.** A refusal (exit 2, `"changed": false`) means nothing was written. An unexpected error after apply or revert started writing is reported as `"failed": true, "changed": "unknown"` (exit 1). A revert whose ledger change is done but a stored file cannot be removed reports it in `removeFailed` (exit 1); the photo is already hidden.
 - **Reverse:** `--revert <ib_…> --orbit-stopped`. The batch's ledger entries go first, so the photos disappear at once. Then their stored copies are deleted (only `import`-scope files that no other entry uses), and the batch's links are removed, including links it added to native photos. The batch is marked `reverted`, and reversing it again is a no-op. Observations saved about reverted photos stay in the observation store but are never served, because their photo is gone. Their vectors are pruned by the semantic index's own maintenance. The export bundle is never modified at any point.
 
 ## Backfill
@@ -133,7 +136,9 @@ Existing records are never changed or superseded.
 | Gap between model calls (`--interval-ms`) | 5000 ms | at least 1000 ms |
 | Attempts per photo version (`--attempts`) | 3 | at most 3 |
 
-The run also stops after 3 consecutive provider failures. One run at a time: `<state>/photo-backfill/.backfill.lock`.
+The run also stops after 3 consecutive provider failures. One run at a time: `<state>/photo-backfill/.backfill.lock`. Options are checked before the lock is taken, so a bad value never leaves it behind, and a lock held by another run is a JSON refusal (exit 2).
+
+**Exit codes and reports.** Exit 0 done; 1 stopped, some photos failed, or an unexpected error after the run began; 2 refused. A refusal says `read: 0, sent: 0, saved: 0`, and only happens before any photo is read. An unexpected error later (for example a checkpoint write failing) is reported as `"failed": true` with the counts of photos read, sent to the model and saved before it, so the operator knows what was sent. The model is stopped however the run ends.
 
 **Checkpoint.** `<state>/photo-backfill/checkpoint.json` is written atomically after every photo, with its status, attempts, reason (provider text redacted), observation id and index status. Ctrl-C or SIGTERM stops after the current photo, and a rerun resumes.
 
@@ -167,10 +172,10 @@ orbit_tool() {
    - Add `projects` only where the legacy message explicitly named the project; put anything weaker in `projectCandidates`.
    - Put the bundle in a root-owned directory such as `/srv/orbit-import/<name>`, readable by the tool. Never in the repository, the vault or a web directory.
 2. **Dry run (ORBIT may keep running).** `orbit_tool tools/photo-import/import.ts --export /srv/orbit-import/<name> --state /var/lib/orbit --projects-dir <the vault copy>/Projects > import-dry-run.json`. Check the counts, then every `missing`, `rejected`, `ambiguous`, `unmatched` and `unverified` item.
-3. **Owner review.** Rai reviews the dry run: what will be imported, which links will be made and which ambiguous ones need a decision. Record the decisions in an approvals file with the dry run's `manifestSha256`. Run the dry run again with `--approvals <file>` until it shows exactly what Rai approved.
+3. **Owner review.** Rai reviews the dry run: what will be imported, which links will be made and which ambiguous ones need a decision. Record the decisions in an approvals file with the dry run's `manifestSha256`. Run the dry run again with `--approvals <file>` until it shows exactly what Rai approved, and keep that dry run's `planSha256`: it is what Rai approved. If anything changes afterwards (a photo, the approvals, or a photo sent to ORBIT in the meantime), apply refuses; run the dry run again (with ORBIT stopped, if photos may still be arriving) and review it.
 4. **Apply (ORBIT stopped).**
    - `sudo systemctl stop orbit`
-   - `orbit_tool tools/photo-import/import.ts --export … --state /var/lib/orbit --projects-dir … --approvals … --apply --reviewed-manifest-sha256 <sha> --orbit-stopped > import-apply.json`
+   - `orbit_tool tools/photo-import/import.ts --export … --state /var/lib/orbit --projects-dir … --approvals … --apply --reviewed-plan-sha256 <planSha256 of the reviewed dry run> --orbit-stopped > import-apply.json`
    - Keep the batch id from the report.
    - `sudo systemctl start orbit`
 5. **Verify the import** (see the checklist below). If anything is wrong: stop ORBIT, run `--revert <batch> --orbit-stopped`, start ORBIT.
@@ -195,6 +200,9 @@ orbit_tool() {
 - **Imported captions are not search evidence yet.** They are displayed and kept, but adding them to `collectEvidence` changes the search corpus, so that was left for coordination with the photo-search ranking work. Imported photos are searchable through their import title and through backfilled observations.
 - **ORBIT must be stopped** for apply, revert and the backfill, because the attachment, thread and Assistant stores have no cross-process lock and the server reads the attachment store only at start.
 - **Rate limits are ORBIT-side only.** The provider's own limits still apply, and the backfill stops after three consecutive failures.
+- **Ledger size.** Every imported item and every link rewrites the whole ledger file, which is capped at 8 MiB (`LEDGER_BYTES_MAX`). An entry is roughly 0.3 to 0.9 KiB, so the ledger holds very roughly 9,000 to 25,000 imported photos in total; past that, each item fails with "would exceed its size bound" and nothing is lost. Large batches also rewrite a file of several MiB many times. Import in batches of hundreds, not tens of thousands, until the writes are batched.
+- **Reverting one batch removes its links even if a later batch asked for the same link.** Links are recorded once, by the batch that first made them. If batch B asked for a link batch A already made, reverting A removes it; re-run B's dry run and apply to restore it.
+- **`--orbit-stopped` is the operator's statement.** The tools do not check that the service is down (they cannot tell a stopped ORBIT from one on another port or host). Stop it first, as the runbook says.
 - **Duplicates are exact-byte only** (after normalization). The same photo re-encoded differently is not recognized as a duplicate. Visual similarity is never used, for duplicates or for projects.
 
 ## Tests
@@ -205,7 +213,9 @@ orbit_tool() {
   - nothing changed, no private text in the report;
   - apply through the real server's gallery: provenance, legacy time and caption, the read-only project link, metadata stripped, 0600 files, chat isolation, image route;
   - retries and an interrupted import; approvals bound to the manifest; reversal;
-  - malformed manifests; the CLI's refusals; the page helpers.
+  - malformed manifests; the CLI's refusals; the page helpers;
+  - apply refusing a swapped photo or a different approvals file after the reviewed dry run (the plan digest), and applying exactly the reviewed plan;
+  - the imported copy chosen among duplicates whatever the store's order; a ledger with broken entries refusing to be rewritten; a revert reporting a file it could not remove.
 - `test/photo-backfill.test.ts`:
   - a blocked vision route reads and sends nothing;
   - selection skips forgotten, corrected and observed photos and includes imported ones;
@@ -215,4 +225,6 @@ orbit_tool() {
   - interrupted reruns and idempotent saves;
   - provider failures with bounded attempts; malformed, refused and fallback answers;
   - an embedding failure keeps the observation, then `--index-only` succeeds;
-  - the CLI refuses without `--orbit-stopped` and sends nothing without a model.
+  - the CLI refuses without `--orbit-stopped` and sends nothing without a model;
+  - a bad option leaves no lock behind, and a held lock is a JSON refusal;
+  - an error mid-run still counts what was read, sent and saved.

@@ -227,11 +227,10 @@
   .brand { display: flex; align-items: center; flex: none; margin: 0; font-size: 16px; }
   #brandbtn { display: inline-flex; align-items: center; gap: 8px; margin: -2px -4px; padding: 2px 6px 2px 4px; border: 0; border-radius: var(--radius-pill);
               background: none; color: inherit; font: inherit; text-decoration: none; }
-  #brandbtn:not(:disabled):hover { background: var(--press-bg); }
   /* A link, so it takes the shared button states (further down) by its own rules: the same hover ring, pressed look and
      motion (none when reduced motion is asked for). The shared focus ring already covers links. */
   #brandbtn { transition: filter var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease), transform var(--dur-1) var(--ease), background-color var(--dur-2) var(--ease); }
-  #brandbtn:hover { filter: brightness(1.08); box-shadow: 0 0 0 2px var(--ring); }
+  #brandbtn:hover { background: var(--press-bg); filter: brightness(1.08); box-shadow: 0 0 0 2px var(--ring); }
   #brandbtn:active { filter: brightness(.9); transform: translateY(1px) scale(.97); box-shadow: 0 0 0 2px var(--ring), inset 0 2px 4px rgba(0, 0, 0, .25); }
   @media (prefers-reduced-motion: reduce) { #brandbtn:active { transform: none; } }
   .bar nav { flex: 0 1 auto; min-width: 0; }
@@ -264,6 +263,10 @@
   /* The narrowest phones: slimmer tab padding so the four page links and the menu button share one row (at 360px and below,
      with the small text size too). */
   @media (max-width: 400px) { .bar nav a { padding-left: 8px; padding-right: 8px; } }
+  /* Short landscape phones and small tablets (561-699px), where the links share the top row with the brand and the theme
+     button: the same slimmer padding keeps all four links and the theme button on one row (one 57px row at 568x320), and
+     leaves Sessions room for its title from about 640px. */
+  @media (min-width: 561px) and (max-width: 699.98px) { .bar nav a { padding-left: 8px; padding-right: 8px; } }
   @media (max-width: 360px) { .bar nav a { padding-left: 5px; padding-right: 5px; font-size: var(--text-sm); } }
   @media (max-width: 400px) { body[data-tab="chat"] .brand .wordmark { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); white-space: nowrap; } }
   /* Touch screens: header controls are at least 36px tall and 44px wide, and an invisible frame around each (::after) makes
@@ -862,7 +865,7 @@
          column-gap: calc(var(--msg-rule-gap) + var(--msg-rule-w) + var(--msg-inset));
          align-self: stretch; width: 100%; max-width: 100%; min-width: 0; padding: 4px var(--msg-inset) 4px var(--msg-pad-l);
          white-space: pre-wrap; overflow-wrap: anywhere; }
-  .msg.user { --who: var(--accent); }
+  .msg.user { --who: var(--accent-text, var(--accent)); } /* a custom accent's text shade (appearance.js, accentText): the name is text, so 4.5:1 */
   .msg > * { grid-column: 2; min-width: 0; }
   .msg > .mavatar { grid-column: 1; grid-row: 1 / span 60; align-self: start; }
   .msg::before { content: ""; position: absolute; left: calc(var(--msg-pad-l) + var(--msg-av) + var(--msg-rule-gap)); top: 28px; bottom: 6px; width: var(--msg-rule-w); border-radius: 1px; background: color-mix(in srgb, var(--who) 40%, transparent); }
@@ -3408,9 +3411,12 @@
     }
   }
   if (fileViewer) {
-    // Another page: hide the viewer (the open files stay open).
-    tabs.addEventListener("click", (e) => { if (e.target instanceof Element && e.target.closest("a[data-tab]")) fileViewer.hide(); });
+    // Another page: hide the viewer (the open files stay open). Only a plain primary click leaves this tab: Ctrl/Command,
+    // Shift or Alt+click is the browser's (a new tab or window, or a download), so the open file stays in front here.
+    const plainClick = (e) => e.button === 0 && !(e.metaKey || e.ctrlKey || e.shiftKey || e.altKey);
+    tabs.addEventListener("click", (e) => { if (plainClick(e) && e.target instanceof Element && e.target.closest("a[data-tab]")) fileViewer.hide(); });
     document.addEventListener("click", (e) => {
+      if (!plainClick(e)) return;
       const a = e.target instanceof Element ? e.target.closest("a[href]") : null;
       if (a && !fileBox.contains(a) && (!a.target || a.target === "_self")) fileViewer.hide();
     }, true);

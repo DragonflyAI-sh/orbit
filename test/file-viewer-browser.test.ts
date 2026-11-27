@@ -141,6 +141,41 @@ test("browser 1280px: a Markdown note opens in the centre pane, edits and previe
   }
 });
 
+// PR #180 review: a modified click on a link (the brand, a page link) opens that page in a new tab or window, so the file open
+// in this tab must stay in front; only a plain click leaves the file.
+test("browser: Ctrl+click and Shift+click on the brand or a page link leave the open file in front; a plain click still leaves it", { skip }, async () => {
+  const s = await served();
+  const { page, ctx, errors } = await openPage(s.base);
+  const opened: any[] = [];
+  ctx.on("page", (p: any) => opened.push(p));
+  try {
+    await page.click(fileButton("Projects/alpha.md"));
+    await page.waitForFunction(() => (document.querySelector("#fileview .fta") as HTMLTextAreaElement | null)?.value.includes("step one"));
+    const address = await page.evaluate(() => location.href);
+    for (const target of ["#brandbtn", "#sessionstab", "#hometab"]) {
+      for (const modifiers of [["Control"], ["Shift"]]) {
+        await page.click(target, { modifiers });
+        await page.waitForTimeout(150);
+        const where = `${modifiers[0]}+click on ${target}`;
+        assert.equal(await visible(page, "#fileview"), true, `${where}: the file stays in front`);
+        assert.equal(await page.textContent("#fileview .ftitle"), "alpha.md", `${where}: still the open file`);
+        assert.equal(await page.evaluate(() => location.href), address, `${where}: this tab stays where it was`);
+        assert.deepEqual(await marked(page), [["Projects/alpha.md", "true"]], `${where}: the sidebar still marks the file`);
+      }
+    }
+    assert.ok(opened.length >= 1, "the browser opened the modified clicks elsewhere");
+    for (const p of opened) await p.close().catch(() => {});
+    // A plain click on a page link still leaves the file (the open files stay open).
+    await page.click("#sessionstab");
+    await page.waitForFunction(() => !document.documentElement.dataset.file);
+    assert.equal(await visible(page, "#fileview"), false);
+    assert.deepEqual(errors, []);
+  } finally {
+    await ctx.close();
+    s.r.close();
+  }
+});
+
 test("browser: unsaved changes ask before closing; a protected note needs confirmation; a note changed elsewhere is not overwritten", { skip }, async () => {
   const s = await served();
   const { page, ctx, errors } = await openPage(s.base);

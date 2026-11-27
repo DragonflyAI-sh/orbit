@@ -5,17 +5,19 @@
 //   Dry run (the default; changes nothing, ORBIT may keep running):
 //     node tools/photo-import/import.ts --export <dir> --state <ORBIT state dir> [--projects-dir <vault>/Projects] [--approvals <file>]
 //   Apply a reviewed dry run (ORBIT stopped):
-//     node tools/photo-import/import.ts ... --apply --reviewed-manifest-sha256 <sha from the dry run> --orbit-stopped
+//     node tools/photo-import/import.ts ... --apply --reviewed-plan-sha256 <planSha256 from the dry run> --orbit-stopped
+//   Apply rebuilds the plan from the files, approvals and stores as they are then, and refuses unless its digest is the reviewed one.
 //   Reverse one applied batch (ORBIT stopped):
 //     node tools/photo-import/import.ts --state <dir> --revert <ib_…> --orbit-stopped
 //
 // Prints one JSON report on stdout: counts, item ids, statuses, reasons, refs and project paths. Never captions, pointers, file
-// names, paths or image data. Exit 0 done, 1 some items failed, 2 refused (nothing was changed).
+// names, paths or image data. Exit 0 done, 1 some items failed (or an error after writing began: the report says so), 2 refused
+// (nothing was changed).
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { attachmentStore } from "../../src/attachments.ts";
 import { lock } from "../../src/photo-backfill.ts";
-import { applyImport, exportRoot, ImportError, knownProjects, planImport, readOnlyIndex, reportOf, revertImport, storeIndex } from "../../src/photo-import.ts";
+import { applyImport, exportRoot, ImportError, knownProjects, planDigest, planImport, readOnlyIndex, reportOf, revertImport, storeIndex } from "../../src/photo-import.ts";
 import { importLedger } from "../../src/photo-import-ledger.ts";
 
 const args = process.argv.slice(2);
@@ -29,7 +31,7 @@ const refuse = (why: string): never => {
   out({ refused: true, why, changed: false });
   process.exit(2);
 };
-const known = ["--export", "--state", "--projects-dir", "--approvals", "--apply", "--reviewed-manifest-sha256", "--orbit-stopped", "--revert"];
+const known = ["--export", "--state", "--projects-dir", "--approvals", "--apply", "--reviewed-plan-sha256", "--reviewed-manifest-sha256", "--orbit-stopped", "--revert"];
 for (const a of args) if (a.startsWith("--") && !known.includes(a)) refuse(`unknown option ${a.slice(0, 40)}; options: ${known.join(" ")}`);
 
 const state = arg("--state");
@@ -46,18 +48,23 @@ if (writing) {
 }
 const attachmentsDir = join(state!, "attachments");
 const importsDir = join(state!, "photo-imports");
+// Set once the ledger or the attachment store may have been written: an error after that is not "nothing was changed".
+let changing = false;
 
 try {
   if (flag("--revert")) {
     const batch = arg("--revert") ?? "";
     const release = lock(importsDir, ".import.lock");
     try {
-      const r = revertImport(batch, { attachments: attachmentStore(attachmentsDir), ledger: importLedger(importsDir) });
+      const attachments = attachmentStore(attachmentsDir), ledger = importLedger(importsDir);
+      changing = true;
+      const r = revertImport(batch, { attachments, ledger });
       out({ reverted: r });
+      process.exitCode = r.removeFailed ? 1 : 0;
     } finally {
       release();
     }
-    process.exit(0);
+    process.exit();
   }
   const exportDir = arg("--export");
   if (!exportDir) refuse("pass --export <the export bundle directory>");
@@ -75,17 +82,21 @@ try {
   if (!flag("--apply")) {
     // Read-only: neither store is opened (opening the attachment store tidies its directory).
     const plan = planImport({ root, approvalsText, projects, existing: readOnlyIndex(attachmentsDir), ledger: importLedger(importsDir) });
-    out({ dryRun: true, ...(projects ? {} : { warning: "no --projects-dir: no project can be checked, so no link would be made" }), next: "Review this report with the owner. To apply exactly this manifest: --apply --reviewed-manifest-sha256 <manifestSha256> --orbit-stopped (ORBIT stopped).", plan: reportOf(plan) });
+    out({ dryRun: true, ...(projects ? {} : { warning: "no --projects-dir: no project can be checked, so no link would be made" }), next: "Review this report with the owner. To apply exactly this plan: --apply --reviewed-plan-sha256 <planSha256> --orbit-stopped (ORBIT stopped). Apply refuses if anything it covers has changed since.", plan: reportOf(plan) });
     process.exit(0);
   }
-  const reviewed = arg("--reviewed-manifest-sha256");
-  if (!reviewed || !/^[0-9a-f]{64}$/.test(reviewed)) refuse("pass --reviewed-manifest-sha256 <the manifestSha256 of the dry run the owner reviewed>");
+  const reviewed = arg("--reviewed-plan-sha256");
+  if (!reviewed || !/^[0-9a-f]{64}$/.test(reviewed)) refuse("pass --reviewed-plan-sha256 <the planSha256 of the dry run the owner reviewed>");
+  const reviewedManifest = arg("--reviewed-manifest-sha256"); // optional, still checked when given
+  if (reviewedManifest !== undefined && !/^[0-9a-f]{64}$/.test(reviewedManifest)) refuse("--reviewed-manifest-sha256 must be the 64-character manifestSha256 of the reviewed dry run");
   const release = lock(importsDir, ".import.lock");
   try {
     const attachments = attachmentStore(attachmentsDir);
     const ledger = importLedger(importsDir);
     const plan = planImport({ root, approvalsText, projects, existing: storeIndex(attachments), ledger });
-    if (plan.manifestSha256 !== reviewed) throw new ImportError("the manifest changed since the reviewed dry run (its SHA-256 differs); run the dry run again and review it");
+    if (reviewedManifest !== undefined && plan.manifestSha256 !== reviewedManifest) throw new ImportError("the manifest changed since the reviewed dry run (its SHA-256 differs); run the dry run again and review it");
+    if (planDigest(plan) !== reviewed) throw new ImportError("the plan changed since the reviewed dry run (a photo file, the approvals, the manifest or what ORBIT already stores differs from what was reviewed); nothing was imported. Run the dry run again and review it");
+    changing = true;
     const result = applyImport(plan, { root, attachments, ledger });
     out({ applied: true, batch: result.batch, result, plan: reportOf(plan), next: `Start ORBIT, then verify in the gallery (docs/photo-import-backfill.md). To reverse: --revert ${result.batch} --orbit-stopped` });
     process.exitCode = result.failed.length ? 1 : 0;
@@ -93,5 +104,12 @@ try {
     release();
   }
 } catch (err) {
-  refuse(err instanceof ImportError ? err.message : `unexpected error: ${err instanceof Error ? err.message.slice(0, 200) : "unknown"}`);
+  const why = err instanceof ImportError ? err.message : `unexpected error: ${err instanceof Error ? err.message.slice(0, 200) : "unknown"}`;
+  // The import and revert refuse their own errors before writing (ImportError); anything else after writing began may have left part
+  // of the work done, so the report never claims nothing changed.
+  if (changing && !(err instanceof ImportError)) {
+    out({ failed: true, why, changed: "unknown", next: "Some of the work may have been done. Look at the ledger and the gallery (docs/photo-import-backfill.md, Verify); rerunning the dry run shows what is stored now." });
+    process.exit(1);
+  }
+  refuse(why);
 }

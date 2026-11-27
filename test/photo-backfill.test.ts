@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -242,4 +242,55 @@ test("CLI: refuses unless ORBIT is stopped; with no model configured it reads an
   assert.equal(report.capability.ok, false);
   assert.match(report.stopped, /vision blocked: no model is connected/);
   assert.equal(cli("--orbit-stopped", "--bogus").status, 2);
+});
+
+// PR #184 review: a bad numeric option was refused after the lock was taken (process.exit skipped its release), and a held lock was an
+// uncaught exception instead of the documented JSON refusal.
+test("CLI: a bad option is refused without leaving the lock behind; a held lock is a JSON refusal (exit 2)", () => {
+  const state = mkdtempSync(join(tmpdir(), "orbit-state-"));
+  const env = { PATH: process.env.PATH ?? "" };
+  const cli = (...a: string[]) => spawnSync(process.execPath, ["tools/photo-backfill/backfill.ts", "--state", state, ...a], { encoding: "utf8", env });
+  const lockFile = join(state, "photo-backfill", ".backfill.lock");
+  for (const bad of [["--limit", "abc"], ["--interval-ms", "1.5"], ["--attempts", "x"]]) {
+    const r = cli("--orbit-stopped", ...bad);
+    assert.equal(r.status, 2, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.refused, true);
+    assert.match(out.why, /must be an integer/);
+    assert.equal(existsSync(lockFile), false, `${bad[0]}: no lock left behind`);
+  }
+  // A dry run after those still works (no stale lock), and releases its own.
+  const dry = cli("--orbit-stopped");
+  assert.equal(dry.status, 1, dry.stderr); // no model here: "vision blocked" is reported as stopped
+  assert.equal(JSON.parse(dry.stdout).dryRun, true);
+  assert.equal(existsSync(lockFile), false);
+  // Another run holds the lock: the documented refusal, not a stack trace.
+  mkdirSync(join(state, "photo-backfill"), { recursive: true });
+  writeFileSync(lockFile, "");
+  const held = cli("--orbit-stopped");
+  assert.equal(held.status, 2, held.stderr);
+  const why = JSON.parse(held.stdout);
+  assert.equal(why.refused, true);
+  assert.match(why.why, /Another run holds/);
+  assert.doesNotMatch(held.stderr, /at .*\.ts:\d+/, "no stack trace");
+  assert.equal(existsSync(lockFile), true, "someone else's lock is left alone");
+});
+
+// PR #183/#184 reviews: an error after photos were sent was reported as "refused: read 0, sent 0, saved 0". The run now counts what it
+// did as it goes (BackfillDeps.progress), so the CLI can say so; here a checkpoint write fails after the first observation is saved.
+test("an unexpected error mid-run still leaves an exact count of what was read, sent and saved", async () => {
+  const g = await galleryRig();
+  for (let i = 0; i < 2; i++) await g.send({ caption: `p${i}` });
+  const model = fakeVision((n) => describe(`Synthetic object number ${n}`));
+  const real = checkpoint(join(g.dir, "photo-backfill"));
+  let saves = 0;
+  const failing = { ...real, save: (st: Parameters<typeof real.save>[0]) => { if (++saves >= 2) throw new Error("synthetic disk full"); real.save(st); } };
+  const progress = { read: 0, sent: 0, saved: 0 };
+  await assert.rejects(runBackfill(deps(g, model, { checkpoint: failing, progress }), { dryRun: false }), /synthetic disk full/);
+  assert.deepEqual(progress, { read: 1, sent: 1, saved: 1 });
+  assert.equal(model.calls.length, 1);
+  // A dry run reads and sends nothing.
+  const quiet = { read: 0, sent: 0, saved: 0 };
+  await runBackfill(deps(g, model, { progress: quiet }), { dryRun: true });
+  assert.deepEqual(quiet, { read: 0, sent: 0, saved: 0 });
 });

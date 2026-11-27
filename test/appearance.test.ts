@@ -137,7 +137,7 @@ test("apply: a look sets data-preset and its scheme; overrides are inline proper
   assert.equal(root.getAttribute("data-theme"), "light", "the look's scheme wins over the stored Dark");
   assert.equal(A.scheme(), "light");
   assert.equal(A.presetName(), "Warm light");
-  assert.deepEqual(Object.fromEntries(root.props), { "--accent": "#3d7fe0", "--on-accent": A.onAccent("#3d7fe0"), "--accent-end": "#3d7fe0", "--font-sans": A.FONTS.serif.stack, "--text-scale": "1.2" });
+  assert.deepEqual(Object.fromEntries(root.props), { "--accent": "#3d7fe0", "--on-accent": A.onAccent("#3d7fe0"), "--accent-end": "#3d7fe0", "--accent-text": A.accentText("#3d7fe0", "warm").css, "--font-sans": A.FONTS.serif.stack, "--text-scale": "1.2" });
   assert.deepEqual(root.metas.map((m: any) => m.c), ["#f5efe4", "#f5efe4"], "the browser's toolbar colour follows the look");
   // Back to Classic: nothing inline, no data-preset, and data-theme is the header's choice again.
   A.apply(root, DEFAULTS, s);
@@ -169,12 +169,53 @@ test("boot: the saved look is applied when the script loads; unreadable or block
   assert.equal(c.root.getAttribute("data-theme"), "light");
 });
 
+test("accent as text: a custom accent gets a text shade that reads at 4.5:1 on every card and page of the look; the looks' own accents need none", () => {
+  const mix = (a: string, b: string, pct: number) => A.mixHex(a, b, pct);
+  assert.equal(mix("#000000", "#ffffff", 100), "#000000");
+  assert.equal(mix("#000000", "#ffffff", 0), "#ffffff");
+  assert.equal(mix("#204060", "#a0c0e0", 50), "#6080a0");
+  const customs = [...A.ACCENTS.filter((x: any) => x.id).map((x: any) => x.id), "#8b6cf0", "#1c1838", "#ffd166", "#ff0000"];
+  for (const p of Object.keys(A.PRESETS)) {
+    const look = A.PRESETS[p];
+    for (const hex of customs) {
+      if (!A.checkAccent(hex, p).ok) continue;
+      const t = A.accentText(hex, p);
+      assert.ok(t.pct >= 0 && t.pct <= 100 && t.pct % 5 === 0);
+      // What the browser draws: color-mix(in srgb, accent pct%, var(--fg)) under each of the look's themes.
+      look.fgs.forEach((fg: string, i: number) => {
+        const drawn = mix(hex, fg, t.pct);
+        for (const s of [look.cards[i], look.bgs[i]]) assert.ok(A.contrast(drawn, s) >= 4.5, `${hex} on ${p} (${fg}): ${A.contrast(drawn, s).toFixed(2)}:1 on ${s}`);
+      });
+      if (t.pct === 100) assert.equal(t.css, hex); else assert.equal(t.css, `color-mix(in srgb, ${hex} ${t.pct}%, var(--fg))`);
+      // As much of the accent as reads: one step more would not.
+      if (t.pct < 100) {
+        const more = t.pct + 5;
+        assert.ok(look.fgs.some((fg: string, i: number) => [look.cards[i], look.bgs[i]].some((s: string) => A.contrast(mix(hex, fg, more), s) < 4.6)), `${hex} on ${p}: ${more}% would not read`);
+      }
+    }
+  }
+  // The swatches the PR #185 review measured below 4.5:1 as name text now get a shade.
+  assert.ok(A.accentText("#1f9a8a", "classic").pct < 100);
+  assert.ok(A.accentText("#c07a10", "warm").pct < 100);
+  // The looks' own accents (no override, so no --accent-text) already read at 4.5:1 as text on their cards and pages.
+  const own: [string, string[]][] = [["#6d4fd8", ["#fdfcff", "#f4f2fb"]], ["#8b6cf0", ["#11142b", "#080a1a"]], ["#a5481f", ["#fffcf6", "#f5efe4"]], ["#3fb8ad", ["#132024", "#0b1316"]]];
+  for (const [acc, surfaces] of own) for (const s of surfaces) assert.ok(A.contrast(acc, s) >= 4.5, `${acc} on ${s}`);
+  assert.match(css, /\.msg\.user \{ --who: var\(--accent-text, var\(--accent\)\); \}/, "the user's name uses the text shade when there is one");
+  // apply() sets the shade with a custom accent and removes it otherwise.
+  const root = fakeRoot();
+  A.apply(root, { preset: "classic", accent: "#1f9a8a", font: "system", size: "default" }, memStorage());
+  assert.match(root.props.get("--accent-text"), /^color-mix\(in srgb, #1f9a8a \d+%, var\(--fg\)\)$/);
+  A.apply(root, { preset: "classic", accent: "", font: "system", size: "default" }, memStorage());
+  assert.equal(root.props.has("--accent-text"), false);
+});
+
 test("each look has its CSS block, and the colours the accent check uses are the ones the CSS draws", () => {
   const hexOf = (block: string, name: string) => block.match(new RegExp(`${name}:\\s*(#[0-9a-f]{6})`))?.[1];
   const light = css.match(/:root \{\s*color-scheme: light;([^}]*)\}/)![1]!;
   const dark = css.match(/:root\[data-theme="dark"\] \{([^}]*)\}/)![1]!;
   assert.deepEqual([...A.PRESETS.classic.cards], [hexOf(light, "--card"), hexOf(dark, "--card")]);
   assert.deepEqual([...A.PRESETS.classic.bgs], [hexOf(light, "--bg"), hexOf(dark, "--bg")]);
+  assert.deepEqual([...A.PRESETS.classic.fgs], [hexOf(light, "--fg"), hexOf(dark, "--fg")]);
   for (const [id, p] of Object.entries<any>(A.PRESETS)) {
     if (id === "classic") continue;
     const block = css.match(new RegExp(`:root\\[data-preset="${id}"\\] \\{([^}]*)\\}`))?.[1];
@@ -185,6 +226,7 @@ test("each look has its CSS block, and the colours the accent check uses are the
     }
     assert.deepEqual([...p.cards], [hexOf(block!, "--card")], `${id}: card`);
     assert.deepEqual([...p.bgs], [hexOf(block!, "--bg")], `${id}: page`);
+    assert.deepEqual([...p.fgs], [hexOf(block!, "--fg")], `${id}: text`);
     assert.equal(p.themeColor, hexOf(block!, "--bg"), `${id}: toolbar colour is its page colour`);
     assert.ok(["light", "dark"].includes(p.scheme));
     // The look comes after Classic's theme blocks, so it wins at equal specificity.

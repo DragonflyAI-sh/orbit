@@ -42,6 +42,12 @@ on it. So:
 - The **label colour** on the accent is chosen automatically: white if it reads at 4.5:1, else ORBIT's ink, else black (one of
   them always reaches 4.5:1). With a custom accent, primary buttons are filled with the accent alone (the gradient's second
   stop, `--accent-end`, becomes the accent), so the label is checked against one colour.
+- **Text in the accent.** The user's own name in each message is drawn in the accent, and it is normal-size text, so it needs
+  **4.5:1**, more than the 3:1 an accent must reach. The looks' own accents already reach 4.5:1 on their cards and pages. A
+  custom accent (a swatch or your own colour) gets a text shade, `--accent-text`: the accent mixed with the theme's text
+  colour (`color-mix(in srgb, <accent> N%, var(--fg))`), keeping as much of the accent (N, in steps of 5%) as still reads at
+  4.5:1 on every card and page the look can show. Because `--fg` follows the theme, one value suits both of Classic's themes.
+  Marks, controls and buttons keep the accent itself.
 - Status colours (ok, warning, danger, waiting on Rai) are not affected by the accent, and keep their shapes and words, so
   status is never told by colour alone.
 
@@ -59,7 +65,8 @@ on it. So:
 - **No flash:** `/appearance.js` is a small same-origin script loaded in `<head>`, after the theme script and before the
   stylesheet. It sets `data-preset`, `data-theme` and the inline overrides on `<html>` before the body is parsed.
 - **No arbitrary CSS:** only these values reach the page, as custom properties on `<html>`: `--accent`, `--on-accent`,
-  `--accent-end` (a checked `#rrggbb` and black, white or ink), `--font-sans` (one of the listed stacks) and `--text-scale`
+  `--accent-end` (a checked `#rrggbb` and black, white or ink), `--accent-text` (that colour mixed with `var(--fg)` by a
+  computed percentage), `--font-sans` (one of the listed stacks) and `--text-scale`
   (one of four numbers). Nothing is downloaded: no web font, no `@font-face`, no third-party request. The page's headers are
   unchanged; the new route sends the same `nosniff` and `no-cache` headers as `/files.js`.
 
@@ -85,7 +92,7 @@ on it. So:
    `--accent`, `--accent-2`, `--on-accent`, `--live`, `--mock`, `--down`, `--gold`, `--header-shadow` (and `--accent-end` if
    the gradient should not end on `--accent-2`). Keep it after the Classic blocks.
 2. In `src/web/appearance.js`, add an entry to `PRESETS`: `name`, `note` (one line), `scheme` (`"light"` or `"dark"`), `cards`
-   and `bgs` (its `--card` and `--bg`), `themeColor` (its `--bg`) and `swatch` (page, accent, text, for the chips). The dialog
+   and `bgs` (its `--card` and `--bg`), `fgs` (its `--fg`), `themeColor` (its `--bg`) and `swatch` (page, accent, text, for the chips). The dialog
    builds its options from this table, so there is no markup to change.
 3. Add the look to the setups in `test/appearance-browser.test.ts`'s contrast test. `test/appearance.test.ts` already checks
    that the block exists with every token and that the colours in `PRESETS` match it; the swatches are checked against every
@@ -101,14 +108,15 @@ Automated (Chromium through Playwright, synthetic content; and plain unit tests)
 
 - `test/appearance.test.ts`: defaults; per-field validation and fallback (unknown values, malformed colours, prototype keys,
   wrong version, broken JSON); storage round trip, defaults removing the key, junk cleaned, blocked storage never throwing;
-  the accent check and its messages, every swatch against every look, the label colour at 4.5:1 for 586 sample colours;
+  the accent check and its messages, every swatch against every look, the label colour at 4.5:1 for 586 sample colours; the
+  accent's text shade at 4.5:1 for every swatch and some custom colours under every look;
   applying and removing a look and its overrides on `<html>`; the boot step; each look's CSS block matching `PRESETS`; fonts and
   sizes bounded and nothing downloaded; the markup and wiring; the server's `/appearance.js` headers.
 - `test/appearance-browser.test.ts`: a fresh load is today's look (light and dark devices); the looks differ (page, cards,
   accent, scheme, toolbar colour) and preview without storing; the theme menu's radios turn off with the note; accent, font and
   size preview, code stays monospace, Save survives a reload and is applied before `<body>`, focus returns to the theme
   button, another tab follows; Cancel, Escape, Reset and saving defaults; broken, unknown and blocked storage; a refused custom
-  accent and Save waiting for a readable one; AA text, 3:1 marks and focus, the syntax colours and the button labels for six
+  accent and Save waiting for a readable one; AA text (including the user's name in the accent's text shade), 3:1 marks and focus, the syntax colours and the button labels for six
   setups (each look, custom accents, a serif font and other sizes), and the dialog on screen with no sideways scroll, reachable
   and with a visible focus ring by keyboard, at 1280, 390 and 320px; the file editor following Cool dark while its text stays
   monospace.

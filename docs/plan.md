@@ -31,7 +31,7 @@ of the index; back on All projects the index returns, unchanged. Each part shows
 | Blocker | The first blocker, "(+N more)" when there are others, in red |
 | Next | Up to 3 next steps (as in the detail) |
 | Overdue | "target was Nov 1 (4 weeks ago)", in red, when the target has passed |
-| Next date | The next milestone or the target from today on, else the next task due date: label, day and how far off |
+| Next date | The next milestone or the target from today on, else the next due date of a task that is not already a next step (a next step shows its own due date): label, day and how far off |
 | Open tasks | How many open linked tasks there are; up to 3 that are not already next steps by name and due day, and how many more |
 | Open full plan | A link to `/#plan/<id>`, the detail in the main area |
 

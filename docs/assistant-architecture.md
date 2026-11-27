@@ -162,7 +162,7 @@ How to read it, using what the code does:
 
 On a deployed ORBIT, as the owner, with the Assistant tab showing (the poller runs only while the tab is visible):
 
-1. Open `/` in two browser tabs (or a tab and a phone) and send a few messages from tab 1 so both show them.
+1. Open `/#assistant` in two browser tabs (or a tab and a phone) and send a few messages from tab 1 so both show them. (`/` is Home, which shows only the newest reply; use the Assistant so every message is visible.)
 2. Restart ORBIT (`systemctl restart` or a deploy). Do not reload either tab, and do not send.
 3. From a third device (or after the restart, from tab 2), send "after restart 1".
 4. Within about 10 seconds, both untouched tabs show "after restart 1". Check that nothing above it disappeared or was duplicated.

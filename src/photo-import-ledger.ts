@@ -149,10 +149,12 @@ export function importLedger(dir: string | undefined) {
       for (const l of load().links) if (l.ref === ref && !out.has(l.project)) out.set(l.project, { ...l });
       return [...out.values()];
     },
-    // One atomic change (importer only). Refused when the file on disk is unreadable, so a damaged ledger is never overwritten.
+    // One atomic change (importer only). Refused when the file on disk is unreadable, or when some of its entries broke the contract
+    // (they are not served, and rewriting would drop them for good), so a damaged ledger is never overwritten.
     mutate<T>(change: (f: { photos: ImportedPhoto[]; batches: ImportBatch[]; links: ProjectLink[] }) => T): T {
       const cur = load();
       if (cur.rev < 0) throw new Error("The import ledger is unreadable, so nothing was changed. It is left as it is for the operator to look at.");
+      if (problem) throw new Error(`The import ledger has entries that break its contract (${problem}), so nothing was changed: rewriting it would lose them. It is left as it is for the operator to look at.`);
       const next = structuredClone({ photos: cur.photos, batches: cur.batches, links: cur.links });
       const result = change(next);
       const photos = next.photos.map(safePhoto);
