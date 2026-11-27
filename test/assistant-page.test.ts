@@ -103,16 +103,16 @@ test("status: transitions are deterministic: green, fallback amber, both down re
   for (const ports of steps) assert.deepEqual(aggregateStatus({ ports }), aggregateStatus({ ports: JSON.parse(JSON.stringify(ports)) }));
 });
 
-test("routing: the root and unknown hashes open the Assistant; /sessions, legacy #chat and #jobs are kept; owner-only pages fall back", () => {
-  assert.equal(pageFor("/", "", true, true), "assistant");
+test("routing: the root and unknown hashes open Home (docs/home.md), #assistant the Assistant; /sessions, legacy #chat and #jobs are kept; owner-only pages fall back", () => {
+  assert.equal(pageFor("/", "", true, true), "home");
   assert.equal(pageFor("/", "#assistant", true, true), "assistant");
-  assert.equal(pageFor("/", "#nothing-here", true, true), "assistant");
+  assert.equal(pageFor("/", "#nothing-here", true, true), "home");
   assert.equal(pageFor("/sessions", "", true, true), "chat");
   assert.equal(pageFor("/sessions/anything", "", true, true), "chat");
   assert.equal(pageFor("/", "#chat", true, true), "chat", "the legacy Chat address still opens Sessions");
   assert.equal(pageFor("/", "#jobs", true, true), "jobs");
   assert.equal(pageFor("/sessions/x", "#assistant", true, true), "assistant", "a fragment link to another page wins over the path");
-  assert.equal(pageFor("/", "#jobs", false, true), "assistant", "Jobs not available (yet): the default page");
+  assert.equal(pageFor("/", "#jobs", false, true), "home", "Jobs not available (yet): the default page");
   assert.equal(pageFor("/", "", false, false), "chat", "not the owner: Sessions (the stateless chat), as before");
   assert.equal(pageFor("/", "#assistant", false, false), "chat");
   assert.equal(pageFor("/", "#chat", false, false), "chat");
@@ -121,13 +121,13 @@ test("routing: the root and unknown hashes open the Assistant; /sessions, legacy
   assert.equal(pageFor("/", "#plan/alpha-garden", false, true), "plan");
   assert.equal(pageFor("/sessions/x", "#plan", true, true), "plan", "a fragment link to the Plan wins over the path");
   assert.equal(pageFor("/", "#plan", true, false), "chat", "not the owner: no Plan");
-  assert.equal(pageFor("/", "#planet", true, true), "assistant");
+  assert.equal(pageFor("/", "#planet", true, true), "home");
 });
 
-test("the page markup: Assistant first in the nav, then Jobs, Sessions (no Status link); the logo header stays; the status dot is the side panel's Status tab", () => {
+test("the page markup: Home first in the nav, then Assistant, Jobs, Sessions (no Status link); the logo header stays; the status dot is the side panel's Status tab", () => {
   const nav = html.match(/<nav id="tabs"[^>]*>([\s\S]*?)<\/nav>/)![1]!;
   const labels = [...nav.matchAll(/<a [^>]*>([\s\S]*?)<\/a>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
-  assert.deepEqual(labels.map((l) => l.split(" ")[0]), ["Assistant", "Jobs", "Sessions"]);
+  assert.deepEqual(labels.map((l) => l.split(" ")[0]), ["Home", "Assistant", "Jobs", "Sessions"]);
   assert.match(html, /<h1 class="brand"><a id="brandbtn" href="\/" aria-label="ORBIT: Refresh page" title="Refresh page"><img src="\/avatar.png" alt=""><span class="wordmark">ORBIT<\/span><\/a><\/h1>/);
   assert.doesNotMatch(html, /id="health"/, "no status indicator in the page header");
   assert.doesNotMatch(html.match(/<header>[\s\S]*?<\/header>/)![0], /statusline|All live/, "nor the status line");
@@ -223,10 +223,12 @@ const reset = () => {
 };
 const shown = (sel: string) => page.evaluate((s: string) => { const e = document.querySelector(s) as HTMLElement | null; return Boolean(e && !e.hidden && e.offsetParent !== null); }, sel);
 
-test("browser: the root opens the Assistant first, with Assistant first in the nav, and no session control", { skip }, async () => {
+test("browser: #assistant opens the Assistant (the root opens Home, first in the nav), with no session control", { skip }, async () => {
   reset();
   await open();
-  assert.deepEqual(await page.$$eval("#tabs a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.textContent!.trim().split(/\s/)[0])), ["Assistant", "Jobs", "Sessions"]);
+  assert.equal(await page.getAttribute("#hometab", "aria-current"), "page", "the root is Home (docs/home.md)");
+  await open("#assistant");
+  assert.deepEqual(await page.$$eval("#tabs a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.textContent!.trim().split(/\s/)[0])), ["Home", "Assistant", "Jobs", "Sessions"]);
   assert.equal(await page.getAttribute("#assistanttab", "aria-current"), "page");
   assert.equal(await shown("#alog"), true);
   assert.equal(await shown("#aform"), true);
@@ -408,7 +410,7 @@ test("browser: a reply in progress elsewhere pauses Send; earlier archived turns
   reset();
   view = baseView([chunk(5, [msg("u5", "user", "recent question"), msg("a5", "assistant", "", { status: "pending", calls: [] })], { state: "open" })], { busy: true, archivedChunks: 4, next: { included: [], omitted: [], historyChars: 0 } });
   history = { chunks: [chunk(3, [msg("u3", "user", "OLD archived question"), msg("a3", "assistant", "old answer", { status: "done", provenance: "live", source: "model/test" })]), chunk(4, [msg("u4", "user", "older two"), msg("a4", "assistant", "fine", { status: "done" })])], more: true };
-  await open();
+  await open("#assistant"); // "Load earlier messages" is the Assistant's; Home shows only the newest reply
   await page.waitForSelector("#alog .older");
   assert.equal(await page.$eval("#asend", (b: HTMLButtonElement) => b.disabled), true, "Send waits for the reply in progress");
   assert.match(await page.textContent("#astatus"), /in progress on another tab or device/);

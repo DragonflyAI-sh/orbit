@@ -218,7 +218,9 @@ test("browser (320 and 375): the session picker is bounded on screen, layered ab
     assert.equal(await page.evaluate(() => document.getElementById("sesspicker")!.hidden), true, "Escape closes");
     assert.equal(await page.evaluate(() => document.activeElement!.id), "sessbtn", "focus returns to the button");
     await page.click("#sessbtn");
-    await page.mouse.click(m.vw / 2, m.vh - 80 > m.bottom ? m.vh - 80 : m.vh - 10);
+    // Below the picker when there is room; otherwise (a short landscape screen, where the picker reaches near the bottom) beside it.
+    const outside = m.vh - 80 > m.bottom ? [m.vw / 2, m.vh - 80] : m.vh - 10 > m.bottom ? [m.vw / 2, m.vh - 10] : [(m.right + m.vw) / 2, m.vh - 10];
+    await page.mouse.click(outside[0]!, outside[1]!);
     assert.equal(await page.evaluate(() => document.getElementById("sesspicker")!.hidden), true, "a tap outside closes");
     await ctx.close();
   }
@@ -229,7 +231,7 @@ test("browser (touch, 320 and 390): header controls, page tabs and the side pane
     const { page, ctx } = await open(chromium, size, "/sessions");
     await page.waitForFunction(() => !document.getElementById("sesswrap")!.hidden);
     const rail = ["sidetoggle", "sidetab-notes", "sidetab-status"];
-    const ids = ["assistanttab", "sessionstab", "sessbtn", ...rail];
+    const ids = ["hometab", "assistanttab", "sessionstab", "sessbtn", ...rail];
     for (const id of ids) {
       const m = await page.evaluate((id: string) => {
         const e = document.getElementById(id)!, r = e.getBoundingClientRect();

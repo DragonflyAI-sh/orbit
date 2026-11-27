@@ -16,7 +16,7 @@ Tests: `test/file-viewer.test.ts`, `test/file-viewer-browser.test.ts`.
   row of tabs above the path switches between them (arrow keys move along it). The sidebar marks the file that is showing
   (tinted, an accent bar, its name underlined, `aria-current="true"`).
 - **Closing.** Close closes the file that is showing; the next open file takes its place, and after the last one the page is back
-  where it was. A file with unsaved changes asks first. Choosing a page tab (Assistant, Jobs, Sessions), following a link inside
+  where it was. A file with unsaved changes asks first. Choosing a page tab (Home, Assistant, Jobs, Sessions), following a link inside
   the page, or Back hides the viewer and keeps the open files (and their unsaved text) until they are closed; clicking the file
   again shows it. Leaving the page with unsaved changes asks the browser's "leave site?" question.
 - **On phones** (the sidebar is a drawer below 1024px) choosing a file closes the drawer and puts focus on the file's name.
