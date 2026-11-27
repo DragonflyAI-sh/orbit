@@ -5,7 +5,7 @@ import { after, before, test } from "node:test";
 import { seededJobs } from "./jobs-page-fixture.ts";
 import { rig } from "./threads-fixture.ts";
 
-// The page links (Assistant, Jobs, Sessions) in Chromium against the real server: opening them in a new tab, a fresh tab at
+// The page links (Home, Assistant, Jobs, Sessions) in Chromium against the real server: opening them in a new tab, a fresh tab at
 // each address they generate, direct entry, reload, legacy addresses, ordinary in-page navigation with Back/Forward, and a
 // cold start with slow API answers and no data. Each check looks at what is drawn (and for uncaught errors), not only the URL.
 //
@@ -66,6 +66,8 @@ const view = (page: any) => page.evaluate(() => ({
 // Drawn content for each view: the Assistant conversation (or its empty note), the Jobs list or one job, a Sessions page.
 const drawn = {
   assistant: () => document.body.dataset.tab === "assistant" && /\S/.test(document.getElementById("alog")!.innerText),
+  // Home (docs/home.md): the Assistant's conversation showing its newest reply, or its idle note, and the Conversation state region.
+  home: () => document.body.dataset.tab === "home" && !!document.querySelector("#alog > .convstate") && /\S/.test(document.getElementById("alog")!.innerText),
   jobs: () => document.body.dataset.tab === "jobs" && !!document.querySelector("#jobs .jlistview .jstatus") && /\S/.test(document.querySelector("#jobs .jstatus")!.textContent!),
   job: () => document.body.dataset.tab === "jobs" && !!document.querySelector("#jobs .jdetail h2"),
   sessions: () => document.body.dataset.tab === "chat" && !document.getElementById("log")!.hidden && /\S/.test(document.getElementById("tstatus")!.textContent! + document.getElementById("log")!.innerText + document.getElementById("sesstitle")!.textContent!),
@@ -73,21 +75,21 @@ const drawn = {
 // Pollers refresh every 10 (Assistant) or 15 (Jobs) seconds; anything drawn well inside that came from the page opening.
 const SOON = { timeout: 4000 };
 
-test("browser: the page links from Jobs are real links to the canonical addresses, in Assistant → Jobs → Sessions order", { skip }, async () => {
+test("browser: the page links from Jobs are real links to the canonical addresses, in Home → Assistant → Jobs → Sessions order", { skip }, async () => {
   const { r, base } = await server();
   const page = await browser.newPage();
   const w = watch(page);
   await page.goto(`${base}/#jobs`);
   await page.waitForFunction(drawn.jobs, null, SOON);
   const links = await page.$$eval("#tabs a", (as: HTMLAnchorElement[]) => as.map((a) => ({ tab: a.dataset.tab, href: a.getAttribute("href"), abs: a.href, hidden: a.hidden })));
-  assert.deepEqual(links.map((l: any) => [l.tab, l.href, l.hidden]), [["assistant", "/#assistant", false], ["jobs", "/#jobs", false], ["chat", "/sessions", false]]);
+  assert.deepEqual(links.map((l: any) => [l.tab, l.href, l.hidden]), [["home", "/", false], ["assistant", "/#assistant", false], ["jobs", "/#jobs", false], ["chat", "/sessions", false]]);
   for (const l of links) assert.equal(new URL(l.abs).origin, base);
   assert.deepEqual(w.problems, []);
   await page.close();
   r.close();
 });
 
-for (const [link, want, wantPath] of [["#assistanttab", "assistant", "/#assistant"], ["#jobstab", "jobs", "/#jobs"], ["#sessionstab", "sessions", "/sessions"]] as const) {
+for (const [link, want, wantPath] of [["#hometab", "home", "/"], ["#assistanttab", "assistant", "/#assistant"], ["#jobstab", "jobs", "/#jobs"], ["#sessionstab", "sessions", "/sessions"]] as const) {
   test(`browser: ${NEW_TAB}-click and middle-click on ${want} from Jobs open a new tab that draws ${want}; Jobs stays as it was`, { skip }, async () => {
     const { r, base } = await server();
     const ctx = await browser.newContext();
@@ -117,7 +119,7 @@ for (const [link, want, wantPath] of [["#assistanttab", "assistant", "/#assistan
 
 // The fresh-tab half on its own, so a platform whose modifier click behaves differently cannot hide a blank page: each address a
 // page link generates, opened in a tab that loads hidden and is shown later, is drawn by the time it is shown.
-for (const [path, want] of [["/#assistant", "assistant"], ["/#jobs", "jobs"], ["/sessions", "sessions"], ["/", "assistant"], ["/#jobs/$ID", "job"]] as const) {
+for (const [path, want] of [["/#assistant", "assistant"], ["/#jobs", "jobs"], ["/sessions", "sessions"], ["/", "home"], ["/#home", "home"], ["/#jobs/$ID", "job"]] as const) {
   test(`browser: a background tab at ${path} (as a new-tab click opens it) is drawn before and when it is shown`, { skip }, async () => {
     const { r, base, id } = await server();
     const ctx = await browser.newContext();
@@ -131,7 +133,7 @@ for (const [path, want] of [["/#assistant", "assistant"], ["/#jobs", "jobs"], ["
     assert.deepEqual(w.problems, []);
     // Hidden or not, it drew once: the Jobs rows were asked for once, the Assistant once.
     if (want === "jobs") assert.equal(w.requests.filter((u) => u.startsWith("/jobs?view=rows")).length, 1, w.requests.join("\n"));
-    if (want === "assistant") assert.equal(w.requests.filter((u) => u === "/assistant").length, 1, w.requests.join("\n"));
+    if (want === "assistant" || want === "home") assert.equal(w.requests.filter((u) => u === "/assistant").length, 1, w.requests.join("\n"));
     await ctx.close();
     r.close();
   });
@@ -186,7 +188,7 @@ test("browser: direct entry and reload draw each page, including one job and one
   const page = await browser.newPage();
   const w = watch(page);
   // Plain /sessions opens the most recent session (the only one here), and its address replaces /sessions, as before.
-  for (const [path, want, at] of [["/", "assistant", "/"], ["/#assistant", "assistant", "/#assistant"], ["/#jobs", "jobs", "/#jobs"], [`/#jobs/${id}`, "job", `/#jobs/${id}`], ["/sessions", "sessions", `/sessions/${session}`], [`/sessions/${session}`, "sessions", `/sessions/${session}`]] as const) {
+  for (const [path, want, at] of [["/", "home", "/"], ["/#home", "home", "/#home"], ["/#assistant", "assistant", "/#assistant"], ["/#jobs", "jobs", "/#jobs"], [`/#jobs/${id}`, "job", `/#jobs/${id}`], ["/sessions", "sessions", `/sessions/${session}`], [`/sessions/${session}`, "sessions", `/sessions/${session}`]] as const) {
     await page.goto(base + path);
     await page.waitForFunction(drawn[want], null, SOON);
     await page.waitForFunction((p: string) => location.pathname + location.search + location.hash === p, at, SOON);
@@ -234,9 +236,9 @@ test("browser: an address that names no page falls back as before instead of dra
   const { r, base } = await server();
   const page = await browser.newPage();
   const w = watch(page);
-  // A fragment that names no page opens the Assistant.
+  // A fragment that names no page opens Home, the default page (docs/home.md).
   await page.goto(`${base}/#nowhere`);
-  await page.waitForFunction(drawn.assistant, null, SOON);
+  await page.waitForFunction(drawn.home, null, SOON);
   // A malformed job id opens the Jobs list.
   await page.goto(`${base}/#jobs/not a job!`);
   await page.waitForFunction(drawn.jobs, null, SOON);

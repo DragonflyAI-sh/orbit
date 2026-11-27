@@ -64,8 +64,8 @@ test("address parsing: /sessions/<id> names a session; plain /sessions names non
   assert.equal(pageFor("/sessions/garbage", "", true, true), "chat");
   assert.equal(pageFor("/", `#chat/${T1}`, true, true), "chat");
   assert.equal(pageFor("/", "#chat", true, true), "chat");
-  assert.equal(pageFor("/", "#chatty", true, true), "assistant");
-  assert.equal(pageFor("/", "", true, true), "assistant");
+  assert.equal(pageFor("/", "#chatty", true, true), "home");
+  assert.equal(pageFor("/", "", true, true), "home");
   assert.equal(pageFor("/", "#jobs", true, true), "jobs");
 });
 

@@ -370,7 +370,7 @@ const links = [...nav.matchAll(/<a ([^>]*)>([\s\S]*?)<\/a>/g)].map((m) => ({ att
 
 test("navigation is real links to the page's views, nothing invented; the status endpoint is linked from the status line", () => {
   assert.match(nav, /aria-label="ORBIT pages"/);
-  assert.deepEqual(links.map((l) => l.href), ["/#assistant", "/#jobs", "/sessions"]);
+  assert.deepEqual(links.map((l) => l.href), ["/", "/#assistant", "/#jobs", "/sessions"]);
   assert.equal(nav.includes("<button"), false, "no button pretends to be navigation");
   // Each destination is a GET route the server really has: "/" and "/sessions" serve this page (Sessions and Jobs are its
   // views), and "/status" answers with JSON, which the link says.
@@ -392,10 +392,11 @@ test("navigation is real links to the page's views, nothing invented; the status
 test("the Jobs link shows only for the owner and the views follow the address", () => {
   const jobs = links.find((l) => l.href === "/#jobs")!;
   assert.match(jobs.attrs, /\bhidden\b/, "hidden until the owner check passes");
-  // The Assistant is the first link and the default page (docs/assistant.md); test/assistant-page.test.ts checks the routing itself.
-  assert.match(links.find((l) => l.href === "/#assistant")!.attrs, /aria-current="page"/);
+  // Home is the first link and the default page (docs/home.md); test/home-page.test.ts checks the routing itself.
+  assert.match(links.find((l) => l.href === "/")!.attrs, /aria-current="page"/);
+  assert.doesNotMatch(links.find((l) => l.href === "/#assistant")!.attrs, /aria-current/);
   assert.match(html, /jobsTab\.hidden = !pr\.ok;/);
-  assert.match(html, /const tabFromHash = \(\) => pageFor\(location\.pathname, location\.hash, !jobsTab\.hidden, !assistantTab\.hidden\);/);
+  assert.match(html, /const tabFromHash = \(\) => pageFor\(location\.pathname, location\.hash, !jobsTab\.hidden, !assistantTab\.hidden && !homeTab\.hidden\);/);
   assert.match(html, /window\.addEventListener\("popstate", route\);/);
   assert.match(html, /window\.addEventListener\("hashchange", route\);/);
   assert.match(html, /if \(a\.dataset\.tab === next\) a\.setAttribute\("aria-current", "page"\); else a\.removeAttribute\("aria-current"\);/);

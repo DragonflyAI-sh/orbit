@@ -6,7 +6,7 @@ import { rig, say, scripted } from "./threads-fixture.ts";
 
 // The header's page links and the Sessions page's session control (docs/threads.md, "The session picker"), in a real browser
 // (Playwright's Chromium) against the REAL ORBIT server (buildServer, the real thread store and index.html). Only the model
-// is a fake. At a desktop width and a narrow phone width it checks: the links read Assistant, Jobs, Sessions in the markup
+// is a fake. At a desktop width and a narrow phone width it checks: the links read Home, Assistant, Jobs, Sessions in the markup
 // and on screen; the Sessions link shows on every page while the session title, chevron and picker show only on Sessions
 // (/sessions and /sessions/<id>, legacy #chat addresses after they move there), on first load, after a link, on Back and
 // Forward; elsewhere the control takes no room, is out of the tab order and the accessibility tree, and an open picker is
@@ -55,7 +55,7 @@ const noSideways = (page: any) => page.evaluate(() => document.documentElement.s
 const links = (page: any) => page.$$eval("header nav#tabs a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => { const b = a.getBoundingClientRect(); return { name: a.textContent!.trim().split(/\s/)[0], left: b.left, right: b.right, top: b.top, visible: b.width > 0 && getComputedStyle(a).visibility !== "hidden" }; }));
 async function assertLinkOrder(page: any, where: string) {
   const ls = await links(page);
-  assert.deepEqual(ls.map((l: any) => l.name), ["Assistant", "Jobs", "Sessions"], `${where}: DOM order`);
+  assert.deepEqual(ls.map((l: any) => l.name), ["Home", "Assistant", "Jobs", "Sessions"], `${where}: DOM order`);
   assert.ok(ls.every((l: any) => l.visible), `${where}: every page link is visible`);
   for (let i = 1; i < ls.length; i++) {
     assert.ok(Math.abs(ls[i].top - ls[0].top) < 4, `${where}: the links share one row`);
@@ -93,8 +93,8 @@ async function assertControl(page: any, title: string, where: string) {
 }
 // Tab from the first page link through the header; the ids (or tag) of each stop, until the status toggle.
 async function tabStops(page: any) {
-  await page.focus("#assistanttab");
-  const stops = ["assistanttab"];
+  await page.focus("#hometab");
+  const stops = ["hometab"];
   for (let i = 0; i < 12; i++) {
     await page.keyboard.press("Tab");
     const id = await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName || "");
@@ -105,7 +105,7 @@ async function tabStops(page: any) {
 }
 
 for (const size of SIZES) {
-  test(`browser (${size.name}): page links read Assistant, Jobs, Sessions; the session control shows on Sessions only and leaves no gap elsewhere`, { skip }, async () => {
+  test(`browser (${size.name}): page links read Home, Assistant, Jobs, Sessions; the session control shows on Sessions only and leaves no gap elsewhere`, { skip }, async () => {
     const { r, made, base } = await setup(["Alpha", LONG]);
     const { ctx, page, errors } = await openAt(`${base}/sessions/${made[1]!.id}`, size);
     try {
@@ -121,11 +121,11 @@ for (const size of SIZES) {
       assert.equal(await noSideways(page), true, "no horizontal scroll on Sessions");
       // Keyboard: the links in order, then the session control, the theme toggle, then the side panel (its button, its selected
       // tab, Status by default).
-      assert.deepEqual(await tabStops(page), ["assistanttab", "jobstab", "sessionstab", "sessbtn", "themebtn", "sidetoggle", "sidetab-status"]);
+      assert.deepEqual(await tabStops(page), ["hometab", "assistanttab", "jobstab", "sessionstab", "sessbtn", "themebtn", "sidetoggle", "sidetab-status"]);
       await shot(page, `${size.name}-nav-sessions`);
       const sessionsHeader = geo.header;
 
-      for (const [tab, link] of [["assistant", "#assistanttab"], ["jobs", "#jobstab"]] as const) {
+      for (const [tab, link] of [["home", "#hometab"], ["assistant", "#assistanttab"], ["jobs", "#jobstab"]] as const) {
         await page.click(link);
         await onTab(page, tab);
         await assertLinkOrder(page, tab);
@@ -133,7 +133,7 @@ for (const size of SIZES) {
         assert.equal(await page.getAttribute(link, "aria-current"), "page");
         assert.equal(await page.getAttribute("#sessionstab", "aria-current"), null);
         // Keyboard: straight from the links to the theme toggle and the side panel; the session control is not a stop.
-        assert.deepEqual(await tabStops(page), ["assistanttab", "jobstab", "sessionstab", "themebtn", "sidetoggle", "sidetab-status"], `${tab}: tab order`);
+        assert.deepEqual(await tabStops(page), ["hometab", "assistanttab", "jobstab", "sessionstab", "themebtn", "sidetoggle", "sidetab-status"], `${tab}: tab order`);
         const h = await page.evaluate(() => document.querySelector("header")!.getBoundingClientRect().height);
         assert.ok(h <= sessionsHeader, `${tab}: the header is no taller than on Sessions (${h} > ${sessionsHeader})`);
         assert.equal(await noSideways(page), true, `${tab}: no horizontal scroll`);
@@ -224,7 +224,7 @@ test("browser: on first load the control shows for /sessions, /sessions/<id> and
       }
       // Other pages, including a Jobs or Assistant fragment under /sessions (which moves to /): no control, even once the
       // session list has loaded behind the page.
-      for (const [from, tab, to] of [["/", "assistant", "/"], ["/#assistant", "assistant", "/#assistant"], ["/#jobs", "jobs", "/#jobs"], [`/sessions/${id}#jobs`, "jobs", "/#jobs"], [`/sessions#assistant`, "assistant", "/#assistant"]] as const) {
+      for (const [from, tab, to] of [["/", "home", "/"], ["/#home", "home", "/#home"], ["/#assistant", "assistant", "/#assistant"], ["/#jobs", "jobs", "/#jobs"], [`/sessions/${id}#jobs`, "jobs", "/#jobs"], [`/sessions#assistant`, "assistant", "/#assistant"]] as const) {
         const { ctx, page, errors } = await openAt(`${base}${from}`, size);
         await onTab(page, tab);
         await page.waitForFunction(() => !(document.getElementById("sesswrap") as HTMLElement).hidden);

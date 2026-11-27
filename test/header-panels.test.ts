@@ -210,9 +210,9 @@ test("browser: page links sit in the header bar beside the theme toggle, with no
   reset();
   for (const width of [900, 360]) {
     await open({ width });
-    assert.deepEqual(await page.$$eval("header .bar nav a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.getAttribute("href"))), ["/#assistant", "/#jobs", "/sessions"]);
+    assert.deepEqual(await page.$$eval("header .bar nav a:not([hidden])", (as: HTMLAnchorElement[]) => as.map((a) => a.getAttribute("href"))), ["/", "/#assistant", "/#jobs", "/sessions"]);
     assert.equal(await page.$$eval('header nav a[href="/status"]', (as: unknown[]) => as.length), 0);
-    assert.equal(await page.getAttribute("#assistanttab", "aria-current"), "page", "the current page cue stays");
+    assert.equal(await page.getAttribute("#hometab", "aria-current"), "page", "the current page cue stays (the root is Home, docs/home.md)");
     const box = await page.evaluate(() => { const r = (id: string) => document.getElementById(id)!.getBoundingClientRect(); return { theme: r("themebtn"), side: r("side"), brand: document.querySelector(".brand")!.getBoundingClientRect(), width: document.documentElement.clientWidth, text: document.querySelector("header")!.textContent }; });
     assert.ok(box.theme.right <= box.width && box.theme.left > box.brand.right, `the theme toggle on the right at ${width}px`);
     assert.doesNotMatch(box.text!, /Notifications|All live|Status/, `no indicator words in the header at ${width}px`);
