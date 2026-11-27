@@ -46,7 +46,8 @@ test("the page imports it first, into its own cascade layer, from ORBIT's own ad
   assert.match(html, /<div id="themepicker" class="pico" hidden>/);
   assert.match(html, /<aside id="side" class="pico" aria-label="Side panel">/);
   assert.match(html, /el\("div", \{ className: "row pico" \}, state\.s, health\.s, lane\.s, kind\.s, routine\.s,/);
-  assert.equal((html.match(/<[a-z]+ [^>]*class="[^"]*\bpico\b/g) ?? []).length, 4, "four in the markup (the Jobs row is built by the script)");
+  assert.match(html, /<dialog id="appearance" class="pico" aria-labelledby="aptitle"/);
+  assert.equal((html.match(/<[a-z]+ [^>]*class="[^"]*\bpico\b/g) ?? []).length, 5, "five in the markup (the Jobs row is built by the script)");
   // Pico's variables are ORBIT's tokens inside .pico (the bridge), so the library follows the theme with no rules of its own.
   const bridge = style.match(/\n {2}\.pico \{([^}]*)\}/)?.[1] ?? "";
   for (const [name, token] of [["background-color", "--card"], ["color", "--fg"], ["primary-background", "--accent"], ["form-element-border-color", "--line"],
