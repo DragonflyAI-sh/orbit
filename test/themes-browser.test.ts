@@ -133,8 +133,11 @@ test("browser: the theme menu works by keyboard, closes on Escape, a click outsi
     await page.mouse.click(5, h - 120);
     assert.equal(await page.isVisible("#themepicker"), false, `${w}px: a click outside closes it`);
     assert.equal(await page.getAttribute("#themebtn", "aria-expanded"), "false");
-    // Focus leaving (Tab past the last option) closes it.
+    // Focus leaving (Tab past the last row, Appearance…) closes it.
     await page.click("#themebtn");
+    await page.keyboard.press("Tab");
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "appearancebtn", `${w}px: Tab reaches Appearance… in the menu`);
+    assert.equal(await page.isVisible("#themepicker"), true);
     await page.keyboard.press("Tab");
     assert.equal(await page.isVisible("#themepicker"), false, `${w}px: focus leaving closes it`);
     await ctx.close();

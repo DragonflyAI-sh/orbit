@@ -27,6 +27,10 @@ Looked at on `main` (after #148) with synthetic content at 1280, 1440 and 390px.
 
 ## Themes: Light, Dark and System
 
+*Update (November 2026): the theme menu's last row, Appearance…, opens a dialog with other looks (Warm light, Cool dark), an
+accent colour, a UI font and a text size, kept per browser. Classic, the default, is everything below. How it works, how it
+keeps accents readable and how to add a look: [appearance.md](appearance.md).*
+
 - **Both themes are designed on their own, not inverted.**
   - Light: a soft lavender page (`#f4f2fb`), cards that are barely off-white (`#fdfcff`, so no surface glares), deep
     ink text, and a restrained violet and blue accent.

@@ -102,6 +102,7 @@ const avatar = readFileSync(new URL("./web/avatar.png", import.meta.url));
 const photosJs = readFileSync(new URL("./web/photos.js", import.meta.url), "utf8");
 const filesJs = readFileSync(new URL("./web/files.js", import.meta.url), "utf8");
 const galleryJs = readFileSync(new URL("./web/gallery.js", import.meta.url), "utf8");
+const appearanceJs = readFileSync(new URL("./web/appearance.js", import.meta.url), "utf8");
 // The page's component library: ORBIT's scoped build of Pico CSS, vendored (src/web/vendor/pico/README.md). Served from
 // here, never from a CDN, so the page makes no third-party request.
 export const PICO_CSS_PATH = "/vendor/pico.orbit.min.css";
@@ -855,6 +856,11 @@ export function buildServer({
     if (req.method === "GET" && url.pathname === "/gallery.js") {
       res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff" });
       return res.end(galleryJs);
+    }
+    // The page's appearance settings (docs/appearance.md), loaded in <head> so a saved look applies before the first paint.
+    if (req.method === "GET" && url.pathname === "/appearance.js") {
+      res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff" });
+      return res.end(appearanceJs);
     }
 
     if (req.method === "GET" && url.pathname === PICO_CSS_PATH) {
