@@ -291,12 +291,54 @@ export const EMBED_BATCH = 16;
 export const EMBED_TEXTS_PER_CALL = 48;
 const QUERY_CACHE_MAX = 200;
 
+// Related-concept tier (docs/photo-semantic-search.md "Related matches"). A query word with no exact match ("jigsaw") can sit close in
+// meaning to a different, related thing ("a benchtop scroll saw") with a similarity BELOW the close-match floor. Rather than lowering
+// the floor for every query, such a hit is admitted only as a bounded, lower-ranked "related" candidate, and only when it stands out:
+// - at or above RELATED_FLOOR_DEFAULT (an absolute lower bound),
+// - at least RELATED_MARGIN above the query's median similarity over the eligible evidence (it is distinct from the background, so a
+//   query about nothing in the corpus, where every similarity is about the same, admits nothing),
+// - at least RELATED_RATIO of the query's best similarity (when one sense of the query matches strongly, as "jigsaw puzzle" does a
+//   puzzle, weaker hits on another sense, the saws, are dropped),
+// - from the photo's own evidence (never a discussion-context line), at most RELATED_MAX photos, ranked after EVERY exact candidate
+//   (keyword or close semantic), and only when enough vectors exist to estimate the background (RELATED_MIN_VECTORS).
+// It uses the similarities already computed: no extra provider call, no new data sent, no index rebuild. NOT CALIBRATED for any real
+// model: set on a labelled mock (test/photo-related-fixture.ts) only; the gallery's diagnose view is how to calibrate on the host.
+export const RELATED_FLOOR_DEFAULT = 0.25;
+export const RELATED_MARGIN = 0.08;
+export const RELATED_RATIO = 0.45;
+export const RELATED_MAX = 2;
+export const RELATED_MIN_VECTORS = 4;
+// Weight of a related similarity when judging ambiguity, against 1 for a keyword match and the full similarity of a close match.
+export const RELATED_WEIGHT = 0.5;
+export const RELATED_LABEL = "related concept: near the query in meaning but below the close-match floor. Not an exact match, and not a verified label of what the photo shows";
+
+export type Via = "keyword" | "semantic" | "related";
 export type Candidate = {
   ref: string;
   rank: number;
   score: number;
-  via: ("keyword" | "semantic")[];
-  evidence: { kind: EvidenceKind; label: string; sourceType: string; sourceId: string; snippet: string; similarity?: number }[];
+  via: Via[];
+  evidence: { kind: EvidenceKind; label: string; sourceType: string; sourceId: string; snippet: string; similarity?: number; related?: true }[];
+};
+// Stage-by-stage counts for one search (opt-in, RetrieveOptions.diagnose). Numbers and fixed reason words only: never the query, any
+// evidence text, a vector, a ref or a source id, so it can be shown to the owner without exposing more than the search itself does.
+// It is returned to the caller only; nothing writes it to a log or a transcript.
+export type RelatedReason = "admitted" | "not-distinct" | "far-below-best" | "over-cap" | "context-only";
+export type SearchDiagnostics = {
+  thresholds: { floor: number; relatedFloor: number; relatedMargin: number; relatedRatio: number; relatedMax: number; semanticListMax: number; resultsMax: number };
+  eligible: { photos: number; evidence: number; withVector: number };
+  keyword: { candidates: number };
+  semantic: { queryEmbedded: boolean; best: number | null; median: number | null; topPhotoSimilarities: number[]; closePhotos: number; closeCutByListMax: number };
+  related: { enabled: boolean; disabledBecause?: string; bandPhotos: number; admitted: number; rejected: Partial<Record<RelatedReason, number>> };
+  fused: { exactCandidates: number; returned: number; droppedByResultsMax: number; droppedByRevalidation: number };
+  target?: {
+    inCandidateSet: boolean;
+    evidence: number;
+    withVector: number;
+    keyword: { matched: boolean; position: number | null };
+    semantic: { bestSimilarity: number | null; band: "close" | "related" | "below-related-floor" | "no-vector" | "not-embedded"; position: number | null; related?: RelatedReason };
+    final: { position: number | null; outcome: "returned" | "not-matched" | "results-cap" | "revalidation-failed" };
+  };
 };
 export type RetrievalResult = {
   mode: "hybrid" | "keyword-only";
@@ -306,12 +348,18 @@ export type RetrievalResult = {
   noMatch: boolean;
   caveat: string;
   stats: { eligibleEvidence: number; authorizedPhotos: number; embedded: number; reused: number; pending: number; discarded: number; ms: number };
+  // True when every candidate is only a related match (no stored text matched exactly or closely).
+  relatedOnly: boolean;
+  diagnostics?: SearchDiagnostics;
 };
 export const CAVEAT =
   "Candidates are ranked by keyword and text-similarity matches over ORBIT's stored text about photos (saved model observations, Rai's corrections, captions, conversation titles and Rai's next message). Similarity is not proof of what a photo shows; context lines describe the conversation, not the image, and observations are what a model said, not verified facts.";
 export const NO_MATCH_CAVEAT =
   "Nothing stored about the photos this conversation can see matched closely enough. That says nothing about what the photos show, because image content itself is never searched.";
 export const AMBIGUITY_NOTE = "Two or more photos match about equally well. Do not pick one: show them (photos_show) and ask Rai which he means.";
+export const RELATED_CAVEAT =
+  "No stored text matched the query exactly or closely. These candidates are only RELATED in meaning (for example a different tool of the same family): present them as related, possibly not what Rai means, never as a match, and never as proof of what a photo shows.";
+export const RELATED_NOTE = "Candidates matchedBy related are near the query in meaning but not an exact or close match: say so when presenting them, and rank exact matches first.";
 
 const cosine = (a: number[], b: number[]) => {
   let d = 0;
@@ -368,10 +416,57 @@ export type RetrieveOptions = {
   refresh?: () => Evidence[];
   queryCache?: Map<string, number[]>;
   floor?: number;
+  // The related-concept tier (default on). false reproduces the close-match-only ranking (the before/after fixture uses it).
+  related?: boolean;
+  relatedFloor?: number;
   embedTextsMax?: number;
   signal?: AbortSignal;
   now?: () => number;
+  // Opt-in stage diagnostics (SearchDiagnostics). `target`: a ref whose path through the stages to report.
+  diagnose?: { target?: string };
 };
+
+const r3 = (n: number) => Number(n.toFixed(3));
+const medianOf = (xs: number[]) => {
+  const s = [...xs].sort((a, b) => a - b);
+  if (!s.length) return 0;
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
+};
+
+// The related-concept tier over similarities already computed (see RELATED_FLOOR_DEFAULT). `exact`: refs already candidates through
+// keyword or a close semantic match; they are never related candidates. Returns the admitted hits (best first) and why every other
+// photo in the related band was not admitted.
+export function relatedTier(scored: { sim: number; e: Evidence }[], o: { floor: number; relatedFloor: number; exact: ReadonlySet<string> }) {
+  const admitted: { ref: string; sim: number; hits: { sim: number; e: Evidence }[] }[] = [];
+  const reasons = new Map<string, RelatedReason>();
+  if (scored.length < RELATED_MIN_VECTORS) return { admitted, reasons, median: undefined as number | undefined, best: undefined as number | undefined, disabledBecause: `fewer than ${RELATED_MIN_VECTORS} indexed evidence texts` };
+  const median = medianOf(scored.map((s) => s.sim));
+  const best = Math.max(...scored.map((s) => s.sim));
+  const byRef = new Map<string, { sim: number; e: Evidence }[]>();
+  for (const s of scored) {
+    if (o.exact.has(s.e.ref) || s.sim >= o.floor || s.sim < o.relatedFloor) continue;
+    byRef.set(s.e.ref, [...(byRef.get(s.e.ref) ?? []), s]);
+  }
+  const eligible: { ref: string; sim: number; hits: { sim: number; e: Evidence }[] }[] = [];
+  for (const [ref, list] of byRef) {
+    const own = list.filter((x) => x.e.kind !== "discussion-context").sort((a, b) => b.sim - a.sim);
+    if (!own.length) {
+      reasons.set(ref, "context-only");
+      continue;
+    }
+    const top = own[0]!.sim;
+    if (top - median < RELATED_MARGIN) reasons.set(ref, "not-distinct");
+    else if (top < RELATED_RATIO * best) reasons.set(ref, "far-below-best");
+    else eligible.push({ ref, sim: top, hits: own.slice(0, 2) });
+  }
+  eligible.sort((a, b) => b.sim - a.sim || a.ref.localeCompare(b.ref));
+  for (const x of eligible) {
+    if (admitted.length < RELATED_MAX) (admitted.push(x), reasons.set(x.ref, "admitted"));
+    else reasons.set(x.ref, "over-cap");
+  }
+  return { admitted, reasons, median, best, disabledBecause: undefined as string | undefined };
+}
 
 export async function retrieve(o: RetrieveOptions): Promise<RetrievalResult> {
   const now = o.now ?? (() => performance.now());
@@ -445,23 +540,27 @@ export async function retrieve(o: RetrieveOptions): Promise<RetrievalResult> {
   const eligible = current();
   const authorized = o.access.authorizedRefs();
   const keyword = keywordRanking(o.query, eligible, "all");
-  const best = new Map<string, { sim: number; e: Evidence }[]>();
+  // Every similarity once: the close tier keeps those at or above the floor; the related tier and the diagnostics read the rest.
+  const scored: { sim: number; e: Evidence }[] = [];
   if (q) {
     for (const e of eligible) {
       const v = vectors.get(o.cache.keyOf(e));
-      if (!v) continue;
-      const sim = cosine(q, v);
-      if (sim < floor) continue;
-      const list = best.get(e.ref) ?? [];
-      list.push({ sim, e });
-      best.set(e.ref, list);
+      if (v) scored.push({ sim: cosine(q, v), e });
     }
   }
+  const best = new Map<string, { sim: number; e: Evidence }[]>();
+  for (const x of scored) {
+    if (x.sim < floor) continue;
+    const list = best.get(x.e.ref) ?? [];
+    list.push(x);
+    best.set(x.e.ref, list);
+  }
   const semScore = (ref: string) => Math.max(...(best.get(ref) ?? []).map((x) => (x.e.kind === "discussion-context" ? x.sim * CONTEXT_WEIGHT : x.sim)), 0);
-  const semantic = [...best.keys()].sort((a, b) => semScore(b) - semScore(a) || a.localeCompare(b)).slice(0, SEMANTIC_LIST_MAX);
+  const semanticAll = [...best.keys()].sort((a, b) => semScore(b) - semScore(a) || a.localeCompare(b));
+  const semantic = semanticAll.slice(0, SEMANTIC_LIST_MAX);
 
   // Reciprocal rank fusion; refs are unique per list, so photos are deduplicated by construction.
-  const fused = new Map<string, { score: number; via: Set<"keyword" | "semantic"> }>();
+  const fused = new Map<string, { score: number; via: Set<Via> }>();
   const add = (list: string[], via: "keyword" | "semantic") =>
     list.forEach((ref, i) => {
       const f = fused.get(ref) ?? { score: 0, via: new Set() };
@@ -479,12 +578,30 @@ export async function retrieve(o: RetrieveOptions): Promise<RetrievalResult> {
     }
   })();
 
-  const ordered = [...fused.entries()].sort((a, b) => b[1].score - a[1].score || a[0].localeCompare(b[0]));
+  // Related candidates come after every exact one (keyword or close semantic), so they can never bury an exact match.
+  const relatedFloor = o.relatedFloor ?? RELATED_FLOOR_DEFAULT;
+  const useRelated = o.related !== false && Boolean(q);
+  const rel = useRelated ? relatedTier(scored, { floor, relatedFloor, exact: new Set([...fused.keys(), ...semanticAll]) }) : undefined;
+  const relatedHits = new Map((rel?.admitted ?? []).map((x) => [x.ref, x]));
+  const exactOrdered = [...fused.entries()].sort((a, b) => b[1].score - a[1].score || a[0].localeCompare(b[0]));
+  const ordered: [string, { score: number; via: Set<Via> }][] = [...exactOrdered, ...(rel?.admitted ?? []).map((x, i) => [x.ref, { score: RELATED_WEIGHT / (RRF_K + exactOrdered.length + i + 1), via: new Set<Via>(["related"]) }] as [string, { score: number; via: Set<Via> }])];
   const candidates: Candidate[] = [];
+  let droppedByRevalidation = 0;
+  let droppedByResultsMax = 0;
+  const outcome = new Map<string, "returned" | "results-cap" | "revalidation-failed">();
   for (const [ref, f] of ordered) {
-    if (candidates.length >= RESULTS_MAX) break;
+    if (candidates.length >= RESULTS_MAX) {
+      droppedByResultsMax++;
+      outcome.set(ref, "results-cap");
+      continue;
+    }
     const v = o.access.currentVersion(ref);
-    if (!authorized.has(ref) || !v || !o.access.revalidate(ref, v)) continue;
+    if (!authorized.has(ref) || !v || !o.access.revalidate(ref, v)) {
+      droppedByRevalidation++;
+      outcome.set(ref, "revalidation-failed");
+      continue;
+    }
+    outcome.set(ref, "returned");
     const sem = [...(best.get(ref) ?? [])].sort((a, b) => b.sim - a.sim).slice(0, 2);
     // For a keyword match, the evidence that holds the most query terms.
     const kw = f.via.has("keyword")
@@ -496,33 +613,85 @@ export async function retrieve(o: RetrieveOptions): Promise<RetrievalResult> {
           .slice(0, 1)
           .map((x) => x.e)
       : [];
-    const shown = [...kw.map((e) => ({ e, sim: undefined as number | undefined })), ...sem.filter((s) => !kw.includes(s.e))].slice(0, 3);
+    const relHits = relatedHits.get(ref)?.hits ?? [];
+    const shown = [
+      ...kw.map((e) => ({ e, sim: undefined as number | undefined, related: false })),
+      ...sem.filter((s) => !kw.includes(s.e)).map((s) => ({ ...s, related: false })),
+      ...relHits.map((s) => ({ ...s, related: true })),
+    ].slice(0, 3);
     candidates.push({
       ref,
       rank: candidates.length + 1,
       score: Number(f.score.toFixed(5)),
       via: [...f.via],
-      evidence: shown.map(({ e, sim }) => ({
+      evidence: shown.map(({ e, sim, related }) => ({
         kind: e.kind,
-        label: EVIDENCE_LABEL[e.kind],
+        label: related ? `${EVIDENCE_LABEL[e.kind]}; ${RELATED_LABEL}` : EVIDENCE_LABEL[e.kind],
         sourceType: e.sourceType,
         sourceId: e.sourceId,
         snippet: untrustedText(e.text, 160).text,
         ...(sim === undefined ? {} : { similarity: Number(sim.toFixed(3)) }),
+        ...(related ? { related: true as const } : {}),
       })),
     });
   }
-  // RRF scores are compressed, so ambiguity is judged on match strength: best (weighted) similarity, plus 1 for a keyword match.
-  const strength = (c: Candidate) => semScore(c.ref) + (c.via.includes("keyword") ? 1 : 0);
+  // RRF scores are compressed, so ambiguity is judged on match strength: best (weighted) similarity, plus 1 for a keyword match; a
+  // related match counts at RELATED_WEIGHT of its similarity.
+  const strength = (c: Candidate) => semScore(c.ref) + (c.via.includes("keyword") ? 1 : 0) + (c.via.includes("related") ? RELATED_WEIGHT * (relatedHits.get(c.ref)?.sim ?? 0) : 0);
   const ambiguous = candidates.length >= 2 && strength(candidates[1]!) >= strength(candidates[0]!) * AMBIGUITY_RATIO;
+  const relatedOnly = candidates.length > 0 && candidates.every((c) => c.via.length === 1 && c.via[0] === "related");
+
+  let diagnostics: SearchDiagnostics | undefined;
+  if (o.diagnose) {
+    const perPhoto = new Map<string, number>();
+    for (const x of scored) perPhoto.set(x.e.ref, Math.max(perPhoto.get(x.e.ref) ?? -1, x.sim));
+    const rejected: Partial<Record<RelatedReason, number>> = {};
+    for (const r of rel?.reasons.values() ?? []) if (r !== "admitted") rejected[r] = (rejected[r] ?? 0) + 1;
+    const photos = new Set(eligible.map((e) => e.ref));
+    diagnostics = {
+      thresholds: { floor, relatedFloor, relatedMargin: RELATED_MARGIN, relatedRatio: RELATED_RATIO, relatedMax: RELATED_MAX, semanticListMax: SEMANTIC_LIST_MAX, resultsMax: RESULTS_MAX },
+      eligible: { photos: photos.size, evidence: eligible.length, withVector: scored.length },
+      keyword: { candidates: keyword.length },
+      semantic: {
+        queryEmbedded: Boolean(q),
+        best: scored.length ? r3(Math.max(...scored.map((x) => x.sim))) : null,
+        median: scored.length ? r3(medianOf(scored.map((x) => x.sim))) : null,
+        topPhotoSimilarities: [...perPhoto.values()].sort((a, b) => b - a).slice(0, 5).map(r3),
+        closePhotos: semanticAll.length,
+        closeCutByListMax: Math.max(0, semanticAll.length - SEMANTIC_LIST_MAX),
+      },
+      related: { enabled: Boolean(rel) && !rel?.disabledBecause, ...(rel?.disabledBecause ? { disabledBecause: rel.disabledBecause } : !rel ? { disabledBecause: q ? "turned off for this search" : "no query vector" } : {}), bandPhotos: rel?.reasons.size ?? 0, admitted: rel?.admitted.length ?? 0, rejected },
+      fused: { exactCandidates: exactOrdered.length, returned: candidates.length, droppedByResultsMax, droppedByRevalidation },
+    };
+    const t = o.diagnose.target;
+    if (t) {
+      const ev = eligible.filter((e) => e.ref === t);
+      const sims = scored.filter((x) => x.e.ref === t);
+      const bestSim = sims.length ? Math.max(...sims.map((x) => x.sim)) : undefined;
+      const relReason = rel?.reasons.get(t);
+      const band = !q ? "not-embedded" : bestSim === undefined ? "no-vector" : bestSim >= floor ? "close" : bestSim >= relatedFloor ? "related" : "below-related-floor";
+      const final = candidates.findIndex((c) => c.ref === t);
+      const out = outcome.get(t);
+      diagnostics.target = {
+        inCandidateSet: authorized.has(t) && ev.length > 0,
+        evidence: ev.length,
+        withVector: sims.length,
+        keyword: { matched: keyword.includes(t), position: keyword.includes(t) ? keyword.indexOf(t) + 1 : null },
+        semantic: { bestSimilarity: bestSim === undefined ? null : r3(bestSim), band, position: semanticAll.includes(t) ? semanticAll.indexOf(t) + 1 : null, ...(relReason ? { related: relReason } : {}) },
+        final: { position: final >= 0 ? final + 1 : null, outcome: out === undefined ? "not-matched" : out },
+      };
+    }
+  }
   return {
     mode,
     ...(degraded ? { degraded } : {}),
     candidates,
     ambiguous,
     noMatch: candidates.length === 0,
-    caveat: candidates.length ? CAVEAT : NO_MATCH_CAVEAT,
+    relatedOnly,
+    caveat: !candidates.length ? NO_MATCH_CAVEAT : relatedOnly ? RELATED_CAVEAT : CAVEAT,
     stats: { eligibleEvidence: eligible.length, authorizedPhotos: authorized.size, embedded, reused, pending, discarded, ms: Number((now() - t0).toFixed(2)) },
+    ...(diagnostics ? { diagnostics } : {}),
   };
 }
 
@@ -599,7 +768,7 @@ export function photoSemantic(d: { attachments: Attachments; sources: SemanticSo
       cache.invalidate(ref);
     },
     maintain,
-    async search(caller: string, query: string, opts: { includeArchived: boolean; signal?: AbortSignal; exclude?: ReadonlySet<string> }) {
+    async search(caller: string, query: string, opts: { includeArchived: boolean; signal?: AbortSignal; exclude?: ReadonlySet<string>; diagnose?: { target?: string } }) {
       if (now().getTime() - maintainedAt > MAINTAIN_EVERY_MS) {
         maintainedAt = now().getTime();
         try {
@@ -610,7 +779,7 @@ export function photoSemantic(d: { attachments: Attachments; sources: SemanticSo
       }
       const first = collectEvidence(d, caller, opts.includeArchived, opts.exclude);
       const access = accessFor(caller, first.byRef);
-      const r = await retrieve({ query, evidence: first.evidence, access, embedder: d.embedder, cache, queryCache, refresh: () => collectEvidence(d, caller, opts.includeArchived, opts.exclude).evidence, signal: opts.signal });
+      const r = await retrieve({ query, evidence: first.evidence, access, embedder: d.embedder, cache, queryCache, refresh: () => collectEvidence(d, caller, opts.includeArchived, opts.exclude).evidence, signal: opts.signal, ...(opts.diagnose ? { diagnose: opts.diagnose } : {}) });
       return { r, first };
     },
   };
@@ -628,7 +797,7 @@ export function photoSearchTool(d: { semantic: PhotoSemantic; attachments: Attac
     name: "photos_search",
     readOnly: true,
     strict: true,
-    description: `Find photos Rai sent by what ORBIT has stored about them, for descriptions like "that place with the library behind it": ranks photos by keyword and text-similarity matches over saved model observations (photos_observe), Rai's corrections, captions, conversation titles and Rai's next message after a photo. ${policy.crossConversation ? "In the Assistant this covers the Assistant and every chat thread." : "In a chat thread this covers only this thread's photos; other conversations are reachable from the Assistant."} Returns at most ${RESULTS_MAX} candidates, each with refs, source, how it matched and labelled evidence. It never looks at the photos: similarity is not proof, and a photo nobody described cannot match. If the result is ambiguous, show the candidates with photos_show and ask Rai; do not pick one. If nothing matches, say no stored description matched (not that no such photo exists). For dates use photos_list. Read-only.`,
+    description: `Find photos Rai sent by what ORBIT has stored about them, for descriptions like "that place with the library behind it": ranks photos by keyword and text-similarity matches over saved model observations (photos_observe), Rai's corrections, captions, conversation titles and Rai's next message after a photo. ${policy.crossConversation ? "In the Assistant this covers the Assistant and every chat thread." : "In a chat thread this covers only this thread's photos; other conversations are reachable from the Assistant."} Returns at most ${RESULTS_MAX} candidates, each with refs, source, how it matched and labelled evidence. It never looks at the photos: similarity is not proof, and a photo nobody described cannot match. A candidate matchedBy related is only near in meaning (no stored text matched exactly or closely): call it a related match, not what Rai asked for. If the result is ambiguous, show the candidates with photos_show and ask Rai; do not pick one. If nothing matches, say no stored description matched (not that no such photo exists). For dates use photos_list. Read-only.`,
     parameters: {
       type: "object",
       properties: {
@@ -680,9 +849,11 @@ export function photoSearchTool(d: { semantic: PhotoSemantic; attachments: Attac
                   }
                 : {}),
               matchedBy: c.via,
-              evidence: c.evidence.map((e) => ({ kind: e.kind, label: e.label, source: { type: e.sourceType, id: e.sourceId }, snippet: e.snippet, ...(e.similarity !== undefined ? { similarity: e.similarity } : {}) })),
+              evidence: c.evidence.map((e) => ({ kind: e.kind, label: e.label, source: { type: e.sourceType, id: e.sourceId }, snippet: e.snippet, ...(e.similarity !== undefined ? { similarity: e.similarity } : {}), ...(e.related ? { related: true } : {}) })),
             };
           }),
+          ...(r.candidates.some((c) => c.via.includes("related")) ? { related: RELATED_NOTE } : {}),
+          ...(r.relatedOnly ? { relatedOnly: true } : {}),
           ambiguous: r.ambiguous,
           ...(r.ambiguous ? { ambiguity: AMBIGUITY_NOTE } : {}),
           noMatch: r.noMatch,
