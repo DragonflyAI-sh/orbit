@@ -594,6 +594,23 @@
   .planall:hover, .planitem:hover { background: var(--surface-hover); }
   .planall[aria-current="page"], .planitem[aria-current="page"] { background: var(--surface-2); box-shadow: inset 3px 0 0 var(--accent); }
   @media (pointer: coarse) { .planall, .planitem { min-height: var(--tap); } }
+  /* The selected project's summary (docs/plan.md, "Sidebar summary"): a few short lines, wrapping in a narrow sidebar. */
+  .plansum { display: flex; flex-direction: column; gap: 3px; padding: 2px 6px 4px; font-size: var(--text-xs); line-height: var(--leading-tight); overflow-wrap: anywhere; min-width: 0; }
+  .plansum p { margin: 0; }
+  .plansum .pshead { display: flex; align-items: center; gap: 8px; font-size: var(--text-ui); }
+  .plansum .pshead .ptitle { flex: 1 1 auto; min-width: 0; }
+  .plansum .psstate, .plansum .when { color: var(--muted); }
+  .plansum .psgoal { color: var(--fg); }
+  .plansum .lbl { font-weight: var(--weight-strong); }
+  .plansum .psline.hot { color: var(--danger); }
+  .plansum .navsub { margin: 6px 0 0; }
+  .plansum .pslist { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; }
+  .plansum .pslist.bul { list-style: disc; }
+  .plansumopen { align-self: flex-start; display: inline-flex; align-items: center; min-height: 28px; margin-top: 4px; padding: 2px 8px; border-radius: var(--radius-sm); border: 1px solid var(--line); color: var(--fg); text-decoration: none; font-weight: var(--weight-strong); }
+  .plansumopen::after { content: " →"; white-space: pre; }
+  .plansumopen:hover { background: var(--surface-hover); }
+  .plansumopen[aria-current="page"] { background: var(--surface-2); box-shadow: inset 3px 0 0 var(--accent); }
+  @media (pointer: coarse) { .plansumopen { min-height: var(--tap); } }
   #plan h2.pltitle { margin: 0; font-size: var(--text-xl); font-weight: var(--weight-strong); color: var(--fg); overflow-wrap: anywhere; }
   #plan h2.pltitle:focus { outline: none; } #plan h2.pltitle:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
   #plan .plsub { margin: 2px 0 0; color: var(--muted); font-size: var(--text-sm); }
@@ -2813,6 +2830,9 @@
     note.className = "navnote err";
     note.textContent = sidebarShown ? `${why} Showing the last answer.` : why;
     if (!sidebarShown) for (const id of ["navplan", "navfiles", "navimages"]) document.getElementById(id).replaceChildren(navNote("Not read yet."));
+    // The Plan section answers for the selector's choice only: a failed read for another scope than the one last answered says so
+    // there, rather than leaving another project's summary (or none) in its place.
+    else if (lastSidebarScope !== (navPrefs.project || "")) drawNavPlan(why);
   }
   async function refreshSidebar(force) {
     if (!force && Date.now() - sidebarAt < 60_000) return;
@@ -2820,7 +2840,8 @@
     sidebarAt = Date.now();
     let res;
     const q = new URLSearchParams();
-    if (navPrefs.project) q.set("project", navPrefs.project);
+    const scope = navPrefs.project || "";
+    if (scope) q.set("project", scope);
     if (navImagesPage > 1) q.set("images", String(navImagesPage));
     try { res = await fetch(`/sidebar${q.toString() ? `?${q}` : ""}`); } catch { if (gen === sidebarGen) sidebarFailed("ORBIT could not be reached for the sidebar."); return; }
     if (gen !== sidebarGen) return;
@@ -2829,10 +2850,10 @@
     try { body = await res.json(); } catch { body = null; }
     if (gen !== sidebarGen) return;
     if (!body || !Array.isArray(body.projects)) return sidebarFailed("ORBIT's answer for the sidebar could not be read.");
-    renderSidebar(body);
+    renderSidebar(body, scope);
   }
   const str = (v, max = 300) => (typeof v === "string" ? v.slice(0, max) : "");
-  function renderSidebar(b) {
+  function renderSidebar(b, scope) {
     sidebarShown = true;
     const vaultOk = b.vault && b.vault.ok === true;
     const vaultWhy = vaultOk ? "" : str(b.vault && b.vault.error) || "The vault could not be read.";
@@ -2851,31 +2872,11 @@
     // Forget the remembered project only when the vault was read and it is not active: an unreadable vault keeps it.
     if (vaultOk && b.unknownProject && navPrefs.project) { navPrefs.project = ""; writeSidebar(localStore, navPrefs); }
 
-    // Plan (docs/plan.md): a compact index of the open projects (status dot, title, priority badge), All projects at the top,
-    // and how many need attention. Each opens its view in the main area (drawPlan below).
+    // Plan (docs/plan.md): for All projects, a compact index of the open projects; for one project chosen in the selector, a
+    // short summary of it (drawNavPlan below). Either opens its view in the main area (drawPlan below) only when clicked.
     lastSidebar = b;
-    const plan = document.getElementById("navplan");
-    if (!vaultOk) plan.replaceChildren(navNote(vaultWhy, true));
-    else {
-      const ov = b.overview && Array.isArray(b.overview.projects) ? b.overview : { projects: [], stats: {} };
-      const open = ov.projects.filter((c) => c && typeof c.id === "string" && c.state !== "done");
-      const st = ov.stats || {};
-      const kids = [el("a", { className: "planall", href: planHref(""), id: "navplan-all" }, el("span", { textContent: "All projects" }), el("span", { className: "navcount", textContent: `${open.length} open` }))];
-      const attn = Number(st.attention) || 0;
-      if (attn) kids.push(el("span", { className: "planattn", textContent: `${attn} need${attn === 1 ? "s" : ""} attention`, title: "Projects that are blocked, past their target, paused, quiet for a month or without a next action" }));
-      if (open.length) kids.push(el("ul", { className: "planlist", ariaLabel: "Open projects" }, ...open.map((c) => {
-        const a = el("a", { className: "planitem", href: planHref(c.id), title: `${str(c.title, 100)}: ${PLAN_HEALTH[c.health] || ""}${c.why ? ` (${str(c.why, 80)})` : ""}` },
-          el("span", { className: `pdot ${PLAN_HEALTH[c.health] ? c.health : ""}`, ariaHidden: "true" }),
-          el("span", { className: "ptitle", textContent: str(c.title, 100) || c.id }),
-          el("span", { className: "vh", textContent: `, ${PLAN_HEALTH[c.health] || "status unknown"}` }));
-        a.dataset.id = c.id;
-        if (c.priority) a.append(el("span", { className: `pbadge p${Number(c.priority)}`, textContent: `P${Number(c.priority)}`, title: `Priority ${Number(c.priority)}` }));
-        return el("li", {}, a);
-      })));
-      else kids.push(navNote("No open projects in the vault (Projects/)."));
-      plan.replaceChildren(...kids);
-      showPlanCurrent();
-    }
+    lastSidebarScope = scope === undefined ? current : scope;
+    drawNavPlan();
     if (tab === "plan" && !planTarget(location.hash)?.id) drawPlan();
 
     // Files: the related notes, each with a preview, then the locations the project note lists.
@@ -2931,6 +2932,95 @@
       }
     } else if (!b.photoError) ikids.push(navNote(current ? "No photos name this project in their caption or conversation title." : "No photos sent yet."));
     imgs.replaceChildren(...ikids);
+  }
+  // The scope ("" for all projects, else a project id) the last /sidebar answer was read for.
+  let lastSidebarScope = null;
+  // The Plan section's index of every open project (All projects in the selector): unchanged from the first Plan views.
+  function navPlanIndex(b) {
+    const ov = b.overview && Array.isArray(b.overview.projects) ? b.overview : { projects: [], stats: {} };
+    const open = ov.projects.filter((c) => c && typeof c.id === "string" && c.state !== "done");
+    const st = ov.stats || {};
+    const kids = [el("a", { className: "planall", href: planHref(""), id: "navplan-all" }, el("span", { textContent: "All projects" }), el("span", { className: "navcount", textContent: `${open.length} open` }))];
+    const attn = Number(st.attention) || 0;
+    if (attn) kids.push(el("span", { className: "planattn", textContent: `${attn} need${attn === 1 ? "s" : ""} attention`, title: "Projects that are blocked, past their target, paused, quiet for a month or without a next action" }));
+    if (open.length) kids.push(el("ul", { className: "planlist", ariaLabel: "Open projects" }, ...open.map((c) => {
+      const a = el("a", { className: "planitem", href: planHref(c.id), title: `${str(c.title, 100)}: ${PLAN_HEALTH[c.health] || ""}${c.why ? ` (${str(c.why, 80)})` : ""}` },
+        el("span", { className: `pdot ${PLAN_HEALTH[c.health] ? c.health : ""}`, ariaHidden: "true" }),
+        el("span", { className: "ptitle", textContent: str(c.title, 100) || c.id }),
+        el("span", { className: "vh", textContent: `, ${PLAN_HEALTH[c.health] || "status unknown"}` }));
+      a.dataset.id = c.id;
+      if (c.priority) a.append(el("span", { className: `pbadge p${Number(c.priority)}`, textContent: `P${Number(c.priority)}`, title: `Priority ${Number(c.priority)}` }));
+      return el("li", {}, a);
+    })));
+    else kids.push(navNote("No open projects in the vault (Projects/)."));
+    return kids;
+  }
+  // The Plan section's summary of the project chosen in the selector (docs/plan.md, "Sidebar summary"): status, the goal, the
+  // next steps, a blocker, the next date, the open linked tasks and a link to the full plan. Only what the note says is shown;
+  // a part with nothing in it is left out. Every value is set as text.
+  function navPlanSummary(s, today) {
+    const title = str(s.title, 100) || s.id;
+    const kids = [el("p", { className: "pshead" },
+      el("span", { className: `pdot ${PLAN_HEALTH[s.health] ? s.health : ""}`, ariaHidden: "true" }),
+      el("strong", { className: "ptitle", textContent: title }),
+      ...(s.priority ? [el("span", { className: `pbadge p${Number(s.priority)}`, textContent: `P${Number(s.priority)}`, title: `Priority ${Number(s.priority)}` })] : []))];
+    const p = s.progress && Number(s.progress.total) > 0 ? s.progress : null;
+    const done = p ? Math.max(0, Math.min(Number(p.done) || 0, Number(p.total))) : 0;
+    kids.push(el("p", { className: "psstate", textContent: `${PLAN_STATE[s.state] || "Active"} · ${PLAN_HEALTH[s.health] || "status unknown"}${s.why && s.health === "yellow" && s.state !== "paused" ? ` (${humanDates(str(s.why, 80), today)})` : ""}${p ? ` · ${done}/${Number(p.total)} ${str(p.label, 40)}` : ""}` }));
+    if (s.summary) kids.push(el("p", { className: "psgoal", textContent: humanDates(str(s.summary, 200), today) }));
+    if (s.state !== "done" && (s.blocker || Number(s.blockers) > 0)) {
+      const more = Number(s.blockers) - 1;
+      kids.push(el("p", { className: "psline hot" }, el("span", { className: "lbl", textContent: "Blocker" }), " ",
+        s.blocker ? `${humanDates(str(s.blocker, 240), today)}${more > 0 ? ` (+${more} more)` : ""}` : "Marked blocked; the note does not say on what."));
+    }
+    const steps = (Array.isArray(s.nextSteps) ? s.nextSteps : []).filter((t) => typeof t === "string" && t).slice(0, 3);
+    if (steps.length) kids.push(el("h3", { className: "navsub", textContent: "Next" }), el("ol", { className: "pslist", ariaLabel: "Next steps" }, ...steps.map((t) => el("li", { textContent: humanDates(str(t, 240), today) }))));
+    if (s.overdue && s.target) kids.push(el("p", { className: "psline hot", title: longDay(s.target) }, el("span", { className: "lbl", textContent: "Overdue" }), " ", `target was ${shortDay(s.target, today)} (${relDay(s.target, today)})`));
+    const m = s.milestone && typeof s.milestone.date === "string" ? s.milestone : null;
+    if (m) kids.push(el("p", { className: "psline", title: longDay(m.date) }, el("span", { className: "lbl", textContent: m.kind === "target" ? "Target" : m.kind === "due" ? "Due" : "Next date" }), " ",
+      `${m.kind === "target" ? "" : `${humanDates(str(m.label, 140), today)} · `}${shortDay(m.date, today)} (${relDay(m.date, today)})`));
+    const open = Number(s.openTasks) || 0;
+    const tasks = (Array.isArray(s.tasks) ? s.tasks : []).filter((t) => t && typeof t.title === "string").slice(0, 3);
+    // Open linked tasks: those not already a next step, a few by name; when every one is a next step, one line says so.
+    const more = Math.max(0, Number(s.tasksMore) || 0), inNext = Math.max(0, open - tasks.length - more);
+    const said = [inNext ? `${inNext} listed under Next` : "", more ? `${more} more in the full plan` : ""].filter(Boolean).join("; ");
+    if (open > 0 && tasks.length) {
+      kids.push(el("h3", { className: "navsub", textContent: `Open tasks (${open})` }), el("ul", { className: "pslist bul", ariaLabel: "Open linked tasks" }, ...tasks.map((t) => el("li", {},
+        el("span", { textContent: str(t.title, 100) }),
+        t.due ? el("span", { className: "when", title: longDay(t.due), textContent: ` · due ${shortDay(t.due, today)}` }) : ""))));
+      if (said) kids.push(el("p", { className: "psline when", textContent: `${said}.` }));
+    } else if (open > 0) kids.push(el("p", { className: "psline" }, el("span", { className: "lbl", textContent: "Open tasks" }), " ", `${open}${inNext === open ? (open === 1 ? " (under Next)" : " (all under Next)") : said ? ` (${said})` : ""}`));
+    const a = el("a", { className: "plansumopen", href: planHref(s.id), textContent: "Open full plan", ariaLabel: `Open the full plan for ${title}` });
+    a.dataset.id = s.id;
+    kids.push(a);
+    const box = el("div", { className: "plansum", ariaLabel: `Plan summary: ${title}` }, ...kids);
+    box.setAttribute("role", "group");
+    box.dataset.id = s.id;
+    return box;
+  }
+  // Draws the Plan section for the selector's choice (navPrefs.project), never for another: the last answer is used only when it
+  // was read for that same choice. All projects can always be drawn from the last answer's overview (it is the same for every
+  // choice); a project waiting for its answer shows its name and "Reading the project…", or `failed` when that read failed.
+  function drawNavPlan(failed) {
+    const plan = document.getElementById("navplan");
+    const want = navPrefs.project || "";
+    const b = lastSidebar;
+    const vaultOk = Boolean(b && b.vault && b.vault.ok === true);
+    const fresh = Boolean(b) && lastSidebarScope === want;
+    if (b && !vaultOk && (fresh || !want)) plan.replaceChildren(navNote(str(b.vault && b.vault.error) || "The vault could not be read.", true));
+    else if (!want) plan.replaceChildren(...(b ? navPlanIndex(b) : [navNote(failed ? "Not read yet." : "Reading the plan…", Boolean(failed))]));
+    else if (fresh && b.project && b.project.id === want && b.planSummary && b.planSummary.id === want) plan.replaceChildren(navPlanSummary(b.planSummary, str(b.overview && b.overview.today, 10)));
+    else {
+      // Waiting for (or failed to read) this project's answer: its name from the overview when known, nothing of another project.
+      const known = vaultOk && b.overview && Array.isArray(b.overview.projects) ? b.overview.projects.find((c) => c && c.id === want) : null;
+      const kids = [el("p", { className: "pshead" }, el("strong", { className: "ptitle", textContent: known ? str(known.title, 100) || want : str(want, 100) }))];
+      kids.push(fresh ? navNote("This project's plan could not be read.", true) : failed ? navNote(failed, true) : navNote("Reading the project…"));
+      const box = el("div", { className: "plansum loading", ariaLabel: "Plan summary", ariaBusy: fresh || failed ? "false" : "true" }, ...kids);
+      box.setAttribute("role", "group");
+      box.dataset.id = want;
+      plan.replaceChildren(box);
+    }
+    showPlanCurrent();
   }
   // Another page of the sidebar's photos. The pager is drawn again, so the keyboard stays on the same button (or the other one
   // when that end is reached).
@@ -3019,7 +3109,7 @@
   // The sidebar's Plan links mark the view that is open.
   function showPlanCurrent() {
     const t = tab === "plan" ? planTarget(location.hash) : null;
-    for (const a of document.querySelectorAll("#navplan a.planall, #navplan a.planitem")) {
+    for (const a of document.querySelectorAll("#navplan a.planall, #navplan a.planitem, #navplan a.plansumopen")) {
       const on = Boolean(t && !t.invalid && (a.classList.contains("planall") ? t.id === "" : a.dataset.id === t.id));
       if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
     }
@@ -3238,6 +3328,8 @@
     navPrefs.project = validProject(e.target.value) ? e.target.value : "";
     navImagesPage = 1;
     writeSidebar(localStore, navPrefs);
+    // The Plan section follows the new choice at once (never showing the previous project's summary); the main area stays.
+    if (sidebarShown) drawNavPlan();
     refreshSidebar(true);
   });
   setInterval(() => { if (document.visibilityState === "visible" && navVisible()) refreshSidebar(false); }, 60_000);

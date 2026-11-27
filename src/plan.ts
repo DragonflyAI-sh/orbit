@@ -16,6 +16,8 @@ export const PLAN_ACTIVITY_MAX = 6;
 export const PLAN_TASKS_MAX = 20;
 export const PLAN_NOTES_MAX = 8;
 export const PLAN_MILESTONES_MAX = 12;
+// The sidebar's summary of the selected project (docs/plan.md, "Sidebar summary"): this many open linked tasks at most.
+export const PLAN_SUMMARY_TASKS = 3;
 // An active project with nothing dated for this long is shown as needing attention.
 export const STALE_DAYS = 30;
 const SUMMARY_MAX = 160;
@@ -69,6 +71,17 @@ export type ProjectDetail = ProjectCard & {
   tasks: LinkedTask[];
   tasksMore: number;
   notes: string[];
+};
+// The compact summary the sidebar's Plan section shows for the project chosen in the Projects selector: the card, its next
+// steps, the first blocker, the next dated milestone (or task due date, or target) from today on, and the open linked tasks
+// that are not already a next step. Nothing is filled in that the note does not say.
+export type ProjectSummary = ProjectCard & {
+  nextSteps: string[];
+  blocker: string;                 // the first blocker recorded, "" when none
+  milestone: TimelineItem | null;  // the next milestone or target not done, today or later (else the next task due date)
+  openTasks: number;               // every open linked task
+  tasks: LinkedTask[];             // up to PLAN_SUMMARY_TASKS of them, those not already listed in nextSteps
+  tasksMore: number;               // the open linked tasks neither in nextSteps nor in tasks
 };
 
 // ---- dates and times --------------------------------------------------------------------------------------------------------
@@ -288,7 +301,7 @@ function linkedTasks(notes: ReadonlyMap<string, string>, id: string): LinkedTask
   return out.sort((a, b) => Number(a.done) - Number(b.done) || (a.due && b.due ? a.due.localeCompare(b.due) : a.due ? -1 : b.due ? 1 : 0) || a.title.localeCompare(b.title));
 }
 
-type Read = { card: ProjectCard; detail: () => ProjectDetail };
+type Read = { card: ProjectCard; detail: () => ProjectDetail; summary: () => ProjectSummary };
 function readProject(notes: ReadonlyMap<string, string>, path: string, text: string, today: string, zone: string): Read {
   const { data, body } = frontmatter(text);
   const id = idOf(path);
@@ -354,8 +367,8 @@ function readProject(notes: ReadonlyMap<string, string>, path: string, text: str
     id, path, title: titleOf(path, text, data), status, state, priority: priorityOf(data), area: clean(plain(first(data.area)), 40),
     summary, next: nextSteps[0] ?? "", started, target, lastActivity, overdue, blockers, stale, health, why: clean(why, 80), progress,
   };
-  const detail = (): ProjectDetail => {
-    const completionSec = secs.find((s) => COMPLETION_HEADING.test(s.key));
+  // Every dated item, oldest first: started, the milestones, the open linked tasks' due dates, the target and today.
+  const timelineOf = (): TimelineItem[] => {
     const timeline: TimelineItem[] = [];
     if (started) timeline.push({ date: started, label: "Started", kind: "start", done: started <= today });
     for (const s of secs) {
@@ -374,6 +387,11 @@ function readProject(notes: ReadonlyMap<string, string>, path: string, text: str
     if (target) timeline.push({ date: target, label: "Target", kind: "target", done: state === "done" });
     timeline.push({ date: today, label: "Today", kind: "today", done: false });
     timeline.sort((a, b) => a.date.localeCompare(b.date) || (a.kind === "today" ? 1 : b.kind === "today" ? -1 : 0));
+    return timeline;
+  };
+  const detail = (): ProjectDetail => {
+    const completionSec = secs.find((s) => COMPLETION_HEADING.test(s.key));
+    const timeline = timelineOf();
     const notesSec = secs.filter((s) => NOTES_HEADING.test(s.key));
     return {
       ...card,
@@ -388,7 +406,23 @@ function readProject(notes: ReadonlyMap<string, string>, path: string, text: str
       notes: notesSec.flatMap((s) => entries(s)).map((x) => line(x, NOTE_MAX)).filter(Boolean).slice(0, PLAN_NOTES_MAX),
     };
   };
-  return { card, detail };
+  const sidebarSummary = (): ProjectSummary => {
+    const listed = new Set(nextSteps);
+    const unlisted = openTasks.filter((t) => !listed.has(line(t.due ? `${t.title} (due ${t.due})` : t.title)));
+    // The next milestone or the target, today or later; else the next task due date (already a next step, most often).
+    const ahead = state === "done" ? [] : timelineOf().filter((t) => !t.done && t.date >= today);
+    const milestone = ahead.find((t) => t.kind === "milestone" || t.kind === "target") ?? ahead.find((t) => t.kind === "due") ?? null;
+    return {
+      ...card,
+      nextSteps,
+      blocker: blockerList[0] ?? "",
+      milestone,
+      openTasks: openTasks.length,
+      tasks: unlisted.slice(0, PLAN_SUMMARY_TASKS).map((t) => ({ ...t, title: clean(t.title, 100) })),
+      tasksMore: Math.max(0, unlisted.length - PLAN_SUMMARY_TASKS),
+    };
+  };
+  return { card, detail, summary: sidebarSummary };
 }
 
 const STATE_ORDER: PlanState[] = ["active", "blocked", "paused", "done"];
@@ -422,13 +456,22 @@ export function planOverview(notes: ReadonlyMap<string, string> | undefined, now
   return { today, zone, projects, stats };
 }
 
-// One project's detail, or undefined when the vault has no such hub note.
-export function projectDetail(notes: ReadonlyMap<string, string>, id: string, now = new Date(), zone = ZONE): ProjectDetail | undefined {
-  // Any id the overview can give a card: the file name of a hub note Projects/<id>.md, so anything without a "/" (spaces,
-  // commas, brackets, apostrophes and accented letters included). It is only a key into the snapshot, never a disk path.
+// Any id the overview can give a card: the file name of a hub note Projects/<id>.md, so anything without a "/" (spaces,
+// commas, brackets, apostrophes and accented letters included). It is only a key into the snapshot, never a disk path.
+function readById(notes: ReadonlyMap<string, string>, id: string, now: Date, zone: string): Read | undefined {
   if (typeof id !== "string" || !projectNote(`Projects/${id}.md`)) return undefined;
   const path = `Projects/${id}.md`;
   const text = notes.get(path);
   if (text === undefined) return undefined;
-  return readProject(notes, path, text, dayIn(now, zone), zone).detail();
+  return readProject(notes, path, text, dayIn(now, zone), zone);
+}
+
+// One project's detail, or undefined when the vault has no such hub note.
+export function projectDetail(notes: ReadonlyMap<string, string>, id: string, now = new Date(), zone = ZONE): ProjectDetail | undefined {
+  return readById(notes, id, now, zone)?.detail();
+}
+
+// One project's sidebar summary, or undefined when the vault has no such hub note.
+export function projectSummary(notes: ReadonlyMap<string, string>, id: string, now = new Date(), zone = ZONE): ProjectSummary | undefined {
+  return readById(notes, id, now, zone)?.summary();
 }
