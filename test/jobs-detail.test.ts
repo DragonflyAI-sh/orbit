@@ -413,7 +413,7 @@ const lib = new Function(`${block("routing")}; ${block("jobs-lib")}; return { pa
 
 test("page: /#jobs/<id> opens that job on the Jobs page; anything else after #jobs/ names no job", () => {
   assert.equal(lib.pageFor("/", "#jobs/orbit-1", true, true), "jobs");
-  assert.equal(lib.pageFor("/", "#jobs/orbit-1", false, true), "assistant", "owner only, as #jobs");
+  assert.equal(lib.pageFor("/", "#jobs/orbit-1", false, true), "home", "owner only, as #jobs: the default page (Home)");
   assert.equal(lib.canonicalAddress("/sessions", "", "#jobs/orbit-1"), "/#jobs/orbit-1");
   assert.equal(lib.jobFromHash("#jobs/orbit-202611180426-9usk"), "orbit-202611180426-9usk");
   assert.equal(lib.jobFromHash("#jobs/orbit%2D1"), "orbit-1");

@@ -318,7 +318,7 @@ test("every navigation link on the page leads to a real GET route that answers, 
     const html = await page.text();
     const nav = html.match(/<nav id="tabs"[^>]*>[\s\S]*?<\/nav>/)?.[0] ?? "";
     const navHrefs = [...nav.matchAll(/<a [^>]*href="([^"]+)"/g)].map((m) => m[1]!);
-    assert.deepEqual(navHrefs, ["/#assistant", "/#jobs", "/sessions"]);
+    assert.deepEqual(navHrefs, ["/", "/#assistant", "/#jobs", "/sessions"]);
     // The status page is linked from the status line under the header, not from the page links.
     const statusLink = html.match(/<a id="statusopen" href="([^"]+)"/)?.[1];
     assert.equal(statusLink, "/status");
@@ -327,7 +327,7 @@ test("every navigation link on the page leads to a real GET route that answers, 
       const res = await fetch(url);
       assert.equal(res.status, 200, href);
       const type = res.headers.get("content-type") ?? "";
-      if (url.pathname === "/" || url.pathname === "/sessions") assert.match(type, /text\/html/, "Assistant, Sessions and Jobs are views of the page itself");
+      if (url.pathname === "/" || url.pathname === "/sessions") assert.match(type, /text\/html/, "Home, Assistant, Sessions and Jobs are views of the page itself");
       else assert.match(type, /application\/json/, "the status link is the JSON endpoint, and the page says so");
       await res.arrayBuffer();
     }
