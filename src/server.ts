@@ -60,7 +60,7 @@ import { resolutionSummary } from "./model-capability.ts";
 import { AttachmentError, attachmentStore, isAttachmentId, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments.ts";
 import { localTime, PHOTO_TOOL_NAMES, photoDisplay, photoTools, reachablePhotos } from "./photo-access.ts";
 import { sidebarNote, sidebarSave, sidebarView } from "./sidebar.ts";
-import { dayIn, planOverview, projectDetail } from "./plan.ts";
+import { dayIn, planOverview, projectDetail, projectSummary } from "./plan.ts";
 import type { SidebarPhoto } from "./sidebar.ts";
 import { isPhotoRef, safeGalleries } from "./photo-ref.ts";
 import type { Located, PhotoSources } from "./photo-access.ts";
@@ -1406,7 +1406,10 @@ export function buildServer({
           return undefined;
         }
       };
-      return send(res, 200, { ...sidebarView(notes, photos, project, { imagesPage: Number.isInteger(imagesPage) ? imagesPage : 1, aiOf }), overview: planOverview(notes), vault: notes ? { ok: true, source } : { ok: false, error: vaultError }, ...(photoError ? { photoError } : {}) });
+      const view = sidebarView(notes, photos, project, { imagesPage: Number.isInteger(imagesPage) ? imagesPage : 1, aiOf });
+      // The Plan section's summary of the selected project (docs/plan.md), for the id the selector resolved to; none without one.
+      const planSummary = notes && view.project ? (projectSummary(notes, view.project.id) ?? null) : null;
+      return send(res, 200, { ...view, overview: planOverview(notes), planSummary, vault: notes ? { ok: true, source } : { ok: false, error: vaultError }, ...(photoError ? { photoError } : {}) });
     }
     // ---- The photo gallery (docs/photo-gallery.md): GET only, owner only. Listing, searching and reading a photo's records across
     // conversations is attachment reading and session reading, as for the Assistant's photo tools and the sidebar; both are audited.

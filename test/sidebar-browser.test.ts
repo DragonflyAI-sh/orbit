@@ -192,8 +192,11 @@ test("browser 1280px: choosing a project scopes the files and images to it, open
   await page.selectOption("#navproject", "alpha-garden");
   await page.waitForFunction(() => document.getElementById("navfiles")!.textContent!.includes("Tasks/buy-seeds.md"));
   assert.ok(fixture.sidebarReads.includes("?project=alpha-garden"), "the server is asked for that project");
-  // Plan: the same index of every open project (one opens in the main area; docs/plan.md), whatever the selector says.
-  assert.deepEqual(await texts(page, "#navplan a"), planBefore);
+  // Plan: a short summary of the chosen project instead of the index (docs/plan.md, "Sidebar summary"); its link opens the
+  // full plan in the main area only when clicked.
+  await page.waitForSelector("#navplan .plansum[data-id='alpha-garden']:not(.loading)");
+  assert.deepEqual(await texts(page, "#navplan a"), ["Open full plan"]);
+  assert.equal(await shown(page, "#alog"), true, "choosing a project does not open the Plan in the main area");
   // Files: the project note, its task, the note that links to it, and the locations it lists.
   assert.deepEqual(await texts(page, "#navfiles .navfile .path"), ["Projects/alpha-garden.md", "Tasks/buy-seeds.md", "Resources/soil-notes.md"]);
   assert.deepEqual(await texts(page, "#navfiles .navsub + .navlist li"), ["~/projects/alpha-garden"]);
@@ -222,9 +225,10 @@ test("browser 1280px: choosing a project scopes the files and images to it, open
   // Remembered: a reload asks for the same project.
   await page.reload();
   await page.waitForFunction(() => (document.getElementById("navproject") as HTMLSelectElement).value === "alpha-garden");
-  // Back to all projects.
+  // Back to all projects: the Plan index as before.
   await page.selectOption("#navproject", "");
   await page.waitForFunction(() => document.getElementById("navfiles")!.textContent!.includes("now.md"));
+  assert.deepEqual(await texts(page, "#navplan a"), planBefore);
   await ctx.close();
 });
 
