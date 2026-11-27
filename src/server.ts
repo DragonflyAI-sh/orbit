@@ -73,6 +73,7 @@ import { photoSearchTool, photoSemantic as semanticSearch } from "./photo-semant
 import type { SemanticSources } from "./photo-semantic.ts";
 import type { Embedder } from "./embeddings.ts";
 import { ZONE } from "./time.ts";
+import { PERSONA, personaPage, personaText } from "./persona.ts";
 import type { AttachmentRef, Attachments } from "./attachments.ts";
 import { JPEG_MAX_BYTES, normalizeJpeg } from "./jpeg.ts";
 import type { CheckRecord, SmokeRunner } from "./smoke.ts";
@@ -99,12 +100,12 @@ const MAX_NOTE_CHARS = 2000;
 // The page shows message times in ORBIT's configured zone (src/time.ts), the one schedules, quiet hours and photo days use.
 const ZONE_META = /<meta name="orbit-time-zone" content="[^"]*">/;
 export const pageHtml = (html: string, zone: string): string => html.replace(ZONE_META, `<meta name="orbit-time-zone" content="${zone.replace(/[^A-Za-z0-9_+\-/]/g, "")}">`);
-const page = pageHtml(readFileSync(new URL("./web/index.html", import.meta.url), "utf8"), ZONE);
-const avatar = readFileSync(new URL("./web/avatar.png", import.meta.url));
-const photosJs = readFileSync(new URL("./web/photos.js", import.meta.url), "utf8");
-const filesJs = readFileSync(new URL("./web/files.js", import.meta.url), "utf8");
-const galleryJs = readFileSync(new URL("./web/gallery.js", import.meta.url), "utf8");
-const appearanceJs = readFileSync(new URL("./web/appearance.js", import.meta.url), "utf8");
+const page = personaPage(pageHtml(readFileSync(new URL("./web/index.html", import.meta.url), "utf8"), ZONE));
+const avatar = PERSONA.avatar ?? readFileSync(new URL("./web/avatar.png", import.meta.url));
+const photosJs = personaText(readFileSync(new URL("./web/photos.js", import.meta.url), "utf8"));
+const filesJs = personaText(readFileSync(new URL("./web/files.js", import.meta.url), "utf8"));
+const galleryJs = personaText(readFileSync(new URL("./web/gallery.js", import.meta.url), "utf8"));
+const appearanceJs = personaText(readFileSync(new URL("./web/appearance.js", import.meta.url), "utf8"));
 // The page's component library: ORBIT's scoped build of Pico CSS, vendored (src/web/vendor/pico/README.md). Served from
 // here, never from a CDN, so the page makes no third-party request.
 export const PICO_CSS_PATH = "/vendor/pico.orbit.min.css";

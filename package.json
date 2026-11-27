@@ -1,12 +1,12 @@
 {
-  "name": "orbit",
+  "name": "agent-platform",
   "private": true,
   "type": "module",
   "engines": { "node": ">=22.18" },
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "start": "node src/main.ts",
-    "test": "node --test test/*.test.ts",
+    "test": "PERSONA_DIR=test/fixtures/persona node --test test/*.test.ts",
     "typecheck": "tsc"
   },
   "devDependencies": {

@@ -1,3 +1,56 @@
+# Agent platform
+
+The runtime behind ORBIT, with no identity of its own, for running personal agent instances. It was extracted from
+`DragonflyAI-sh/orbit` at commit 96da05b. Everything below this section describes the runtime. It is written in ORBIT's words, because ORBIT is
+the reference instance.
+
+## Instances
+
+An instance is a repo that holds this platform's tree at a pinned commit plus its own `persona/`:
+
+| Instance | Repo | Port |
+| --- | --- | --- |
+| ORBIT | `DragonflyAI-sh/orbit` | 8790 (job listener 8791) |
+| Nova | `DragonflyAI-sh/nova` | 8792 |
+
+- `persona/` is loaded at startup by `src/persona.ts` (`PERSONA_DIR` overrides the path):
+  - `persona.json`: name, expansion, owner, time zone, default port, theme colors
+  - `personality.md`: the model's identity and voice
+  - `avatar.png`
+  - `theme.css`: CSS custom properties over the base palette
+  
+  An invalid value stops startup instead of being half-applied. This repo's own `persona/` is a neutral "Agent".
+- `PLATFORM_COMMIT` names the platform commit the instance carries, and `INSTANCE_FILES` lists the paths the instance owns.
+- `tools/sync-platform.sh [ref]`, run inside an instance, replaces everything else with the platform at `ref` and stages the
+  result for review.
+
+Why a pinned copy and not a submodule or package: hosts deploy with `git archive` (`deploy/pull-deploy.sh`), which leaves
+submodules out, and Node runs this TypeScript directly but will not strip types under `node_modules`.
+
+**Change platform code here, then sync it into each instance.** Change identity in the instance's `persona/`.
+
+**Running another instance on ORBIT's host.** Run this once, as root, from a clone of the instance repo:
+
+```bash
+deploy/install-instance.sh nova DragonflyAI-sh/nova 8792
+```
+
+It gives the instance its own `/opt/<name>`, `<name>.env`, `<name>.service` (own DynamicUser and state, so a separate
+ChatGPT sign-in), and a `<name>-deploy.timer` that deploys the newest green commit like ORBIT's. Bind address and owner
+default to ORBIT's. ORBIT's root ops helpers, job ingress node, vault and credentials are ORBIT-only and are not set up
+for other instances. `deploy/install.sh` remains ORBIT's full installer.
+
+**Tests.** `pnpm test` runs the suite as the fixture persona in `test/fixtures/persona` (ORBIT's identity, which the suite
+was written against). `test/persona.test.ts` also loads the repo's real `persona/`.
+
+**Still ORBIT-shaped (follow-ups):**
+- Settings keep the `ORBIT_` prefix.
+- Many model-facing strings still say "ORBIT" and "Rai".
+- The default palette in `src/web/index.html` is ORBIT's.
+- The docs describe ORBIT.
+
+---
+
 # ORBIT
 
 Operational Reasoning Bot for Intelligent Tasks. Always live: merging to main deploys, and `GET /status` says what is real.

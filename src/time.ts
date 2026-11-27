@@ -1,4 +1,6 @@
-export const ZONE = "America/Los_Angeles";
+import { PERSONA } from "./persona.ts";
+
+export const ZONE = PERSONA.zone;
 const QUIET_START = 23;
 const QUIET_END = 8;
 

@@ -1,3 +1,4 @@
+import { identityLines } from "./persona.ts";
 import { laneGuidance } from "./research-tools.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -231,8 +232,7 @@ function roundLines(rounds: ToolRounds, offeredNow: boolean): string[] {
 export function instructions(limits: string[], notes?: string, tooling?: string[], rounds?: ToolRounds): string {
   const names = (tooling ?? []).map(toolName).filter(Boolean);
   return [
-    "You are ORBIT (Operational Reasoning Bot for Intelligent Tasks), Rai's personal assistant.",
-    "Be concise and technical. Never present a guess as fact.",
+    ...identityLines(),
     ...(limits.length
       ? [
           "These parts of ORBIT are not fully live. Each line says its state: down or mock means you know nothing from it; degraded means it works with the caveat given. Say so plainly when it matters. These lines describe services, not which tools you can call: the tool list below is the only authority on that.",

@@ -140,6 +140,30 @@ test("normal deployment switches to the new release and records it", () => {
   assert.equal(h.restarts(), 1);
 });
 
+test("another instance deploys with its own service, env file and repo (deploy/install-instance.sh)", () => {
+  const h = host();
+  writeFileSync(join(h.root, "nova.env"), "HOST=127.0.0.1\nPORT=8792\n");
+  const sha = h.commit();
+  const r = h.run([], { ORBIT_INSTANCE: "nova", ORBIT_DEPLOY_REPO: "DragonflyAI-sh/nova" });
+  assert.equal(r.code, 0, r.out);
+  assert.equal(h.current(), join(h.root, "releases", sha));
+  assert.deepEqual(h.lines(join(h.mock, "systemctl.log")), ["restart nova"]);
+  const curls = h.lines(join(h.mock, "curl.log"));
+  assert.ok(curls.some((l) => l.includes("https://api.github.com/repos/DragonflyAI-sh/nova/commits/")), curls.join("\n"));
+  assert.ok(curls.some((l) => l.includes("http://127.0.0.1:8792/status")), "health is checked on the instance's own port");
+});
+
+test("ORBIT's defaults are unchanged, and an invalid instance name is refused before anything runs", () => {
+  const h = host();
+  h.commit();
+  assert.equal(h.run().code, 0);
+  assert.deepEqual(h.lines(join(h.mock, "systemctl.log")), ["restart orbit"]);
+  assert.ok(h.lines(join(h.mock, "curl.log")).some((l) => l.includes("/repos/DragonflyAI-sh/orbit/commits/")));
+  const bad = h.run([], { ORBIT_INSTANCE: "../orbit" });
+  assert.equal(bad.code, 64, bad.out);
+  assert.equal(h.restarts(), 1, "the refused run restarted nothing");
+});
+
 test("a main commit equal to the running one is a no-op that does not touch the release directory", () => {
   const h = host();
   const before = h.snap(h.knownDir);
