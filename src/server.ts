@@ -59,7 +59,7 @@ import type { Chunk } from "./assistant-store.ts";
 import { resolutionSummary } from "./model-capability.ts";
 import { AttachmentError, attachmentStore, isAttachmentId, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments.ts";
 import { localTime, PHOTO_TOOL_NAMES, photoDisplay, photoTools, reachablePhotos } from "./photo-access.ts";
-import { sidebarNote, sidebarSave, sidebarView } from "./sidebar.ts";
+import { idOf, sidebarNote, sidebarSave, sidebarView } from "./sidebar.ts";
 import { dayIn, planOverview, projectDetail } from "./plan.ts";
 import type { SidebarPhoto } from "./sidebar.ts";
 import { isPhotoRef, safeGalleries } from "./photo-ref.ts";
@@ -67,6 +67,8 @@ import type { Located, PhotoSources } from "./photo-access.ts";
 import { observationStore, observationTools } from "./photo-observations.ts";
 import { aiCounts, GalleryError, photoGallery } from "./photo-gallery.ts";
 import type { ObservationSources, ObservationStore } from "./photo-observations.ts";
+import { importLedger } from "./photo-import-ledger.ts";
+import type { ImportLedger } from "./photo-import-ledger.ts";
 import { photoSearchTool, photoSemantic as semanticSearch } from "./photo-semantic.ts";
 import type { SemanticSources } from "./photo-semantic.ts";
 import type { Embedder } from "./embeddings.ts";
@@ -182,6 +184,9 @@ export type Deps = {
   attachments?: Attachments;
   // Saved photo observations (src/photo-observations.ts, docs/photo-recall.md), kept in <state>/photo-observations. Absent means memory only.
   photoObservations?: ObservationStore;
+  // The legacy photo import ledger (src/photo-import-ledger.ts, docs/photo-import-backfill.md), <state>/photo-imports: provenance of
+  // imported photos and their project links. Only read here; the host-local importer writes it while ORBIT is stopped.
+  photoImports?: ImportLedger;
   // Opt-in semantic photo search (src/photo-semantic.ts, docs/photo-semantic-search.md). Absent (the default) means photos_search is not
   // offered and nothing changes. `status` is its /status line.
   photoSemantic?: { embedder: Embedder | undefined; cacheDir: string | undefined; status(): PortStatus };
@@ -301,6 +306,7 @@ export function buildServer({
   reconciliations: reconArg,
   attachments = attachmentStore(undefined),
   photoObservations = observationStore(undefined),
+  photoImports = importLedger(undefined),
   photoSemantic,
   smoke,
   recentContext: recentPort = stateRecentContext(jsonStore(undefined, "recent-context", null)),
@@ -440,7 +446,8 @@ export function buildServer({
   const work = workArg ?? newWorkSessions(workFile(undefined), clock);
   const sessions = sessionRegistry({ adapters: [assistantAdapter(assistant), chatAdapter(threads), workAdapter(work, jobsReader)], jobs: jobsReader, work, now });
   // What photo discovery reads of the conversation stores (src/photo-access.ts): titles, archive state and user messages with photos.
-  const photoSources: PhotoSources = { assistant: () => assistant.photoSource(), chat: (tid) => threads.photoSource(tid) };
+  // Imported legacy photos (docs/photo-import-backfill.md) are resolved from the import ledger only, and only the Assistant's reach sees them.
+  const photoSources: PhotoSources = { assistant: () => assistant.photoSource(), chat: (tid) => threads.photoSource(tid), imported: (aid) => photoImports.photo(aid) };
   // Where saved photo observations came from (src/photo-observations.ts): the conversation must still exist and hold the message.
   const observationSources: ObservationSources = {
     ...photoSources,
@@ -456,7 +463,7 @@ export function buildServer({
   // the conversation that shows them.
   const display = photoDisplay({ attachments, sources: photoSources, zone: ZONE });
   // The page's photo gallery (docs/photo-gallery.md): read-only, under the Assistant's reach, built from the photo tools' own parts.
-  const gallery = photoGallery({ attachments, sources: semanticSources, store: photoObservations, semantic, zone: ZONE });
+  const gallery = photoGallery({ attachments, sources: semanticSources, store: photoObservations, semantic, zone: ZONE, projects: (ref) => photoImports.linksOf(ref).map((l) => ({ project: l.project, name: idOf(l.project), evidence: l.evidence, at: l.at })) });
   // The service that owns a proposal's card: the Assistant's when its card is there, otherwise the chat threads'.
   const cardSvc = (proposalId: string) => (assistant.threadOfCard(proposalId) ? asvc : svc);
 
@@ -1387,7 +1394,7 @@ export function buildServer({
             ref: l.ref,
             sentAt: l.sentAt,
             sentLocal: localTime(l.sentAt, ZONE),
-            caption: l.message?.caption ?? "",
+            caption: l.message?.caption ?? l.imported?.caption ?? "",
             conversation: { id: l.conversation.id, kind: l.conversation.kind, title: l.conversation.title },
             present: attachments.present(l.meta.id, l.meta.scope),
           }));

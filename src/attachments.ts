@@ -21,7 +21,11 @@ export const MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024;
 
 const ID = /^a[0-9a-f]{32}$/;
 export const isAttachmentId = (s: unknown): s is string => typeof s === "string" && ID.test(s);
-const SCOPE = /^(assistant|chat:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+// IMPORT_SCOPE: photos brought in by the operator-run legacy importer (docs/photo-import-backfill.md). They are never a conversation's
+// photos: they are stored bound (never pending, so cleanup never deletes them), only the Assistant's reach can read them
+// (src/photo-access.ts photoPolicy), and their provenance lives in the import ledger (src/photo-import-ledger.ts), not in any message.
+export const IMPORT_SCOPE = "import";
+const SCOPE = /^(assistant|import|chat:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
 export type AttachmentState = "pending" | "bound";
 export type AttachmentMeta = {
@@ -142,10 +146,50 @@ export function attachmentStore(dir: string | undefined, opts: { now?: () => Dat
     persisted: Boolean(dir),
     problems: () => [...problems],
 
+    // Imported legacy photos (docs/photo-import-backfill.md): processed bytes (from src/jpeg.ts, exactly as an upload) stored directly as
+    // bound in IMPORT_SCOPE at `at`. The same bytes already stored anywhere (an earlier import, or a photo Rai sent in a conversation)
+    // are never stored twice: the existing attachment is returned with `reused: true` and nothing is written. The storage bound applies.
+    putImported(bytes: Buffer, facts: { width: number; height: number }, at: string): { meta: AttachmentMeta; reused: boolean } {
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      const same = [...metas.values()].find((m) => m.sha256 === sha256 && m.state === "bound") ?? [...metas.values()].find((m) => m.sha256 === sha256 && m.scope === IMPORT_SCOPE);
+      if (same) return { meta: { ...same }, reused: true };
+      if (totalBytes() + bytes.length > maxTotal) throw new AttachmentError(507, "ORBIT's photo storage is full. Nothing was stored.");
+      const meta: AttachmentMeta = { id: `a${randomBytes(16).toString("hex")}`, scope: IMPORT_SCOPE, state: "bound", type: "image/jpeg", bytes: bytes.length, width: facts.width, height: facts.height, sha256, createdAt: at, boundAt: at };
+      if (dir) {
+        writeBytesAtomic(jpg(meta.id), bytes);
+        try {
+          persistMeta(meta);
+        } catch (err) {
+          try {
+            unlinkSync(jpg(meta.id));
+          } catch {
+            // removed at the next start
+          }
+          throw err;
+        }
+      } else memBytes.set(meta.id, Buffer.from(bytes));
+      metas.set(meta.id, meta);
+      return { meta: { ...meta }, reused: false };
+    },
+
+    // Reverses one imported photo (the importer's rollback): only an attachment in IMPORT_SCOPE can be removed this way, never a photo
+    // sent in a conversation. Returns whether something was removed.
+    removeImported(id: string): boolean {
+      const m = isAttachmentId(id) ? metas.get(id) : undefined;
+      if (!m || m.scope !== IMPORT_SCOPE) return false;
+      remove(id);
+      return true;
+    },
+
+    // Every stored attachment with these exact bytes (any scope or state), as safe records: the importer's duplicate check.
+    withSha256(sha256: string): AttachmentMeta[] {
+      return [...metas.values()].filter((m) => m.sha256 === sha256).map((m) => ({ ...m }));
+    },
+
     // Stores processed bytes (from src/jpeg.ts) pending in `scope`. The same photo uploaded again into the same scope while still
     // pending (a retry after a lost answer) returns the existing attachment instead of a second copy.
     put(scope: string, bytes: Buffer, facts: { width: number; height: number }): { meta: AttachmentMeta; reused: boolean } {
-      if (!SCOPE.test(scope)) throw new AttachmentError(400, "Unknown conversation.");
+      if (!SCOPE.test(scope) || scope === IMPORT_SCOPE) throw new AttachmentError(400, "Unknown conversation.");
       const sha256 = createHash("sha256").update(bytes).digest("hex");
       const same = [...metas.values()].find((m) => m.scope === scope && m.state === "pending" && m.sha256 === sha256);
       if (same) return { meta: { ...same }, reused: true };

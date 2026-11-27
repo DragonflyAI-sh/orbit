@@ -39,6 +39,7 @@ import { jsonStore } from "./store.ts";
 import { threadStore } from "./threads.ts";
 import { attachmentStore } from "./attachments.ts";
 import { observationStore } from "./photo-observations.ts";
+import { importLedger } from "./photo-import-ledger.ts";
 import { embeddingBudget, embeddingsConfig, embeddingsStatus, openaiEmbedder } from "./embeddings.ts";
 import { workFile, workSessions } from "./work-sessions.ts";
 import { taskFile, taskStore } from "./tasks.ts";
@@ -284,6 +285,8 @@ buildServer({
   attachments: attachmentStore(stateDir ? join(stateDir, "attachments") : undefined),
   // Saved photo observations: <state>/photo-observations (docs/photo-recall.md). Without a state directory they are kept in memory only.
   photoObservations: observationStore(stateDir ? join(stateDir, "photo-observations") : undefined),
+  // Legacy photo import ledger: <state>/photo-imports (docs/photo-import-backfill.md). Read only; written by the host-local importer.
+  photoImports: importLedger(stateDir ? join(stateDir, "photo-imports") : undefined),
   photoSemantic,
   smoke,
   // Work sessions and run links: <state>/work-sessions.json (docs/adr/0002-work-sessions.md).

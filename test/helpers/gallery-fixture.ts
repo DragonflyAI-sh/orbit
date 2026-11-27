@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { attachmentStore } from "../../src/attachments.ts";
 import { photoRef } from "../../src/photo-access.ts";
 import { observationStore } from "../../src/photo-observations.ts";
+import { importLedger } from "../../src/photo-import-ledger.ts";
 import { smallJpeg } from "../jpeg-fixture.ts";
 import { call, rig, say, scripted } from "../threads-fixture.ts";
 import type { Seen } from "../threads-fixture.ts";
@@ -17,6 +18,7 @@ import type { Seen } from "../threads-fixture.ts";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Step = ReturnType<typeof say> | { text: string; calls: ReturnType<typeof call>[] };
 
+// The server reads the legacy import ledger from <dir>/photo-imports (docs/photo-import-backfill.md); tests write it with the importer.
 export async function galleryRig(start = "2026-11-20T09:00:00Z") {
   const dir = mkdtempSync(join(tmpdir(), "orbit-gallery-"));
   let t = Date.parse(start);
@@ -25,7 +27,8 @@ export async function galleryRig(start = "2026-11-20T09:00:00Z") {
   const model = Object.assign(scripted((seen) => (queue.shift() ?? (() => say("Noted.")))(seen)), { images: () => ({ ok: true, detail: "test model takes photos" }) });
   const attachments = attachmentStore(join(dir, "attachments"), { now });
   const photoObservations = observationStore(join(dir, "photo-observations"));
-  const r = rig({ dir, model, now, extra: () => ({ assistantDir: join(dir, "assistant"), attachments, photoObservations }) });
+  const photoImports = importLedger(join(dir, "photo-imports"));
+  const r = rig({ dir, model, now, extra: () => ({ assistantDir: join(dir, "assistant"), attachments, photoObservations, photoImports }) });
   await r.api("/status");
   const base = `http://127.0.0.1:${(r.server.address() as AddressInfo).port}`;
   let seed = 1;
@@ -60,7 +63,7 @@ export async function galleryRig(start = "2026-11-20T09:00:00Z") {
     assert.ok(photoObservations.records(ref).some((x) => x.kind === "user-correction"), "the correction was saved");
     return oid;
   };
-  return { ...r, dir, base, attachments, photoObservations, send, correct, advance: (hours: number) => void (t += hours * 3_600_000) };
+  return { ...r, dir, base, attachments, photoObservations, photoImports, queue, send, correct, advance: (hours: number) => void (t += hours * 3_600_000) };
 }
 
 // A small realistic set: four days, the Assistant and two chat threads, observations on two photos and a correction on one.
