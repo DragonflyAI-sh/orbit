@@ -74,6 +74,7 @@ import type { SemanticSources } from "./photo-semantic.ts";
 import type { Embedder } from "./embeddings.ts";
 import { ZONE } from "./time.ts";
 import { PERSONA, personaPage, personaText } from "./persona.ts";
+import type { ChannelTurn } from "./discord.ts";
 import type { AttachmentRef, Attachments } from "./attachments.ts";
 import { JPEG_MAX_BYTES, normalizeJpeg } from "./jpeg.ts";
 import type { CheckRecord, SmokeRunner } from "./smoke.ts";
@@ -215,6 +216,10 @@ export type Deps = {
   // the Assistant page. `backend`: where its record lives (<state>/supervisor-wake.json in main.ts; memory when absent). `tickMs`: how
   // often it looks (0: never on a timer; tests tick it through `onWake`).
   supervisorWake?: { enabled: boolean; backend?: WakeBackend; tickMs?: number; minIntervalMs?: number; onWake?: (w: SupervisorWake) => void };
+  // Chat channels other than the web page (src/discord.ts). `onTurn` receives the function that runs one owner turn in the Assistant
+  // conversation, exactly as the page's send does (same tools, policy, confirmations and storage; no photos). `describe` is the
+  // channel line /status shows.
+  channels?: { onTurn?: (turn: ChannelTurn) => void; describe?: string };
   // The clock for thread cards and the recent-context note. Tests inject one; it must be the clock the proposals use.
   now?: () => Date;
   // Chat tool execution deadline and abort grace period (docs/tool-deadlines.md). Tests lower them; production uses the defaults.
@@ -319,6 +324,7 @@ export function buildServer({
   taskTurnsMax = TASK_TURNS_MAX_CONCURRENT,
   taskFollowUps,
   supervisorWake: supervisorWakeArg,
+  channels,
   now,
   toolDeadlineMs,
   abortGraceMs,
@@ -335,7 +341,7 @@ export function buildServer({
     const now = new Date();
     return [
       fixed("policy", "fail-closed", "Allows reads and chat replies; memory, vault writes, the config view, notify, schedule, runs, tools, devices and jobs for the owner only; refuses everything else."),
-      fixed("channel", "web", "Web chat at /. Discord and CLI are not built."),
+      fixed("channel", "web", channels?.describe ?? "Web chat at /. Discord is not configured; CLI is not built."),
       ...[model.status(), memory.status(), notify.status(), schedule.status(), runs.status(), tools.status(), nodes.status(), ...(jobs ? [launcherStatus(jobs.status())] : []), ...ports.map((p) => p.status()), ...(photoSemantic ? [photoSemantic.status()] : []), ...(watch ? [watch.status()] : [])].map((s) => withFreshness(s, now)),
     ].map((s) => withAvailability(withCheck(s, smoke?.forPort(s.port, now))));
   };
@@ -811,6 +817,34 @@ export function buildServer({
     console.log(JSON.stringify({ at: clock().toISOString(), event: "supervisor_wake_recover_failed", detail: e instanceof Error ? e.message.slice(0, 200) : "error" }));
   }
   supervisorWakeArg?.onWake?.(wake);
+
+  // One owner turn from a chat channel (Discord): the Assistant route's turn without photos or a browser request id. The channel has
+  // already proven the sender is the owner (its own configured account); a reply already running is reported as busy, never queued.
+  const channelTurn: ChannelTurn = async (text) => {
+    const message = text.trim();
+    if (!message || message.length > MAX_MESSAGE_CHARS) return { error: `Messages must be 1-${MAX_MESSAGE_CHARS} characters. Nothing was sent.` };
+    const decision = decide("channel", "chat", false);
+    audit("channel", "chat", decision);
+    if (!decision.allow) return { error: decision.reason };
+    if (assistant.isBusy(ASSISTANT_ID)) return { busy: true };
+    const prep = await prepare(true, message, "assistant", assistantSessionId());
+    if (assistant.isBusy(ASSISTANT_ID)) return { busy: true };
+    let out: Awaited<ReturnType<typeof asvc.turn>>;
+    try {
+      out = await asvc.turn(ASSISTANT_ID, message, { notes: [boundNotes(prep.notes), prep.digest].filter(Boolean).join("\n\n") || undefined, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(true, "assistant"), isOwner: true });
+    } catch (e) {
+      supervisor.undelivered(prep.taskDelivery, e instanceof Error ? e.message : "the Assistant turn failed");
+      if (e instanceof ThreadError && e.code === 409) return { busy: true };
+      return { error: e instanceof Error ? e.message : "the Assistant turn failed" };
+    }
+    if (out.error) supervisor.undelivered(prep.taskDelivery, out.error);
+    else supervisor.delivered(prep.taskDelivery);
+    void summaries.roll().catch(() => undefined);
+    const reply = [...(assistant.active().at(-1)?.messages ?? [])].reverse().find((m) => m.role === "assistant");
+    const open = (reply?.cards ?? []).filter((id) => proposals.peek(id)).length;
+    return { ...(reply?.text ? { reply: reply.text } : {}), ...(out.error ? { error: out.error } : {}), ...(open ? { proposals: open } : {}) };
+  };
+  channels?.onTurn?.(channelTurn);
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://orbit");

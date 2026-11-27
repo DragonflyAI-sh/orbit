@@ -1,7 +1,7 @@
 // The instance's identity: who this agent is, whose it is, how it looks and where it listens by default. The platform code
 // has no identity of its own; everything personal lives in a persona directory, loaded once at startup:
 //
-//   persona/persona.json   name, expansion, owner, zone, port, ingressPort, url, themeColor
+//   persona/persona.json   id, name, expansion, owner, zone, port, ingressPort, url, themeColor, discord
 //   persona/personality.md the model's identity and voice (the first lines of every system prompt)
 //   persona/avatar.png     the page's logo and icon
 //   persona/theme.css      optional CSS layered over the base palette (custom properties such as --accent)
@@ -13,6 +13,8 @@ import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type Persona = {
+  // Lowercase slug naming the instance's systemd credentials (<id>.discord-bot, ...).
+  id: string;
   name: string;
   expansion?: string;
   owner: string;
@@ -21,6 +23,8 @@ export type Persona = {
   ingressPort?: number;
   url?: string;
   themeColor: { dark: string; light: string };
+  // Discord as a chat channel (src/discord.ts): the channel and the only account whose messages are run.
+  discord?: { channelId?: string; ownerUserId?: string };
   personality: string;
   avatar?: Buffer;
   themeCss: string;
@@ -31,6 +35,7 @@ const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const HEX = /^#[0-9a-fA-F]{6}$/;
 
 export const DEFAULT_PERSONA: Omit<Persona, "dir"> = {
+  id: "agent",
   name: "Agent",
   owner: "the owner",
   zone: "America/Los_Angeles",
@@ -86,7 +91,18 @@ export function loadPersona(dir = personaDir()): Persona {
   } catch {
     fail(dir, `zone ${zone} is not a time zone`);
   }
+  const dc = json.discord;
+  if (dc !== undefined && (typeof dc !== "object" || dc === null || Array.isArray(dc))) fail(dir, "discord must be an object");
+  const snowflake = (k: "channelId" | "ownerUserId"): string | undefined => {
+    const v = (dc as Record<string, unknown> | undefined)?.[k];
+    if (v === undefined || v === null || v === "") return undefined;
+    if (typeof v !== "string" || !/^[0-9]{17,20}$/.test(v)) fail(dir, `discord.${k} must be a Discord id (17-20 digits, as a string)`);
+    return v;
+  };
+  const discord = { channelId: snowflake("channelId"), ownerUserId: snowflake("ownerUserId") };
   return {
+    id: str("id", /^[a-z][a-z0-9-]{0,30}$/) ?? DEFAULT_PERSONA.id,
+    ...(discord.channelId || discord.ownerUserId ? { discord } : {}),
     name: str("name", /^[\p{L}\p{N} ._-]{1,40}$/u) ?? DEFAULT_PERSONA.name,
     expansion: str("expansion"),
     owner: str("owner", /^[\p{L}\p{N} ._-]{1,60}$/u) ?? DEFAULT_PERSONA.owner,

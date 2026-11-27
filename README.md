@@ -14,7 +14,7 @@ An instance is a repo that holds this platform's tree at a pinned commit plus it
 | Nova | `DragonflyAI-sh/nova` | 8792 |
 
 - `persona/` is loaded at startup by `src/persona.ts` (`PERSONA_DIR` overrides the path):
-  - `persona.json`: name, expansion, owner, time zone, default port, theme colors
+  - `persona.json`: id (credential prefix), name, expansion, owner, time zone, default port, theme colors, Discord channel and owner
   - `personality.md`: the model's identity and voice
   - `avatar.png`
   - `theme.css`: CSS custom properties over the base palette
@@ -39,6 +39,8 @@ It gives the instance its own `/opt/<name>`, `<name>.env`, `<name>.service` (own
 ChatGPT sign-in), and a `<name>-deploy.timer` that deploys the newest green commit like ORBIT's. Bind address and owner
 default to ORBIT's. ORBIT's root ops helpers, job ingress node, vault and credentials are ORBIT-only and are not set up
 for other instances. `deploy/install.sh` remains ORBIT's full installer.
+
+**Discord.** Each instance can use its own bot in its own channel as a second front door to its Assistant conversation. The bot answers the owner only, and confirmations stay on the web page. See `docs/discord.md`.
 
 **Tests.** `pnpm test` runs the suite as the fixture persona in `test/fixtures/persona` (ORBIT's identity, which the suite
 was written against). `test/persona.test.ts` also loads the repo's real `persona/`.
