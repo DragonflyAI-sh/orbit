@@ -9,5 +9,8 @@
   "themeColor": {
     "dark": "#080a1a",
     "light": "#f4f2fb"
+  },
+  "discord": {
+    "channelId": "1551482832587722863"
   }
 }
