@@ -11,6 +11,7 @@ import { openaiModel } from "../src/model.ts";
 import { photoRef } from "../src/photo-access.ts";
 import { observationStore } from "../src/photo-observations.ts";
 import { smallJpeg } from "./jpeg-fixture.ts";
+import { conceptMock } from "./photo-related-fixture.ts";
 import { lexicalStandIn } from "./photo-semantic-fixture.ts";
 import { rig } from "./threads-fixture.ts";
 
@@ -211,5 +212,82 @@ test("archived threads: their photos are hidden and counted unless includeArchiv
   const shown = (await r.search("/assistant/messages", "lighthouse", true)).result;
   assert.equal(shown.candidates[0].ref, a.ref);
   assert.equal(shown.candidates[0].conversation.archived, true);
+  r.close();
+});
+
+// Related matches (docs/photo-semantic-search.md "Related matches") through the real server, with the hand-weighted MOCK embedder of
+// test/photo-related-fixture.ts (not a model): the Assistant's photos_search and the page's gallery search rank from the same retrieval
+// and attribute the related match the same way; with the provider disabled both stay keyword-only.
+const WORKSHOP: [string, string, string][] = [
+  ["Shop upgrades", "new tool for the shop", "A benchtop scroll saw with a thin vertical blade sits on a workshop bench"],
+  ["Garden jobs", "shed tidy", "A curved pruning saw hangs on a hook in the garden shed"],
+  ["Cabin", "winter prep", "A chainsaw resting on a pile of split firewood"],
+  ["Living room", "it arrived", "A grey three-seat couch with two cushions in the living room"],
+  ["Kitchen", "first coffee", "A blue ceramic coffee mug on the kitchen counter"],
+];
+
+test("related match: the Assistant and the gallery agree, label it related, and the opt-in diagnose view explains it without private text", async () => {
+  const r = serverRig({ embedder: conceptMock() });
+  const photos = [];
+  for (const [i, [title, caption, obs]] of WORKSHOP.entries()) photos.push(await r.photoWithObservation(title, caption, obs, 21 + i));
+  const saw = photos[0]!.ref;
+  const assistant = (await r.search("/assistant/messages", "jigsaw")).result;
+  assert.match(assistant.mode, /^hybrid/);
+  assert.deepEqual(assistant.candidates.map((c: any) => [c.ref, c.matchedBy]), [[saw, ["related"]]]);
+  assert.equal(assistant.relatedOnly, true);
+  assert.match(assistant.related, /not an exact or close match/);
+  assert.match(assistant.caveat, /only RELATED/);
+  assert.equal(assistant.candidates[0].evidence[0].related, true);
+  assert.match(assistant.candidates[0].evidence[0].label, /not a verified label/);
+  const gallery = await r.api("/gallery/search?q=jigsaw");
+  assert.equal(gallery.status, 200, JSON.stringify(gallery.data));
+  assert.equal(gallery.data.mode, "hybrid");
+  assert.deepEqual(gallery.data.matches.map((m: any) => [m.photo.ref, m.via]), [[saw, ["related"]]]);
+  assert.equal(gallery.data.matches[0].hits[0].related, true);
+  assert.deepEqual(gallery.data.matches[0].hits[0].terms, []);
+  assert.equal("diagnostics" in gallery.data, false, "diagnostics only when asked for");
+  // The exact name still ranks by keyword and semantic, in both views.
+  const exact = (await r.search("/assistant/messages", "scroll saw")).result;
+  assert.equal(exact.candidates[0].ref, saw);
+  assert.deepEqual(exact.candidates[0].matchedBy, ["keyword", "semantic"]);
+  const exactGallery = (await r.api("/gallery/search?q=scroll%20saw")).data;
+  assert.deepEqual(exactGallery.matches.find((m: any) => m.photo.ref === saw).via, ["keyword", "semantic"]);
+  // Unrelated: no match in either.
+  assert.equal((await r.search("/assistant/messages", "giraffe")).result.noMatch, true);
+  assert.deepEqual((await r.api("/gallery/search?q=giraffe")).data.matches, []);
+  // Opt-in diagnose: stage counts and the target's path; numbers and reason words only.
+  const diag = await r.api(`/gallery/search?q=jigsaw&diagnose=1&target=${saw}`);
+  assert.equal(diag.status, 200, JSON.stringify(diag.data));
+  const d = diag.data.diagnostics;
+  assert.deepEqual(d.eligible, { photos: 5, evidence: 15, withVector: 15 });
+  assert.equal(d.target.semantic.band, "related");
+  assert.equal(d.target.semantic.related, "admitted");
+  assert.deepEqual(d.target.final, { position: 1, outcome: "returned" });
+  const dtext = JSON.stringify(d);
+  for (const needle of ["jigsaw", "scroll", "workshop", ...photos.map((p) => p.ref), ...photos.map((p) => p.th.id)]) assert.ok(!dtext.includes(needle), needle);
+  assert.equal((await r.api("/gallery/search?q=jigsaw&diagnose=1&target=not-a-ref")).status, 400);
+  // Cross-site reads stay refused, diagnose or not.
+  assert.equal((await r.api("/gallery/search?q=jigsaw&diagnose=1", "GET", undefined, { "sec-fetch-site": "cross-site" })).status, 403);
+  // Nothing about the diagnostics or the related match is written to stored state beyond what search already keeps.
+  assert.ok(!stateText(r.dir).includes("far-below-best") && !stateText(r.dir).includes("topPhotoSimilarities"));
+  r.close();
+});
+
+test("related match, provider disabled: both views keyword-only, no related candidates, exact names still found", async () => {
+  const r = serverRig({ embedder: undefined });
+  const photos = [];
+  for (const [i, [title, caption, obs]] of WORKSHOP.entries()) photos.push(await r.photoWithObservation(title, caption, obs, 31 + i));
+  const miss = (await r.search("/assistant/messages", "jigsaw")).result;
+  assert.match(miss.mode, /^keyword-only/);
+  assert.equal(miss.noMatch, true);
+  assert.equal(miss.related, undefined);
+  const g = (await r.api("/gallery/search?q=jigsaw")).data;
+  assert.equal(g.mode, "keyword");
+  assert.deepEqual(g.matches, []);
+  const hit = (await r.search("/assistant/messages", "scroll saw")).result;
+  assert.deepEqual(hit.candidates.map((c: any) => [c.ref, c.matchedBy]), [[photos[0]!.ref, ["keyword"]]]);
+  assert.deepEqual((await r.api("/gallery/search?q=scroll%20saw")).data.matches.map((m: any) => m.photo.ref), [photos[0]!.ref]);
+  const diag = (await r.api("/gallery/search?q=jigsaw&diagnose=1")).data;
+  assert.match(diag.diagnostics.semantic, /not configured/);
   r.close();
 });

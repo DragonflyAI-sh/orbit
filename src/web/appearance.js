@@ -10,9 +10,10 @@
 
   const KEY = "orbit.appearance", VERSION = 1, THEME_KEY = "orbit.theme";
 
-  // ---- The looks. Each non-Classic preset is a CSS block `:root[data-preset="<id>"]` in index.html with the full palette
-  // (and its syntax colours); `scheme` is the colour scheme it is drawn for (it also sets data-theme, so native controls and
-  // every theme-aware rule follow). `cards` and `bgs` are the surfaces an accent must stay visible on (3:1); Classic can show
+  // ---- The looks. Each non-Classic preset is a CSS block `:root[data-preset="<id>"]` in index.html with the full palette.
+  // It defines no syntax colours: those (--tk-*) are inherited from the light or dark theme through data-theme. `scheme` is
+  // the colour scheme it is drawn for (it also sets data-theme, so native controls, the syntax colours and every
+  // theme-aware rule follow). `cards` and `bgs` are the surfaces an accent must stay visible on (3:1); Classic can show
   // either of its themes (the header's Light, Dark or System), so an accent there must suit both. `swatch` is shown next to
   // the name (page, card, accent). A test checks these colours against the CSS. How to add one: docs/appearance.md.
   const PRESETS = {

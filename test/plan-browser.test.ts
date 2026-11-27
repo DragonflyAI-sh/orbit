@@ -228,3 +228,224 @@ test("browser (390 phone): the drawer's Plan link opens the project in the main 
   assert.deepEqual(errors, []);
   await ctx.close();
 });
+
+// ---- The Plan section's summary of the project chosen in the Projects selector (docs/plan.md, "Sidebar summary") ----------
+
+// Answers of GET /sidebar for one project, held until released (a slow network), by the project the page asked for.
+async function holdSidebar(page: any, project: string) {
+  let release!: () => void, asked!: () => void;
+  const held = new Promise<void>((r) => { release = r; });
+  const requested = new Promise<void>((r) => { asked = r; });
+  const match = (u: URL) => u.pathname === "/sidebar" && u.searchParams.get("project") === project;
+  const handler = async (route: any) => { asked(); await held; await route.continue().catch(() => { /* the page may be gone */ }); };
+  await page.route(match, handler);
+  return {
+    requested,
+    release: async () => {
+      const answered = page.waitForResponse((r: any) => match(new URL(r.url())));
+      release();
+      await answered;
+      await page.unroute(match, handler);
+      await page.waitForTimeout(150);
+    },
+  };
+}
+// The Plan index's links as text (textContent, so it reads the same however far layout has got).
+const indexText = (page: any) => words(page, "#navplan a");
+const summaryOf = (page: any, id: string) => page.waitForSelector(`#navplan .plansum[data-id='${id}']:not(.loading)`);
+
+test("browser 1280px: All projects keeps the priority-sorted index; a chosen project shows its summary, and only a click opens the full plan", { skip }, async () => {
+  const { page, ctx, errors } = await open(1280, 900, "/#assistant");
+  await page.waitForSelector("#navplan a.planitem");
+  const index = await indexText(page);
+  assert.deepEqual(index, ["All projects3 open", "Alpha Garden, on trackP1", "Gamma Roof, at riskP2", "Beta Desk, needs attentionP3"], "by priority, as before");
+  assert.equal(await page.$("#navplan .plansum"), null);
+
+  await page.selectOption("#navproject", "alpha-garden");
+  await summaryOf(page, "alpha-garden");
+  assert.equal(await page.$("#navplan a.planitem"), null, "the index gives way to the summary");
+  assert.deepEqual(await texts(page, "#navplan .plansum > *"), [
+    "Alpha Garden P1",
+    "Active · on track · 1/3 beds done",
+    "A synthetic vegetable garden that feeds the household through winter.",
+    "NEXT", // set in capitals
+    "Order the synthetic seeds Draw the watering plan Buy seeds (due Nov 30)",
+    "Next date First planting · Dec 1 (in 5 days)",
+    "Open tasks 1 (under Next)",
+    "Open full plan",
+  ]);
+  assert.equal(await page.getAttribute("#navplan .plansum .psline[title]", "title"), "Tue, Dec 1, 2026", "the full date on hover");
+  assert.equal(await page.getAttribute("#navplan .plansum .pdot", "class"), "pdot green");
+  assert.equal(await page.getAttribute("#navplan a.plansumopen", "aria-label"), "Open the full plan for Alpha Garden");
+  assert.doesNotMatch(await page.innerText("#navplan"), AGENTISH);
+  // Choosing a project does not open the Plan in the main area.
+  assert.equal(new URL(page.url()).hash, "#assistant");
+  assert.equal(await shown(page, "#plan"), false);
+  assert.equal(await shown(page, "#alog"), true);
+
+  // A blocker and an overdue target are said, in red.
+  await page.selectOption("#navproject", "gamma-roof");
+  await summaryOf(page, "gamma-roof");
+  assert.deepEqual(await texts(page, "#navplan .plansum .psline"), ["Blocker Waiting on the roofer's quote", "Overdue target was Nov 1 (4 weeks ago)"]);
+  assert.deepEqual(await page.$$eval("#navplan .plansum .psline", (ps: Element[]) => ps.map((p) => p.classList.contains("hot"))), [true, true]);
+  assert.match(await page.textContent("#navplan .psstate"), /^Active · at risk$/);
+
+  // "Open full plan" opens the project's detail in the main area, focused, and marks itself.
+  await page.selectOption("#navproject", "alpha-garden");
+  await summaryOf(page, "alpha-garden");
+  await page.click("#navplan a.plansumopen");
+  await page.waitForSelector("#plan .pldetail");
+  assert.equal(new URL(page.url()).hash, "#plan/alpha-garden");
+  assert.equal(await page.textContent("#plan h2.pltitle"), "Alpha Garden");
+  assert.equal(await page.evaluate(() => document.activeElement!.matches("#plan h2.pltitle")), true);
+  assert.deepEqual(await current(page), ["/#plan/alpha-garden"]);
+
+  // Changing the selector leaves the main area where it is.
+  await page.selectOption("#navproject", "gamma-roof");
+  await summaryOf(page, "gamma-roof");
+  assert.equal(new URL(page.url()).hash, "#plan/alpha-garden");
+  assert.equal(await page.textContent("#plan h2.pltitle"), "Alpha Garden");
+  assert.deepEqual(await current(page), [], "another project's link is not marked");
+  // Back to All projects: the same index, marking the project open in the main area; its links still work.
+  await page.selectOption("#navproject", "");
+  assert.deepEqual(await indexText(page), index, "drawn at once from the last answer");
+  await page.waitForFunction(() => document.getElementById("navfiles")!.textContent!.includes("now.md"));
+  assert.deepEqual(await indexText(page), index);
+  assert.deepEqual(await current(page), ["/#plan/alpha-garden"]);
+  await page.click("#navplan a.planall");
+  await page.waitForSelector("#plan .plcard");
+  assert.deepEqual(await current(page), ["/#plan"]);
+  assert.equal(await sideways(page), false);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("browser 1280px: a sparse project's summary leaves out what its note does not say", { skip }, async () => {
+  fixture.set({ planNotes: new Map([["Projects/zeta-bare.md", "---\nstatus: active\n---\n"], ["Projects/eta-script.md", "---\nstatus: active\npriority: 2\n---\n# <img src=x onerror=\"window.pwned=1\">\n\n## Next actions\n- <b>bold?</b> & <script>window.pwned=1</script>\n"]]) });
+  const { page, ctx, errors } = await open(1280, 900, "/#assistant");
+  try {
+    await page.selectOption("#navproject", "zeta-bare");
+    await summaryOf(page, "zeta-bare");
+    assert.deepEqual(await texts(page, "#navplan .plansum > *"), ["zeta bare", "Active · needs attention (No recorded activity)", "Open full plan"]);
+    for (const sel of [".psgoal", ".pslist", ".psline", ".navsub", ".pbadge"]) assert.equal(await page.$(`#navplan .plansum ${sel}`), null, `${sel}: left out`);
+    // Project and task text is shown as text, never as markup.
+    await page.selectOption("#navproject", "eta-script");
+    await summaryOf(page, "eta-script");
+    assert.equal(await page.textContent("#navplan .plansum .ptitle"), "<img src=x onerror=\"window.pwned=1\">");
+    assert.equal(await page.$("#navplan img, #navplan script, #navplan b"), null);
+    assert.equal(await page.evaluate(() => (window as any).pwned), undefined);
+    assert.deepEqual(errors, []);
+  } finally {
+    await ctx.close();
+    fixture.set({ planNotes: undefined });
+  }
+});
+
+test("browser 1280px: switching quickly (A→B, A→All projects) or a failed read never shows the wrong project's summary", { skip }, async () => {
+  const { page, ctx, errors } = await open(1280, 900, "/#assistant");
+  await page.waitForSelector("#navplan a.planitem");
+  const index = await indexText(page);
+  // A is slow; B is chosen before it answers: A's late answer is dropped.
+  let a = await holdSidebar(page, "alpha-garden");
+  await page.selectOption("#navproject", "alpha-garden");
+  assert.deepEqual(await texts(page, "#navplan .plansum.loading > *"), ["Alpha Garden", "Reading the project…"], "A's name at once, nothing of the index");
+  assert.equal(await page.getAttribute("#navplan .plansum.loading", "aria-busy"), "true");
+  await page.selectOption("#navproject", "gamma-roof");
+  await summaryOf(page, "gamma-roof");
+  await a.release();
+  await summaryOf(page, "gamma-roof");
+  assert.doesNotMatch(await page.innerText("#navplan"), /Alpha|synthetic seeds|First planting/);
+  assert.equal(await page.inputValue("#navproject"), "gamma-roof");
+  assert.match(await page.textContent("#navfiles"), /Projects\/gamma-roof\.md/);
+
+  // A is slow again; All projects is chosen before it answers: the index at once, and it stays.
+  a = await holdSidebar(page, "alpha-garden");
+  await page.selectOption("#navproject", "alpha-garden");
+  await page.waitForSelector("#navplan .plansum.loading[data-id='alpha-garden']");
+  await page.selectOption("#navproject", "");
+  assert.deepEqual(await indexText(page), index, "the index, drawn at once");
+  await page.waitForFunction(() => document.getElementById("navfiles")!.textContent!.includes("now.md"));
+  await a.release();
+  assert.deepEqual(await indexText(page), index);
+  assert.equal(await page.$("#navplan .plansum"), null);
+  assert.equal(await page.inputValue("#navproject"), "");
+
+  // B's read fails: B's name and the failure, not the previous project's summary.
+  await page.selectOption("#navproject", "gamma-roof");
+  await summaryOf(page, "gamma-roof");
+  fixture.set({ sidebar: 500 });
+  await page.selectOption("#navproject", "beta-desk");
+  await page.waitForFunction(() => document.querySelector("#navplan .plansum .err"));
+  assert.deepEqual(await texts(page, "#navplan .plansum > *"), ["Beta Desk", "The sidebar could not be read (HTTP 500)."]);
+  assert.doesNotMatch(await page.innerText("#navplan"), /Gamma|roofer/);
+  // All projects can still be drawn from the last answer while reads fail.
+  await page.selectOption("#navproject", "");
+  assert.deepEqual(await indexText(page), index);
+  fixture.set({ sidebar: "ok" });
+  await page.selectOption("#navproject", "beta-desk");
+  await summaryOf(page, "beta-desk");
+  assert.deepEqual(await texts(page, "#navplan .plansum .pslist li"), ["Fix the drawer"]);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("browser 1280px: a refresh that answers after the choice moved on is dropped; a refresh of the same choice updates it", { skip }, async () => {
+  const ctx = await chromium.newContext({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1 });
+  const page = await ctx.newPage();
+  const errors: string[] = [];
+  page.on("pageerror", (e: Error) => errors.push(e.message));
+  await page.clock.install();
+  fixture.set({ sidebar: "ok" });
+  await page.goto(url + "/#assistant");
+  await page.waitForSelector("#navplan a.planitem");
+  const index = await indexText(page);
+  await page.selectOption("#navproject", "alpha-garden");
+  await summaryOf(page, "alpha-garden");
+  // The minute's refresh for A is slow; All projects is chosen meanwhile.
+  const a = await holdSidebar(page, "alpha-garden");
+  await page.clock.fastForward(61_000);
+  await a.requested;
+  await page.selectOption("#navproject", "");
+  assert.deepEqual(await indexText(page), index);
+  await page.waitForFunction(() => document.getElementById("navfiles")!.textContent!.includes("now.md"));
+  await a.release();
+  assert.deepEqual(await indexText(page), index, "the late refresh of A does not bring its summary back");
+  // A refresh of the same choice redraws it with the newer answer.
+  await page.selectOption("#navproject", "gamma-roof");
+  await summaryOf(page, "gamma-roof");
+  fixture.set({ planNotes: new Map([["Projects/gamma-roof.md", "---\nstatus: active\npriority: 2\ntarget: 2026-11-01\nupdated: 2026-11-25\n---\n# Gamma Roof\n\n## Next steps\n- Sign the roofer's contract\n"]]) });
+  try {
+    await page.clock.fastForward(61_000);
+    await page.waitForFunction(() => document.querySelector("#navplan .plansum .pslist li")?.textContent === "Sign the roofer's contract");
+    assert.equal(await page.$("#navplan .plansum .psline.hot >> text=Blocker"), null, "the blocker that was removed is gone");
+  } finally {
+    fixture.set({ planNotes: undefined });
+  }
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("browser (390 phone): a chosen project's summary fits the drawer; Open full plan closes it and opens the detail; dark theme", { skip }, async () => {
+  const { page, ctx, errors } = await open(390, 844, "/#assistant", { phone: true, colorScheme: "dark" });
+  await page.click("#navbtn");
+  await page.selectOption("#navproject", "alpha-garden");
+  await summaryOf(page, "alpha-garden");
+  assert.equal(await shown(page, "#nav"), true, "the drawer stays open while choosing");
+  const fit = await page.evaluate(() => {
+    const nav = document.getElementById("nav")!.getBoundingClientRect(), box = document.querySelector("#navplan .plansum")!.getBoundingClientRect();
+    const scroller = document.querySelector("#nav .navscroll")!;
+    return { inside: box.left >= nav.left && box.right <= nav.right + 0.5, overflow: scroller.scrollWidth > scroller.clientWidth, height: box.height };
+  });
+  assert.deepEqual([fit.inside, fit.overflow], [true, false]);
+  assert.ok(fit.height < 360, `small: ${fit.height}px`);
+  assert.equal(await sideways(page), false);
+  const link = await page.$eval("#navplan a.plansumopen", (a: HTMLElement) => a.getBoundingClientRect().height);
+  assert.ok(link >= 44, `a tap target: ${link}px`);
+  await page.click("#navplan a.plansumopen");
+  await page.waitForSelector("#plan .pldetail");
+  assert.equal(await shown(page, "#nav"), false, "the drawer closed");
+  assert.equal(await page.textContent("#plan h2.pltitle"), "Alpha Garden");
+  assert.equal(await sideways(page), false);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});

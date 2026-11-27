@@ -30,6 +30,7 @@
     const where = KIND_NAME[h.kind] || "stored text";
     const terms = Array.isArray(h.terms) ? h.terms.filter((t) => typeof t === "string").slice(0, 8) : [];
     if (terms.length) return `matched ${where}: ${terms.map((t) => `'${t.slice(0, 40)}'`).join(", ")}`;
+    if (typeof h.similarity === "number" && h.related === true) return `related in meaning to ${where} (${h.similarity.toFixed(2)}), not an exact match`;
     if (typeof h.similarity === "number") return `similar in meaning to ${where} (${h.similarity.toFixed(2)})`;
     return "";
   }
@@ -187,8 +188,8 @@
         matches: b.matches.map((m) => {
           const p = safePhoto(m && m.photo);
           if (!p) return null;
-          const hits = (Array.isArray(m.hits) ? m.hits : []).slice(0, 8).map((h) => ({ kind: KIND_NAME[h && h.kind] ? h.kind : "", label: str(h && h.label, 160), terms: Array.isArray(h && h.terms) ? h.terms.filter((t) => typeof t === "string").map((t) => t.slice(0, 40)) : [], snippet: str(h && h.snippet, 200), ...(typeof (h && h.similarity) === "number" ? { similarity: h.similarity } : {}) }));
-          return { photo: p, via: Array.isArray(m.via) ? m.via.filter((v) => v === "keyword" || v === "semantic") : [], contextOnly: m.contextOnly === true, hits };
+          const hits = (Array.isArray(m.hits) ? m.hits : []).slice(0, 8).map((h) => ({ kind: KIND_NAME[h && h.kind] ? h.kind : "", label: str(h && h.label, 160), terms: Array.isArray(h && h.terms) ? h.terms.filter((t) => typeof t === "string").map((t) => t.slice(0, 40)) : [], snippet: str(h && h.snippet, 200), ...(typeof (h && h.similarity) === "number" ? { similarity: h.similarity } : {}), ...(h && h.related === true ? { related: true } : {}) }));
+          return { photo: p, via: Array.isArray(m.via) ? m.via.filter((v) => v === "keyword" || v === "semantic" || v === "related") : [], contextOnly: m.contextOnly === true, hits };
         }).filter(Boolean),
       };
       draw();

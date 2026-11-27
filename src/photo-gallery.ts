@@ -5,7 +5,7 @@ import { isPhotoRef } from "./photo-ref.ts";
 import { CORRECTION_LABEL, MODEL_LABEL, readableRecords } from "./photo-observations.ts";
 import type { ObservationSources, ObservationStore, ReadableRecord } from "./photo-observations.ts";
 import { collectEvidence, EVIDENCE_LABEL, keywordRanking } from "./photo-semantic.ts";
-import type { Evidence, EvidenceKind, PhotoSemantic, SemanticSources } from "./photo-semantic.ts";
+import type { Evidence, EvidenceKind, PhotoSemantic, SearchDiagnostics, SemanticSources, Via } from "./photo-semantic.ts";
 import { untrustedText } from "./sessions.ts";
 
 // The page's photo gallery (docs/photo-gallery.md): the data behind the Images sidebar section's gallery in the centre pane. Read-only:
@@ -57,8 +57,10 @@ export type MatchHit = {
   snippet: string;
   source: { type: string; id: string };
   similarity?: number;
+  // A related-concept match (src/photo-semantic.ts relatedTier): near in meaning, below the close-match floor. Not an exact match.
+  related?: true;
 };
-export type GalleryMatch = { photo: GalleryPhoto; via: ("keyword" | "semantic")[]; contextOnly: boolean; hits: MatchHit[] };
+export type GalleryMatch = { photo: GalleryPhoto; via: Via[]; contextOnly: boolean; hits: MatchHit[] };
 
 export type GalleryRecord = {
   id: string;
@@ -200,7 +202,10 @@ export function photoGallery(d: GalleryDeps) {
     // Photos whose stored text matches the query, newest first, each with how it matched. Keyword matching is photos_search's rule over
     // its corpus (every word must appear in the photo's own stored text; a match that needs Rai's next message is marked contextOnly);
     // semantic candidates are added when semantic search is configured. Nothing here looks at a photo.
-    async search(query: string, opts: { signal?: AbortSignal } = {}) {
+    // `diagnose` (opt-in, owner only, see docs/photo-semantic-search.md "Diagnosing a miss"): adds the semantic stages' counts, and with
+    // `target` (a photo ref) that photo's path through them. Numbers and reason words only; never logged.
+    async search(query: string, opts: { signal?: AbortSignal; diagnose?: { target?: string } } = {}) {
+      if (opts.diagnose?.target !== undefined && !isPhotoRef(opts.diagnose.target)) throw new GalleryError("The diagnose target must be a photo ref.");
       if (typeof query !== "string" || !query.trim()) throw new GalleryError("Type a few words to search for.");
       if (query.length > GALLERY_QUERY_MAX) throw new GalleryError(`The search is at most ${GALLERY_QUERY_MAX} characters.`);
       let terms: string[];
@@ -229,21 +234,24 @@ export function photoGallery(d: GalleryDeps) {
       }
       let mode: "keyword" | "hybrid" = "keyword";
       let degraded: string | undefined;
+      let diagnostics: SearchDiagnostics | undefined;
       if (d.semantic?.enabled) {
         try {
-          const { r } = await d.semantic.search(caller, query, { includeArchived: false, signal: opts.signal });
+          const { r } = await d.semantic.search(caller, query, { includeArchived: false, signal: opts.signal, ...(opts.diagnose ? { diagnose: opts.diagnose } : {}) });
           mode = r.mode === "hybrid" ? "hybrid" : "keyword";
           if (r.degraded) degraded = r.degraded;
+          diagnostics = r.diagnostics;
           for (const c of r.candidates) {
-            if (!c.via.includes("semantic")) continue;
+            const via = c.via.filter((v): v is "semantic" | "related" => v === "semantic" || v === "related");
+            if (!via.length) continue;
             const l = corpus.byRef.get(c.ref) ?? photoReach(d, caller).find(c.ref);
             if (!l) continue;
-            const hits: MatchHit[] = c.evidence.filter((e) => e.similarity !== undefined).map((e) => ({ kind: e.kind, label: e.label, terms: [], snippet: e.snippet, source: { type: e.sourceType, id: e.sourceId }, similarity: e.similarity }));
+            const hits: MatchHit[] = c.evidence.filter((e) => e.similarity !== undefined).map((e) => ({ kind: e.kind, label: e.label, terms: [], snippet: e.snippet, source: { type: e.sourceType, id: e.sourceId }, similarity: e.similarity, ...(e.related ? { related: true as const } : {}) }));
             const had = matches.get(c.ref);
             if (had) {
-              had.via.push("semantic");
+              had.via.push(...via);
               had.hits.push(...hits);
-            } else matches.set(c.ref, { l, via: ["semantic"], contextOnly: false, hits });
+            } else matches.set(c.ref, { l, via, contextOnly: false, hits });
           }
         } catch (err) {
           degraded = `semantic ranking unavailable: ${err instanceof Error ? err.message.slice(0, 160) : "unknown error"}`;
@@ -258,13 +266,14 @@ export function photoGallery(d: GalleryDeps) {
         ...(degraded ? { degraded } : {}),
         rule:
           mode === "hybrid"
-            ? "Every word must appear in a photo's stored text (keyword), or the stored text is close in meaning (semantic). Stored text is the caption, the conversation title, saved model observations, Rai's corrections and Rai's next message."
+            ? "Every word must appear in a photo's stored text (keyword), or the stored text is close in meaning (semantic), or, ranked after those, related in meaning (related: for example another tool of the same family; not an exact match). Stored text is the caption, the conversation title, saved model observations, Rai's corrections and Rai's next message."
             : "Every word must appear in a photo's stored text: the caption, the conversation title, saved model observations, Rai's corrections and Rai's next message.",
         caveat: "A match means the words are in ORBIT's stored text about the photo, not that the photo shows them: image content is never searched, and observations are what a model said, not verified facts.",
         total: all.length,
         ...(all.length > GALLERY_SEARCH_MAX ? { more: all.length - GALLERY_SEARCH_MAX } : {}),
         coverage: { photosSearched: corpus.photos, ...(corpus.truncated ? { olderPhotosNotSearched: corpus.truncated } : {}), ...(corpus.archivedHidden ? { archivedHidden: corpus.archivedHidden } : {}) },
         matches: all.slice(0, GALLERY_SEARCH_MAX).map(({ l, ...m }): GalleryMatch => ({ photo: view(l), ...m })),
+        ...(opts.diagnose ? { diagnostics: diagnostics ?? { semantic: d.semantic?.enabled ? "unavailable for this search" : "semantic search is not configured: keyword only" } } : {}),
       };
     },
 

@@ -27,6 +27,81 @@ Each result has at most 3 candidates. A candidate has the ref, conversation, mes
 
 The two lists are fused with reciprocal rank fusion (k = 60) and deduplicated by ref. A result is ambiguous when the second candidate's strength is at least 0.9 of the first's. **The floor and the ambiguity ratio are not calibrated for any real model**: they were set on synthetic data only.
 
+- **Related (bounded, ranked last).** A photo with no keyword or close match whose own evidence is near the query in meaning, but below the floor, can be returned as a `related` candidate after every exact one. See "Related matches".
+
+## Related matches
+
+Everyday names are often related, not identical, to what was recorded: a model observation says "a benchtop scroll saw" and Rai asks for "jigsaw". Keyword search cannot match a word that is not there, and the close-match floor is a single absolute cut for every query. So a related object can score just under it and the search returns nothing, even though the related photo is the only plausible answer.
+
+The related tier (`relatedTier` in `src/photo-semantic.ts`) admits such a hit only as a **separate, lower-ranked** candidate, and only when it stands out:
+
+| Gate | Value | Why |
+|---|---|---|
+| Related floor | cosine ≥ 0.25 (and below the 0.35 floor) | absolute lower bound |
+| Distinct from the background | ≥ 0.08 above the query's **median** similarity over the eligible evidence | a query about nothing in the corpus has every similarity at about the same level, so nothing is admitted |
+| Near the best | ≥ 0.45 × the query's **best** similarity | when one sense of the query matches strongly ("jigsaw puzzle" → a puzzle), weak hits on another sense (saws) are dropped |
+| Own evidence only | observations, corrections, captions, titles; never a discussion-context line | context describes the conversation, not the photo |
+| Bounded | at most 2 related photos; never a photo that is already a keyword or close candidate; needs at least 4 indexed evidence texts | cannot flood results or estimate a background from nothing |
+| Ranked last | after **every** keyword or close candidate; fills only free slots of the 3 | an exact match is never pushed down |
+
+Attribution is explicit. A related candidate has `matchedBy: ["related"]`; its evidence carries `related: true`, its similarity and the label "related concept: … not an exact match, and not a verified label of what the photo shows". When every candidate is related, the result has `relatedOnly: true` and a caveat saying nothing matched exactly or closely. The tool result adds a `related` note, and the chat guidance tells the model to call it a related match. The gallery shows "related in meaning to AI observation (0.32), not an exact match". Observations are never rewritten, and no label is inferred.
+
+**Cost and rebuild.** None. The tier reads the similarities `retrieve()` already computes for the close tier. There is no extra provider request, no new text or field sent, no change to the embedded text or to the cache keys, and so no index rebuild. Budgets, keyword-only fallback, scoping, revalidation and the cross-site refusal are unchanged. Without vectors (feature off, no adapter, query embedding failed) there is no related tier.
+
+**Not calibrated.** The three numbers were set on the labelled mock fixture only (`test/photo-related-fixture.ts`, a hand-weighted stand-in, not a model). Check them on the host with the diagnose view below before relying on them.
+
+## Diagnosing a miss (the `jigsaw` report)
+
+**Reported.** On the live Assistant, `jigsaw` returned no candidates in hybrid mode, and `scroll saw` returned the intended photo at rank 1 by keyword and semantic. Both searches reported 8 photos, 22 evidence records, 22 reused vectors and 0 not yet indexed.
+
+**What the code establishes (main at d3f1445).** These are the stages, and what the report rules in or out at each:
+
+1. **Eligibility and scope.** Both queries see the same 22 eligible records (eligibility does not depend on the query), and `scroll saw` returned the photo, so its observation was eligible, authorized and passed revalidation. *Ruled out.*
+2. **Indexing and model/cache compatibility.** 22 reused and 0 pending means every eligible record had a vector in the current namespace. The namespace is a hash of the cache format, adapter format, embedding model and dimensions, so a vector from another embedding model is never mixed in. The vision model that wrote the observation is irrelevant: embeddings are made by the configured embedding model (default `text-embedding-3-small`) from the stored text. *Ruled out.*
+3. **Query embedding.** The mode was hybrid, so the query vector existed. (An embedding failure gives `keyword-only` with a `degraded` reason.) *Ruled out.*
+4. **Keyword.** No stored text contains "jigsaw". The keyword list is empty, as it should be.
+5. **Semantic floor.** With the keyword list empty, an empty result means no eligible evidence reached cosine 0.35 against `query: jigsaw`. That includes the scroll saw observation, `visual-observation: A benchtop scroll saw …` in the brief's wording. *This is where the miss happens.* The list cap (10), RRF fusion and the 3-result cap only remove candidates when there are more of them, and there were none.
+6. **Revalidation.** Only applies to fused candidates, and there were none.
+
+So the miss is at the semantic close-match floor. That is a design limit: one absolute cut for every query, uncalibrated, and set on synthetic text. It is not a data, scope or cache fault.
+
+**Unknown.** The actual similarity of `jigsaw` to that observation under the live model was not measured. No provider credential or live corpus was used. It is likely in the related band, since a single ambiguous word scores lower than a phrase, but that is an expectation, not a measurement. Other unknowns: the exact query string the chat model sent, and how many statements the live observation record joins. Statements are joined into one embedded text, and extra statements about other objects dilute a single-object query.
+
+**Opt-in diagnose view (owner, on the host).** `GET /gallery/search?q=<query>&diagnose=1[&target=<photo ref>]` is the gallery's own owner-only, same-origin route: the same authorization and cross-site refusal, and the same single search. It adds `diagnostics` to that response only. It holds numbers and fixed reason words: thresholds; eligible photos, evidence and vectors; keyword candidates; whether the query was embedded; the best and median similarity and the top 5 per-photo similarities; close photos and how many the list cap cut; related band, admitted and rejected-by-reason counts; exact and returned candidates and drops by cap or revalidation. With `target`, it reports that photo's path: whether it is in the candidate set, its evidence and vectors, keyword match and position, best similarity and band (`close`, `related`, `below-related-floor`, `no-vector`, `not-embedded`), the related gate's verdict, and the final position or outcome (`returned`, `not-matched`, `results-cap`, `revalidation-failed`). It never contains the query, any evidence text, a vector, a ref or a source id, and nothing writes it to a log, the audit lines or a transcript (tested). `photos_search` itself is unchanged by it.
+
+**Host checklist (Rai, after deploy; no config change needed).** Open ORBIT's page in your browser as the owner, open the developer console on that page (a same-origin request, so it passes the cross-site refusal), and run each request as `await (await fetch("/gallery/search?q=…")).json()`. Do not paste the output anywhere public. It holds no text, but the similarities are about private photos.
+
+1. Find the scroll saw photo's ref: `GET /gallery/search?q=scroll%20saw`, then `matches[0].photo.ref`.
+2. `GET /gallery/search?q=jigsaw&diagnose=1&target=<ref>`. Expect `diagnostics.target.inCandidateSet: true`, `withVector` equal to `evidence`, `keyword.matched: false`, and a `semantic.bestSimilarity`:
+   - **≥ 0.35** (`band: close`) but not returned: the floor was not the cause. Report `final.outcome` and the `fused` counts.
+   - **0.25 to 0.35** (`band: related`): this confirms the floor as the cause. With this change, `semantic.related` should be `admitted` and `final.position` 1 to 3. If it says `not-distinct` or `far-below-best`, note `semantic.median` and `semantic.best`: those are the numbers to calibrate the margin and ratio.
+   - **< 0.25** (`below-related-floor`): the related tier does not cover it. The next lever is evidence granularity (one embedded text per statement, which costs a re-index), not a lower floor.
+3. The matches for `jigsaw` show the scroll saw labelled "related in meaning … not an exact match". In the Assistant, "find the photo of my jigsaw" should present it as a related match, not as a jigsaw.
+4. `scroll saw` is still rank 1, matched by keyword and semantic. A clearly unrelated query (for example `giraffe`) still says nothing matched. If a jigsaw puzzle photo exists, `jigsaw puzzle` returns it first and no saw is `related`.
+5. `/status` `photo-embeddings` daily request counts rise by the same amount as before for the same searches: one request per uncached query, with no new requests from this change.
+
+### Before/after fixture (MOCK embedder, not a model)
+
+`test/photo-related.test.ts` and `test/photo-related-fixture.ts` hold an invented corpus. Its main observation is "A benchtop scroll saw with a thin vertical blade sits on a workshop bench", plus saw distractors (a pruning saw, a chainsaw, a seesaw), unrelated objects (a couch, a canoe, a mug, a receipt) and, in larger corpora, a jigsaw puzzle and a cordless jigsaw. `liveLike` has 8 photos and 22 records, with no stored "jigsaw". `conceptMock` gives each word an identity direction plus hand-set concept weights, so its similarities have the **shape** of the report. **They are not real-model measurements.** "Before" is `related: false`, which is main's ranking. Every row also asserts that the exact candidates are unchanged, in order.
+
+| Query | Corpus | Before | After |
+|---|---|---|---|
+| `jigsaw` | liveLike | none | scrollSaw (related) |
+| `jigsaw` | withPuzzle | puzzle (keyword+semantic) | puzzle (keyword+semantic), scrollSaw (related) |
+| `jigsaw` | workshop | jigsawTool, puzzle (both keyword+semantic; ambiguous) | jigsawTool, puzzle, scrollSaw (related) |
+| `jigsaw workshop` | workshop | jigsawTool (keyword+semantic), scrollSaw, puzzle (semantic) | unchanged |
+| `jigsaw puzzle` | withPuzzle | puzzle (keyword+semantic) | unchanged (scroll saw rejected: far below best) |
+| `jigsaw puzzle` | workshop | puzzle (keyword+semantic), jigsawTool (semantic) | unchanged; the related tier adds no saw |
+| `scroll saw` | liveLike | scrollSaw (keyword+semantic), pruningSaw (semantic) | the same, plus chainsaw (related) third |
+| `scroll saw` | workshop | scrollSaw (keyword+semantic), pruningSaw, jigsawTool (semantic) | unchanged |
+| `armchair` | liveLike | none | couch (related) |
+| `rowboat` | liveLike | none | canoe (related) |
+| `sofa` / `kayak` | liveLike | couch / canoe (semantic) | unchanged |
+| `giraffe`, `birthday cake` | liveLike, workshop | none | none |
+| `seesaw` | workshop | seesaw (keyword+semantic) | unchanged |
+
+In the `jigsaw puzzle` / workshop row, the cordless jigsaw, which shares the exact word, is a **close** match under the mock. That comes from the unchanged close tier, ranked below the puzzle. Whether a real model puts it above 0.35 is unmeasured: that is checklist step 4.
+
 ## Authorization and lifecycle
 
 - **Candidate set first.** The candidate set is `reachablePhotos` (`src/photo-access.ts`), using the same policy as `photos_list`. The Assistant reaches every conversation. A chat thread reaches only its own photos. Archived threads are included only with `includeArchived`. Observation records go through `readableRecords`: the source must be readable by the caller, still exist and be about the current image version. Only this evidence is matched, ranked, counted or sent for embedding. Inaccessible evidence never affects matches, rankings or counts (tested: a thread searching sees `photosSearched: 1` and none of another thread's text).
@@ -131,6 +206,8 @@ It exits 0 when complete, 1 when a request failed (including the probe: a 401, 4
   - `photos_forget` deletes the vectors and the text never matches again;
   - a provider halted on quota gives keyword-only with exactly 1 attempt;
   - discussion context is labelled, and the search request is not context for itself.
+- `test/photo-related.test.ts` covers the related tier with the labelled mock: the before/after table above, each gate (related floor, background margin, best ratio, context-only, exact excluded, cap, too few vectors), provider-disabled and query-failure fallback with no extra request, and the diagnostics' content (no query, text, ref or source id; an unauthorized target is not in the candidate set).
+- `test/photo-search-server.test.ts` also checks, through the real server, that the Assistant's `photos_search` and `GET /gallery/search` return and label the same related match, that `diagnose=1` explains it and refuses a non-ref target and cross-site reads, and that with the provider disabled both stay keyword-only.
 - Full suite: `pnpm test` and `pnpm typecheck` pass.
 
 **Synthetic comparison (stand-in, not semantic).** The fixture has 20 queries, 14 of them answerable, over one corpus. Forgotten, superseded, stale and unauthorized evidence are removed first.
@@ -139,7 +216,7 @@ It exits 0 when complete, 1 when a request failed (including the probe: a 401, 4
 |---|---|---|---|
 | Intended photo at rank 1 | 5 | 10 | 12 |
 | Intended photo in the top 3 | 5 | 10 | 13 |
-| Unanswerable queries returning nothing (of 6) | 6 | 5 | 4 |
+| Unanswerable queries returning nothing (of 6) | 6 | 5 | 3 (4 before the related tier) |
 | Queries returning an excluded photo | 0 | 0 | 0 |
 
 The stand-in used 21 requests and 36 texts, with no failures. The cache held 16 entries in about 29 KB.
@@ -152,13 +229,14 @@ Reading it:
 - "Place we ate with all the books" ranked the intended photo second.
 - "City library" and "pizza place bookshelves" returned non-intended photos instead of no match.
 - Ambiguity was not flagged on this fixture. It is shown only by the dedicated twin test.
+- With the related tier, "big bookcase cafe" (whose cafe photo's observation was forgotten) returns the bookshelf restaurant as a labelled **related** candidate instead of nothing. The forgotten photo is still never surfaced. This is the trade-off of the tier: a weak, labelled near match where there used to be a no-match. Its gates are what keep it rare, and they are uncalibrated.
 - Whether a real model does better is **unverified** until the owner-run evaluation.
 
 **Not verified:** any live request, key, project, billing or grant coverage; real-model quality, latency or threshold calibration; whether a real chat model follows the guidance; any production data or configuration. No runner credential was available, so no live call was made.
 
 ## Unresolved and residual risks
 
-- **Thresholds.** The floor, context weight and ambiguity ratio are uncalibrated. Weak semantic hits can surface for unanswerable queries. The no-match and ambiguity wording mitigates this; it does not eliminate it.
+- **Thresholds.** The floor, context weight, ambiguity ratio and the related tier's floor, margin and ratio are uncalibrated. Weak semantic hits can surface for unanswerable queries. The no-match and ambiguity wording mitigates this; it does not eliminate it.
 - **Data sent to OpenAI.** Untrusted stored text (observations, captions, titles, Rai's follow-ups) and the query are sent to OpenAI's embeddings endpoint. That is a new data flow under a separate key, and its retention follows that project's settings.
 - **Forgotten text in replies.** Assistant reply prose that quoted an observation still exists after forgetting (as in milestone 2). It is not used as evidence here.
 - **Coverage.** A photo nobody inspected, captioned or titled cannot match.

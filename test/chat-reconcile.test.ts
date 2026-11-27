@@ -174,7 +174,8 @@ test("the page draws the thread through the reconciler, never by replacing the w
   assert.match(html, /if \(seq !== loadSeq\) return true;/, "a stale load is dropped");
   assert.match(html, /view\.rev < current\.rev\) return true;/, "an older revision never rolls the view back");
   // The one reload on the page is the header brand's, and only when the reader clicks it (test/brand-refresh-browser.test.ts).
-  const brand = 'document.getElementById("brandbtn").addEventListener("click", () => location.reload());';
-  assert.equal(html.split(brand).length, 2, "the brand's reload is wired once, to a click");
+  const brand = html.match(/\n {2}function brandRefresh\(\) \{[\s\S]*?\n {2}\}\n/)![0];
+  assert.equal(brand.split("location.reload()").length, 2, "the brand's reload is wired once");
+  assert.match(brand, /addEventListener\("click", \(e\) => \{/, "to a click");
   assert.doesNotMatch(html.replace(brand, ""), /location\.reload|location\.href\s*=|location\.assign/, "chat updates never reload the page");
 });
