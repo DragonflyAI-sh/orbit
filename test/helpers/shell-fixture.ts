@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { sidebarNote, sidebarView } from "../../src/sidebar.ts";
-import { dayIn, planOverview, projectDetail } from "../../src/plan.ts";
+import { dayIn, planOverview, projectDetail, projectSummary } from "../../src/plan.ts";
 import type { SidebarPhoto } from "../../src/sidebar.ts";
 import { serveWebAsset } from "./web-assets.ts";
 
@@ -109,7 +109,9 @@ export function shellServer(opts: ShellOpts = {}) {
       if (typeof o.sidebar === "number") return json(o.sidebar, { error: "synthetic failure" });
       const down = o.sidebar === "vault-down";
       const vault = vaultNotes();
-      return json(200, { ...sidebarView(down ? undefined : vault, sidebarPhotos(at), url.searchParams.get("project") || undefined), overview: planOverview(down ? undefined : vault, PLAN_NOW), vault: down ? { ok: false, error: "The vault could not be read: synthetic outage" } : { ok: true, source: "memory/vault@fixture" } });
+      const view = sidebarView(down ? undefined : vault, sidebarPhotos(at), url.searchParams.get("project") || undefined);
+      const planSummary = !down && view.project ? (projectSummary(vault, view.project.id, PLAN_NOW) ?? null) : null;
+      return json(200, { ...view, overview: planOverview(down ? undefined : vault, PLAN_NOW), planSummary, vault: down ? { ok: false, error: "The vault could not be read: synthetic outage" } : { ok: true, source: "memory/vault@fixture" } });
     }
     if (p === "/sidebar/project") {
       if (o.sidebar === "vault-down") return json(503, { error: "The vault could not be read: synthetic outage" });

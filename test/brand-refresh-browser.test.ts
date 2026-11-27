@@ -5,24 +5,34 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { seededJobs } from "./jobs-page-fixture.ts";
 
-// The header brand (the ORBIT logo and its name) is one button that reloads the current page: clicking the logo, clicking the
-// name, tapping it, Enter and Space each reload the same address (path, query and hash), as the browser's own reload does,
-// with nothing sent on the way. The markup checks always run; the rest runs in Chromium against the real server, at phone,
-// tablet and desktop widths in Light and Dark, and is skipped, saying so, where Playwright is not installed.
+// The header brand (the ORBIT logo and its name) is one link to the current page that reloads it: clicking the logo, clicking
+// the name, tapping it and Enter each reload the same address (path, query and hash), as the browser's own reload does, with
+// nothing sent on the way. Its href is that same address, so the browser's own link actions (Ctrl or Command+click,
+// middle-click, Shift+click, the context menu's "Open link in new tab") are left to the browser and open the same page.
+// The markup checks always run; the rest runs in Chromium against the real server, at phone, tablet and desktop widths in
+// Light and Dark, and is skipped, saying so, where Playwright is not installed. The context menu itself is browser chrome
+// Playwright cannot drive, so "Open link in new tab" is checked by hand; here only that the menu is not blocked and the
+// href it would open is the current address.
 
 const html = readFileSync(new URL("../src/web/index.html", import.meta.url), "utf8");
 
-test("markup: one button wraps both the logo and the name, with an accessible name that says it refreshes", () => {
+test("markup: one link wraps both the logo and the name, with an accessible name that says it refreshes", () => {
   const brand = html.match(/<h1 class="brand">([\s\S]*?)<\/h1>/)![1]!;
-  assert.equal(brand, '<button type="button" id="brandbtn" aria-label="ORBIT: Refresh page" title="Refresh page"><img src="/avatar.png" alt=""><span class="wordmark">ORBIT</span></button>');
-  assert.equal(html.match(/id="brandbtn"/g)?.length, 1, "one brand button");
+  // href="/" is only the fallback before the script runs; brandRefresh sets it to the current address at once.
+  assert.equal(brand, '<a id="brandbtn" href="/" aria-label="ORBIT: Refresh page" title="Refresh page"><img src="/avatar.png" alt=""><span class="wordmark">ORBIT</span></a>');
+  assert.doesNotMatch(brand, /target=|tabindex|role=/, "a plain link: no forced new tab, focusable and named as a link");
+  assert.equal(html.match(/id="brandbtn"/g)?.length, 1, "one brand link");
   assert.equal(html.match(/<h1\b/g)?.length, 1, "still the page's one heading");
 });
 
-test("markup: the brand reloads the page as it is: location.reload(), no new address, no cache-busting, nothing else", () => {
+test("markup: the brand reloads the page as it is: location.reload() on a plain click only, no new address, no new tab", () => {
   const fn = html.match(/function brandRefresh\(\) \{([\s\S]*?)\n {2}\}/)![1]!.replace(/\/\/[^\n]*/g, "");
-  assert.match(fn, /addEventListener\("click", \(\) => location\.reload\(\)\)/);
-  assert.doesNotMatch(fn, /location\.(href|assign|replace)|Date\.now|\?t=|fetch|send|draft|storage|setInterval|setTimeout/i);
+  // Only a plain primary click is taken over; a modified or non-primary one, or one already handled, stays the browser's.
+  const click = fn.match(/addEventListener\("click", \(e\) => \{([\s\S]*?)\}\);/)![1]!;
+  assert.match(click, /^\s*if \(e\.defaultPrevented \|\| e\.button !== 0 \|\| e\.ctrlKey \|\| e\.metaKey \|\| e\.shiftKey \|\| e\.altKey\) return;\s*e\.preventDefault\(\);\s*location\.reload\(\);\s*$/);
+  assert.equal(fn.split("preventDefault").length, 2, "nothing else is prevented (no context menu, middle-click or drag blocking)");
+  assert.match(fn, /brand\.href = location\.href/, "the href is the current address");
+  assert.doesNotMatch(fn, /window\.open|_blank|location\.(assign|replace)|location\.href\s*=|Date\.now|\?t=|fetch|send|draft|storage|setInterval|setTimeout/i);
   // Wired before the rest of the page's set-up, so a failure later in the script cannot leave the brand dead.
   const script = html.slice(html.indexOf("<script>", html.indexOf("/photos.js")));
   assert.ok(script.indexOf("brandRefresh();") < script.indexOf("const history = [];"), "wired first");
@@ -73,13 +83,15 @@ async function reloadBy(page: any, w: Watch, act: () => Promise<unknown>) {
 const ways: [string, (page: any) => Promise<unknown>][] = [
   ["clicking the logo", (page) => page.click("#brandbtn img")],
   ["clicking the name", (page) => page.click("#brandbtn .wordmark")],
-  ["Enter on the focused button", async (page) => { await page.focus("#brandbtn"); await page.keyboard.press("Enter"); }],
-  ["Space on the focused button", async (page) => { await page.focus("#brandbtn"); await page.keyboard.press("Space"); }],
+  ["Enter on the focused link", async (page) => { await page.focus("#brandbtn"); await page.keyboard.press("Enter"); }],
 ];
 const addresses = () => ["/?probe=1#assistant", "/#jobs", `/#jobs/${srv!.id}`, `/sessions/${session}`];
 
-test("browser: the logo, the name, Enter and Space each reload the current page at the same address, sending nothing", { skip }, async () => {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+test("browser: the logo, the name and Enter each reload the current page at the same address, in this tab, sending nothing", { skip }, async () => {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await ctx.newPage();
+  const opened: string[] = [];
+  ctx.on("page", (p: any) => opened.push(p.url()));
   const w = watch(page);
   for (const path of addresses()) {
     await page.goto(base + path);
@@ -93,8 +105,74 @@ test("browser: the logo, the name, Enter and Space each reload the current page 
       assert.deepEqual(w.writes, [], `${how} at ${path}: nothing was sent`);
     }
   }
+  assert.deepEqual(opened, [], "no new tab or window");
+  assert.deepEqual(w.problems, []);
+  await ctx.close();
+});
+
+const brandHref = (page: any) => page.evaluate(() => (document.getElementById("brandbtn") as HTMLAnchorElement).getAttribute("href"));
+
+test("browser: the brand is a link named \"ORBIT: Refresh page\" whose href is the current address, and follows the address", { skip }, async () => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  const w = watch(page);
+  for (const path of addresses()) {
+    await page.goto(base + path);
+    await ready(page);
+    assert.equal(await page.getByRole("link", { name: "ORBIT: Refresh page", exact: true }).count(), 1, `${path}: one link with that name`);
+    assert.equal(await page.getByRole("button", { name: "ORBIT: Refresh page" }).count(), 0, `${path}: no longer a button`);
+    assert.equal(await brandHref(page), base + (await address(page)), `${path}: href is the current address`);
+  }
+  // The page's own address changes (pushState and replaceState fire no event): the href is current by the time it is used.
+  await page.evaluate(() => window.history.pushState(null, "", "/?probe=2#jobs")); // window.: the page has its own `history`
+  await page.hover("#brandbtn");
+  assert.equal(await brandHref(page), `${base}/?probe=2#jobs`, "after pushState, on hover");
+  await page.evaluate((s: string) => window.history.replaceState(null, "", `/sessions/${s}`), session);
+  await page.focus("#brandbtn");
+  assert.equal(await brandHref(page), `${base}/sessions/${session}`, "after replaceState, on focus");
+  // Back and a hash change update it straight away.
+  await page.evaluate(() => { location.hash = "#assistant"; });
+  await page.waitForFunction(() => (document.getElementById("brandbtn") as HTMLAnchorElement).href === location.href, null, SOON);
   assert.deepEqual(w.problems, []);
   await page.close();
+});
+
+test("browser: Ctrl or Command+click, Shift+click and middle-click are left to the browser: the same page opens in a new tab, this one stays", { skip }, async () => {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await ctx.newPage();
+  const w = watch(page);
+  const path = `/sessions/${session}?probe=3#x`;
+  await page.goto(base + path);
+  await ready(page);
+  // The address moves after load without an event, as the page's own routing does; the new tab must get the moved one.
+  await page.evaluate(() => window.history.replaceState(null, "", location.pathname + "?probe=4"));
+  const want = await address(page);
+  await page.evaluate(() => {
+    (window as any).__beforeBrand = true;
+    (window as any).__prevented = [];
+    for (const ev of ["click", "auxclick", "contextmenu", "mousedown"]) window.addEventListener(ev, (e) => (window as any).__prevented.push(`${ev}:${e.defaultPrevented}`));
+  });
+  for (const [how, act] of [
+    ["ControlOrMeta+click", () => page.click("#brandbtn .wordmark", { modifiers: ["ControlOrMeta"] })],
+    ["Shift+click", () => page.click("#brandbtn img", { modifiers: ["Shift"] })],
+    ["middle-click", () => page.click("#brandbtn .wordmark", { button: "middle" })],
+  ] as const) {
+    const [opened] = await Promise.all([ctx.waitForEvent("page", SOON), act()]);
+    await opened.waitForLoadState("domcontentloaded");
+    const u = new URL(opened.url());
+    assert.equal(u.pathname + u.search + u.hash, want, `${how}: the new tab opens the current address`);
+    await opened.close();
+  }
+  // Right-click: the browser's context menu is not blocked (its "Open link in new tab" is checked by hand), and its href is current.
+  await page.click("#brandbtn .wordmark", { button: "right" });
+  assert.equal(await brandHref(page), base + want, "the context menu would open the current address");
+  const got = await page.evaluate(() => ({ same: !!(window as any).__beforeBrand, prevented: (window as any).__prevented as string[], at: location.pathname + location.search + location.hash }));
+  assert.equal(got.same, true, "this tab was not reloaded or navigated");
+  assert.equal(got.at, want, "and is still at the same address");
+  assert.deepEqual(got.prevented.filter((p: string) => p.endsWith(":true")), [], `no default prevented: ${got.prevented.join(", ")}`);
+  assert.ok(got.prevented.includes("contextmenu:false"), "the context menu event reached the page, not prevented");
+  assert.deepEqual(w.writes, []);
+  assert.deepEqual(w.problems, []);
+  await ctx.close();
 });
 
 test("browser: the brand leaves a composer draft to the page's existing behaviour: no send, no confirm, nothing cleared first", { skip }, async () => {

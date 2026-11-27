@@ -8,7 +8,7 @@ in the right-hand side panel (docs/design-system.md, "Side panel"), Status first
 ## What it shows
 
 Read from `GET /sidebar?project=<id>` (owner only; src/sidebar.ts, src/plan.ts, src/server.ts). The answer's `overview` is
-the Plan's project cards (docs/plan.md); its older `plan` field (plan headings of now.md or the selected project, and open
+the Plan's project cards (docs/plan.md) and `planSummary` the selected project's summary; its older `plan` field (plan headings of now.md or the selected project, and open
 tasks) is still sent but no longer drawn. Nothing is mock data: the vault parts
 come from the same vault snapshot memory search reads (the writable clone, or the read-only copy, as `vault.source` says),
 and the photos from the attachment store.
@@ -16,7 +16,7 @@ and the photos from the attachment store.
 | Section | Source | Without a project | With a project |
 | --- | --- | --- | --- |
 | **Projects** | Hub notes `Projects/<name>.md` (top level only) whose `status:` is not done, dropped, archived, cancelled, completed, abandoned or closed | — | The selector's choice, remembered in this browser |
-| **Plan** | Every hub note `Projects/<name>.md`, read as a project card (docs/plan.md) | **All projects** (opens the overview in the main area), how many projects need attention, then each open project by priority with a status dot and a priority badge; each opens its detail in the main area | The same list: the Plan does not follow the selector |
+| **Plan** | Every hub note `Projects/<name>.md`, read as a project card (docs/plan.md) | **All projects** (opens the overview in the main area), how many projects need attention, then each open project by priority with a status dot and a priority badge; each opens its detail in the main area | A short summary of that project (status, goal, blocker, next steps, next date, open tasks) and **Open full plan**, which opens its detail in the main area (docs/plan.md, "Sidebar summary") |
 | **Files** | Vault notes; clicking one opens it in the centre pane in the file viewer (docs/file-viewer.md), read on demand (`GET /sidebar/note?path=`), and marks it here while it shows | `now.md` and every active project's hub note | The project note, its tasks (open or not), every other note that links `[[id]]` (the activity `Log/` aside), and the items under its Locations heading |
 | **Images** | Photos Rai sent in the Assistant or a chat thread that still exists (archived threads aside), the same reach as the Assistant's photo tools; 10 per page (`images=<page>`) | Every photo, newest first | Those whose caption or conversation title contains the project's id (as words), title or an alias as a whole phrase |
 

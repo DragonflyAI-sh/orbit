@@ -8,7 +8,8 @@ It has three parts:
 
 | Part | Where | What it shows |
 | --- | --- | --- |
-| **Sidebar index** | The left sidebar's Plan section (docs/sidebar.md) | **All projects** (with the count of open projects), a "N need attention" badge, then each open project by priority: a status dot, the title and a priority badge (P1, P2, P3). Each is a link that opens a view in the main area; the open one is marked (`aria-current="page"`). |
+| **Sidebar index** | The left sidebar's Plan section (docs/sidebar.md), while the Projects selector is on All projects | **All projects** (with the count of open projects), a "N need attention" badge, then each open project by priority: a status dot, the title and a priority badge (P1, P2, P3). Each is a link that opens a view in the main area; the open one is marked (`aria-current="page"`). |
+| **Sidebar summary** | The same section, while the Projects selector names one project | That project only, in a few lines: status dot, title and priority; state and health (and progress); the goal; a blocker; up to 3 next steps; an overdue target; the next date; the open linked tasks; and **Open full plan**, which opens its detail in the main area. See "Sidebar summary" below. |
 | **All projects** | `/#plan`, in the main area | Quick stats (active, overdue, with blockers, paused), then one card per open project: title, priority, status and health, a one-line summary, the next action, progress (a bar and "7/50 adventures done"), last activity and target as relative dates ("2 days ago", "in 3 weeks"), and blockers or why it needs attention. Finished projects are folded under "Finished (N)". |
 | **One project** | `/#plan/<project id>`, in the main area | Status (progress, state, last activity, what done means), Next steps (up to 3), Blockers, Timeline (started, milestones, task due dates, today and target, with how much of the time to the target has passed), Recent activity (up to 6 dated updates), Linked tasks (ORBIT tasks that name the project, open and done) and Notes. |
 
@@ -17,12 +18,40 @@ other owner-only pages. They are real addresses: a card, the sidebar, "← All p
 move between them without reloading the page. A click on a Plan link moves keyboard focus to the new view's heading, and on
 a phone closes the sidebar drawer.
 
+## Sidebar summary
+
+When the Projects selector (docs/sidebar.md) names a project, the Plan section shows a short summary of that project instead
+of the index; back on All projects the index returns, unchanged. Each part shows only when the note says something for it:
+
+| Part | What it shows |
+| --- | --- |
+| Head | Status dot, title, priority badge |
+| State | "Active · on track", with why it needs attention when it does (stale, no next action), and progress ("1/3 beds done") |
+| Goal | The one-line summary of the Outcome |
+| Blocker | The first blocker, "(+N more)" when there are others, in red |
+| Next | Up to 3 next steps (as in the detail) |
+| Overdue | "target was Nov 1 (4 weeks ago)", in red, when the target has passed |
+| Next date | The next milestone or the target from today on, else the next task due date: label, day and how far off |
+| Open tasks | How many open linked tasks there are; up to 3 that are not already next steps by name and due day, and how many more |
+| Open full plan | A link to `/#plan/<id>`, the detail in the main area |
+
+Changing the selector never opens or changes the main area; only **Open full plan** (or a Plan link) does.
+
+The summary rides on `GET /sidebar?project=<id>`, the read the selector already makes (`planSummary`, src/plan.ts
+`projectSummary`), for the id the selector resolved to (`project.id`), so there is no second request. The page draws the
+section for the selector's choice only: the moment the choice changes it shows All projects' index from the last answer
+(the overview is the same for every choice) or the new project's name and "Reading the project…", never the previous
+project's summary. An answer is drawn only if it is the newest read (`sidebarGen`) and was read for the choice showing; a
+late answer for an earlier choice, including a minute's refresh, is dropped. A failed read for a new choice says so under
+that project's name.
+
 ## Data
 
 Read-only, from the same vault snapshot as the sidebar (src/plan.ts):
 
 - `GET /sidebar` carries `overview`: `{ today, zone, projects: ProjectCard[], stats }` for every hub note
-  `Projects/<name>.md` (top level only, open and done).
+  `Projects/<name>.md` (top level only, open and done), whatever the selector says; and `planSummary`, the selected project's
+  `ProjectSummary` (the card with `nextSteps`, `blocker`, `milestone`, `openTasks`, `tasks`, `tasksMore`), or `null` without one.
 - `GET /sidebar/project?id=<id>` (owner only, GET only) answers `{ project: ProjectDetail, today }`, 404 for no such hub
   note (or an id with a `/` in it), 503 when the vault cannot be read. The id is the hub note's file name, so any id a card
   has opens, spaces, commas, brackets, apostrophes and accents included; the page sends it URL-encoded.
@@ -77,12 +106,16 @@ in `Projects/<id>.md`.
 
 - `test/plan.test.ts`: dated entries, the humanizing of agent text, cards (priority, status, health, summary, next action,
   progress, last activity, overdue, blockers, stale), sorting, the detail (timeline, blockers, next steps, activity, linked
-  tasks, notes), masking and bounds; `GET /sidebar`'s overview and `GET /sidebar/project` on the real server (owner only,
+  tasks, notes), the sidebar summary (next date, tasks not already next steps, a sparse note, a done project, masking),
+  masking and bounds; `GET /sidebar`'s overview and `planSummary` and `GET /sidebar/project` on the real server (owner only,
   404, 503); the page's helpers (`<plan-lib>`: addresses, relative days, dates in text).
 - `test/plan-browser.test.ts` (Chromium): the sidebar index, All projects (stats, cards, folded finished projects, no raw
   UTC times or message ids), a card opening the detail with every section, Back and the browser's back button, the
   sidebar's link to another project, the Assistant and the other sidebar sections still working, error states, and the
-  phone drawer closing on a Plan link in the dark theme.
+  phone drawer closing on a Plan link in the dark theme. The sidebar summary: the index unchanged on All projects, a chosen
+  project's summary and its Open full plan link (the main area untouched by the selector), a sparse project, untrusted text
+  shown as text, switching A→B and A→All projects with A's answer held back, a failed read, a minute's refresh answering
+  after the choice moved on, and the phone drawer (fits, tap target, closes on Open full plan).
 - `test/sidebar-browser.test.ts`: the Plan section's index in the docked sidebar.
 - `test/assistant-page.test.ts`, `test/chat-address.test.ts`: `#plan` routing.
 

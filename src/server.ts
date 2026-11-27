@@ -60,7 +60,7 @@ import { resolutionSummary } from "./model-capability.ts";
 import { AttachmentError, attachmentStore, isAttachmentId, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments.ts";
 import { localTime, PHOTO_TOOL_NAMES, photoDisplay, photoTools, reachablePhotos } from "./photo-access.ts";
 import { idOf, sidebarNote, sidebarSave, sidebarView } from "./sidebar.ts";
-import { dayIn, planOverview, projectDetail } from "./plan.ts";
+import { dayIn, planOverview, projectDetail, projectSummary } from "./plan.ts";
 import type { SidebarPhoto } from "./sidebar.ts";
 import { isPhotoRef, safeGalleries } from "./photo-ref.ts";
 import type { Located, PhotoSources } from "./photo-access.ts";
@@ -1413,7 +1413,10 @@ export function buildServer({
           return undefined;
         }
       };
-      return send(res, 200, { ...sidebarView(notes, photos, project, { imagesPage: Number.isInteger(imagesPage) ? imagesPage : 1, aiOf }), overview: planOverview(notes), vault: notes ? { ok: true, source } : { ok: false, error: vaultError }, ...(photoError ? { photoError } : {}) });
+      const view = sidebarView(notes, photos, project, { imagesPage: Number.isInteger(imagesPage) ? imagesPage : 1, aiOf });
+      // The Plan section's summary of the selected project (docs/plan.md), for the id the selector resolved to; none without one.
+      const planSummary = notes && view.project ? (projectSummary(notes, view.project.id) ?? null) : null;
+      return send(res, 200, { ...view, overview: planOverview(notes), planSummary, vault: notes ? { ok: true, source } : { ok: false, error: vaultError }, ...(photoError ? { photoError } : {}) });
     }
     // ---- The photo gallery (docs/photo-gallery.md): GET only, owner only. Listing, searching and reading a photo's records across
     // conversations is attachment reading and session reading, as for the Assistant's photo tools and the sidebar; both are audited.
@@ -1441,7 +1444,11 @@ export function buildServer({
           const raw = url.searchParams.get("limit");
           return send(res, 200, gallery.list({ cursor: url.searchParams.get("cursor") || undefined, limit: raw === null ? undefined : Number(raw) }));
         }
-        if (galleryRoute === "search") return send(res, 200, await gallery.search(url.searchParams.get("q") ?? ""));
+        if (galleryRoute === "search") {
+          // diagnose=1 (opt-in, this owner-only route): stage counts for the semantic search; target=<ref> adds one photo's path.
+          const diagnose = url.searchParams.get("diagnose") === "1" ? { ...(url.searchParams.get("target") ? { target: url.searchParams.get("target")! } : {}) } : undefined;
+          return send(res, 200, await gallery.search(url.searchParams.get("q") ?? "", diagnose ? { diagnose } : {}));
+        }
         const got = gallery.detail(url.pathname.slice("/gallery/photos/".length));
         return got ? send(res, 200, got) : send(res, 404, { error: "No such photo is visible to the Assistant." });
       } catch (err) {

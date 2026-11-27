@@ -128,7 +128,7 @@ test("the page markup: Assistant first in the nav, then Jobs, Sessions (no Statu
   const nav = html.match(/<nav id="tabs"[^>]*>([\s\S]*?)<\/nav>/)![1]!;
   const labels = [...nav.matchAll(/<a [^>]*>([\s\S]*?)<\/a>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
   assert.deepEqual(labels.map((l) => l.split(" ")[0]), ["Assistant", "Jobs", "Sessions"]);
-  assert.match(html, /<h1 class="brand"><button type="button" id="brandbtn" aria-label="ORBIT: Refresh page" title="Refresh page"><img src="\/avatar.png" alt=""><span class="wordmark">ORBIT<\/span><\/button><\/h1>/);
+  assert.match(html, /<h1 class="brand"><a id="brandbtn" href="\/" aria-label="ORBIT: Refresh page" title="Refresh page"><img src="\/avatar.png" alt=""><span class="wordmark">ORBIT<\/span><\/a><\/h1>/);
   assert.doesNotMatch(html, /id="health"/, "no status indicator in the page header");
   assert.doesNotMatch(html.match(/<header>[\s\S]*?<\/header>/)![0], /statusline|All live/, "nor the status line");
   const dot = html.match(/<button type="button" role="tab" id="sidetab-status"[^>]*>/)![0];

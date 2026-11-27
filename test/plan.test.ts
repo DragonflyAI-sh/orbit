@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { brief, datedEntry, dayIn, humanize, planOverview, projectDetail, sortCards, STALE_DAYS } from "../src/plan.ts";
+import { brief, datedEntry, dayIn, humanize, planOverview, projectDetail, projectSummary, sortCards, STALE_DAYS } from "../src/plan.ts";
 import type { ProjectCard } from "../src/plan.ts";
 import { OWNER, rig } from "./threads-fixture.ts";
 
@@ -125,6 +125,43 @@ test("detail: timeline, blockers, next steps, recent activity in Rai's time, lin
   for (const bad of ["../now", "inner/nested", "", ".hidden"]) assert.equal(projectDetail(notes(VAULT), bad, NOW), undefined, bad);
 });
 
+test("sidebar summary: the card with its next steps, first blocker, next date and the open tasks not already a next step", () => {
+  const v = notes(VAULT);
+  const roof = projectSummary(v, "roof", NOW)!;
+  assert.deepEqual([roof.id, roof.title, roof.state, roof.health, roof.priority, roof.summary], ["roof", "Roof", "active", "red", 1, "A dry roof."]);
+  assert.deepEqual(roof.nextSteps, ["Call the roofer", "Chase the quote (due 2026-11-28)"]);
+  assert.deepEqual([roof.blocker, roof.blockers, roof.overdue, roof.target], ["Waiting on the roofer's quote", 2, true, "2026-11-01"]);
+  // The past target is not "next"; a milestone ahead wins over a task's due date.
+  assert.deepEqual(roof.milestone, { date: "2026-12-10", label: "Shingles delivered", kind: "milestone", done: false });
+  assert.deepEqual([roof.openTasks, roof.tasks, roof.tasksMore], [1, [], 0], "the open task is already a next step; the done one is not counted");
+
+  // Open tasks beyond the next steps are listed (soonest due first), a few at most; the rest are counted.
+  const many = notes({
+    "Projects/many.md": "---\nstatus: active\n---\n# Many\n\n## Next actions\n- One\n- Two\n- Three\n",
+    ...Object.fromEntries(["a", "b", "c", "d", "e"].map((x, i) => [`Tasks/${x}.md`, `---\nstatus: todo\nproject: "[[many]]"\n${i < 2 ? `due: 2026-12-0${i + 2}\n` : ""}---\n# Task ${x.toUpperCase()}\n`])),
+    "Tasks/done.md": "---\nstatus: done\nproject: \"[[many]]\"\n---\n# Done task\n",
+  });
+  const m = projectSummary(many, "many", NOW)!;
+  assert.deepEqual(m.nextSteps, ["One", "Two", "Three"]);
+  assert.deepEqual(m.tasks.map((t) => [t.title, t.due]), [["Task A", "2026-12-02"], ["Task B", "2026-12-03"], ["Task C", null]]);
+  assert.deepEqual([m.openTasks, m.tasksMore], [5, 2]);
+  assert.deepEqual(m.milestone, { date: "2026-12-02", label: "Task A", kind: "due", done: false }, "without a milestone or target, the next task due date");
+
+  // A sparse note: nothing is made up.
+  const sparse = projectSummary(notes({ "Projects/bare.md": "---\nstatus: active\n---\n" }), "bare", NOW)!;
+  assert.deepEqual([sparse.title, sparse.summary, sparse.nextSteps, sparse.blocker, sparse.milestone, sparse.openTasks, sparse.tasks, sparse.progress, sparse.target, sparse.priority],
+    ["bare", "", [], "", null, 0, [], null, null, null]);
+  // A done project has no next date or blocker.
+  const shed = projectSummary(v, "shed", NOW)!;
+  assert.deepEqual([shed.state, shed.milestone, shed.blocker], ["done", null, ""]);
+  // The same ids as the detail: none for a missing note or a path.
+  for (const bad of ["nope", "../now", "inner/nested", ""]) assert.equal(projectSummary(v, bad, NOW), undefined, bad);
+  // Masked like the rest of the Plan.
+  const secret = fakeSecret();
+  const s = projectSummary(notes({ "Projects/p.md": `---\nstatus: active\n---\n# P\n\n## Outcome\nKeep ${secret} safe.\n\n## Blockers\n- ${secret}\n`, "Tasks/t.md": `---\nstatus: todo\nproject: p\n---\n# ${secret}\n` }), "p", NOW)!;
+  assert.doesNotMatch(JSON.stringify(s), new RegExp(secret.slice(-20)));
+});
+
 // Names people give projects: every card the overview draws opens (a regression from the first Plan views, which turned
 // these away as "No such project").
 const ODD_NAMES = ["Café Rebuild, Q4 (plan)", "Mom's 70th", "  spaced  out ", "50% & more + [draft] #2", "Ünïcødé 漢字 ✓", ".dotted", "a".repeat(200)];
@@ -180,12 +217,24 @@ test("GET /sidebar carries the plan overview; GET /sidebar/project gives one pro
     assert.equal(res.data.project.path, `Projects/${id}.md`);
   }
   assert.equal((await r.api("/sidebar/project?id=roof", "POST", {})).status, 405);
+  // The selected project's sidebar summary rides on GET /sidebar, for the id the selector resolved to; none for all projects
+  // or a project that is not active.
+  assert.equal(all.data.planSummary, null);
+  const scoped = await r.api("/sidebar?project=roof");
+  assert.equal(scoped.data.project.id, "roof");
+  assert.deepEqual([scoped.data.planSummary.id, scoped.data.planSummary.blocker, scoped.data.planSummary.milestone.label], ["roof", "Waiting on the roofer's quote", "Shingles delivered"]);
+  assert.deepEqual(scoped.data.overview.projects.map((c: any) => c.id), all.data.overview.projects.map((c: any) => c.id), "the overview does not follow the selector");
+  const gone = await r.api("/sidebar?project=shed");
+  assert.deepEqual([gone.data.project, gone.data.unknownProject, gone.data.planSummary], [null, "shed", null]);
   r.caller.who = "someone@example.com";
   for (const path of ["/sidebar/project?id=roof", "/sidebar"]) {
     const res = await r.api(path);
     assert.equal(res.status, 403, path);
     assert.doesNotMatch(JSON.stringify(res.data), /roof|Fifty/i, `${path}: nothing of the vault`);
   }
+  const scopedOther = await r.api("/sidebar?project=roof");
+  assert.equal(scopedOther.status, 403);
+  assert.doesNotMatch(JSON.stringify(scopedOther.data), /roof|Fifty/i, "no summary for anyone else");
   r.caller.who = OWNER;
 });
 
