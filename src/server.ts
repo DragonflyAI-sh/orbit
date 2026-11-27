@@ -1434,7 +1434,11 @@ export function buildServer({
           const raw = url.searchParams.get("limit");
           return send(res, 200, gallery.list({ cursor: url.searchParams.get("cursor") || undefined, limit: raw === null ? undefined : Number(raw) }));
         }
-        if (galleryRoute === "search") return send(res, 200, await gallery.search(url.searchParams.get("q") ?? ""));
+        if (galleryRoute === "search") {
+          // diagnose=1 (opt-in, this owner-only route): stage counts for the semantic search; target=<ref> adds one photo's path.
+          const diagnose = url.searchParams.get("diagnose") === "1" ? { ...(url.searchParams.get("target") ? { target: url.searchParams.get("target")! } : {}) } : undefined;
+          return send(res, 200, await gallery.search(url.searchParams.get("q") ?? "", diagnose ? { diagnose } : {}));
+        }
         const got = gallery.detail(url.pathname.slice("/gallery/photos/".length));
         return got ? send(res, 200, got) : send(res, 404, { error: "No such photo is visible to the Assistant." });
       } catch (err) {
