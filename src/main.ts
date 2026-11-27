@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { tailscaleIdentify } from "./identity.ts";
+import { PERSONA } from "./persona.ts";
 import { buildIngress } from "./ingress.ts";
 import { jobLauncher } from "./job-launch.ts";
 import { jobSecret, jobs as jobRegistry } from "./jobs.ts";
@@ -55,7 +56,7 @@ import { selectWorkspace } from "./workspace/select.ts";
 import { wsHostClient } from "./ops-ws-client.ts";
 import { WS_SOCKET_PATH } from "./ops/ws-protocol.ts";
 
-const port = Number(process.env.PORT ?? 8790);
+const port = Number(process.env.PORT ?? PERSONA.port);
 const host = process.env.HOST ?? "127.0.0.1";
 const commit = process.env.ORBIT_COMMIT ?? "unknown";
 const deployState = process.env.ORBIT_DEPLOY_STATE;

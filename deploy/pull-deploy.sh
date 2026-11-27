@@ -13,8 +13,12 @@
 # A drill reports PASSED (exit 0) only when all three hold: the candidate was activated and restarted, the intended smoke failure
 # was observed (the candidate answered /status with a commit other than the sentinel), and the known-good release was verified restored.
 set -euo pipefail
-ROOT="${ORBIT_DEPLOY_ROOT:-/opt/orbit}"
-REPO=DragonflyAI-sh/orbit
+# One host can run several instances of the platform (ORBIT, Nova, ...). Each has its own root, service, env file and repo;
+# the defaults are ORBIT's, so ORBIT's installed timer needs no new settings (deploy/install-instance.sh sets them for others).
+SERVICE="${ORBIT_INSTANCE:-orbit}"
+case "$SERVICE" in *[!a-z0-9-]*|"") echo "pull-deploy: ORBIT_INSTANCE must be lowercase letters, digits and dashes" >&2; exit 64 ;; esac
+ROOT="${ORBIT_DEPLOY_ROOT:-/opt/$SERVICE}"
+REPO="${ORBIT_DEPLOY_REPO:-DragonflyAI-sh/orbit}"
 STATE="$ROOT/state"
 mode=deploy
 case "${1:-}" in
@@ -35,7 +39,7 @@ if ! flock -w "$lock_wait" 9; then
 fi
 
 # shellcheck source=/dev/null
-. "$ROOT/orbit.env"
+. "$ROOT/$SERVICE.env"
 HEALTH_ATTEMPTS="${ORBIT_HEALTH_ATTEMPTS:-15}"
 HEALTH_SLEEP="${ORBIT_HEALTH_SLEEP:-2}"
 CURL_CONNECT_TIMEOUT="${ORBIT_CURL_CONNECT_TIMEOUT:-2}"
@@ -77,12 +81,12 @@ rollback_failed() { # rollback_failed <reason> <previous> <previous-commit> <can
 rollback_to() { # rollback_to <previous> <previous-commit> <candidate>
   local previous="$1" prev_commit="$2" candidate="$3"
   if [ -z "$previous" ] || [ ! -d "$previous" ]; then
-    systemctl stop orbit || true
+    systemctl stop "$SERVICE" || true
     echo "deploy: no previous release; orbit stopped"
     return 1
   fi
   if ! point "$previous"; then rollback_failed "could not switch current back to the known-good release" "$previous" "$prev_commit" "$candidate"; return 2; fi
-  if ! systemctl restart orbit; then rollback_failed "orbit failed to restart on the known-good release" "$previous" "$prev_commit" "$candidate"; return 2; fi
+  if ! systemctl restart "$SERVICE"; then rollback_failed "orbit failed to restart on the known-good release" "$previous" "$prev_commit" "$candidate"; return 2; fi
   if [ -z "$prev_commit" ]; then
     # Legacy release without a COMMIT file: restore it anyway (better than leaving the failed candidate), but identity cannot be proven.
     rollback_failed "restored $previous and restarted orbit, but UNVERIFIED: that release has no COMMIT, so what /status serves cannot be proven to be it" "$previous" "" "$candidate"
@@ -98,7 +102,7 @@ rollback_to() { # rollback_to <previous> <previous-commit> <candidate>
 # SWITCH_OUTCOME says why the candidate did not go live, so callers never have to guess from the return code:
 #   healthy            candidate served the expected commit (return 0)
 #   activation-failed  could not point current at the candidate; the restart was never attempted
-#   restart-failed     systemctl restart orbit failed on the candidate
+#   restart-failed     systemctl restart "$SERVICE" failed on the candidate
 #   smoke-failed       restarted fine but /status never served the expected commit; SMOKE_SEEN is the commit it did serve (empty = no answer)
 SWITCH_OUTCOME=""
 SMOKE_SEEN=""
@@ -117,7 +121,7 @@ switch_and_verify() { # switch_and_verify <candidate-dir> <expected-commit> <pre
     [ "$rc" = 2 ] && return 2
     return 1
   fi
-  if systemctl restart orbit; then
+  if systemctl restart "$SERVICE"; then
     if healthy "$expected"; then SWITCH_OUTCOME=healthy; return 0; fi
     SWITCH_OUTCOME=smoke-failed; SMOKE_SEEN="$LAST_SEEN"
     echo "deploy: $expected failed its smoke test"

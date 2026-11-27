@@ -1,0 +1,2 @@
+# Paths this instance owns. tools/sync-platform.sh never overwrites or deletes them; everything else is the platform.
+persona/
