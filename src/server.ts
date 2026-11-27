@@ -833,7 +833,7 @@ export function buildServer({
       }
     }
 
-    // The page is served at / (the Assistant, /#assistant, /#jobs) and at its Sessions addresses: /sessions and
+    // The page is served at / (Home, /#home, /#assistant, /#jobs and the other in-page views) and at its Sessions addresses: /sessions and
     // /sessions/<session id> (docs/threads.md, "Addresses"). Which session an address names is the page's business (an
     // invalid one is reported there, never fetched); the server only serves the page, so a reload or a direct link works.
     if (req.method === "GET" && isPageRoute(url.pathname)) {

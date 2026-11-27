@@ -9,7 +9,7 @@ import vm from "node:vm";
 import { IMPORT_SCOPE } from "../src/attachments.ts";
 import { metadataSegments, normalizeJpeg } from "../src/jpeg.ts";
 import { photoPolicy, photoReach, photoRef } from "../src/photo-access.ts";
-import { applyImport, APPROVALS_FORMAT, EXPORT_FORMAT, ImportError, knownProjects, planImport, readOnlyIndex, reportOf, revertImport, storeIndex } from "../src/photo-import.ts";
+import { applyImport, APPROVALS_FORMAT, EXPORT_FORMAT, ImportError, knownProjects, planDigest, planImport, readOnlyIndex, reportOf, revertImport, storeIndex } from "../src/photo-import.ts";
 import { importLedger } from "../src/photo-import-ledger.ts";
 import { galleryRig } from "./helpers/gallery-fixture.ts";
 import { encodeJpeg, pattern, smallJpeg, withMetadata } from "./jpeg-fixture.ts";
@@ -268,6 +268,86 @@ test("revert: the batch's photos and links disappear, only imported files are de
   assert.throws(() => revertImport("ib_0000000000000000", { attachments: g.attachments, ledger }), /No such import batch/);
 });
 
+// PR #183/#184 reviews: when the same bytes are stored twice (an imported photo later sent again in a chat), which copy the dry run,
+// apply and putImported chose depended on directory or map order, so a rerun could call an imported item "imported earlier with
+// different bytes". The imported copy now always wins, then the lowest id.
+test("duplicates: the imported copy is chosen whatever order the store lists the copies in, in the dry run and in apply", () => {
+  const sha256 = "ab".repeat(32);
+  const imp = { id: `a${"9".repeat(32)}`, scope: IMPORT_SCOPE, state: "bound", sha256 };
+  const chatA = { id: `a${"1".repeat(32)}`, scope: "assistant", state: "bound", sha256 };
+  const chatB = { id: `a${"5".repeat(32)}`, scope: "chat:t1", state: "bound", sha256 };
+  for (const order of [[chatA, imp, chatB], [imp, chatB, chatA], [chatB, chatA, imp]]) {
+    const store = { withSha256: () => order.map((m) => ({ ...m })) } as any;
+    assert.equal(storeIndex(store).bySha(sha256)?.id, imp.id);
+    const dir = mkdtempSync(join(tmpdir(), "orbit-attachments-"));
+    for (const m of order) writeFileSync(join(dir, `${m.id}.json`), JSON.stringify(m));
+    assert.equal(readOnlyIndex(dir).bySha(sha256)?.id, imp.id);
+  }
+  // Without an imported copy: the lowest id, the same both ways.
+  const store = { withSha256: () => [{ ...chatB }, { ...chatA }] } as any;
+  assert.equal(storeIndex(store).bySha(sha256)?.id, chatA.id);
+  const dir = mkdtempSync(join(tmpdir(), "orbit-attachments-"));
+  for (const m of [chatB, chatA]) writeFileSync(join(dir, `${m.id}.json`), JSON.stringify(m));
+  assert.equal(readOnlyIndex(dir).bySha(sha256)?.id, chatA.id);
+});
+
+test("duplicates: a photo imported and then sent in a conversation is still 'already imported' on a rerun, and apply finishes an orphan", async () => {
+  const g = await galleryRig();
+  const root = bundle([item("one", "1.jpg")], { "1.jpg": smallJpeg(111) });
+  const ledger = importLedger(join(g.dir, "photo-imports"));
+  const first = applyImport(planImport({ root, existing: storeIndex(g.attachments), ledger }), { root, attachments: g.attachments, ledger });
+  assert.equal(first.imported.length, 1);
+  // The same bytes sent in a conversation: a second, chat-scope copy with the same SHA-256.
+  const stored = g.attachments.bound().find((m) => m.scope === IMPORT_SCOPE)!;
+  const bytes = g.attachments.read(stored.id, IMPORT_SCOPE)!;
+  const up = await fetch(`${g.base}/assistant/attachments`, { method: "POST", headers: { "content-type": "image/jpeg" }, body: new Uint8Array(bytes) });
+  assert.equal(up.status, 201);
+  const chatId = ((await up.json()) as any).attachment.id as string;
+  assert.equal((await g.api("/assistant/messages", "POST", { text: "the same photo again", attachments: [chatId] })).status, 200);
+  const copies = g.attachments.withSha256(stored.sha256).filter((m) => m.state === "bound");
+  assert.deepEqual(copies.map((m) => m.scope).sort(), ["assistant", IMPORT_SCOPE].sort(), "two stored copies of the same bytes");
+  // putImported (an interrupted import's retry) reuses the imported copy, not the conversation's.
+  assert.equal(g.attachments.putImported(bytes, { width: stored.width, height: stored.height }, "2026-11-27T00:00:00Z").meta.id, stored.id);
+  const rerunDry = planImport({ root, existing: readOnlyIndex(join(g.dir, "attachments")), ledger });
+  const rerunApply = planImport({ root, existing: storeIndex(g.attachments), ledger });
+  assert.deepEqual(rerunDry.items.map((i) => i.status), ["already-imported"]);
+  assert.deepEqual(rerunApply.items.map((i) => i.status), ["already-imported"]);
+  assert.equal(planDigest(rerunDry), planDigest(rerunApply), "the dry run and apply describe the same plan");
+});
+
+// PR #184 review: entries that fail validation were dropped on load and then lost at the next write, despite "a damaged ledger is
+// never overwritten".
+test("ledger: entries that break the contract are not served, and the ledger refuses to rewrite (and lose) them", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orbit-ledger-"));
+  const ledger = importLedger(dir);
+  ledger.mutate((f) => void f.batches.push({ id: "ib_0123456789abcdef", source: "openclaw", manifestSha256: "c".repeat(64), at: "2026-11-27T00:00:00Z", state: "applied", items: 0 }));
+  const file = join(dir, "ledger.json");
+  const x = JSON.parse(readFileSync(file, "utf8"));
+  x.photos.push({ attachment: "not-an-id", ref: "?", junk: true });
+  writeFileSync(file, JSON.stringify(x));
+  const before = readFileSync(file, "utf8");
+  const fresh = importLedger(dir);
+  assert.match(fresh.problem() ?? "", /1 ledger entry broke the contract/);
+  assert.equal(fresh.batches().length, 1, "the valid entries are still served");
+  assert.throws(() => fresh.mutate((f) => void f.links.splice(0)), /break its contract.*nothing was changed/);
+  assert.equal(readFileSync(file, "utf8"), before, "the file is left as it was");
+});
+
+test("revert: a stored file that cannot be removed is reported (the batch is already hidden), not thrown as if nothing happened", async () => {
+  const g = await galleryRig();
+  const root = bundle([item("r1", "1.jpg"), item("r2", "2.jpg")], { "1.jpg": smallJpeg(121), "2.jpg": smallJpeg(122) });
+  const ledger = importLedger(join(g.dir, "photo-imports"));
+  const r = applyImport(planImport({ root, existing: storeIndex(g.attachments), ledger }), { root, attachments: g.attachments, ledger });
+  const stuck = r.imported[0]!.ref;
+  const stuckId = g.attachments.bound().find((m) => photoRef(m.id) === stuck)!.id;
+  const attachments = new Proxy(g.attachments, { get: (t, k) => (k === "removeImported" ? (id: string) => { if (id === stuckId) throw new Error("synthetic EACCES"); return t.removeImported(id); } : (t as any)[k]) });
+  const undo = revertImport(r.batch, { attachments, ledger });
+  assert.equal(undo.photosHidden, 2);
+  assert.equal(undo.filesRemoved, 1);
+  assert.deepEqual(undo.removeFailed, [{ ref: stuck, reason: "synthetic EACCES" }]);
+  assert.equal(ledger.photos().length, 0, "the batch is hidden");
+});
+
 test("malformed manifests are refused whole, before anything is read", () => {
   const ledger = importLedger(undefined);
   const existing = readOnlyIndex(undefined);
@@ -284,7 +364,7 @@ test("malformed manifests are refused whole, before anything is read", () => {
   bad(JSON.stringify({ format: EXPORT_FORMAT, source: "openclaw", items: {} }), /items must be a list/);
 });
 
-test("CLI: dry run by default and prints no private text; apply and revert refuse unless ORBIT is stopped and the reviewed manifest matches", () => {
+test("CLI: dry run by default and prints no private text; apply and revert refuse unless ORBIT is stopped and the reviewed plan matches", () => {
   const state = mkdtempSync(join(tmpdir(), "orbit-state-"));
   const root = bundle([item("cli-1", "a.jpg", { caption: "Synthetic CLI caption" })], { "a.jpg": smallJpeg(91) });
   const cli = (...a: string[]) => spawnSync(process.execPath, ["tools/photo-import/import.ts", ...a], { encoding: "utf8" });
@@ -293,15 +373,24 @@ test("CLI: dry run by default and prints no private text; apply and revert refus
   const report = JSON.parse(dry.stdout);
   assert.equal(report.dryRun, true);
   assert.equal(report.plan.counts.importable, 1);
+  assert.match(report.plan.planSha256, /^[0-9a-f]{64}$/);
+  assert.match(report.next, /--reviewed-plan-sha256/);
   assert.ok(!dry.stdout.includes("Synthetic CLI caption") && !dry.stdout.includes("a.jpg") && !dry.stdout.includes(root));
   assert.deepEqual(readdirSync(state), [], "a dry run creates nothing in the state directory");
-  const noStop = cli("--export", root, "--state", state, "--apply", "--reviewed-manifest-sha256", report.plan.manifestSha256);
+  const noStop = cli("--export", root, "--state", state, "--apply", "--reviewed-plan-sha256", report.plan.planSha256);
   assert.equal(noStop.status, 2);
   assert.match(JSON.parse(noStop.stdout).why, /stop ORBIT/);
-  const wrong = cli("--export", root, "--state", state, "--apply", "--reviewed-manifest-sha256", "f".repeat(64), "--orbit-stopped");
+  // The manifest hash alone no longer applies anything: the reviewed plan's digest is required.
+  const manifestOnly = cli("--export", root, "--state", state, "--apply", "--reviewed-manifest-sha256", report.plan.manifestSha256, "--orbit-stopped");
+  assert.equal(manifestOnly.status, 2);
+  assert.match(JSON.parse(manifestOnly.stdout).why, /--reviewed-plan-sha256/);
+  const wrong = cli("--export", root, "--state", state, "--apply", "--reviewed-plan-sha256", "f".repeat(64), "--orbit-stopped");
   assert.equal(wrong.status, 2);
-  assert.match(JSON.parse(wrong.stdout).why, /manifest changed/);
-  const ok = cli("--export", root, "--state", state, "--apply", "--reviewed-manifest-sha256", report.plan.manifestSha256, "--orbit-stopped");
+  assert.match(JSON.parse(wrong.stdout).why, /plan changed since the reviewed dry run/);
+  const wrongManifest = cli("--export", root, "--state", state, "--apply", "--reviewed-plan-sha256", report.plan.planSha256, "--reviewed-manifest-sha256", "f".repeat(64), "--orbit-stopped");
+  assert.equal(wrongManifest.status, 2);
+  assert.match(JSON.parse(wrongManifest.stdout).why, /manifest changed/);
+  const ok = cli("--export", root, "--state", state, "--apply", "--reviewed-plan-sha256", report.plan.planSha256, "--reviewed-manifest-sha256", report.plan.manifestSha256, "--orbit-stopped");
   assert.equal(ok.status, 0, ok.stdout);
   const applied = JSON.parse(ok.stdout);
   assert.equal(applied.result.imported.length, 1);
@@ -310,6 +399,45 @@ test("CLI: dry run by default and prints no private text; apply and revert refus
   assert.equal(undo.status, 0, undo.stdout);
   assert.equal(JSON.parse(undo.stdout).reverted.filesRemoved, 1);
   assert.equal(cli("--state", state, "--bogus").status, 2);
+});
+
+// PR #183/#184 reviews: apply was pinned only to the manifest's hash, so a photo swapped in the export folder, or a different approvals
+// file, went through after the owner reviewed the dry run. Apply now refuses unless the rebuilt plan's digest is the reviewed one.
+test("CLI: apply refuses, changing nothing, when a photo or the approvals changed after the reviewed dry run", () => {
+  const state = mkdtempSync(join(tmpdir(), "orbit-state-"));
+  const projects = vaultProjects(["Alpha", "Beta"]);
+  const root = bundle([item("i1", "1.jpg", { projects: [{ project: "Projects/Alpha.md", evidence: "explicit", basis: "tag" }, { project: "Projects/Beta.md", evidence: "explicit", basis: "tag" }] }), item("i2", "2.jpg")], { "1.jpg": smallJpeg(101), "2.jpg": smallJpeg(102) });
+  const cli = (...a: string[]) => spawnSync(process.execPath, ["tools/photo-import/import.ts", "--export", root, "--state", state, "--projects-dir", projects, ...a], { encoding: "utf8" });
+  const manifestSha256 = sha(readFileSync(join(root, "orbit-photo-export.json")));
+  const approvals = (project: string) => {
+    const f = join(mkdtempSync(join(tmpdir(), "orbit-approvals-")), "approvals.json");
+    writeFileSync(f, JSON.stringify({ format: APPROVALS_FORMAT, manifestSha256, links: { i1: project } }));
+    return f;
+  };
+  const toAlpha = approvals("Projects/Alpha.md"), toBeta = approvals("Projects/Beta.md");
+  const dry = JSON.parse(cli("--approvals", toAlpha).stdout);
+  const reviewed = dry.plan.planSha256;
+  assert.equal(dry.plan.items.find((i: any) => i.item === "i1").link.project, "Projects/Alpha.md");
+  // A different approvals file (same manifest): the link would change, so apply refuses.
+  const swappedApprovals = cli("--approvals", toBeta, "--apply", "--reviewed-plan-sha256", reviewed, "--orbit-stopped");
+  assert.equal(swappedApprovals.status, 2, swappedApprovals.stdout);
+  assert.match(JSON.parse(swappedApprovals.stdout).why, /plan changed since the reviewed dry run/);
+  assert.equal(JSON.parse(swappedApprovals.stdout).changed, false);
+  // A photo's bytes replaced by another valid JPEG (same manifest, same approvals): apply refuses.
+  const original = readFileSync(join(root, "1.jpg"));
+  writeFileSync(join(root, "1.jpg"), smallJpeg(103));
+  const swappedPhoto = cli("--approvals", toAlpha, "--apply", "--reviewed-plan-sha256", reviewed, "--orbit-stopped");
+  assert.equal(swappedPhoto.status, 2, swappedPhoto.stdout);
+  assert.match(JSON.parse(swappedPhoto.stdout).why, /plan changed since the reviewed dry run/);
+  assert.equal(importLedger(join(state, "photo-imports")).photos().length, 0, "nothing was imported");
+  assert.equal(importLedger(join(state, "photo-imports")).links().length, 0, "nothing was linked");
+  // Exactly what was reviewed: it applies.
+  writeFileSync(join(root, "1.jpg"), original);
+  const ok = cli("--approvals", toAlpha, "--apply", "--reviewed-plan-sha256", reviewed, "--orbit-stopped");
+  assert.equal(ok.status, 0, ok.stdout);
+  const done = JSON.parse(ok.stdout);
+  assert.equal(done.result.imported.length, 2);
+  assert.deepEqual(done.result.linked.map((l: any) => [l.item, l.project]), [["i1", "Projects/Alpha.md"]]);
 });
 
 test("the gallery page's helpers: an imported photo says where it came from, project links are read-only text, backfill context is named", () => {

@@ -14,15 +14,16 @@
   // It defines no syntax colours: those (--tk-*) are inherited from the light or dark theme through data-theme. `scheme` is
   // the colour scheme it is drawn for (it also sets data-theme, so native controls, the syntax colours and every
   // theme-aware rule follow). `cards` and `bgs` are the surfaces an accent must stay visible on (3:1); Classic can show
-  // either of its themes (the header's Light, Dark or System), so an accent there must suit both. `swatch` is shown next to
+  // either of its themes (the header's Light, Dark or System), so an accent there must suit both. `fgs` is each theme's text
+  // colour, in the same order as `cards` and `bgs` (see accentText). `swatch` is shown next to
   // the name (page, card, accent). A test checks these colours against the CSS. How to add one: docs/appearance.md.
   const PRESETS = {
     classic: { name: "Classic", note: "Today's look. Light, Dark or System from the theme menu.", scheme: null,
-      cards: ["#fdfcff", "#11142b"], bgs: ["#f4f2fb", "#080a1a"], themeColor: null, swatch: ["#f4f2fb", "#6d4fd8", "#080a1a"] },
+      cards: ["#fdfcff", "#11142b"], bgs: ["#f4f2fb", "#080a1a"], fgs: ["#1c1838", "#e4e1fa"], themeColor: null, swatch: ["#f4f2fb", "#6d4fd8", "#080a1a"] },
     warm: { name: "Warm light", note: "Cream paper, brown ink and a terracotta accent.", scheme: "light",
-      cards: ["#fffcf6"], bgs: ["#f5efe4"], themeColor: "#f5efe4", swatch: ["#f5efe4", "#a5481f", "#2b2119"] },
+      cards: ["#fffcf6"], bgs: ["#f5efe4"], fgs: ["#2b2119"], themeColor: "#f5efe4", swatch: ["#f5efe4", "#a5481f", "#2b2119"] },
     cool: { name: "Cool dark", note: "Slate and teal, easy on the eyes in low light.", scheme: "dark",
-      cards: ["#132024"], bgs: ["#0b1316"], themeColor: "#0b1316", swatch: ["#0b1316", "#3fb8ad", "#dde9ec"] },
+      cards: ["#132024"], bgs: ["#0b1316"], fgs: ["#dde9ec"], themeColor: "#0b1316", swatch: ["#0b1316", "#3fb8ad", "#dde9ec"] },
   };
   // ---- UI fonts: faces that are already on the device (nothing is downloaded, no font files). Each stack ends in a generic family, so
   // something always renders. Code and the editor keep --font-mono whatever is chosen here.
@@ -96,6 +97,26 @@
     return { ok: true, ratio: worst, hex, on: onAccent(hex), message: "" };
   }
 
+  // The accent as text. The accent only has to reach 3:1 (it marks controls), but the user's own name in each message is
+  // drawn in it as normal-size text, which needs 4.5:1 (WCAG AA). So a custom accent gets a text shade: the accent mixed
+  // with the theme's own text colour (var(--fg), which flips with the theme, so one value suits both of Classic's), using
+  // as much of the accent as still reads at 4.5:1 on every card and page of the look, with a little margin for rounding.
+  // `pct` is the accent's share (100 means the accent itself reads); `css` is the value for --accent-text.
+  const TEXT_GOAL = MIN_TEXT + 0.1;
+  function mixHex(a, b, pct) {
+    const ch = (h, i) => parseInt(h.slice(i, i + 2), 16);
+    return "#" + [1, 3, 5].map((i) => Math.round(ch(a, i) * pct / 100 + ch(b, i) * (100 - pct) / 100).toString(16).padStart(2, "0")).join("");
+  }
+  function accentText(accent, presetId) {
+    const hex = normHex(accent);
+    if (!hex) return null;
+    const p = PRESETS[own(PRESETS, presetId) ? presetId : "classic"];
+    const reads = (pct) => p.fgs.every((fg, i) => { const c = mixHex(hex, fg, pct); return contrast(c, p.cards[i]) >= TEXT_GOAL && contrast(c, p.bgs[i]) >= TEXT_GOAL; });
+    let pct = 100;
+    while (pct > 0 && !reads(pct)) pct -= 5;
+    return { pct, css: pct === 100 ? hex : `color-mix(in srgb, ${hex} ${pct}%, var(--fg))` };
+  }
+
   // ---- Validation. Every field is checked on its own; a bad one becomes its default and is reported, the rest are kept.
   function normalize(raw) {
     const prefs = { ...DEFAULTS }, problems = [];
@@ -118,7 +139,6 @@
     return normalize(raw);
   }
   const isDefault = (p) => Object.keys(DEFAULTS).every((k) => p[k] === DEFAULTS[k]);
-  const same = (a, b) => Object.keys(DEFAULTS).every((k) => a[k] === b[k]);
   function serialize(prefs) {
     const p = normalize(prefs).prefs;
     return JSON.stringify({ v: VERSION, preset: p.preset, accent: p.accent, font: p.font, size: p.size });
@@ -157,7 +177,8 @@
     const acc = p.accent ? checkAccent(p.accent, p.preset) : null;
     if (acc && acc.ok) {
       st.setProperty("--accent", acc.hex); st.setProperty("--on-accent", acc.on); st.setProperty("--accent-end", acc.hex);
-    } else { st.removeProperty("--accent"); st.removeProperty("--on-accent"); st.removeProperty("--accent-end"); }
+      st.setProperty("--accent-text", accentText(acc.hex, p.preset).css);
+    } else { for (const k of ["--accent", "--on-accent", "--accent-end", "--accent-text"]) st.removeProperty(k); }
     if (FONTS[p.font].stack) st.setProperty("--font-sans", FONTS[p.font].stack); else st.removeProperty("--font-sans");
     if (SIZES[p.size].scale !== 1) st.setProperty("--text-scale", String(SIZES[p.size].scale)); else st.removeProperty("--text-scale");
     const doc = root.ownerDocument;
@@ -282,7 +303,7 @@
     apply(doc.documentElement, read(storage).prefs, storage);
   }
 
-  global.OrbitAppearance = { KEY, VERSION, PRESETS, FONTS, SIZES, ACCENTS, DEFAULTS, normalize, parse, serialize, read, write, checkAccent, contrast, onAccent,
-    apply, scheme, presetName, mount, isDefault, same, current: () => ({ ...current }) };
+  global.OrbitAppearance = { KEY, VERSION, PRESETS, FONTS, SIZES, ACCENTS, DEFAULTS, normalize, parse, serialize, read, write, checkAccent, contrast, onAccent, accentText, mixHex,
+    apply, scheme, presetName, mount, isDefault, current: () => ({ ...current }) };
   boot();
 })(typeof window !== "undefined" ? window : globalThis);

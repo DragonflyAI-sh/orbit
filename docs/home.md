@@ -24,7 +24,11 @@ session, model mode or API: it sends with the Assistant's composer to `POST /ass
   In this first pass nothing feeds it, so it shows its quiet empty state ("Nothing to show yet."). It never infers anything
   from reply text, calls a model or stores anything.
 - Warnings about the conversation itself (kept in memory only, unreadable stored files) show on Home as on the Assistant.
-  The Assistant's task-attention strip, the context divider and "Load earlier messages" are Assistant-only.
+  The Assistant's task-attention strip, the context divider and "Load earlier messages" are Assistant-only. (Whether Home
+  should also show tasks that need attention is an open product question; for now they are seen on `/#assistant`.)
+- Since Home, a task-attention update that arrives while this page's own send is waiting no longer redraws the
+  conversation at once (that redraw dropped the "Working…" bubble, on the Assistant too); the strip catches up with the
+  draw that shows the send's answer.
 
 ## How it works
 
@@ -48,10 +52,15 @@ the Assistant at every width. Home, like the Assistant, is owner only: for anyon
 ## Narrow screens
 
 The header now has four page links. At 360 px and below they use slimmer padding and the small text size so all four and the
-sidebar's menu button still share one row (checked at 320 px by `test/sessions-nav-browser.test.ts` and
-`test/app-shell-browser.test.ts`). On Sessions in a short landscape phone (568×320) the open session's title moves to its own
-row under the links instead of squeezing beside them; the header is no taller than before and the session picker stays on
-screen.
+sidebar's menu button still share one row (checked at 320 px by `test/app-shell-browser.test.ts`, and at 360 px by
+`test/sessions-nav-browser.test.ts`).
+
+Between 561 px and 699 px (short landscape phones such as 568×320, and small tablets) the links share the top row with the
+brand and the theme button, so they use the same slimmer padding. Home, the Assistant and Jobs keep a one-row header there
+(57 px at 568×320, as before Home was added; checked at 568×320, 600×360 and 667×375 by `test/app-shell-browser.test.ts`).
+On Sessions below about 640 px the open session's title moves to its own row under the links instead of squeezing beside them,
+which makes that header two rows (99 px at 568×320, the same as before Home was added; from about 600 px to 640 px it was one row
+before the fourth link); the session picker stays on screen.
 
 ## Addresses
 

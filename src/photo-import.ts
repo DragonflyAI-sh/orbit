@@ -274,10 +274,16 @@ function linkFor(e: Entry, approvals: Approvals | undefined, projects: Set<strin
 
 // ---- planning (the dry run) ------------------------------------------------------------------------------------------------------------
 export type ExistingIndex = { bySha(sha256: string): { id: string; scope: string } | undefined };
+// When the same bytes are stored more than once (an imported photo later sent again in a conversation gives a second, chat copy), the
+// copy that counts is the same whatever order the store lists them in: an imported copy first (the one the ledger names), then the
+// lowest id. The dry run and apply therefore agree (the reviewed plan's digest depends on it).
+function preferred<T extends { id: string; scope: string }>(list: T[]): T | undefined {
+  return [...list].sort((a, b) => Number(b.scope === IMPORT_SCOPE) - Number(a.scope === IMPORT_SCOPE) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0];
+}
 // A read-only view of what is already stored, for a dry run: the attachment records' SHA-256 values, read without opening the store
 // (which would tidy the directory). Unreadable records are skipped.
 export function readOnlyIndex(attachmentsDir: string | undefined): ExistingIndex {
-  const map = new Map<string, { id: string; scope: string }>();
+  const map = new Map<string, { id: string; scope: string }[]>();
   if (attachmentsDir) {
     let names: string[] = [];
     try {
@@ -289,17 +295,17 @@ export function readOnlyIndex(attachmentsDir: string | undefined): ExistingIndex
       if (!/^a[0-9a-f]{32}\.json$/.test(n)) continue;
       try {
         const m = JSON.parse(readFileSync(join(attachmentsDir, n), "utf8")) as { id?: string; scope?: string; state?: string; sha256?: string };
-        if (typeof m.sha256 === "string" && typeof m.id === "string" && typeof m.scope === "string" && (m.state === "bound" || m.scope === IMPORT_SCOPE)) map.set(m.sha256, { id: m.id, scope: m.scope });
+        if (typeof m.sha256 === "string" && typeof m.id === "string" && typeof m.scope === "string" && (m.state === "bound" || m.scope === IMPORT_SCOPE)) map.set(m.sha256, [...(map.get(m.sha256) ?? []), { id: m.id, scope: m.scope }]);
       } catch {
         // not ours to judge here
       }
     }
   }
-  return { bySha: (sha) => map.get(sha) };
+  return { bySha: (sha) => preferred(map.get(sha) ?? []) };
 }
 export const storeIndex = (attachments: Attachments): ExistingIndex => ({
   bySha: (sha) => {
-    const m = attachments.withSha256(sha).find((x) => x.state === "bound" || x.scope === IMPORT_SCOPE);
+    const m = preferred(attachments.withSha256(sha).filter((x) => x.state === "bound" || x.scope === IMPORT_SCOPE));
     return m ? { id: m.id, scope: m.scope } : undefined;
   },
 });
@@ -362,12 +368,23 @@ export function planImport(o: { root: string; approvalsText?: string; projects?:
   return { format: EXPORT_FORMAT, source: manifest.source, manifestSha256: sha256, ...(approvals ? { approvalsSha256: approvals.sha256 } : {}), items, counts };
 }
 
+// The reviewed plan's digest: what apply will do, item by item. It covers the manifest and approvals hashes and, for every item, its
+// status, the SHA-256 of the normalized bytes that would be stored, the photo ref it is (or is already stored as) and its project link.
+// The dry run prints it; apply rebuilds the plan from the files as they are then and refuses unless the digest is the one the owner
+// reviewed, so a swapped photo, a changed approvals file or a store that changed in between never goes through unreviewed.
+export function planDigest(plan: ImportPlan): string {
+  const items = plan.items.map((i) => [i.item, i.status, i.sha256 ?? null, i.ref ?? null, i.link.status, i.link.project ?? null, i.link.evidence ?? null]);
+  const canon = JSON.stringify({ format: plan.format, source: plan.source, manifestSha256: plan.manifestSha256, approvalsSha256: plan.approvalsSha256 ?? null, items });
+  return createHash("sha256").update(canon).digest("hex");
+}
+
 // What may be printed or written as a report: item ids, statuses, reason codes, refs, hashes and project paths. Never captions,
 // pointers, file names or paths (the operator has the manifest).
 export function reportOf(plan: ImportPlan) {
   return {
     format: plan.format,
     source: plan.source,
+    planSha256: planDigest(plan),
     manifestSha256: plan.manifestSha256,
     ...(plan.approvalsSha256 ? { approvalsSha256: plan.approvalsSha256 } : {}),
     counts: plan.counts,
@@ -463,7 +480,17 @@ export function revertImport(batch: string, o: { attachments: Attachments; ledge
     b.revertedAt ??= at;
     return { photos, links, already, remaining: new Set(f.photos.map((p) => p.attachment)) };
   });
+  // The batch is already hidden (the ledger is written); a file that cannot be removed now is reported, not thrown, so the report says
+  // what changed. It is invisible without its ledger entry, and a later revert of the same batch cannot reach it, so it is named.
   let removed = 0;
-  for (const p of res.photos) if (!res.remaining.has(p.attachment) && o.attachments.removeImported(p.attachment)) removed++;
-  return { batch, alreadyReverted: res.already && !res.photos.length, photosHidden: res.photos.length, filesRemoved: removed, linksRemoved: res.links, refs: res.photos.map((p) => p.ref) };
+  const removeFailed: { ref: string; reason: string }[] = [];
+  for (const p of res.photos) {
+    if (res.remaining.has(p.attachment)) continue;
+    try {
+      if (o.attachments.removeImported(p.attachment)) removed++;
+    } catch (err) {
+      removeFailed.push({ ref: p.ref, reason: err instanceof Error ? err.message.slice(0, 200) : "unknown error" });
+    }
+  }
+  return { batch, alreadyReverted: res.already && !res.photos.length, photosHidden: res.photos.length, filesRemoved: removed, ...(removeFailed.length ? { removeFailed } : {}), linksRemoved: res.links, refs: res.photos.map((p) => p.ref) };
 }

@@ -303,6 +303,8 @@ const PAIRS: [string, string, number][] = [
   ["var(--fg)", "color-mix(in srgb, var(--accent) 8%, var(--card))", TEXT], ["var(--bg)", "var(--fg)", TEXT],
   ["var(--accent-2)", "var(--bg)", UI], ["var(--accent-2)", "var(--card)", UI], ["var(--accent)", "var(--card)", UI], ["var(--accent)", "var(--bg)", UI],
   ["var(--attention)", "var(--card)", UI], ["var(--danger)", "var(--card)", UI],
+  // The user's own name in each message is drawn in the accent's text shade (.msg.user .mname): normal-size text, so 4.5:1.
+  ["var(--accent-text, var(--accent))", "var(--bg)", TEXT], ["var(--accent-text, var(--accent))", "var(--card)", TEXT],
   ...["comment", "keyword", "string", "number", "fn", "type", "prop", "tag", "meta", "var"].map((t) => [`var(--tk-${t})`, "var(--card)", TEXT] as [string, string, number]),
 ];
 

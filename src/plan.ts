@@ -409,9 +409,11 @@ function readProject(notes: ReadonlyMap<string, string>, path: string, text: str
   const sidebarSummary = (): ProjectSummary => {
     const listed = new Set(nextSteps);
     const unlisted = openTasks.filter((t) => !listed.has(line(t.due ? `${t.title} (due ${t.due})` : t.title)));
-    // The next milestone or the target, today or later; else the next task due date (already a next step, most often).
+    // The next milestone or the target, today or later; else the next task due date, unless that task is already one of the
+    // next steps (they show its due date), so the summary never lists the same task twice.
     const ahead = state === "done" ? [] : timelineOf().filter((t) => !t.done && t.date >= today);
-    const milestone = ahead.find((t) => t.kind === "milestone" || t.kind === "target") ?? ahead.find((t) => t.kind === "due") ?? null;
+    const milestone = ahead.find((t) => t.kind === "milestone" || t.kind === "target")
+      ?? ahead.find((t) => t.kind === "due" && !listed.has(line(`${t.label} (due ${t.date})`))) ?? null;
     return {
       ...card,
       nextSteps,
