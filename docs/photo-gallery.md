@@ -63,6 +63,10 @@ Differences from the tools, on purpose:
   its top 3 candidates. Like `photos_search`, it searches the newest 500 photos and says how many older ones were not.
 - `photos_inspect` is not called: it supplies a photo to the model, and the page only needs to display it.
 
+## Imported photos, project links and backfilled observations
+
+Photos the operator imported from the legacy assistant (OpenClaw) are listed with the others, under their legacy send time, and are labelled as imported: "Sent (legacy)", "Imported", "Legacy item" and "Legacy caption", with a note that the photo is not a message sent in ORBIT and no conversation link. Only the Assistant's reach (and so this gallery) sees them; chat threads do not. A photo's detail may show a read-only **Projects** section: links the importer recorded from explicit or operator-approved evidence, never inferred. Observations saved by the operator backfill say "described by the operator backfill" with the context "operator backfill (not a conversation)". See `docs/photo-import-backfill.md`.
+
 ## Tests
 
 - `test/photo-gallery.test.ts`: the routes on the real server with photos, observations saved by `photos_observe` and a

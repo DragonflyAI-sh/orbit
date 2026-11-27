@@ -3,7 +3,10 @@ import { MAX_OUTPUT_CHARS } from "./agent.ts";
 import type { ChatTool, ToolImage, ToolResult } from "./agent.ts";
 import { GALLERY_ITEMS_MAX, isPhotoRef, PHOTO_REF_CONTRACT } from "./photo-ref.ts";
 import type { StoredGallery } from "./photo-ref.ts";
+import { IMPORT_SCOPE } from "./attachments.ts";
 import type { AttachmentMeta, Attachments } from "./attachments.ts";
+import { SOURCE_LABEL } from "./photo-import-ledger.ts";
+import type { ImportedPhoto } from "./photo-import-ledger.ts";
 import { isThreadId } from "./threads.ts";
 import type { PhotoMessage } from "./threads.ts";
 import { untrustedText } from "./sessions.ts";
@@ -52,9 +55,12 @@ export const photoRef = (attachmentId: string) => `ph_${createHash("sha256").upd
 
 // What the tools read of the conversation stores (src/threads.ts, src/assistant-store.ts photoSource): titles, archive state and the
 // user messages with photos. Read-only.
+// `imported`: the provenance of a photo the operator-run legacy importer stored (src/photo-import-ledger.ts), or undefined when it was
+// never imported or the import was reversed. Absent: imported photos are not visible at all.
 export type PhotoSources = {
   assistant(): { messages: PhotoMessage[]; archivedChunks: number };
   chat(threadId: string): { title: string; archived: boolean; messages: PhotoMessage[] } | undefined;
+  imported?(attachmentId: string): ImportedPhoto | undefined;
 };
 
 // Which conversation scopes (attachment scopes) a caller may read. `caller` is the session id of the conversation the tools are
@@ -62,7 +68,7 @@ export type PhotoSources = {
 export type PhotoPolicy = { caller: string; crossConversation: boolean; may(scope: string): boolean; rule: string };
 export function photoPolicy(caller: string): PhotoPolicy {
   if (caller === "assistant:assistant") {
-    return { caller, crossConversation: true, may: (s) => s === "assistant" || /^chat:/.test(s), rule: "Assistant: the owner's conversations (the Assistant and every chat thread that still exists), the same reach session_read has. Unsent uploads are never visible." };
+    return { caller, crossConversation: true, may: (s) => s === "assistant" || s === IMPORT_SCOPE || /^chat:/.test(s), rule: "Assistant: the owner's conversations (the Assistant and every chat thread that still exists), the same reach session_read has, plus photos the operator imported from the legacy assistant. Unsent uploads are never visible." };
   }
   const m = /^chat:(.+)$/.exec(caller);
   if (m && isThreadId(m[1]!)) {
@@ -142,14 +148,22 @@ export function dayWindow(a: { day?: unknown; from?: unknown; to?: unknown }, no
 }
 
 // ---- resolving a photo to its source ---------------------------------------------------------------------------------------------
+// An imported photo (kind "import") has no ORBIT conversation or message: `conversation` names the import source, `message` is null,
+// `sentAt` is the legacy send time from the export, and `imported` carries the provenance the importer recorded. It is never presented
+// as a message Rai sent in ORBIT.
+export type ConversationKind = "assistant" | "chat" | "import";
+export type ImportedView = { source: string; label: string; item: string; batch: string; sentAt: string; importedAt: string; caption: string; pointers: { session?: string; message?: string } };
 export type Located = {
   meta: AttachmentMeta;
   ref: string;
   sentAt: string;
-  conversation: { id: string; kind: "assistant" | "chat"; title: string; archived: boolean };
+  conversation: { id: string; kind: ConversationKind; title: string; archived: boolean };
   message: { id: string; at: string; photo: number; of: number; caption: string } | null;
   messageNote?: string;
+  imported?: ImportedView;
 };
+export const IMPORT_CONVERSATION_PREFIX = "import:";
+export const IMPORTED_NOTE = "Imported by the operator from a legacy assistant export; it is not a message sent in ORBIT. The time is the legacy send time from the export.";
 
 function resolver(sources: PhotoSources) {
   let assistant: ReturnType<PhotoSources["assistant"]> | undefined;
@@ -164,6 +178,20 @@ function resolver(sources: PhotoSources) {
   // Undefined: the source is gone (the conversation no longer exists, or its message no longer refers to this photo).
   return (meta: AttachmentMeta): Located | undefined => {
     const base = { meta, ref: photoRef(meta.id), sentAt: meta.boundAt ?? meta.createdAt };
+    if (meta.scope === IMPORT_SCOPE) {
+      // The import ledger is the only source of an imported photo: without its entry (never imported, or reversed) it is not visible.
+      const p = sources.imported?.(meta.id);
+      if (!p || p.ref !== base.ref) return undefined;
+      const label = SOURCE_LABEL[p.source];
+      return {
+        ...base,
+        sentAt: p.sentAt,
+        conversation: { id: `${IMPORT_CONVERSATION_PREFIX}${p.source}`, kind: "import", title: `Imported from ${label}`, archived: false },
+        message: null,
+        messageNote: IMPORTED_NOTE,
+        imported: { source: p.source, label, item: p.item, batch: p.batch, sentAt: p.sentAt, importedAt: p.importedAt, caption: p.caption, pointers: { ...p.pointers } },
+      };
+    }
     if (meta.scope === "assistant") {
       assistant ??= sources.assistant();
       const msg = find(assistant.messages, meta.id);
@@ -232,7 +260,7 @@ export type GalleryItemView = {
   src?: string;
   width?: number;
   height?: number;
-  source?: { conversation: { id: string; kind: "assistant" | "chat"; title: string; archived?: true }; message: { id: string; photo: number; of: number } | null; sentAt: string; sentLocal: string };
+  source?: { conversation: { id: string; kind: ConversationKind; title: string; archived?: true }; message: { id: string; photo: number; of: number } | null; sentAt: string; sentLocal: string };
   caption?: string;
   link?: string;
 };
@@ -244,7 +272,7 @@ export const GALLERY_UNAVAILABLE = "This photo's stored file is missing or damag
 export function photoDisplay(d: { attachments: Attachments; sources: PhotoSources; zone?: string }) {
   const zone = d.zone ?? "UTC";
   const routeOf = (caller: string) => (caller === "assistant:assistant" ? "/assistant/photos" : /^chat:/.test(caller) && isThreadId(caller.slice(5)) ? `/threads/${caller.slice(5)}/photos` : undefined);
-  const linkOf = (l: Located) => (l.conversation.kind === "assistant" ? "#assistant" : `#chat/${l.conversation.id.slice(5)}`);
+  const linkOf = (l: Located) => (l.conversation.kind === "assistant" ? "#assistant" : l.conversation.kind === "chat" ? `#chat/${l.conversation.id.slice(5)}` : undefined);
   return {
     // Every stored gallery of one message, as the page shows it now. Undefined when there is none.
     galleries(caller: string, stored: StoredGallery[] | undefined): GalleryView[] | undefined {
@@ -258,7 +286,8 @@ export function photoDisplay(d: { attachments: Attachments; sources: PhotoSource
           const l = route ? reach.find(ref) : undefined;
           if (!l) return { position: i + 1, ref, status: "not-found", note: GALLERY_NOT_FOUND };
           const ok = d.attachments.present(l.meta.id, l.meta.scope);
-          const caption = l.message?.caption.trim() ? untrustedText(l.message.caption, GALLERY_CAPTION_MAX).text : undefined;
+          const raw = l.message?.caption ?? l.imported?.caption ?? "";
+          const caption = raw.trim() ? untrustedText(raw, GALLERY_CAPTION_MAX).text : undefined;
           return {
             position: i + 1,
             ref,
@@ -271,7 +300,7 @@ export function photoDisplay(d: { attachments: Attachments; sources: PhotoSource
               sentLocal: localTime(l.sentAt, zone),
             },
             ...(caption ? { caption } : {}),
-            link: linkOf(l),
+            ...(linkOf(l) ? { link: linkOf(l) } : {}),
           };
         }),
       }));
@@ -392,7 +421,7 @@ export function photoTools(d: { attachments: Attachments; sources: PhotoSources;
     return { items: out, archivedHidden };
   };
   const label = (l: Located, i: number, n: number, zone: string) =>
-    `[ORBIT photo ${i} of ${n}: ref ${l.ref}; from ${l.conversation.kind === "assistant" ? "the Assistant (assistant:assistant)" : `chat thread ${l.conversation.id}`}; ${l.message ? `message ${l.message.id}, photo ${l.message.photo} of ${l.message.of}` : "message not resolved"}; sent ${localTime(l.sentAt, zone)} (${l.sentAt}).]`;
+    `[ORBIT photo ${i} of ${n}: ref ${l.ref}; from ${l.conversation.kind === "assistant" ? "the Assistant (assistant:assistant)" : l.conversation.kind === "import" ? `${l.conversation.title} (no ORBIT message)` : `chat thread ${l.conversation.id}`}; ${l.message ? `message ${l.message.id}, photo ${l.message.photo} of ${l.message.of}` : l.imported ? "imported legacy photo" : "message not resolved"}; sent ${localTime(l.sentAt, zone)} (${l.sentAt}).]`;
 
   return [
     {
@@ -500,6 +529,7 @@ export function photoTools(d: { attachments: Attachments; sources: PhotoSources;
               message: l.message ? { id: l.message.id, at: l.message.at, photo: `${l.message.photo} of ${l.message.of}` } : null,
               ...(l.messageNote ? { messageNote: l.messageNote } : {}),
               caption: l.message ? (l.message.caption.trim() ? untrustedText(l.message.caption, PHOTO_CAPTION_MAX) : null) : null,
+              ...(l.imported ? { imported: { source: l.imported.label, legacyCaption: l.imported.caption.trim() ? untrustedText(l.imported.caption, PHOTO_CAPTION_MAX) : null, importedAt: l.imported.importedAt, note: IMPORTED_NOTE } } : {}),
               image: { type: l.meta.type, width: l.meta.width, height: l.meta.height, bytes: l.meta.bytes },
               ...(terms ? { match: { caption: matched.get(l.ref)?.caption ?? [], conversationTitle: matched.get(l.ref)?.title ?? [], kind: "text match, not visual verification" } } : {}),
             })),

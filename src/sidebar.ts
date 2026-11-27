@@ -110,7 +110,7 @@ export type SidebarView = {
 export type SidebarOptions = { imagesPage?: number; aiOf?: (ref: string) => { observations: number; corrections: number } | undefined };
 
 // A located photo as src/photo-access.ts reachablePhotos gives it, reduced to what the sidebar reads.
-export type SidebarPhoto = { ref: string; sentAt: string; sentLocal: string; caption: string; conversation: { title: string; kind: "assistant" | "chat"; id: string }; present: boolean };
+export type SidebarPhoto = { ref: string; sentAt: string; sentLocal: string; caption: string; conversation: { title: string; kind: "assistant" | "chat" | "import"; id: string }; present: boolean };
 
 export const titleOf = (path: string, text: string, data: Frontmatter): string => {
   const alias = first(data.aliases) || first(data.alias) || first(data.title);
@@ -278,7 +278,8 @@ export function sidebarView(notes: ReadonlyMap<string, string> | undefined, phot
     sentLocal: ph.sentLocal,
     caption: untrustedText(ph.caption, 140).text,
     conversation: untrustedText(ph.conversation.title, TITLE_MAX).text,
-    link: ph.conversation.kind === "assistant" ? "#assistant" : `#chat/${ph.conversation.id.slice("chat:".length)}`,
+    // An imported legacy photo has no ORBIT conversation to open (docs/photo-import-backfill.md).
+    link: ph.conversation.kind === "assistant" ? "#assistant" : ph.conversation.kind === "chat" ? `#chat/${ph.conversation.id.slice("chat:".length)}` : "",
     ...(() => {
       const ai = opts.aiOf?.(ph.ref);
       return ai ? { ai: { observations: ai.observations, corrections: ai.corrections } } : {};

@@ -70,12 +70,32 @@
       day: DAY.test(p.day) ? p.day : "",
       month: MONTH.test(p.month) ? p.month : "",
       caption: str(p.caption, 280),
-      conversation: { kind: c.kind === "chat" ? "chat" : "assistant", title: str(c.title, 100), archived: c.archived === true },
+      conversation: { kind: c.kind === "chat" ? "chat" : c.kind === "import" ? "import" : "assistant", title: str(c.title, 100), archived: c.archived === true },
       message: m ? { photo: num(m.photo), of: num(m.of) } : null,
       link: typeof p.link === "string" && LINK.test(p.link) ? p.link : "",
       image: { width: num(p.image && p.image.width), height: num(p.image && p.image.height), bytes: num(p.image && p.image.bytes), type: str(p.image && p.image.type, 40) },
       ai: { observations: num(p.ai && p.ai.observations), corrections: num(p.ai && p.ai.corrections) },
+      // An imported legacy photo (docs/photo-import-backfill.md): no ORBIT message; where it came from and when it was imported.
+      imported: p.imported && typeof p.imported === "object" ? { source: str(p.imported.source, 80), item: str(p.imported.item, 64), importedLocal: str(p.imported.importedLocal, 40), note: str(p.imported.note, 240) } : null,
     };
+  }
+  // Where a photo is from, in a few words: the Assistant, a chat thread's title, or the legacy source it was imported from.
+  function whereOf(p, quote) {
+    if (p.conversation.kind === "assistant") return "Assistant";
+    if (p.conversation.kind === "import") return p.conversation.title || "Imported photo";
+    const t = p.conversation.title || "chat thread";
+    return `${quote ? `“${t}”` : t}${p.conversation.archived ? " (archived)" : ""}`;
+  }
+  // A saved record's context: the conversation it was made in, or the operator backfill (no conversation).
+  function contextOf(src) {
+    const c = src && src.conversation;
+    if (c && c.kind === "chat") return `“${str(c.title, 100)}”`;
+    if (c && c.kind === "operator") return "operator backfill (not a conversation)";
+    return "Assistant";
+  }
+  // A photo's project links (read-only): the project's name and why it is linked.
+  function safeProjects(v) {
+    return Array.isArray(v) ? v.slice(0, 12).filter((x) => x && typeof x.project === "string" && /^Projects\/[^/]{1,120}\.md$/.test(x.project)).map((x) => ({ name: str(x.name, 100) || x.project.slice(9, -3), evidence: x.evidence === "operator-approved" ? "operator-approved" : "explicit", label: str(x.label, 200) })) : [];
   }
 
   // ---- the page -----------------------------------------------------------------------------------------------------------------
@@ -206,7 +226,7 @@
     }
     function card(it, index) {
       const p = it.photo;
-      const where = p.conversation.kind === "assistant" ? "Assistant" : `“${p.conversation.title || "chat thread"}”${p.conversation.archived ? " (archived)" : ""}`;
+      const where = whereOf(p, true);
       const label = `${p.caption || "Photo"} · ${where} · sent ${p.sentLocal}`;
       const thumb = p.ok ? mk("img", { src: srcOf(p.ref), alt: p.caption || `Photo sent ${p.sentLocal}`, loading: "lazy", decoding: "async" }) : mk("span", { className: "gmissing", textContent: "Stored file missing or damaged" });
       const notes = it.hits ? matchNotes(it) : [];
@@ -331,12 +351,13 @@
       }
       function renderMeta(r) {
         const p = item.photo;
-        const where = p.conversation.kind === "assistant" ? "Assistant" : `${p.conversation.title || "Chat thread"}${p.conversation.archived ? " (archived)" : ""}`;
+        const where = whereOf(p, false);
         const kids = [];
         kids.push(section("File",
           dl([
             ["Photo", document.createTextNode(`${p.image.type === "image/jpeg" ? "JPEG" : p.image.type || "Image"} · ref ${p.ref}`)],
-            ["Sent", document.createTextNode(p.sentLocal || "unknown")],
+            [p.imported ? "Sent (legacy)" : "Sent", document.createTextNode(p.sentLocal || "unknown")],
+            p.imported ? ["Imported", document.createTextNode(p.imported.importedLocal || "unknown")] : null,
             ["Taken", document.createTextNode("Not known: the capture date and the original file name are removed before upload.")],
             ["Size", document.createTextNode(`${p.image.width}×${p.image.height} px · ${kb(p.image.bytes)}`)],
           ])));
@@ -344,9 +365,11 @@
           dl([
             ["Conversation", document.createTextNode(where)],
             p.message ? ["Message", document.createTextNode(`photo ${p.message.photo} of ${p.message.of}`)] : null,
+            p.imported ? ["Legacy item", document.createTextNode(p.imported.item || "unknown")] : null,
           ]),
+          p.imported && p.imported.note ? mk("p", { className: "gcaveat", textContent: p.imported.note }) : null,
           convLink(p.conversation, p.link, p.conversation.kind === "assistant" ? "Open the Assistant" : "Open this conversation")));
-        kids.push(section("Caption", mk("p", { className: p.caption ? "glcaption" : "glnone", textContent: p.caption || "No message text was sent with this photo." })));
+        kids.push(section(p.imported ? "Legacy caption" : "Caption", mk("p", { className: p.caption ? "glcaption" : "glnone", textContent: p.caption || (p.imported ? "The export had no caption for this photo." : "No message text was sent with this photo.") })));
         if (item.hits) {
           kids.push(section("Search match",
             mk("p", { textContent: `Search: “${st.query}”${item.contextOnly ? ". Matched only with Rai's next message (conversation context, not a description of the photo)." : ""}` }),
@@ -373,13 +396,13 @@
             ? mk("ol", { className: "globs" }, ...obs.map((o) => {
               const sup = o.state === "superseded";
               const fix = corrector.get(str(o.id, 40));
-              const via = o.inspection ? `${o.inspection.via === "photos_inspect" ? "looked at with photos_inspect" : "sent with the message"}${o.inspection.model ? ` · model ${str(o.inspection.model, 80)}` : ""}` : "";
+              const via = o.inspection ? `${o.inspection.via === "photos_inspect" ? "looked at with photos_inspect" : o.inspection.via === "backfill" ? "described by the operator backfill" : "sent with the message"}${o.inspection.model ? ` · model ${str(o.inspection.model, 80)}` : ""}` : "";
               return mk("li", { className: sup ? "superseded" : "" },
                 mk("p", { className: "glwhen", textContent: `Observed ${str(o.atLocal, 40)}${via ? ` · ${via}` : ""}` }),
                 mk("ul", { className: "globl" }, ...lines(o.observations).map((t) => mk("li", {}, sup ? mk("s", { textContent: t }) : document.createTextNode(t)))),
                 lines(o.limitations).length ? mk("div", { className: "gllim" }, mk("span", { textContent: "Limitations noted: " }), document.createTextNode(lines(o.limitations).join("; "))) : null,
                 o.scope ? mk("p", { className: "glscope", textContent: `Inspecting for: ${str(o.scope, 240)}` }) : null,
-                mk("p", { className: "glctx" }, document.createTextNode(`Context: ${o.source && o.source.conversation && o.source.conversation.kind === "chat" ? `“${str(o.source.conversation.title, 100)}”` : "Assistant"} `), convLink(null, o.source && o.source.link, "open")),
+                mk("p", { className: "glctx" }, document.createTextNode(`Context: ${contextOf(o.source)} `), convLink(null, o.source && o.source.link, "open")),
                 sup ? mk("p", { className: "glsup", textContent: fix ? `Superseded: Rai corrected this (${str(fix.atLocal, 40)}).` : `Superseded${o.supersededAt ? " by a later record" : ""}; not reused by default.` }) : null);
             }))
             : mk("p", { className: "glnone", textContent: "No saved AI observation. Nothing was saved about this photo that the Assistant can reuse; that says nothing about what it shows." }),
@@ -393,6 +416,10 @@
               return o ? mk("p", { className: "glorig" }, mk("span", { textContent: "Original observation: " }), mk("s", { textContent: lines(o.observations).join("; ") })) : null;
             }),
             mk("p", { className: "glctx" }, document.createTextNode("Context: "), convLink(null, c.source && c.source.link, c.source && c.source.conversation && c.source.conversation.kind === "chat" ? `“${str(c.source.conversation.title, 100)}”` : "Assistant")))))));
+        const projects = safeProjects(b.projects);
+        if (projects.length) out.push(section("Projects",
+          mk("ul", { className: "glprojects" }, ...projects.map((x) => mk("li", {}, mk("strong", { textContent: x.name }), document.createTextNode(` · ${x.label || (x.evidence === "operator-approved" ? "linked by the operator after review" : "linked from explicit project evidence")}`)))),
+          mk("p", { className: "gcaveat", textContent: "Read-only links recorded by the legacy import; the project notes themselves are not changed." })));
         const nr = b.notReusable || {};
         const left = [num(nr.olderImageVersion) && `${num(nr.olderImageVersion)} about an older version of the image`, num(nr.sourceGone) && `${num(nr.sourceGone)} whose conversation is gone`, num(nr.forgotten) && `${num(nr.forgotten)} forgotten`].filter(Boolean);
         if (left.length) out.push(mk("p", { className: "gcaveat", textContent: `Not shown: ${left.join(", ")}.` }));
@@ -428,5 +455,5 @@
   function readGroup() { try { return global.localStorage.getItem("orbit.gallery.group") === "month" ? "month" : "day"; } catch { return "day"; } }
   function writeGroup(v) { try { global.localStorage.setItem("orbit.gallery.group", v); } catch { /* a per-device convenience only */ } }
 
-  global.OrbitGallery = { create, matchNotes, hitNote, groupPhotos, groupLabel, safePhoto, KIND_NAME };
+  global.OrbitGallery = { create, matchNotes, hitNote, groupPhotos, groupLabel, safePhoto, safeProjects, whereOf, contextOf, KIND_NAME };
 })(typeof window !== "undefined" ? window : globalThis);

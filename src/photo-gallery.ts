@@ -1,6 +1,6 @@
 import type { Attachments } from "./attachments.ts";
 import { comparePhotoKeys, localTime, photoKey, photoReach, queryTerms, reachablePhotos } from "./photo-access.ts";
-import type { Located, PhotoKey } from "./photo-access.ts";
+import type { ConversationKind, Located, PhotoKey } from "./photo-access.ts";
 import { isPhotoRef } from "./photo-ref.ts";
 import { CORRECTION_LABEL, MODEL_LABEL, readableRecords } from "./photo-observations.ts";
 import type { ObservationSources, ObservationStore, ReadableRecord } from "./photo-observations.ts";
@@ -42,9 +42,13 @@ export type GalleryPhoto = {
   day: string;
   month: string;
   caption: string;
-  conversation: { id: string; kind: "assistant" | "chat"; title: string; archived?: true };
+  conversation: { id: string; kind: ConversationKind; title: string; archived?: true };
   message: { id: string; photo: number; of: number } | null;
+  // Empty for an imported legacy photo, which has no ORBIT conversation to open.
   link: string;
+  // Only for a photo the operator imported from a legacy assistant export (docs/photo-import-backfill.md): where it came from. The
+  // caption above is then the legacy caption from the export, and sentAt the legacy send time.
+  imported?: { source: string; item: string; importedAt: string; importedLocal: string; note: string };
   image: { type: string; width: number; height: number; bytes: number };
   // Counts of the saved records the Assistant may read about this exact image version (photos_recall's read), for the "AI" badge.
   ai: { observations: number; corrections: number };
@@ -76,13 +80,13 @@ export type GalleryRecord = {
   supersedes?: string[];
   supersededBy?: string;
   supersededAt?: string;
-  inspection?: { via: "message" | "photos_inspect"; model: string };
-  source: { conversation: { id: string; kind: "assistant" | "chat"; title: string; archived?: true }; message: "present" | "archived"; link: string };
+  inspection?: { via: "message" | "photos_inspect" | "backfill"; model: string };
+  source: { conversation: { id: string; kind: "assistant" | "chat" | "operator"; title: string; archived?: true }; message: "present" | "archived"; link: string };
 };
 
 const fold = (s: string) => s.normalize("NFKD").replace(/\p{M}+/gu, "").toLowerCase();
 const text = (s: string, max: number) => untrustedText(s, max).text;
-const linkOf = (conversation: string) => (conversation === GALLERY_CALLER ? "#assistant" : `#chat/${conversation.slice("chat:".length)}`);
+const linkOf = (conversation: string) => (conversation === GALLERY_CALLER ? "#assistant" : conversation.startsWith("chat:") ? `#chat/${conversation.slice("chat:".length)}` : "");
 const dayIn = (iso: string, zone: string) => {
   const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(iso)).filter((x) => x.type !== "literal").map((x) => [x.type, x.value]));
   return `${p.year}-${p.month}-${p.day}`;
@@ -116,7 +120,14 @@ export function aiCounts(store: ObservationStore, sources: SemanticSources | Obs
   return { observations, corrections };
 }
 
-export type GalleryDeps = { attachments: Attachments; sources: SemanticSources; store: ObservationStore; semantic?: PhotoSemantic; zone?: string };
+// A photo's project links (docs/photo-import-backfill.md, "Project links"): read-only, from the import ledger. `project` is the vault
+// path of the project's hub note; the gallery never reads or writes the vault for them.
+export type GalleryProjectLink = { project: string; name: string; evidence: "explicit" | "operator-approved"; at: string };
+export type GalleryDeps = { attachments: Attachments; sources: SemanticSources; store: ObservationStore; semantic?: PhotoSemantic; zone?: string; projects?: (ref: string) => GalleryProjectLink[] };
+export const PROJECT_EVIDENCE_LABEL = {
+  explicit: "linked from explicit project evidence in the legacy export",
+  "operator-approved": "linked by the operator after review",
+} as const;
 
 export function photoGallery(d: GalleryDeps) {
   const zone = d.zone ?? "UTC";
@@ -132,12 +143,13 @@ export function photoGallery(d: GalleryDeps) {
       sentLocal: localTime(l.sentAt, zone),
       day: dayIn(l.sentAt, zone),
       month: dayIn(l.sentAt, zone).slice(0, 7),
-      caption: l.message?.caption.trim() ? text(l.message.caption, CAPTION_MAX) : "",
+      caption: (l.message?.caption ?? l.imported?.caption ?? "").trim() ? text(l.message?.caption ?? l.imported?.caption ?? "", CAPTION_MAX) : "",
       conversation: { id: l.conversation.id, kind: l.conversation.kind, title: text(l.conversation.title, TITLE_MAX), ...(l.conversation.archived ? { archived: true as const } : {}) },
       message: l.message ? { id: l.message.id, photo: l.message.photo, of: l.message.of } : null,
       link: linkOf(l.conversation.id),
       image: { type: l.meta.type, width: l.meta.width, height: l.meta.height, bytes: l.meta.bytes },
       ai: counts(l),
+      ...(l.imported ? { imported: { source: text(l.imported.label, 80), item: l.imported.item, importedAt: l.imported.importedAt, importedLocal: localTime(l.imported.importedAt, zone), note: l.messageNote ?? "" } } : {}),
     };
   };
   const ordered = () => {
@@ -292,6 +304,7 @@ export function photoGallery(d: GalleryDeps) {
         observations: records.filter((r) => r.kind === "model-observation"),
         corrections: records.filter((r) => r.kind === "user-correction"),
         ...(Object.keys(notReusable).length ? { notReusable } : {}),
+        projects: (d.projects?.(ref) ?? []).map((p) => ({ project: p.project, name: text(p.name, TITLE_MAX), evidence: p.evidence, label: PROJECT_EVIDENCE_LABEL[p.evidence], at: p.at })),
         labels: { observation: MODEL_LABEL, correction: CORRECTION_LABEL },
       };
     },
