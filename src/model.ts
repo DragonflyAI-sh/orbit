@@ -238,6 +238,7 @@ function researchGuidance(names: string[]): string[] {
   return [
     "",
     "Dates and times: resolve \"today\", \"tomorrow\", \"this weekend\" and weekdays against the Now note in the reference material, never against what you remember. Say the actual date when it matters.",
+    "Location: you cannot detect where Rai is right now (no device location reaches you). For \"near me\", \"around here\", weather and local events, use the place Rai most recently said he is in during this conversation; otherwise use the Home area in the Now note. Always say which place you used (\"Assuming you're near Duvall, WA…\") so he can correct you, and if there is no Home area either, ask where he is before searching.",
     ...(names.includes(WEB_SEARCH_TOOL)
       ? [
           "Research before answering when the answer depends on the present or a place: events and their dates, times and tickets; opening hours; schedules; prices; weather; local places, restaurants and activities; news; anything that may have changed. Search first, then answer. Prefer the official or event-specific site (the venue, organizer, city calendar, ticketing page) over aggregators, check that dates match the year and the Home area or the place Rai names, and give the source link for each fact. If you could not confirm something, say so instead of guessing. Do not search for things that do not change (definitions, how-tos, history) or when Rai asks for your own ideas.",
