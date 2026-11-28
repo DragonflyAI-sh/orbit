@@ -73,6 +73,86 @@ function writeBytesAtomic(file: string, data: Buffer): void {
   }
 }
 
+// ---- reading the records ---------------------------------------------------------------------------------------------------------
+// One attachment record that cannot be used: the record's file name (an opaque random id, never a path, caption or byte of its
+// content) and a fixed reason. The store skips it (never deletes it); the importer refuses to plan or apply while any exist, because
+// such a record may hold the very bytes it would otherwise store a second time (docs/photo-import-backfill.md).
+export type DamagedReason = "unreadable" | "not-json" | "not-an-attachment-record" | "photo-file-missing" | "photo-file-unreadable" | "photo-file-wrong-size";
+export type DamagedRecord = { record: string; reason: DamagedReason };
+export const DAMAGED_REASON_TEXT: Record<DamagedReason, string> = {
+  unreadable: "the record file cannot be read",
+  "not-json": "the record is not valid JSON",
+  "not-an-attachment-record": "the record does not have the fields of an attachment record",
+  "photo-file-missing": "its photo file is missing",
+  "photo-file-unreadable": "its photo file cannot be checked",
+  "photo-file-wrong-size": "its photo file has the wrong size",
+};
+const code = (err: unknown) => (err && typeof err === "object" && typeof (err as { code?: unknown }).code === "string" ? ((err as { code: string }).code).slice(0, 20) : "unknown");
+
+// Every record in an attachment directory, checked exactly as the store checks them when it opens, WITHOUT changing anything (no
+// temporary file or orphan is tidied). The store's own start and the importer's read-only dry run both use this, so they always agree
+// on which stored photos exist and which records are damaged. A missing directory is an empty store; any other failure to list it is
+// `ok: false` with the error code only (never a path).
+export function scanAttachmentRecords(dir: string): { ok: true; names: string[]; metas: AttachmentMeta[]; damaged: DamagedRecord[] } | { ok: false; code: string } {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch (err) {
+    if (code(err) === "ENOENT") return { ok: true, names: [], metas: [], damaged: [] };
+    return { ok: false, code: code(err) };
+  }
+  names.sort();
+  const metas: AttachmentMeta[] = [];
+  const damaged: DamagedRecord[] = [];
+  for (const name of names) {
+    const m = name.match(/^(a[0-9a-f]{32})\.json$/);
+    if (!m) continue;
+    const bad = (reason: DamagedReason) => damaged.push({ record: name, reason });
+    let text: string;
+    try {
+      text = readFileSync(join(dir, name), "utf8");
+    } catch {
+      bad("unreadable");
+      continue;
+    }
+    let meta: AttachmentMeta;
+    try {
+      meta = JSON.parse(text) as AttachmentMeta;
+    } catch {
+      bad("not-json");
+      continue;
+    }
+    if (!validRecord(meta, m[1]!)) {
+      bad("not-an-attachment-record");
+      continue;
+    }
+    let size: number;
+    try {
+      size = statSync(join(dir, `${meta.id}.jpg`)).size;
+    } catch (err) {
+      bad(code(err) === "ENOENT" ? "photo-file-missing" : "photo-file-unreadable");
+      continue;
+    }
+    if (size !== meta.bytes) {
+      bad("photo-file-wrong-size");
+      continue;
+    }
+    metas.push(meta);
+  }
+  return { ok: true, names, metas, damaged };
+}
+function validRecord(x: unknown, id: string): x is AttachmentMeta {
+  const m = x as Record<string, unknown> | null;
+  if (!m || typeof m !== "object" || Array.isArray(m)) return false;
+  if (m.id !== id || typeof m.scope !== "string" || !SCOPE.test(m.scope) || (m.state !== "pending" && m.state !== "bound")) return false;
+  return typeof m.sha256 === "string" && /^[0-9a-f]{64}$/.test(m.sha256) && Number.isInteger(m.bytes) && (m.bytes as number) > 0;
+}
+
+// What removeImported did: `removed` (its files are gone now), `not-stored` (no record and no photo file: already removed),
+// `not-imported` (an attachment of a conversation, never removed by the importer), `damaged` (its record is on disk but could not be
+// read when the store opened: left for the operator, never deleted).
+export type RemoveImportedResult = "removed" | "not-stored" | "not-imported" | "damaged";
+
 export type Attachments = ReturnType<typeof attachmentStore>;
 
 // `dir` undefined keeps attachments in memory (tests, or a service without a state directory) and says so through `persisted`.
@@ -84,12 +164,21 @@ export function attachmentStore(dir: string | undefined, opts: { now?: () => Dat
   const metas = new Map<string, AttachmentMeta>();
   const memBytes = new Map<string, Buffer>();
   const problems: string[] = [];
+  const damaged: DamagedRecord[] = [];
   const jpg = (id: string) => join(dir!, `${id}.jpg`);
   const rec = (id: string) => join(dir!, `${id}.json`);
 
   if (dir) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const names = readdirSync(dir);
+    const scan = scanAttachmentRecords(dir);
+    if (!scan.ok) throw new AttachmentError(500, `The attachment directory cannot be read (${scan.code}).`);
+    for (const m of scan.metas) metas.set(m.id, m);
+    // Never deleted: left for a person to look at.
+    for (const d of scan.damaged) {
+      damaged.push(d);
+      problems.push(`${d.record}: ${DAMAGED_REASON_TEXT[d.reason]}`);
+    }
+    const names = scan.names;
     for (const name of names) {
       // A temporary file left by a crash mid-write is never a stored attachment.
       if (name.endsWith(".tmp")) {
@@ -98,18 +187,6 @@ export function attachmentStore(dir: string | undefined, opts: { now?: () => Dat
         } catch {
           // left for a person
         }
-        continue;
-      }
-      const m = name.match(/^(a[0-9a-f]{32})\.json$/);
-      if (!m) continue;
-      try {
-        const meta = JSON.parse(readFileSync(join(dir, name), "utf8")) as AttachmentMeta;
-        if (meta.id !== m[1] || !SCOPE.test(meta.scope) || (meta.state !== "pending" && meta.state !== "bound")) throw new Error("not an attachment record");
-        if (statSync(jpg(meta.id)).size !== meta.bytes) throw new Error("its photo file is missing or has the wrong size");
-        metas.set(meta.id, meta);
-      } catch (err) {
-        // Never deleted: left for a person to look at.
-        problems.push(`${name}: ${err instanceof Error ? err.message : "unreadable"}`);
       }
     }
     // A photo file without a record was written by an upload that stopped before its record: it was never usable. Removed once old.
@@ -177,13 +254,84 @@ export function attachmentStore(dir: string | undefined, opts: { now?: () => Dat
     },
 
     // Reverses one imported photo (the importer's rollback): only an attachment in IMPORT_SCOPE can be removed this way, never a photo
-    // sent in a conversation. Returns whether something was removed.
-    removeImported(id: string): boolean {
-      const m = isAttachmentId(id) ? metas.get(id) : undefined;
-      if (!m || m.scope !== IMPORT_SCOPE) return false;
-      remove(id);
-      return true;
+    // sent in a conversation. Unlike cleanup, a file that cannot be removed is never taken as removed: any error other than "not found"
+    // throws an AttachmentError (the error code only, never a path), and the attachment is then left as it was, so a later call can
+    // retry it. The record goes first (a photo file without its record is never served); if the photo file then cannot be removed, the
+    // record is written back. Idempotent: a call for files already gone is `not-stored`.
+    removeImported(id: string): RemoveImportedResult {
+      if (!isAttachmentId(id)) return "not-stored";
+      const m = metas.get(id);
+      if (m && m.scope !== IMPORT_SCOPE) return "not-imported";
+      if (!dir) {
+        if (!m) return "not-stored";
+        metas.delete(id);
+        memBytes.delete(id);
+        return "removed";
+      }
+      const gone = (f: string): boolean => {
+        try {
+          unlinkSync(f);
+          return true;
+        } catch (err) {
+          if (code(err) === "ENOENT") return false;
+          throw err;
+        }
+      };
+      if (!m) {
+        // Not loaded: either removed already, or its record is damaged (left for the operator), or a photo file whose record went
+        // earlier (an interrupted removal): such a file is never served, and it is removed now.
+        let text: string | undefined;
+        try {
+          text = readFileSync(rec(id), "utf8");
+        } catch (err) {
+          if (code(err) !== "ENOENT") return "damaged";
+        }
+        if (text !== undefined) {
+          // A record on disk that the store did not load. Only one that is still a valid IMPORT_SCOPE record (its photo file missing
+          // or the wrong size: a removal interrupted half way) is removed; anything else is left for the operator.
+          let x: unknown;
+          try {
+            x = JSON.parse(text);
+          } catch {
+            return "damaged";
+          }
+          if (!validRecord(x, id) || x.scope !== IMPORT_SCOPE) return "damaged";
+          try {
+            gone(rec(id));
+          } catch (err) {
+            throw new AttachmentError(500, `The stored record could not be removed (${code(err)}); nothing was removed.`);
+          }
+        }
+        try {
+          return gone(jpg(id)) || text !== undefined ? "removed" : "not-stored";
+        } catch (err) {
+          throw new AttachmentError(500, `The photo file could not be removed (${code(err)})${text !== undefined ? "; its record is removed, so it is never served, and a retry removes it" : "; nothing was removed"}.`);
+        }
+      }
+      try {
+        gone(rec(id));
+      } catch (err) {
+        throw new AttachmentError(500, `The stored record could not be removed (${code(err)}); nothing was removed.`);
+      }
+      try {
+        gone(jpg(id));
+      } catch (err) {
+        try {
+          persistMeta(m);
+        } catch {
+          // The record is gone and the photo file stayed: it is never served, and the next call (or the store's next start, once it
+          // is old) removes it.
+          metas.delete(id);
+          throw new AttachmentError(500, `The photo file could not be removed (${code(err)}) and its record could not be restored; the file is never served and a retry removes it.`);
+        }
+        throw new AttachmentError(500, `The photo file could not be removed (${code(err)}); nothing was removed.`);
+      }
+      metas.delete(id);
+      return "removed";
     },
+
+    // The records that could not be read when the store opened (src/attachments.ts scanAttachmentRecords), as safe facts.
+    damaged: (): DamagedRecord[] => damaged.map((d) => ({ ...d })),
 
     // Every stored attachment with these exact bytes (any scope or state), as safe records: the importer's duplicate check.
     withSha256(sha256: string): AttachmentMeta[] {

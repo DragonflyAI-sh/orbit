@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import vm from "node:vm";
-import { IMPORT_SCOPE } from "../src/attachments.ts";
+import { attachmentStore, IMPORT_SCOPE } from "../src/attachments.ts";
 import { metadataSegments, normalizeJpeg } from "../src/jpeg.ts";
 import { photoPolicy, photoReach, photoRef } from "../src/photo-access.ts";
 import { applyImport, APPROVALS_FORMAT, EXPORT_FORMAT, ImportError, knownProjects, planDigest, planImport, readOnlyIndex, reportOf, revertImport, storeIndex } from "../src/photo-import.ts";
@@ -261,7 +261,7 @@ test("revert: the batch's photos and links disappear, only imported files are de
   assert.deepEqual(after.data.photos.map((p: any) => p.ref), sent.refs);
   assert.deepEqual((await g.api(`/gallery/photos/${sent.refs[0]}`)).data.projects, []);
   assert.ok(g.attachments.read(native.id, "assistant"), "the native photo is untouched");
-  assert.equal(g.attachments.removeImported(native.id), false, "a conversation's photo can never be removed by the importer");
+  assert.equal(g.attachments.removeImported(native.id), "not-imported", "a conversation's photo can never be removed by the importer");
   assert.equal(ledger.batches()[0]!.state, "reverted");
   const twice = revertImport(r.batch, { attachments: g.attachments, ledger });
   assert.equal(twice.alreadyReverted, true);
@@ -273,21 +273,27 @@ test("revert: the batch's photos and links disappear, only imported files are de
 // different bytes". The imported copy now always wins, then the lowest id.
 test("duplicates: the imported copy is chosen whatever order the store lists the copies in, in the dry run and in apply", () => {
   const sha256 = "ab".repeat(32);
-  const imp = { id: `a${"9".repeat(32)}`, scope: IMPORT_SCOPE, state: "bound", sha256 };
-  const chatA = { id: `a${"1".repeat(32)}`, scope: "assistant", state: "bound", sha256 };
-  const chatB = { id: `a${"5".repeat(32)}`, scope: "chat:t1", state: "bound", sha256 };
+  const rec = (id: string, scope: string) => ({ id, scope, state: "bound", type: "image/jpeg", bytes: 3, width: 1, height: 1, sha256, createdAt: "2026-11-01T00:00:00Z" });
+  const imp = rec(`a${"9".repeat(32)}`, IMPORT_SCOPE);
+  const chatA = rec(`a${"1".repeat(32)}`, "assistant");
+  const chatB = rec(`a${"5".repeat(32)}`, "chat:00000000-0000-4000-8000-000000000001");
+  // Records exactly as the store writes them (a record and its photo file of the recorded size), so the read-only scan loads them.
+  const write = (dir: string, m: { id: string }) => {
+    writeFileSync(join(dir, `${m.id}.json`), JSON.stringify(m));
+    writeFileSync(join(dir, `${m.id}.jpg`), "xyz");
+  };
   for (const order of [[chatA, imp, chatB], [imp, chatB, chatA], [chatB, chatA, imp]]) {
     const store = { withSha256: () => order.map((m) => ({ ...m })) } as any;
     assert.equal(storeIndex(store).bySha(sha256)?.id, imp.id);
     const dir = mkdtempSync(join(tmpdir(), "orbit-attachments-"));
-    for (const m of order) writeFileSync(join(dir, `${m.id}.json`), JSON.stringify(m));
+    for (const m of order) write(dir, m);
     assert.equal(readOnlyIndex(dir).bySha(sha256)?.id, imp.id);
   }
   // Without an imported copy: the lowest id, the same both ways.
   const store = { withSha256: () => [{ ...chatB }, { ...chatA }] } as any;
   assert.equal(storeIndex(store).bySha(sha256)?.id, chatA.id);
   const dir = mkdtempSync(join(tmpdir(), "orbit-attachments-"));
-  for (const m of [chatB, chatA]) writeFileSync(join(dir, `${m.id}.json`), JSON.stringify(m));
+  for (const m of [chatB, chatA]) write(dir, m);
   assert.equal(readOnlyIndex(dir).bySha(sha256)?.id, chatA.id);
 });
 
@@ -333,19 +339,179 @@ test("ledger: entries that break the contract are not served, and the ledger ref
   assert.equal(readFileSync(file, "utf8"), before, "the file is left as it was");
 });
 
-test("revert: a stored file that cannot be removed is reported (the batch is already hidden), not thrown as if nothing happened", async () => {
+// PR #188 review, finding 2: the real store's removal swallowed every unlink error, so a file that could not be removed was counted
+// as removed, and its ledger entry was already gone, so nothing could retry it. These use the REAL attachment store on disk; the
+// unlink failures are real errors from the file system (a directory where the file should be gives EISDIR, even for root).
+test("revert (real store): an unlink error is reported, never counted as removed, and the same revert retries exactly that copy", async () => {
   const g = await galleryRig();
-  const root = bundle([item("r1", "1.jpg"), item("r2", "2.jpg")], { "1.jpg": smallJpeg(121), "2.jpg": smallJpeg(122) });
+  const root = bundle([item("r1", "1.jpg"), item("r2", "2.jpg"), item("r3", "3.jpg")], { "1.jpg": smallJpeg(121), "2.jpg": smallJpeg(122), "3.jpg": smallJpeg(123) });
   const ledger = importLedger(join(g.dir, "photo-imports"));
   const r = applyImport(planImport({ root, existing: storeIndex(g.attachments), ledger }), { root, attachments: g.attachments, ledger });
-  const stuck = r.imported[0]!.ref;
-  const stuckId = g.attachments.bound().find((m) => photoRef(m.id) === stuck)!.id;
-  const attachments = new Proxy(g.attachments, { get: (t, k) => (k === "removeImported" ? (id: string) => { if (id === stuckId) throw new Error("synthetic EACCES"); return t.removeImported(id); } : (t as any)[k]) });
-  const undo = revertImport(r.batch, { attachments, ledger });
-  assert.equal(undo.photosHidden, 2);
-  assert.equal(undo.filesRemoved, 1);
-  assert.deepEqual(undo.removeFailed, [{ ref: stuck, reason: "synthetic EACCES" }]);
-  assert.equal(ledger.photos().length, 0, "the batch is hidden");
+  assert.equal(r.imported.length, 3);
+  const dir = join(g.dir, "attachments");
+  const idOf = (ref: string) => g.attachments.bound().find((m) => photoRef(m.id) === ref)!.id;
+  const [recStuck, jpgStuck, fine] = r.imported.map((x) => idOf(x.ref)) as [string, string, string];
+  // r1: its record cannot be unlinked. r2: its record can, but its photo file cannot (the record must then be written back).
+  rmSync(join(dir, `${recStuck}.json`));
+  mkdirSync(join(dir, `${recStuck}.json`));
+  writeFileSync(join(dir, `${recStuck}.json`, "keep"), "x");
+  const jpgBytes = readFileSync(join(dir, `${jpgStuck}.jpg`));
+  rmSync(join(dir, `${jpgStuck}.jpg`));
+  mkdirSync(join(dir, `${jpgStuck}.jpg`));
+  writeFileSync(join(dir, `${jpgStuck}.jpg`, "keep"), "x");
+  const undo = revertImport(r.batch, { attachments: g.attachments, ledger });
+  assert.equal(undo.photosHidden, 3, "every photo of the batch is hidden at once");
+  assert.equal(undo.filesRemoved, 1, "only the copy whose files really went is counted");
+  assert.deepEqual(undo.removeFailed!.map((f) => f.ref).sort(), [photoRef(recStuck), photoRef(jpgStuck)].sort());
+  for (const f of undo.removeFailed!) assert.match(f.reason, /could not be removed \(EISDIR\)/);
+  assert.ok(!JSON.stringify(undo).includes(g.dir), "no path in the report");
+  assert.match(undo.retry!, new RegExp(`--revert ${r.batch} --orbit-stopped`));
+  assert.deepEqual(ledger.batches()[0]!.unremoved!.sort(), [recStuck, jpgStuck].sort(), "the failed copies stay on the batch, for a retry");
+  assert.ok(existsSync(join(dir, `${jpgStuck}.json`)), "r2's record was written back when its photo file could not be removed");
+  assert.ok(g.attachments.get(jpgStuck) && g.attachments.get(recStuck), "the store still knows both");
+  assert.ok(!existsSync(join(dir, `${fine}.json`)) && !existsSync(join(dir, `${fine}.jpg`)));
+  assert.equal((await g.api("/gallery/photos")).data.total, 0, "hidden from the gallery");
+  // Still failing: the retry reports the same two, removes nothing, counts nothing.
+  const still = revertImport(r.batch, { attachments: g.attachments, ledger });
+  assert.equal(still.filesRemoved, 0);
+  assert.equal(still.removeFailed!.length, 2);
+  assert.equal(still.alreadyReverted, false);
+  // The operator fixes the cause; the same revert retries exactly those two.
+  rmSync(join(dir, `${recStuck}.json`), { recursive: true });
+  rmSync(join(dir, `${jpgStuck}.jpg`), { recursive: true });
+  writeFileSync(join(dir, `${jpgStuck}.jpg`), jpgBytes);
+  const retry = revertImport(r.batch, { attachments: g.attachments, ledger });
+  assert.equal(retry.removeFailed, undefined);
+  assert.equal(retry.filesRemoved, 2);
+  assert.equal(ledger.batches()[0]!.unremoved, undefined, "nothing left to retry");
+  assert.deepEqual(readdirSync(dir).filter((n) => [recStuck, jpgStuck].some((id) => n.startsWith(id))), []);
+  const done = revertImport(r.batch, { attachments: g.attachments, ledger });
+  assert.equal(done.alreadyReverted, true);
+  assert.deepEqual([done.filesRemoved, done.filesAlreadyGone], [0, 0]);
+});
+
+test("revert (CLI, real store): a failed removal exits 1 and a later run in a new process retries and finishes it", () => {
+  const state = mkdtempSync(join(tmpdir(), "orbit-state-"));
+  const root = bundle([item("c1", "1.jpg"), item("c2", "2.jpg")], { "1.jpg": smallJpeg(131), "2.jpg": smallJpeg(132) });
+  const cli = (...a: string[]) => spawnSync(process.execPath, ["tools/photo-import/import.ts", "--state", state, ...a], { encoding: "utf8" });
+  const dry = JSON.parse(cli("--export", root).stdout);
+  const applied = JSON.parse(cli("--export", root, "--apply", "--reviewed-plan-sha256", dry.plan.planSha256, "--orbit-stopped").stdout);
+  const dir = join(state, "attachments");
+  const stuck = readdirSync(dir).find((n) => n.endsWith(".jpg"))!.slice(0, 33);
+  rmSync(join(dir, `${stuck}.jpg`));
+  mkdirSync(join(dir, `${stuck}.jpg`));
+  writeFileSync(join(dir, `${stuck}.jpg`, "keep"), "x");
+  const first = cli("--revert", applied.batch, "--orbit-stopped");
+  assert.equal(first.status, 1, first.stdout);
+  const r1 = JSON.parse(first.stdout).reverted;
+  assert.deepEqual([r1.photosHidden, r1.filesRemoved, r1.removeFailed.length], [2, 1, 1]);
+  assert.equal(r1.removeFailed[0].ref, photoRef(stuck));
+  assert.ok(!first.stdout.includes(state), "no path in the report");
+  // Still blocked by the same cause in a new process: the record is kept, nothing is counted as removed.
+  const second = cli("--revert", applied.batch, "--orbit-stopped");
+  assert.equal(second.status, 1, second.stdout);
+  assert.equal(JSON.parse(second.stdout).reverted.filesRemoved, 0);
+  // The cause fixed (the photo file is an ordinary file again): the next run removes it and clears the batch's retry list.
+  rmSync(join(dir, `${stuck}.jpg`), { recursive: true });
+  writeFileSync(join(dir, `${stuck}.jpg`), "leftover");
+  const third = cli("--revert", applied.batch, "--orbit-stopped");
+  assert.equal(third.status, 0, third.stdout);
+  assert.equal(JSON.parse(third.stdout).reverted.filesRemoved, 1);
+  // And once everything is gone, a further run is a no-op that counts nothing as removed.
+  const fourth = JSON.parse(cli("--revert", applied.batch, "--orbit-stopped").stdout).reverted;
+  assert.deepEqual([fourth.alreadyReverted, fourth.filesRemoved, fourth.filesAlreadyGone], [true, 0, 0]);
+  assert.deepEqual(readdirSync(dir), []);
+  assert.equal(importLedger(join(state, "photo-imports")).batches()[0]!.unremoved, undefined);
+});
+
+// PR #188 review, finding 1: the dry run's read-only index skipped records the store would load (and loaded records the store would
+// skip), so a damaged record gave a dry run with a planSha256 that apply then refused every time ("the plan changed"). Both now read
+// records through the same scan, and any damaged record blocks the plan in both, with the same safe diagnostics.
+test("damaged attachment records: the dry run and apply both refuse, naming only the records, and agree once they are dealt with", () => {
+  const state = mkdtempSync(join(tmpdir(), "orbit-state-"));
+  const photo = smallJpeg(141);
+  const root = bundle([item("d1", "1.jpg", { caption: "Synthetic private caption d1" }), item("d2", "2.jpg")], { "1.jpg": photo, "2.jpg": smallJpeg(142) });
+  const dir = join(state, "attachments");
+  // A photo Rai already sent in ORBIT with the same bytes as d1, then damaged in each way the store can find.
+  const n = normalizeJpeg(photo);
+  assert.ok(n.ok);
+  const store = attachmentStore(dir);
+  const sent = store.put("assistant", n.bytes, { width: n.width, height: n.height }).meta;
+  store.bind([sent.id], "assistant");
+  const n2 = normalizeJpeg(smallJpeg(143));
+  assert.ok(n2.ok);
+  const other = store.put("assistant", n2.bytes, { width: n2.width, height: n2.height }).meta;
+  const junkId = `a${"c".repeat(32)}`, wrongId = `a${"d".repeat(32)}`;
+  writeFileSync(join(dir, `${junkId}.json`), "{ Synthetic private caption in a broken record");
+  writeFileSync(join(dir, `${wrongId}.json`), JSON.stringify({ ...sent, id: `a${"e".repeat(32)}` }));
+  writeFileSync(join(dir, `${wrongId}.jpg`), "x");
+  writeFileSync(join(dir, `${sent.id}.jpg`), n.bytes.subarray(0, 10)); // the photo file truncated
+  rmSync(join(dir, `${other.id}.jpg`)); // the photo file gone
+  const expected = [
+    { record: `${junkId}.json`, reason: "not-json" },
+    { record: `${wrongId}.json`, reason: "not-an-attachment-record" },
+    { record: `${sent.id}.json`, reason: "photo-file-wrong-size" },
+    { record: `${other.id}.json`, reason: "photo-file-missing" },
+  ].sort((a, b) => (a.record < b.record ? -1 : 1));
+  // The read-only scan and the store opening agree on every damaged record.
+  assert.deepEqual(readOnlyIndex(dir).damaged, expected);
+  assert.deepEqual(attachmentStore(dir).damaged(), expected);
+  const before = tree(state);
+  const cli = (...a: string[]) => spawnSync(process.execPath, ["tools/photo-import/import.ts", "--export", root, "--state", state, ...a], { encoding: "utf8" });
+  const dry = cli();
+  assert.equal(dry.status, 2, dry.stdout);
+  const report = JSON.parse(dry.stdout);
+  assert.equal(report.refused, true);
+  assert.equal(report.changed, false);
+  assert.equal(report.plan.planSha256, null, "no digest to approve for a plan apply would refuse");
+  assert.deepEqual(report.blocked.attachmentRecords.map((r: any) => ({ record: r.record, reason: r.reason })), expected);
+  assert.match(report.blocked.why, /4 attachment records are damaged/);
+  assert.match(report.blocked.fix, /restore both from a backup, or move both out of the state directory/);
+  for (const secret of ["Synthetic private caption", state, root, "1.jpg"]) assert.ok(!dry.stdout.includes(secret), `the report leaks ${secret}`);
+  assert.deepEqual(tree(state), before, "the dry run changed nothing");
+  // Apply refuses the same way, whatever digest it is given (there is none to give), and imports nothing.
+  const apply = cli("--apply", "--reviewed-plan-sha256", "0".repeat(64), "--orbit-stopped");
+  assert.equal(apply.status, 2, apply.stdout);
+  const refused = JSON.parse(apply.stdout);
+  assert.deepEqual(refused.blocked.attachmentRecords.map((r: any) => r.record), expected.map((r) => r.record));
+  assert.ok(!apply.stdout.includes("Synthetic private caption"));
+  assert.equal(importLedger(join(state, "photo-imports")).photos().length, 0);
+  assert.equal(attachmentStore(dir).bound().filter((m) => m.scope === IMPORT_SCOPE).length, 0, "nothing was stored");
+  // The library refuses a blocked plan too, not only the CLI.
+  const ledger = importLedger(join(state, "photo-imports"));
+  const blocked = planImport({ root, existing: storeIndex(attachmentStore(dir)), ledger });
+  assert.ok(blocked.blocked);
+  assert.throws(() => planDigest(blocked), /No plan can be applied/);
+  assert.throws(() => applyImport(blocked, { root, attachments: attachmentStore(dir), ledger }), /No plan can be applied/);
+  // The operator moves the damaged records (and their photo files) aside: the dry run and apply agree and the reviewed plan applies.
+  const aside = mkdtempSync(join(tmpdir(), "orbit-aside-"));
+  for (const id of [junkId, wrongId, sent.id, other.id]) for (const ext of [".json", ".jpg"]) if (existsSync(join(dir, id + ext))) renameSync(join(dir, id + ext), join(aside, id + ext));
+  const clean = cli();
+  assert.equal(clean.status, 0, clean.stdout);
+  const plan = JSON.parse(clean.stdout).plan;
+  assert.match(plan.planSha256, /^[0-9a-f]{64}$/);
+  assert.equal(plan.counts.importable, 2);
+  const ok = cli("--apply", "--reviewed-plan-sha256", plan.planSha256, "--orbit-stopped");
+  assert.equal(ok.status, 0, ok.stdout);
+  assert.equal(JSON.parse(ok.stdout).result.imported.length, 2);
+});
+
+test("a damaged import ledger blocks the dry run and apply alike, without quoting the file", () => {
+  const state = mkdtempSync(join(tmpdir(), "orbit-state-"));
+  mkdirSync(join(state, "photo-imports"));
+  writeFileSync(join(state, "photo-imports", "ledger.json"), '{"v":1,"photos":[{"caption":"Synthetic private ledger caption"');
+  const root = bundle([item("l1", "1.jpg")], { "1.jpg": smallJpeg(151) });
+  const cli = (...a: string[]) => spawnSync(process.execPath, ["tools/photo-import/import.ts", "--export", root, "--state", state, ...a], { encoding: "utf8" });
+  const dry = cli();
+  assert.equal(dry.status, 2, dry.stdout);
+  const report = JSON.parse(dry.stdout);
+  assert.equal(report.plan.planSha256, null);
+  assert.match(report.blocked.ledger, /not valid JSON/);
+  assert.ok(!dry.stdout.includes("Synthetic private ledger caption"));
+  const apply = cli("--apply", "--reviewed-plan-sha256", "0".repeat(64), "--orbit-stopped");
+  assert.equal(apply.status, 2);
+  assert.match(JSON.parse(apply.stdout).why, /no plan can be applied: the import ledger/);
+  assert.ok(!apply.stdout.includes("Synthetic private ledger caption"));
 });
 
 test("malformed manifests are refused whole, before anything is read", () => {

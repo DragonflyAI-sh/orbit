@@ -12,12 +12,13 @@
 //
 // Prints one JSON report on stdout: counts, item ids, statuses, reasons, refs and project paths. Never captions, pointers, file
 // names, paths or image data. Exit 0 done, 1 some items failed (or an error after writing began: the report says so), 2 refused
-// (nothing was changed).
+// (nothing was changed). A damaged attachment record or import ledger blocks the dry run and apply alike (exit 2, `blocked` names the
+// records and what to do); a revert whose files could not all be removed exits 1 and is retried by running it again.
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { attachmentStore } from "../../src/attachments.ts";
 import { lock } from "../../src/photo-backfill.ts";
-import { applyImport, exportRoot, ImportError, knownProjects, planDigest, planImport, readOnlyIndex, reportOf, revertImport, storeIndex } from "../../src/photo-import.ts";
+import { applyImport, blockReport, exportRoot, ImportError, knownProjects, planDigest, planImport, readOnlyIndex, reportOf, revertImport, storeIndex } from "../../src/photo-import.ts";
 import { importLedger } from "../../src/photo-import-ledger.ts";
 
 const args = process.argv.slice(2);
@@ -27,10 +28,18 @@ const arg = (n: string) => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 const out = (x: unknown) => process.stdout.write(`${JSON.stringify(x, null, 2)}\n`);
-const refuse = (why: string): never => {
-  out({ refused: true, why, changed: false });
+const refuse = (why: string, extra: Record<string, unknown> = {}): never => {
+  out({ refused: true, why, changed: false, ...extra });
   process.exit(2);
 };
+// A refusal raised while the lock is held, with extra report fields.
+class Refusal extends ImportError {
+  extra: Record<string, unknown>;
+  constructor(why: string, extra: Record<string, unknown>) {
+    super(why);
+    this.extra = extra;
+  }
+}
 const known = ["--export", "--state", "--projects-dir", "--approvals", "--apply", "--reviewed-plan-sha256", "--reviewed-manifest-sha256", "--orbit-stopped", "--revert"];
 for (const a of args) if (a.startsWith("--") && !known.includes(a)) refuse(`unknown option ${a.slice(0, 40)}; options: ${known.join(" ")}`);
 
@@ -82,6 +91,8 @@ try {
   if (!flag("--apply")) {
     // Read-only: neither store is opened (opening the attachment store tidies its directory).
     const plan = planImport({ root, approvalsText, projects, existing: readOnlyIndex(attachmentsDir), ledger: importLedger(importsDir) });
+    // Fail closed: a plan apply would refuse is never offered for review (it has no planSha256), and the run exits 2, as apply would.
+    if (plan.blocked) refuse(`no plan can be applied: ${blockReport(plan.blocked).why}`, { dryRun: true, blocked: blockReport(plan.blocked), plan: reportOf(plan) });
     out({ dryRun: true, ...(projects ? {} : { warning: "no --projects-dir: no project can be checked, so no link would be made" }), next: "Review this report with the owner. To apply exactly this plan: --apply --reviewed-plan-sha256 <planSha256> --orbit-stopped (ORBIT stopped). Apply refuses if anything it covers has changed since.", plan: reportOf(plan) });
     process.exit(0);
   }
@@ -94,6 +105,8 @@ try {
     const attachments = attachmentStore(attachmentsDir);
     const ledger = importLedger(importsDir);
     const plan = planImport({ root, approvalsText, projects, existing: storeIndex(attachments), ledger });
+    // Thrown, not refuse(): the lock is released on the way out.
+    if (plan.blocked) throw new Refusal(`no plan can be applied: ${blockReport(plan.blocked).why}; nothing was imported`, { blocked: blockReport(plan.blocked) });
     if (reviewedManifest !== undefined && plan.manifestSha256 !== reviewedManifest) throw new ImportError("the manifest changed since the reviewed dry run (its SHA-256 differs); run the dry run again and review it");
     if (planDigest(plan) !== reviewed) throw new ImportError("the plan changed since the reviewed dry run (a photo file, the approvals, the manifest or what ORBIT already stores differs from what was reviewed); nothing was imported. Run the dry run again and review it");
     changing = true;
@@ -111,5 +124,5 @@ try {
     out({ failed: true, why, changed: "unknown", next: "Some of the work may have been done. Look at the ledger and the gallery (docs/photo-import-backfill.md, Verify); rerunning the dry run shows what is stored now." });
     process.exit(1);
   }
-  refuse(why);
+  refuse(why, err instanceof Refusal ? err.extra : {});
 }

@@ -43,7 +43,10 @@ export type ImportedPhoto = {
   caption: string;
   pointers: { session?: string; message?: string };
 };
-export type ImportBatch = { id: string; source: ImportSource; manifestSha256: string; at: string; state: "applied" | "reverted"; revertedAt?: string; items: number };
+// `unremoved`: after a revert, the stored copies (attachment ids) whose files could not be removed yet. They are hidden (no ledger
+// entry), and a revert of the same batch again retries exactly these (docs/photo-import-backfill.md, Reverse).
+export type ImportBatch = { id: string; source: ImportSource; manifestSha256: string; at: string; state: "applied" | "reverted"; revertedAt?: string; items: number; unremoved?: string[] };
+export const UNREMOVED_MAX = 10_000;
 export type ProjectLink = { ref: string; project: string; evidence: LinkEvidence; batch: string; item: string; at: string };
 type LedgerFile = { v: 1; contract: string; rev: number; photos: ImportedPhoto[]; batches: ImportBatch[]; links: ProjectLink[] };
 
@@ -81,7 +84,9 @@ function safeBatch(v: unknown): ImportBatch | undefined {
   if (!b || typeof b !== "object" || typeof b.id !== "string" || !BATCH_ID.test(b.id) || !IMPORT_SOURCES.includes(b.source as ImportSource)) return undefined;
   if (typeof b.manifestSha256 !== "string" || !/^[0-9a-f]{64}$/.test(b.manifestSha256) || typeof b.at !== "string" || !ISO.test(b.at) || (b.state !== "applied" && b.state !== "reverted") || !Number.isInteger(b.items)) return undefined;
   if (b.revertedAt !== undefined && (typeof b.revertedAt !== "string" || !ISO.test(b.revertedAt))) return undefined;
-  return { id: b.id, source: b.source as ImportSource, manifestSha256: b.manifestSha256, at: b.at, state: b.state, items: b.items as number, ...(b.revertedAt ? { revertedAt: b.revertedAt as string } : {}) };
+  if (b.unremoved !== undefined && (b.state !== "reverted" || !Array.isArray(b.unremoved) || b.unremoved.length > UNREMOVED_MAX || !b.unremoved.every(isAttachmentId) || new Set(b.unremoved).size !== b.unremoved.length)) return undefined;
+  const unremoved = Array.isArray(b.unremoved) && b.unremoved.length ? { unremoved: [...(b.unremoved as string[])] } : {};
+  return { id: b.id, source: b.source as ImportSource, manifestSha256: b.manifestSha256, at: b.at, state: b.state, items: b.items as number, ...(b.revertedAt ? { revertedAt: b.revertedAt as string } : {}), ...unremoved };
 }
 
 export type ImportLedger = ReturnType<typeof importLedger>;
@@ -113,9 +118,21 @@ export function importLedger(dir: string | undefined) {
     if (stamp === seen) return mem;
     seen = stamp;
     try {
+      // Fixed reasons only: a parser's message can quote the file's content (captions), which never belongs in a report.
       if (st.size > LEDGER_BYTES_MAX) throw new Error("the ledger is over its size bound");
-      const x = JSON.parse(readFileSync(file, "utf8")) as Partial<LedgerFile>;
-      if (x.v !== 1 || x.contract !== IMPORT_LEDGER_CONTRACT || !Number.isInteger(x.rev) || !Array.isArray(x.photos) || !Array.isArray(x.batches) || !Array.isArray(x.links)) throw new Error("not an import ledger");
+      let text: string;
+      try {
+        text = readFileSync(file, "utf8");
+      } catch {
+        throw new Error("the ledger file cannot be read");
+      }
+      let x: Partial<LedgerFile>;
+      try {
+        x = JSON.parse(text) as Partial<LedgerFile>;
+      } catch {
+        throw new Error("the ledger is not valid JSON");
+      }
+      if (!x || typeof x !== "object" || x.v !== 1 || x.contract !== IMPORT_LEDGER_CONTRACT || !Number.isInteger(x.rev) || !Array.isArray(x.photos) || !Array.isArray(x.batches) || !Array.isArray(x.links)) throw new Error("not an import ledger");
       const photos = x.photos.map(safePhoto).filter((p): p is ImportedPhoto => Boolean(p));
       const batches = x.batches.map(safeBatch).filter((b): b is ImportBatch => Boolean(b));
       const links = x.links.map(safeLink).filter((l): l is ProjectLink => Boolean(l));

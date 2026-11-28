@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, sep } from "node:path";
-import { IMPORT_SCOPE } from "./attachments.ts";
-import type { Attachments } from "./attachments.ts";
+import { DAMAGED_REASON_TEXT, IMPORT_SCOPE, scanAttachmentRecords } from "./attachments.ts";
+import type { Attachments, DamagedRecord } from "./attachments.ts";
 import { normalizeJpeg, sniff } from "./jpeg.ts";
 import { photoRef } from "./photo-access.ts";
 import { BATCH_ID, IMPORT_SOURCES, importCaption, ITEM_ID, LINK_EVIDENCE, POINTER, PROJECT_PATH } from "./photo-import-ledger.ts";
@@ -51,11 +51,16 @@ export type PlannedItem = {
   caption?: string;
   pointers?: { session?: string; message?: string };
 };
+// Why no plan can be applied at all: damaged attachment records (one may hold the very bytes an item would store, so its status cannot
+// be known), an attachment directory that cannot be listed, or a damaged import ledger. A blocked plan has no digest to review, and
+// apply refuses it, so the dry run and apply always give the same answer.
+export type PlanBlock = { attachmentRecords: DamagedRecord[]; attachmentsDir?: string; ledger?: string };
 export type ImportPlan = {
   format: typeof EXPORT_FORMAT;
   source: ImportSource;
   manifestSha256: string;
   approvalsSha256?: string;
+  blocked?: PlanBlock;
   items: PlannedItem[];
   counts: Record<ItemStatus, number> & { links: Record<LinkStatus, number> };
 };
@@ -75,11 +80,14 @@ export function exportRoot(dir: string): string {
   return real;
 }
 export type Confined = { ok: true; path: string; bytes: number } | { ok: false; status: "missing" | "rejected"; reason: string };
-export function confinedFile(root: string, rel: unknown): Confined {
+// `o` lets the staging helper (src/photo-import-stage.ts) accept its own source types and size bound under exactly the same path rules.
+export function confinedFile(root: string, rel: unknown, o: { ext?: RegExp; extReason?: string; maxBytes?: number } = {}): Confined {
+  const ext = o.ext ?? FILE_EXT;
+  const maxBytes = o.maxBytes ?? SOURCE_FILE_BYTES_MAX;
   if (typeof rel !== "string" || !rel || rel.length > 240) return { ok: false, status: "rejected", reason: "file: a relative path of at most 240 characters is required" };
   if (/^[a-z][a-z0-9+.-]*:/i.test(rel)) return { ok: false, status: "rejected", reason: "file: URLs are never fetched; give a path inside the export" };
   if (isAbsolute(rel) || rel.includes("\\") || /[\u0000-\u001f]/.test(rel) || rel.split("/").some((p) => p === ".." || p === "." || p === "")) return { ok: false, status: "rejected", reason: "file: must be a plain relative path inside the export (no absolute path, '..', '.', empty part or backslash)" };
-  if (!FILE_EXT.test(rel)) return { ok: false, status: "rejected", reason: "file: only .jpg or .jpeg files are imported; convert other formats to JPEG first" };
+  if (!ext.test(rel)) return { ok: false, status: "rejected", reason: o.extReason ?? "file: only .jpg or .jpeg files are imported; convert other formats to JPEG first (tools/photo-import/stage.ts)" };
   const joined = join(root, rel);
   try {
     lstatSync(joined);
@@ -95,11 +103,11 @@ export function confinedFile(root: string, rel: unknown): Confined {
   if (!real.startsWith(root + sep)) return { ok: false, status: "rejected", reason: "file: resolves outside the export directory" };
   const st = statSync(real);
   if (!st.isFile()) return { ok: false, status: "rejected", reason: "file: not a regular file" };
-  if (st.size > SOURCE_FILE_BYTES_MAX) return { ok: false, status: "rejected", reason: `file: ${st.size} bytes is over the ${SOURCE_FILE_BYTES_MAX}-byte source limit; convert it to a JPEG within the upload bounds first` };
+  if (st.size > maxBytes) return { ok: false, status: "rejected", reason: `file: ${st.size} bytes is over the ${maxBytes}-byte source limit; convert it to a JPEG within the upload bounds first` };
   return { ok: true, path: real, bytes: st.size };
 }
 // Reads at most `max` bytes (the size was checked just before; a file that grew is refused).
-function readBounded(path: string, max: number): Buffer {
+export function readBounded(path: string, max: number): Buffer {
   const fd = openSync(path, "r");
   try {
     const buf = Buffer.alloc(max + 1);
@@ -273,46 +281,65 @@ function linkFor(e: Entry, approvals: Approvals | undefined, projects: Set<strin
 }
 
 // ---- planning (the dry run) ------------------------------------------------------------------------------------------------------------
-export type ExistingIndex = { bySha(sha256: string): { id: string; scope: string } | undefined };
+export type ExistingIndex = {
+  bySha(sha256: string): { id: string; scope: string } | undefined;
+  // Records the store skips (and the importer therefore cannot judge), and whether the directory could not be listed at all.
+  damaged: DamagedRecord[];
+  unreadable?: string;
+};
 // When the same bytes are stored more than once (an imported photo later sent again in a conversation gives a second, chat copy), the
 // copy that counts is the same whatever order the store lists them in: an imported copy first (the one the ledger names), then the
 // lowest id. The dry run and apply therefore agree (the reviewed plan's digest depends on it).
 function preferred<T extends { id: string; scope: string }>(list: T[]): T | undefined {
   return [...list].sort((a, b) => Number(b.scope === IMPORT_SCOPE) - Number(a.scope === IMPORT_SCOPE) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0];
 }
-// A read-only view of what is already stored, for a dry run: the attachment records' SHA-256 values, read without opening the store
-// (which would tidy the directory). Unreadable records are skipped.
+// A read-only view of what is already stored, for a dry run: the attachment records exactly as the store reads them when it opens
+// (src/attachments.ts scanAttachmentRecords, the same checks), without opening the store (which would tidy the directory). Damaged
+// records are reported, never skipped silently: the plan is then blocked, as apply's would be.
 export function readOnlyIndex(attachmentsDir: string | undefined): ExistingIndex {
   const map = new Map<string, { id: string; scope: string }[]>();
-  if (attachmentsDir) {
-    let names: string[] = [];
-    try {
-      names = readdirSync(attachmentsDir);
-    } catch {
-      names = [];
-    }
-    for (const n of names) {
-      if (!/^a[0-9a-f]{32}\.json$/.test(n)) continue;
-      try {
-        const m = JSON.parse(readFileSync(join(attachmentsDir, n), "utf8")) as { id?: string; scope?: string; state?: string; sha256?: string };
-        if (typeof m.sha256 === "string" && typeof m.id === "string" && typeof m.scope === "string" && (m.state === "bound" || m.scope === IMPORT_SCOPE)) map.set(m.sha256, [...(map.get(m.sha256) ?? []), { id: m.id, scope: m.scope }]);
-      } catch {
-        // not ours to judge here
-      }
-    }
-  }
-  return { bySha: (sha) => preferred(map.get(sha) ?? []) };
+  if (!attachmentsDir) return { bySha: () => undefined, damaged: [] };
+  const scan = scanAttachmentRecords(attachmentsDir);
+  if (!scan.ok) return { bySha: () => undefined, damaged: [], unreadable: scan.code };
+  for (const m of scan.metas) if (m.state === "bound" || m.scope === IMPORT_SCOPE) map.set(m.sha256, [...(map.get(m.sha256) ?? []), { id: m.id, scope: m.scope }]);
+  return { bySha: (sha) => preferred(map.get(sha) ?? []), damaged: scan.damaged };
 }
 export const storeIndex = (attachments: Attachments): ExistingIndex => ({
   bySha: (sha) => {
     const m = preferred(attachments.withSha256(sha).filter((x) => x.state === "bound" || x.scope === IMPORT_SCOPE));
     return m ? { id: m.id, scope: m.scope } : undefined;
   },
+  damaged: attachments.damaged?.() ?? [],
 });
+
+// What blocks a plan, or undefined. Checked before any item, by the dry run and apply alike.
+function blockOf(existing: ExistingIndex, ledger: ImportLedger): PlanBlock | undefined {
+  const ledgerProblem = ledger.problem();
+  if (!existing.damaged.length && !existing.unreadable && !ledgerProblem) return undefined;
+  return { attachmentRecords: existing.damaged.map((d) => ({ ...d })), ...(existing.unreadable ? { attachmentsDir: `the attachment directory cannot be listed (${existing.unreadable})` } : {}), ...(ledgerProblem ? { ledger: ledgerProblem } : {}) };
+}
+// The operator's guidance for a blocked plan: only record file names (opaque ids), fixed reasons and what to do. Never a path, a
+// caption or anything read from a damaged file.
+export function blockReport(b: PlanBlock) {
+  const recs = b.attachmentRecords;
+  return {
+    why: [
+      recs.length ? `${recs.length} attachment record${recs.length === 1 ? " is" : "s are"} damaged, so ORBIT skips ${recs.length === 1 ? "it" : "them"} and the importer cannot tell whether an item's photo is already stored there` : "",
+      b.attachmentsDir ?? "",
+      b.ledger ? `the import ledger: ${b.ledger}` : "",
+    ].filter(Boolean).join("; "),
+    attachmentRecords: recs.slice(0, 50).map((d) => ({ record: d.record, reason: d.reason, detail: DAMAGED_REASON_TEXT[d.reason] })),
+    ...(recs.length > 50 ? { moreAttachmentRecords: recs.length - 50 } : {}),
+    ...(b.attachmentsDir ? { attachmentsDir: b.attachmentsDir } : {}),
+    ...(b.ledger ? { ledger: b.ledger } : {}),
+    fix: "Nothing can be applied until this is resolved; nothing was changed. With ORBIT stopped, look at each named record (<state>/attachments/<record>) and its photo file (<same id>.jpg): restore both from a backup, or move both out of the state directory to keep them for later. Then run the dry run again and review the new plan. See docs/photo-import-backfill.md, \"Blocked plans\".",
+  };
+}
 
 export function planImport(o: { root: string; approvalsText?: string; projects?: Set<string>; existing: ExistingIndex; ledger: ImportLedger }): ImportPlan {
   const { sha256, manifest } = readManifest(o.root);
   const approvals = o.approvalsText !== undefined ? parseApprovals(o.approvalsText, sha256) : undefined;
+  const blocked = blockOf(o.existing, o.ledger);
   const imported = o.ledger.photos();
   const seenIds = new Set<string>();
   const seenSha = new Map<string, string>();
@@ -365,7 +392,7 @@ export function planImport(o: { root: string; approvalsText?: string; projects?:
     counts[it.status]++;
     counts.links[it.link.status]++;
   }
-  return { format: EXPORT_FORMAT, source: manifest.source, manifestSha256: sha256, ...(approvals ? { approvalsSha256: approvals.sha256 } : {}), items, counts };
+  return { format: EXPORT_FORMAT, source: manifest.source, manifestSha256: sha256, ...(approvals ? { approvalsSha256: approvals.sha256 } : {}), ...(blocked ? { blocked } : {}), items, counts };
 }
 
 // The reviewed plan's digest: what apply will do, item by item. It covers the manifest and approvals hashes and, for every item, its
@@ -373,18 +400,21 @@ export function planImport(o: { root: string; approvalsText?: string; projects?:
 // The dry run prints it; apply rebuilds the plan from the files as they are then and refuses unless the digest is the one the owner
 // reviewed, so a swapped photo, a changed approvals file or a store that changed in between never goes through unreviewed.
 export function planDigest(plan: ImportPlan): string {
+  if (plan.blocked) throw new ImportError(`No plan can be applied: ${blockReport(plan.blocked).why}. Nothing was changed.`);
   const items = plan.items.map((i) => [i.item, i.status, i.sha256 ?? null, i.ref ?? null, i.link.status, i.link.project ?? null, i.link.evidence ?? null]);
   const canon = JSON.stringify({ format: plan.format, source: plan.source, manifestSha256: plan.manifestSha256, approvalsSha256: plan.approvalsSha256 ?? null, items });
   return createHash("sha256").update(canon).digest("hex");
 }
 
 // What may be printed or written as a report: item ids, statuses, reason codes, refs, hashes and project paths. Never captions,
-// pointers, file names or paths (the operator has the manifest).
+// pointers, file names or paths (the operator has the manifest). A blocked plan has `planSha256: null` and says why, so there is never a
+// digest to approve for a plan apply would refuse.
 export function reportOf(plan: ImportPlan) {
   return {
     format: plan.format,
     source: plan.source,
-    planSha256: planDigest(plan),
+    planSha256: plan.blocked ? null : planDigest(plan),
+    ...(plan.blocked ? { blocked: blockReport(plan.blocked) } : {}),
     manifestSha256: plan.manifestSha256,
     ...(plan.approvalsSha256 ? { approvalsSha256: plan.approvalsSha256 } : {}),
     counts: plan.counts,
@@ -400,6 +430,7 @@ export function applyImport(plan: ImportPlan, o: { root: string; attachments: At
   const startedAt = now().toISOString().replace(/\.\d{3}Z$/, "Z");
   const batch = o.batch ?? `ib_${createHash("sha256").update(`${plan.manifestSha256}:${startedAt}:${randomBytes(8).toString("hex")}`).digest("hex").slice(0, 16)}`;
   if (!BATCH_ID.test(batch)) throw new ImportError("bad batch id");
+  if (plan.blocked) throw new ImportError(`No plan can be applied: ${blockReport(plan.blocked).why}. Nothing was changed.`);
   const out: ApplyResult = { batch, imported: [], finished: [], linked: [], skipped: [], failed: [] };
   o.ledger.mutate((f) => {
     if (f.batches.some((b) => b.id === batch)) throw new ImportError("This batch id already exists.");
@@ -460,11 +491,24 @@ export function applyImport(plan: ImportPlan, o: { root: string; attachments: At
 }
 
 // ---- reversing a batch --------------------------------------------------------------------------------------------------------------
-// The ledger entries go first (the photos stop being visible at once), then the stored copies that no other ledger entry uses. Links the
-// batch added (including links to photos that were already in ORBIT) are removed. Only IMPORT_SCOPE attachments are ever deleted.
-// Saved observations about the reversed photos stay in the observation store but are never served (their photo is gone); derived
-// search vectors are pruned by the semantic index's own maintenance. Idempotent.
-export function revertImport(batch: string, o: { attachments: Attachments; ledger: ImportLedger; now?: () => Date }) {
+// The ledger entries go first (the photos stop being visible at once), and in the same write the stored copies that no other ledger
+// entry uses are recorded on the batch as `unremoved`. Then each copy is removed through the store (src/attachments.ts removeImported),
+// which never takes a failed removal as done; the batch then keeps exactly the copies that could not be removed, and reverting the same
+// batch again retries those. Links the batch added (including links to photos that were already in ORBIT) are removed. Only
+// IMPORT_SCOPE attachments are ever deleted. Saved observations about the reversed photos stay in the observation store but are never
+// served (their photo is gone); derived search vectors are pruned by the semantic index's own maintenance. Idempotent.
+export type RevertResult = {
+  batch: string;
+  alreadyReverted: boolean;
+  photosHidden: number;
+  filesRemoved: number;
+  filesAlreadyGone: number;
+  removeFailed?: { ref: string; reason: string }[];
+  linksRemoved: number;
+  refs: string[];
+  retry?: string;
+};
+export function revertImport(batch: string, o: { attachments: Attachments; ledger: ImportLedger; now?: () => Date }): RevertResult {
   if (!BATCH_ID.test(batch)) throw new ImportError("The batch id must look like ib_<16 hex characters> (from the apply report).");
   const now = o.now ?? (() => new Date());
   const at = now().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -475,22 +519,51 @@ export function revertImport(batch: string, o: { attachments: Attachments; ledge
     const links = f.links.filter((l) => l.batch === batch).length;
     f.photos = f.photos.filter((p) => p.batch !== batch);
     f.links = f.links.filter((l) => l.batch !== batch);
+    const remaining = new Set(f.photos.map((p) => p.attachment));
     const already = b.state === "reverted";
+    const todo = [...new Set([...(b.unremoved ?? []), ...photos.map((p) => p.attachment)])].filter((id) => !remaining.has(id));
     b.state = "reverted";
     b.revertedAt ??= at;
-    return { photos, links, already, remaining: new Set(f.photos.map((p) => p.attachment)) };
+    if (todo.length) b.unremoved = todo;
+    else delete b.unremoved;
+    return { photos, links, already, todo };
   });
-  // The batch is already hidden (the ledger is written); a file that cannot be removed now is reported, not thrown, so the report says
-  // what changed. It is invisible without its ledger entry, and a later revert of the same batch cannot reach it, so it is named.
   let removed = 0;
+  let gone = 0;
+  const failed: string[] = [];
   const removeFailed: { ref: string; reason: string }[] = [];
-  for (const p of res.photos) {
-    if (res.remaining.has(p.attachment)) continue;
+  for (const id of res.todo) {
     try {
-      if (o.attachments.removeImported(p.attachment)) removed++;
+      const r = o.attachments.removeImported(id);
+      if (r === "removed") removed++;
+      else if (r === "not-stored") gone++;
+      else if (r === "damaged") {
+        failed.push(id);
+        removeFailed.push({ ref: photoRef(id), reason: "its stored record is damaged, so it was left for the operator (see the dry run's blocked section); nothing was removed" });
+      }
+      // "not-imported": a conversation's photo, never removed by the importer (nothing to retry).
     } catch (err) {
-      removeFailed.push({ ref: p.ref, reason: err instanceof Error ? err.message.slice(0, 200) : "unknown error" });
+      failed.push(id);
+      removeFailed.push({ ref: photoRef(id), reason: err instanceof Error ? err.message.slice(0, 200) : "unknown error" });
     }
   }
-  return { batch, alreadyReverted: res.already && !res.photos.length, photosHidden: res.photos.length, filesRemoved: removed, ...(removeFailed.length ? { removeFailed } : {}), linksRemoved: res.links, refs: res.photos.map((p) => p.ref) };
+  // Keep exactly the copies still to remove, for a retry. Skipped when nothing changed (the batch already says so).
+  const changed = failed.length !== res.todo.length;
+  if (changed)
+    o.ledger.mutate((f) => {
+      const b = f.batches.find((x) => x.id === batch);
+      if (!b) return;
+      if (failed.length) b.unremoved = failed;
+      else delete b.unremoved;
+    });
+  return {
+    batch,
+    alreadyReverted: res.already && !res.photos.length && !res.todo.length,
+    photosHidden: res.photos.length,
+    filesRemoved: removed,
+    filesAlreadyGone: gone,
+    ...(removeFailed.length ? { removeFailed, retry: `The photos are hidden; ${removeFailed.length} stored file${removeFailed.length === 1 ? "" : "s"} could not be removed and ${removeFailed.length === 1 ? "is" : "are"} kept on the batch. Fix the cause (the reason gives the error code), then run --revert ${batch} --orbit-stopped again: it retries only these.` } : {}),
+    linksRemoved: res.links,
+    refs: res.photos.map((p) => p.ref),
+  };
 }
