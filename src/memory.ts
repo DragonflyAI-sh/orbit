@@ -1,3 +1,4 @@
+import { CREDENTIAL_NAME } from "./vault/clone.ts";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import type { VaultClone } from "./vault/clone.ts";
@@ -251,7 +252,7 @@ export function cloneMemory(clone: VaultClone, fallback: MemoryPort | undefined,
   });
   const info = (): { via: "clone" | "fallback"; reason?: string } => {
     const st = clone.state();
-    if (st.credential === "missing") return { via: "fallback", reason: "the vault write credential (orbit.github-vault) is not installed in this ORBIT process" };
+    if (st.credential === "missing") return { via: "fallback", reason: `the vault write credential (${CREDENTIAL_NAME}) is not installed in this ORBIT process` };
     if (st.clone !== "ready") return { via: "fallback", reason: `the writable clone is not available yet${st.syncError ? `: ${st.syncError.message}` : st.lastError ? `: ${st.lastError.message}` : ""}` };
     return { via: "clone" };
   };
