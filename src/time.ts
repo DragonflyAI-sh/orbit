@@ -56,3 +56,11 @@ export function quietUntil(at: Date, zone = ZONE): Date | undefined {
 export function isDailyTime(value: string): boolean {
   return /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
 }
+
+// The "now" line for the model (prepare(), src/server.ts): the date, weekday and time on the owner's clock, so "tomorrow",
+// "this weekend" and "tonight" are resolved against the real date, never guessed. Plus the owner's home area when the persona
+// names one (persona.json homeArea), for "near me" questions.
+export function nowNote(at: Date, zone = ZONE, homeArea = PERSONA.homeArea): string {
+  const when = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(at);
+  return [`### Now\n${when} (${zone}; ${at.toISOString()}).`, ...(homeArea ? [`Home area: ${homeArea}.`] : [])].join(" ");
+}

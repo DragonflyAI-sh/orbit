@@ -23,6 +23,8 @@ export type Persona = {
   // The vault tag that marks a note as protected (#rai for ORBIT): changing such a note needs the owner's confirmation.
   protectedTag: string;
   zone: string;
+  // Where the owner lives, in their words ("San Diego, CA"), for local events, weather and "near me"; unset means ask.
+  homeArea?: string;
   port: number;
   ingressPort?: number;
   url?: string;
@@ -125,6 +127,7 @@ export function loadPersona(dir = personaDir()): Persona {
     expansion: str("expansion"),
     owner,
     zone,
+    ...(str("homeArea", /^[\p{L}\p{N} ,.'()-]{2,80}$/u) ? { homeArea: str("homeArea")! } : {}),
     port: port("port") ?? DEFAULT_PERSONA.port,
     ingressPort: port("ingressPort"),
     url: str("url", /^https?:\/\/[^\s"<>]+$/),
