@@ -14,7 +14,7 @@ An instance is a repo that holds this platform's tree at a pinned commit plus it
 | Nova | `DragonflyAI-sh/nova` | 8792 |
 
 - `persona/` is loaded at startup by `src/persona.ts` (`PERSONA_DIR` overrides the path):
-  - `persona.json`: id (credential prefix), name, expansion, owner, time zone, default port, theme colors, Discord channel and owner
+  - `persona.json`: id (credential prefix), name, expansion, owner, time zone, default port, theme colors, Discord channel and owner, vault repository (`vault.remote`, written with the `<id>.github-vault` credential)
   - `personality.md`: the model's identity and voice
   - `avatar.png`
   - `theme.css`: CSS custom properties over the base palette

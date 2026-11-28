@@ -1,3 +1,4 @@
+import { PERSONA } from "../persona.ts";
 import { createHash } from "node:crypto";
 import { describeFindings, hasVaultFindings, maskVaultText, vaultFindings, type Finding } from "./filter.ts";
 import { sensitiveCategories } from "./sensitive.ts";
@@ -95,7 +96,9 @@ export type Area = "direct" | "journal" | "protected" | "archive" | "outside";
 
 const DIRECT_DIRS = ["Projects", "Tasks", "Areas", "Resources", "Memory", "Inbox"];
 const PROTECTED_DIRS = ["System", ".obsidian", "scripts"];
-const LOG_FILE = /^Log\/\d{4}\/\d{4}-\d{2}-\d{2}-orbit\.md$/;
+// The instance writes its own log file and machine note (ORBIT: Log/<year>/<date>-orbit.md and Machines/orbit.md).
+const LOG_FILE = new RegExp(`^Log/\\d{4}/\\d{4}-\\d{2}-\\d{2}-${PERSONA.id}\\.md$`);
+const MACHINE_NOTE = `Machines/${PERSONA.id}.md`;
 export const isOrbitLog = (path: string): boolean => LOG_FILE.test(path);
 // Append-only: the whole existing text is still the start of the new text, and something was added.
 export const isAppendOnly = (before: string, after: string): boolean => after.length > before.length && after.startsWith(before);
@@ -110,7 +113,7 @@ export function areaOf(path: string): { area: Area; label: string } {
   if (lower(top) === "journal") return { area: "journal", label: "Journal/" };
   if (lower(top) === "archive") return { area: "archive", label: "Archive/" };
   if (segs.length > 1 && DIRECT_DIRS.includes(top)) return { area: "direct", label: `${top}/` };
-  if (path === "now.md" || path === "Machines/orbit.md" || LOG_FILE.test(path)) return { area: "direct", label: path };
+  if (path === "now.md" || path === MACHINE_NOTE || LOG_FILE.test(path)) return { area: "direct", label: path };
   return { area: "outside", label: top };
 }
 

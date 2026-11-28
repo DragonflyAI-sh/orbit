@@ -1,4 +1,4 @@
-import { identityLines } from "./persona.ts";
+import { identityLines, PERSONA } from "./persona.ts";
 import { laneGuidance } from "./research-tools.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -462,18 +462,18 @@ export function openaiModel(model: string, key: string, fetcher: Fetch = fetch, 
   };
 }
 
-// An OpenAI API key (systemd credential orbit.openai) wins; otherwise ORBIT signs in with ChatGPT like OpenClaw does.
+// An OpenAI API key (systemd credential <persona id>.openai, orbit.openai for ORBIT) wins; otherwise ORBIT signs in with ChatGPT like OpenClaw does.
 // ORBIT_MODEL_CAPABILITIES: absolute path of the trusted operator declaration file (docs/photos.md). Set by hand in orbit.env.
 export function selectModel(env: NodeJS.ProcessEnv, chatgpt?: (model: string) => ModelPort): ModelPort {
   const model = env.ORBIT_MODEL;
   const dir = env.CREDENTIALS_DIRECTORY;
   if (!model) return mockModel("No model is configured (ORBIT_MODEL unset), so replies are mock.");
   try {
-    const key = readFileSync(join(dir ?? "", "orbit.openai"), "utf8").trim();
+    const key = readFileSync(join(dir ?? "", `${PERSONA.id}.openai`), "utf8").trim();
     if (dir && key) return openaiModel(model, key, fetch, { capabilities: { operatorFile: env.ORBIT_MODEL_CAPABILITIES || undefined } });
   } catch {
     // No API key installed; fall through to ChatGPT sign-in.
   }
   if (chatgpt) return chatgpt(model);
-  return mockModel(`ORBIT_MODEL is ${model} but no orbit.openai credential is installed, so replies are mock.`);
+  return mockModel(`ORBIT_MODEL is ${model} but no ${PERSONA.id}.openai credential is installed, so replies are mock.`);
 }

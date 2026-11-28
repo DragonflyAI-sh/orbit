@@ -47,6 +47,11 @@ kept="$(grep -Ev "$managed" "$envfile" 2>/dev/null || true)"
   if [ -n "$kept" ]; then printf '%s\n' "$kept"; fi
 } > "$envfile.new"
 mv "$envfile.new" "$envfile"
+# The chat model: ORBIT's, unless this instance already names its own (ORBIT_MODEL in <name>.env is kept on re-runs).
+if ! grep -q '^ORBIT_MODEL=' "$envfile"; then
+  model="$(from_orbit ORBIT_MODEL)"
+  if [ -n "$model" ]; then printf 'ORBIT_MODEL=%s\n' "$model" >> "$envfile"; fi
+fi
 
 src="$(cd "$(dirname "$0")" && pwd)"
 install -m 755 "$src/pull-deploy.sh" "/usr/local/lib/$name/pull-deploy.sh"

@@ -68,3 +68,23 @@ test("id and discord settings are validated; Discord ids must be strings of 17-2
   assert.throws(() => loadPersona(dir({ "persona.json": JSON.stringify({ discord: { channelId: 1575982468467531787 } }) })), /discord.channelId/, "a number loses precision");
   assert.throws(() => loadPersona(dir({ "persona.json": JSON.stringify({ id: "Nova!" }) })), /id is not valid/);
 });
+
+test("vault.remote must be a GitHub https URL", () => {
+  assert.deepEqual(loadPersona(dir({ "persona.json": JSON.stringify({ vault: { remote: "https://github.com/DragonflyAI-sh/nova-vault.git" } }) })).vault, { remote: "https://github.com/DragonflyAI-sh/nova-vault.git" });
+  assert.equal(loadPersona(dir({})).vault, undefined);
+  for (const remote of ["git@github.com:a/b.git", "https://evil.example/a/b.git", "https://github.com/a/b.git --upload-pack=x", "--upload-pack=x"]) {
+    assert.throws(() => loadPersona(dir({ "persona.json": JSON.stringify({ vault: { remote } }) })), /vault.remote/, remote);
+  }
+});
+
+test("each instance has its own vault credential, repository, log file, machine note and commit author", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const nova = dir({ "persona.json": JSON.stringify({ id: "nova", name: "Nova", vault: { remote: "https://github.com/DragonflyAI-sh/nova-vault.git" } }) });
+  const none = dir({ "persona.json": JSON.stringify({ id: "plain" }) });
+  const probe = `
+    const c = await import("./src/vault/clone.ts"); const e = await import("./src/vault/edit.ts"); const g = await import("./src/vault/git.ts");
+    console.log(JSON.stringify({ cred: c.CREDENTIAL_NAME, remote: c.DEFAULT_REMOTE ?? null, novaLog: e.isOrbitLog("Log/2026/2026-11-27-nova.md"), orbitLog: e.isOrbitLog("Log/2026/2026-11-27-orbit.md"), machine: e.areaOf("Machines/nova.md").area, author: g.GIT_AUTHOR }));`;
+  const run = (d: string) => JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", probe], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, PERSONA_DIR: d }, encoding: "utf8" }));
+  assert.deepEqual(run(nova), { cred: "nova.github-vault", remote: "https://github.com/DragonflyAI-sh/nova-vault.git", novaLog: true, orbitLog: false, machine: "direct", author: { name: "Nova", email: "nova@users.noreply.github.com" } });
+  assert.equal(run(none).remote, null, "no vault repository unless the persona names one: never another instance's");
+});

@@ -1,3 +1,4 @@
+import { PERSONA } from "./persona.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { MAX_RESET_MS, ProviderError } from "./chatgpt.ts";
@@ -121,7 +122,7 @@ const num = (v: string | undefined): number | undefined => {
 
 // The systemd credential that holds the OpenRouter API key ($CREDENTIALS_DIRECTORY/orbit.openrouter, root only). There is no
 // environment-variable form of the key: a key in orbit.env or the process environment would be readable far more widely.
-export const OPENROUTER_CREDENTIAL = "orbit.openrouter";
+export const OPENROUTER_CREDENTIAL = `${PERSONA.id}.openrouter`;
 
 // Every orbit.env setting the fallback reads. None of them is secret (the key is only ever the credential above), so the config view
 // shows them as they are running.
@@ -196,14 +197,14 @@ export function openrouterConfig(env: NodeJS.ProcessEnv, readKey: (dir: string) 
   const largest = reservationUsd(MAX_REQUEST_BYTES, priceIn, priceOut, outputBound);
   if (largest > dailyCapUsd) return bad(`The daily cap (${dailyCapUsd} USD) is below the reservation for the largest request (${largest.toFixed(6)} USD at these prices and ORBIT_OPENROUTER_OUTPUT_BOUND_TOKENS).`);
   const dir = env.CREDENTIALS_DIRECTORY;
-  if (!dir) return bad("No credential directory: the orbit.openrouter credential cannot be read.");
+  if (!dir) return bad(`No credential directory: the ${OPENROUTER_CREDENTIAL} credential cannot be read.`);
   let key = "";
   try {
     key = readKey(dir).trim();
   } catch {
     // Absent or unreadable is the same to the caller.
   }
-  if (!key) return bad("The orbit.openrouter credential is not installed.");
+  if (!key) return bad(`The ${OPENROUTER_CREDENTIAL} credential is not installed.`);
   return { state: "ready", key, model, priceIn, priceOut, maxOutputTokens: maxOut, outputBoundTokens: outputBound, timeoutMs, sort, allowFallbacks, dailyCapUsd, monthlyCapUsd, totalCapUsd };
 }
 

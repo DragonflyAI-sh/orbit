@@ -13,5 +13,8 @@
   "discord": {
     "channelId": "1551482832587722863",
     "ownerUserId": "809169364745846806"
+  },
+  "vault": {
+    "remote": "https://github.com/phairow/orbit-vault.git"
   }
 }
