@@ -109,8 +109,9 @@ const modelHealth = modelHealthTracker(jsonStore<ModelHealth | null>(stateDir, "
 const model = observeModel(builtModel, modelHealth);
 // The writable vault clone needs a state directory and the orbit.github-vault credential (read when used, never cached). Without
 // either, memory reads the read-only server copy and no vault write tool is offered; /status and the tool results say so.
-const vault = stateDir
-  ? vaultClone({ dir: join(stateDir, "vault-clone"), remote: process.env.ORBIT_VAULT_REMOTE || DEFAULT_REMOTE, branch: process.env.ORBIT_VAULT_BRANCH || undefined, credential: credentialFile(process.env), onChange: () => memory.invalidate?.() })
+const vaultRemote = process.env.ORBIT_VAULT_REMOTE || DEFAULT_REMOTE;
+const vault = stateDir && vaultRemote
+  ? vaultClone({ dir: join(stateDir, "vault-clone"), remote: vaultRemote, branch: process.env.ORBIT_VAULT_BRANCH || undefined, credential: credentialFile(process.env), onChange: () => memory.invalidate?.() })
   : undefined;
 const memory = selectMemory(process.env, vault);
 const notify = notifier(jsonStore(stateDir, "notifications", []), selectDiscord(process.env));

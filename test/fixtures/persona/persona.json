@@ -9,5 +9,8 @@
   "themeColor": {
     "dark": "#080a1a",
     "light": "#f4f2fb"
+  },
+  "vault": {
+    "remote": "https://github.com/phairow/orbit-vault.git"
   }
 }

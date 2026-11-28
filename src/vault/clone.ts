@@ -9,6 +9,7 @@ import type { GitRunner } from "./git.ts";
 import { checkPolicy } from "./policy-check.ts";
 import type { PolicyCheck, PolicyObservation } from "./policy-check.ts";
 import { scrubUserinfo } from "./remote.ts";
+import { PERSONA } from "../persona.ts";
 
 // ORBIT's writable clone of the vault repository (the repo named in `remote`), kept under ORBIT's state
 // directory. It is a mirror of the remote branch between writes. docs/vault-writes.md has the full behaviour; in short, every
@@ -19,11 +20,13 @@ import { scrubUserinfo } from "./remote.ts";
 // is being changed (reset/clean, applying a write, until the clone is back to the remote head) readers keep the snapshot they
 // already took (see `stable`), so they never see a half-updated tree. A failing fetch backs off (1, 2, 5, 10 minutes).
 
-export const CREDENTIAL_NAME = "orbit.github-vault";
-export const DEFAULT_REMOTE = "https://github.com/phairow/orbit-vault.git";
+// The instance's own vault: the credential is <persona id>.github-vault (orbit.github-vault for ORBIT, nova.github-vault for
+// Nova), and the repository is the persona's vault.remote (or ORBIT_VAULT_REMOTE). An instance never reads another's vault.
+export const CREDENTIAL_NAME = `${PERSONA.id}.github-vault`;
+export const DEFAULT_REMOTE = PERSONA.vault?.remote;
 const BRANCH = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,100}$/;
 
-// The credential systemd gave this process ($CREDENTIALS_DIRECTORY/orbit.github-vault), read on each use. Undefined when absent.
+// The credential systemd gave this process ($CREDENTIALS_DIRECTORY/<persona id>.github-vault), read on each use. Undefined when absent.
 export function credentialFile(env: NodeJS.ProcessEnv): () => string | undefined {
   return () => {
     const dir = env.CREDENTIALS_DIRECTORY;
@@ -113,7 +116,9 @@ export type VaultClone = ReturnType<typeof vaultClone>;
 
 export function vaultClone(deps: VaultCloneDeps) {
   const { dir } = deps;
-  const remote = deps.remote ?? DEFAULT_REMOTE;
+  const configured = deps.remote ?? DEFAULT_REMOTE;
+  if (!configured) throw new Error("No vault repository is configured (persona.json vault.remote or ORBIT_VAULT_REMOTE).");
+  const remote: string = configured;
   const now = deps.now ?? (() => new Date());
   const allowProtocols = deps.allowProtocols ?? "https";
   let branch: string | undefined = deps.branch;
@@ -332,7 +337,7 @@ export function vaultClone(deps: VaultCloneDeps) {
       if (extra.length) fail("policy_refused", `The change now needs confirmation for a reason that was not shown on the card (${extra.join("; ")}). Nothing was written; propose it again.`);
     }
     const t = stamp(now());
-    const logFile = `Log/${t.year}/${t.date}-orbit.md`;
+    const logFile = `Log/${t.year}/${t.date}-${PERSONA.id}.md`;
     const line = `- ${t.time} orbit: ${summary ?? describe.join("; ")} (${actor})`;
     if (secretFindings([line])) fail("secret_refused", `The log line for this change looks like it holds a secret (${secretFindingsDetail([line])}). Nothing was written.`);
     const existing = read(logFile);

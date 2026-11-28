@@ -1,3 +1,4 @@
+import { PERSONA } from "../persona.ts";
 import { spawn } from "node:child_process";
 
 // Runs git for the vault clone. Three rules:
@@ -14,7 +15,7 @@ export type GitRunner = {
   scrub(text: string): string;
 };
 
-export const GIT_AUTHOR = { name: "ORBIT", email: "orbit@users.noreply.github.com" };
+export const GIT_AUTHOR = { name: PERSONA.name, email: `${PERSONA.id}@users.noreply.github.com` };
 const TIMEOUT_MS = 60_000;
 const MAX_OUT = 256 * 1024;
 
