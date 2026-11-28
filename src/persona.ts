@@ -1,7 +1,7 @@
 // The instance's identity: who this agent is, whose it is, how it looks and where it listens by default. The platform code
 // has no identity of its own; everything personal lives in a persona directory, loaded once at startup:
 //
-//   persona/persona.json   id, name, expansion, owner, zone, port, ingressPort, url, themeColor, discord, vault
+//   persona/persona.json   id, name, expansion, owner, ownerPronouns, protectedTag, zone, port, ingressPort, url, themeColor, discord, vault
 //   persona/personality.md the model's identity and voice (the first lines of every system prompt)
 //   persona/avatar.png     the page's logo and icon
 //   persona/theme.css      optional CSS layered over the base palette (custom properties such as --accent)
@@ -18,6 +18,10 @@ export type Persona = {
   name: string;
   expansion?: string;
   owner: string;
+  // How the platform's model-facing text refers to the owner (it was written about Rai as "he"); unset leaves it as written.
+  ownerPronouns?: "she" | "he" | "they";
+  // The vault tag that marks a note as protected (#rai for ORBIT): changing such a note needs the owner's confirmation.
+  protectedTag: string;
   zone: string;
   port: number;
   ingressPort?: number;
@@ -40,6 +44,7 @@ export const DEFAULT_PERSONA: Omit<Persona, "dir"> = {
   id: "agent",
   name: "Agent",
   owner: "the owner",
+  protectedTag: "owner",
   zone: "America/Los_Angeles",
   port: 8790,
   themeColor: { dark: "#080a1a", light: "#f4f2fb" },
@@ -106,13 +111,19 @@ export function loadPersona(dir = personaDir()): Persona {
   if (vj !== undefined && (typeof vj !== "object" || vj === null || Array.isArray(vj))) fail(dir, "vault must be an object");
   const vr = (vj as Record<string, unknown> | undefined)?.remote;
   if (vr !== undefined && (typeof vr !== "string" || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?(\.git)?$/.test(vr))) fail(dir, "vault.remote must be https://github.com/<owner>/<repo>.git");
+  const owner = str("owner", /^[\p{L}\p{N} ._-]{1,60}$/u) ?? DEFAULT_PERSONA.owner;
+  const pronouns = str("ownerPronouns", /^(she|he|they)$/) as Persona["ownerPronouns"];
+  const tagGuess = owner.toLowerCase().replace(/[^a-z0-9-]/g, "");
+  const protectedTag = str("protectedTag", /^[a-z][a-z0-9-]{0,30}$/) ?? (/^[a-z][a-z0-9-]{0,30}$/.test(tagGuess) && owner !== DEFAULT_PERSONA.owner ? tagGuess : DEFAULT_PERSONA.protectedTag);
   return {
+    ...(pronouns ? { ownerPronouns: pronouns } : {}),
+    protectedTag,
     id: str("id", /^[a-z][a-z0-9-]{0,30}$/) ?? DEFAULT_PERSONA.id,
     ...(discord.channelId || discord.ownerUserId ? { discord } : {}),
     ...(typeof vr === "string" ? { vault: { remote: vr } } : {}),
     name: str("name", /^[\p{L}\p{N} ._-]{1,40}$/u) ?? DEFAULT_PERSONA.name,
     expansion: str("expansion"),
-    owner: str("owner", /^[\p{L}\p{N} ._-]{1,60}$/u) ?? DEFAULT_PERSONA.owner,
+    owner,
     zone,
     port: port("port") ?? DEFAULT_PERSONA.port,
     ingressPort: port("ingressPort"),
@@ -157,4 +168,33 @@ export function personaText(text: string, p: Persona = PERSONA): string {
   if (p.name !== "ORBIT") out = out.replace(/\bORBIT\b(?!_)/g, p.name);
   if (p.owner !== "Rai") out = out.replace(/\bRai\b/g, p.owner);
   return out;
+}
+
+// Model-facing platform text (system instructions, status lines, tool descriptions) was written for ORBIT and Rai ("he").
+// For another persona: whole-word ORBIT (never ORBIT_* settings) becomes its name, Rai its owner, #rai its protected tag,
+// and, when ownerPronouns differs from "he", he/him/his/himself the owner's pronouns. Never applied to what people wrote:
+// messages, notes, vault excerpts and tool results reach the model as they are. ORBIT's own persona changes nothing.
+const PRONOUNS: Record<"she" | "they", Record<string, string>> = {
+  she: { he: "she", him: "her", his: "her", himself: "herself" },
+  they: { he: "they", him: "them", his: "their", himself: "themselves" },
+};
+export function personaModelText(text: string, p: Persona = PERSONA): string {
+  let out = text;
+  if (p.name !== "ORBIT") out = out.replace(/\bORBIT\b(?!_)/g, p.name);
+  if (p.owner !== "Rai") out = out.replace(/\bRai\b/g, p.owner);
+  if (p.protectedTag !== "rai") out = out.replace(/#rai\b/g, `#${p.protectedTag}`);
+  const map = p.ownerPronouns && p.ownerPronouns !== "he" ? PRONOUNS[p.ownerPronouns] : undefined;
+  if (map) out = out.replace(/\b(he|him|his|himself|He|Him|His|Himself)\b/g, (w) => {
+    const r = map[w.toLowerCase()]!;
+    return w[0] === w[0]!.toUpperCase() ? r[0]!.toUpperCase() + r.slice(1) : r;
+  });
+  return out;
+}
+
+// The same for a tool's JSON schema: every "description" string inside it.
+export function personaModelSchema<T>(schema: T, p: Persona = PERSONA): T {
+  if (p.name === "ORBIT" && p.owner === "Rai" && p.protectedTag === "rai" && (!p.ownerPronouns || p.ownerPronouns === "he")) return schema;
+  const walk = (v: unknown): unknown =>
+    Array.isArray(v) ? v.map(walk) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, k === "description" && typeof x === "string" ? personaModelText(x, p) : walk(x)])) : v;
+  return walk(schema) as T;
 }

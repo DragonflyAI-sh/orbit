@@ -20,6 +20,13 @@ export const MAX_CONTENT = 2000;
 // GUILDS (1) | GUILD_MESSAGES (1 << 9) | MESSAGE_CONTENT (1 << 15, privileged: enabled on the app's Bot page).
 export const INTENTS = 1 | (1 << 9) | (1 << 15);
 const SNOWFLAKE = /^[0-9]{17,20}$/;
+const CDN_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
+const MAX_PHOTOS = 10; // MAX_ATTACHMENTS_PER_MESSAGE
+const PHOTO_MAX_BYTES = 1_048_576; // JPEG_MAX_BYTES
+const MAX_TEXT_FILE_BYTES = 64 * 1024;
+const MAX_TURN_CHARS = 20_000; // MAX_MESSAGE_CHARS
+const TEXT_EXT = /\.(txt|md|markdown|csv|tsv|json|log|ya?ml|xml|ini|toml)$/i;
+const isTextFile = (name: string, type: string) => type.startsWith("text/") || /^application\/(json|xml|x-yaml|yaml|toml)/.test(type) || TEXT_EXT.test(name);
 // Close codes after which reconnecting cannot help (https://discord.com/developers/docs/topics/opcodes-and-status-codes).
 const FATAL: Record<number, string> = {
   4004: "Discord refused the bot token (authentication failed). Install a new token and restart.",
@@ -31,7 +38,8 @@ const FATAL: Record<number, string> = {
 };
 
 export type ChannelTurnResult = { reply?: string; error?: string; busy?: boolean; proposals?: number };
-export type ChannelTurn = (text: string) => Promise<ChannelTurnResult>;
+// `photos`: JPEG bytes from the message's image attachments (the server checks and stores them like a page upload).
+export type ChannelTurn = (text: string, extra?: { photos?: Buffer[] }) => Promise<ChannelTurnResult>;
 
 export type DiscordConfig = { token: string; channelId: string; ownerId: string };
 export type DiscordSelection = { config: DiscordConfig } | { off: string } | { invalid: string };
@@ -132,23 +140,84 @@ export function discordChannel(config: DiscordConfig, turn: ChannelTurn, o: { we
 
   const typing = () => void rest("POST", `/channels/${config.channelId}/typing`).catch(() => undefined);
 
-  async function handle(message: { id: string; content: string; attachments?: unknown[] }) {
-    const text = message.content.trim();
-    if (!text) {
-      await post(message.attachments?.length ? "Photos and files can't be sent over Discord yet. Attach them on the web page instead." : "That message had no text, so there was nothing to answer.", message.id);
-      return;
+  // Attachments (owner messages only, docs/discord.md): images become photos on the turn, fetched as JPEG at most 1,600 px on the
+  // long edge through Discord's media proxy (it converts PNG, WebP and HEIC), and refused if still over 1 MB; small text files
+  // (.txt .md .csv .json .log .yaml ...) are added to the message as quoted text; anything else is named in the reply as
+  // unread. Only Discord's own CDN hosts are fetched.
+  async function readAttachments(list: unknown[]): Promise<{ photos: Buffer[]; text: string; notes: string[] }> {
+    const photos: Buffer[] = [];
+    const notes: string[] = [];
+    let text = "";
+    for (const raw of list) {
+      const a = raw as { filename?: unknown; size?: unknown; url?: unknown; proxy_url?: unknown; content_type?: unknown; width?: unknown; height?: unknown };
+      const name = typeof a.filename === "string" ? a.filename.slice(0, 120) : "a file";
+      const type = typeof a.content_type === "string" ? a.content_type.toLowerCase() : "";
+      const size = Number(a.size) || 0;
+      try {
+        if (type.startsWith("image/") && Number(a.width) > 0 && Number(a.height) > 0) {
+          if (photos.length >= MAX_PHOTOS) {
+            notes.push(`${name} was not sent: at most ${MAX_PHOTOS} photos per message.`);
+            continue;
+          }
+          const photo = await fetchPhoto(String(a.proxy_url ?? a.url ?? ""), Number(a.width), Number(a.height));
+          if (photo) photos.push(photo);
+          else notes.push(`${name} could not be read as a photo (too large even when shrunk, or Discord would not convert it).`);
+        } else if (isTextFile(name, type) && size <= MAX_TEXT_FILE_BYTES) {
+          const res = await cdnFetch(String(a.url ?? ""), MAX_TEXT_FILE_BYTES);
+          if (!res) {
+            notes.push(`${name} could not be downloaded.`);
+            continue;
+          }
+          const body = res.toString("utf8").replace(/\u0000/g, "");
+          text += `\n\n[Attached file: ${name}]\n\`\`\`\n${body.replace(/\`\`\`/g, "\`\`\u200b\`")}\n\`\`\``;
+        } else {
+          notes.push(`${name} was not read: over Discord only photos and small text files (${Math.round(MAX_TEXT_FILE_BYTES / 1024)} KB) are supported.`);
+        }
+      } catch {
+        notes.push(`${name} could not be downloaded.`);
+      }
     }
-    typing();
-    const keepTyping = every(typing, 8000);
-    let out: ChannelTurnResult;
+    return { photos, text, notes };
+  }
+
+  async function cdnFetch(url: string, maxBytes: number): Promise<Buffer | undefined> {
+    let u: URL;
     try {
-      out = await turn(text);
-    } catch (e) {
-      out = { error: e instanceof Error ? e.message : "the turn failed" };
-    } finally {
-      stopEvery(keepTyping);
+      u = new URL(url);
+    } catch {
+      return undefined;
     }
-    handled++;
+    if (u.protocol !== "https:" || !CDN_HOSTS.has(u.hostname)) return undefined;
+    const res = await http(u.toString(), { headers: { "user-agent": auth["user-agent"] }, redirect: "error", signal: AbortSignal.timeout(20_000) });
+    if (!res.ok) return undefined;
+    const declared = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) return undefined;
+    const bytes = Buffer.from(await res.arrayBuffer());
+    return bytes.length > maxBytes ? undefined : bytes;
+  }
+
+  async function fetchPhoto(url: string, width: number, height: number): Promise<Buffer | undefined> {
+    for (const edge of [1600, 1200, 900]) {
+      const scale = Math.min(1, edge / Math.max(width, height));
+      const w = Math.max(1, Math.round(width * scale));
+      const h = Math.max(1, Math.round(height * scale));
+      let u: URL;
+      try {
+        u = new URL(url);
+      } catch {
+        return undefined;
+      }
+      u.searchParams.set("format", "jpeg");
+      u.searchParams.set("width", String(w));
+      u.searchParams.set("height", String(h));
+      const bytes = await cdnFetch(u.toString(), PHOTO_MAX_BYTES);
+      if (bytes && bytes[0] === 0xff && bytes[1] === 0xd8) return bytes;
+    }
+    return undefined;
+  }
+
+  // The reply as posted in the channel: the answer, any error, and how many proposals wait on the web page.
+  function formatResult(out: ChannelTurnResult): string {
     const web = o.webUrl ? ` ${o.webUrl}` : " the web page";
     const lines: string[] = [];
     if (out.busy) lines.push(`A reply is already in progress (maybe from the web page). This message was not run; send it again when that reply is done.`);
@@ -158,6 +227,34 @@ export function discordChannel(config: DiscordConfig, turn: ChannelTurn, o: { we
       if (!out.reply && !out.error) lines.push("(The turn finished without a reply.)");
       if (out.proposals) lines.push(`\n\n🔒 ${out.proposals === 1 ? "1 proposal is" : `${out.proposals} proposals are`} waiting for your confirmation on${web}. Nothing has run yet.`);
     }
+    return lines.join("");
+  }
+
+  async function handle(message: { id: string; content: string; attachments?: unknown[] }) {
+    let text = message.content.trim();
+    const files = message.attachments?.length ? await readAttachments(message.attachments) : { photos: [], text: "", notes: [] as string[] };
+    text = (text + files.text).trim();
+    if (text.length > MAX_TURN_CHARS) {
+      text = text.slice(0, MAX_TURN_CHARS);
+      files.notes.push(`The message with its attached text was longer than ${MAX_TURN_CHARS} characters, so the end was cut.`);
+    }
+    if (!text && !files.photos.length) {
+      await post(files.notes.length ? files.notes.join("\n") : "That message had no text, so there was nothing to answer.", message.id);
+      return;
+    }
+    typing();
+    const keepTyping = every(typing, 8000);
+    let out: ChannelTurnResult;
+    try {
+      out = await turn(text, files.photos.length ? { photos: files.photos } : undefined);
+    } catch (e) {
+      out = { error: e instanceof Error ? e.message : "the turn failed" };
+    } finally {
+      stopEvery(keepTyping);
+    }
+    handled++;
+    const lines = [formatResult(out)];
+    if (files.notes.length) lines.push(`\n\n📎 ${files.notes.join(" ")}`);
     await post(lines.join(""), message.id);
   }
 
@@ -318,6 +415,19 @@ export function discordChannel(config: DiscordConfig, turn: ChannelTurn, o: { we
     status(): PortStatus {
       return { port: "discord", state, impl: "discord-gateway", detail, verifiedAt };
     },
+    // A turn from the web page's Assistant tab, shown in the channel too (same conversation): the owner's message, quoted and
+    // marked as sent from the web, then the reply. Queued behind Discord turns so the channel keeps the conversation's order;
+    // skipped while the bot is not connected.
+    mirror(turn: { text: string; photos: number; reply?: string; error?: string; proposals: number }) {
+      if (state === "down") return;
+      const said = turn.text.trim() ? turn.text.trim().split("\n").map((l) => `> ${l}`).join("\n") : "> (photos only)";
+      const photos = turn.photos ? `\n> 📷 ${turn.photos === 1 ? "1 photo" : `${turn.photos} photos`}` : "";
+      queue = queue
+        .then(async () => {
+          if (await post(`🌐 **From the web page:**\n${said}${photos}`)) await post(formatResult(turn));
+        })
+        .catch((e) => log("mirror_failed", { detail: e instanceof Error ? e.message.slice(0, 200) : "error" }));
+    },
     // Tests: wait for queued turns and replies.
     idle: () => queue,
     handled: () => handled,
@@ -327,4 +437,28 @@ export function discordChannel(config: DiscordConfig, turn: ChannelTurn, o: { we
 // The port status for a Discord channel that is configured wrongly (partly set): down, with the reason, so /status and the watch say so.
 export function discordOffStatus(reason: string): PortStatus {
   return { port: "discord", state: "down", impl: "discord-gateway", detail: reason, verifiedAt: new Date().toISOString() };
+}
+
+// Notifications (src/notify.ts) through the instance's own bot, posted in its channel, when no webhook is installed: the same
+// message the webhook would send (at most 2,000 characters, never pinging anyone), with the persona's name and owner in place of
+// ORBIT's in the platform's wording. Returns the Discord message id as the delivery receipt; any failure throws (recorded, retried
+// at the next pump like a webhook failure).
+export function discordBotSink(config: DiscordConfig, o: { fetch?: typeof fetch; rewrite?: (text: string) => string } = {}) {
+  const http = o.fetch ?? fetch;
+  return {
+    name: "discord",
+    send: async (text: string): Promise<string> => {
+      const content = (o.rewrite ? o.rewrite(text) : text).slice(0, MAX_CONTENT);
+      const res = await http(`${API}/channels/${config.channelId}/messages`, {
+        method: "POST",
+        headers: { authorization: `Bot ${config.token}`, "content-type": "application/json", "user-agent": "DiscordBot (https://github.com/DragonflyAI-sh/agent-platform, 1)" },
+        body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const id = ((await res.json()) as { id?: string }).id;
+      if (!id) throw new Error("Discord returned no message id");
+      return id;
+    },
+  };
 }

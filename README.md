@@ -27,7 +27,9 @@ An instance is a repo that holds this platform's tree at a pinned commit plus it
 Why a pinned copy and not a submodule or package: hosts deploy with `git archive` (`deploy/pull-deploy.sh`), which leaves
 submodules out, and Node runs this TypeScript directly but will not strip types under `node_modules`.
 
-**Change platform code here, then sync it into each instance.** Change identity in the instance's `persona/`.
+**Change platform code here, then sync it into each instance.** Change identity in the instance's `persona/`. Two workflows keep every instance on the same code:
+- **Platform drift check:** each instance's Delivery CI runs `tools/check-platform.sh`, which fails if anything outside its `INSTANCE_FILES` differs from the platform at `PLATFORM_COMMIT`.
+- **Platform sync:** `.github/workflows/platform-sync.yml` runs hourly and on demand. It brings the instance to the newest platform `main`, runs typecheck and tests, and opens one "Sync platform" pull request. This needs "Allow GitHub Actions to create and approve pull requests" enabled in the repo settings.
 
 **Running another instance on ORBIT's host.** Run this once, as root, from a clone of the instance repo:
 

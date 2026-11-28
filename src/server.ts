@@ -219,7 +219,12 @@ export type Deps = {
   // Chat channels other than the web page (src/discord.ts). `onTurn` receives the function that runs one owner turn in the Assistant
   // conversation, exactly as the page's send does (same tools, policy, confirmations and storage; no photos). `describe` is the
   // channel line /status shows.
-  channels?: { onTurn?: (turn: ChannelTurn) => void; describe?: string };
+  channels?: {
+    onTurn?: (turn: ChannelTurn) => void;
+    describe?: string;
+    // A turn sent from the web page's Assistant tab, so the channel can show it too (the channel is the same conversation).
+    mirror?: (turn: { text: string; photos: number; reply?: string; error?: string; proposals: number }) => void;
+  };
   // The clock for thread cards and the recent-context note. Tests inject one; it must be the clock the proposals use.
   now?: () => Date;
   // Chat tool execution deadline and abort grace period (docs/tool-deadlines.md). Tests lower them; production uses the defaults.
@@ -818,21 +823,54 @@ export function buildServer({
   }
   supervisorWakeArg?.onWake?.(wake);
 
-  // One owner turn from a chat channel (Discord): the Assistant route's turn without photos or a browser request id. The channel has
-  // already proven the sender is the owner (its own configured account); a reply already running is reported as busy, never queued.
-  const channelTurn: ChannelTurn = async (text) => {
+  // One owner turn from a chat channel (Discord): the Assistant route's turn without a browser request id. Photos arrive as JPEG
+  // bytes the channel already fetched; each is checked and stored exactly like a page upload (normalizeJpeg, the attachment
+  // store, at most MAX_ATTACHMENTS_PER_MESSAGE) and bound to this message, and released again if the turn never stored it. The
+  // channel has already proven the sender is the owner (its own configured account); a reply already running is reported as
+  // busy, never queued.
+  const hasRefsIn = (msgs: { attachments?: AttachmentRef[] }[], refs: AttachmentRef[]) => msgs.some((m) => m.attachments?.some((a) => a.id === refs[0]?.id));
+  const channelTurn: ChannelTurn = async (text, extra) => {
     const message = text.trim();
-    if (!message || message.length > MAX_MESSAGE_CHARS) return { error: `Messages must be 1-${MAX_MESSAGE_CHARS} characters. Nothing was sent.` };
+    const images = extra?.photos ?? [];
+    if ((!message && !images.length) || message.length > MAX_MESSAGE_CHARS) return { error: `Messages must be 1-${MAX_MESSAGE_CHARS} characters (or photos). Nothing was sent.` };
+    if (images.length > MAX_ATTACHMENTS_PER_MESSAGE) return { error: `At most ${MAX_ATTACHMENTS_PER_MESSAGE} photos per message. Nothing was sent.` };
     const decision = decide("channel", "chat", false);
     audit("channel", "chat", decision);
     if (!decision.allow) return { error: decision.reason };
     if (assistant.isBusy(ASSISTANT_ID)) return { busy: true };
     const prep = await prepare(true, message, "assistant", assistantSessionId());
     if (assistant.isBusy(ASSISTANT_ID)) return { busy: true };
+    let refs: AttachmentRef[] = [];
+    if (images.length) {
+      const ids: string[] = [];
+      for (const bytes of images) {
+        const checked = normalizeJpeg(bytes);
+        if (!checked.ok) {
+          if (ids.length) attachments.release(ids, "assistant");
+          return { error: `A photo could not be used: ${checked.error}` };
+        }
+        try {
+          ids.push(attachments.put("assistant", checked.bytes, { width: checked.width, height: checked.height }).meta.id);
+        } catch (err) {
+          if (ids.length) attachments.release(ids, "assistant");
+          return { error: err instanceof AttachmentError ? err.message : "Could not store the photo. Nothing was sent." };
+        }
+      }
+      try {
+        refs = attachments.bind(ids, "assistant");
+      } catch (err) {
+        attachments.release(ids, "assistant");
+        return { error: err instanceof AttachmentError ? err.message : "Could not record the photos. Nothing was sent." };
+      }
+    }
+    const releaseUnstored = () => {
+      if (refs.length && !hasRefsIn(assistant.active().flatMap((c) => c.messages), refs)) attachments.release(refs.map((r) => r.id), "assistant");
+    };
     let out: Awaited<ReturnType<typeof asvc.turn>>;
     try {
-      out = await asvc.turn(ASSISTANT_ID, message, { notes: [boundNotes(prep.notes), prep.digest].filter(Boolean).join("\n\n") || undefined, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(true, "assistant"), isOwner: true });
+      out = await asvc.turn(ASSISTANT_ID, message, { notes: [boundNotes(prep.notes), prep.digest].filter(Boolean).join("\n\n") || undefined, memory: prep.used, limits: prep.current, tools: prep.offered, allow: allowAgent(true, "assistant"), isOwner: true, ...(refs.length ? { attachments: refs } : {}) });
     } catch (e) {
+      releaseUnstored();
       supervisor.undelivered(prep.taskDelivery, e instanceof Error ? e.message : "the Assistant turn failed");
       if (e instanceof ThreadError && e.code === 409) return { busy: true };
       return { error: e instanceof Error ? e.message : "the Assistant turn failed" };
@@ -1349,6 +1387,12 @@ export function buildServer({
         // The turn's end may have rolled the page (archived chunks): summarize them now, in the background, so the next turn rarely waits.
         // The next turn's own roll waits for this one (rolls are serialized). Failures are reported in the summary block, never thrown.
         void summaries.roll().catch(() => undefined);
+        try {
+          const reply = [...(assistant.active().at(-1)?.messages ?? [])].reverse().find((m) => m.role === "assistant");
+          channels?.mirror?.({ text, photos: photos.refs.length, ...(reply?.text ? { reply: reply.text } : {}), ...(out.error ? { error: out.error } : {}), proposals: (reply?.cards ?? []).filter((id) => proposals.peek(id)).length });
+        } catch {
+          // Mirroring to a channel never changes the page's answer.
+        }
         return send(res, out.error ? 502 : 200, { assistant: assistantView(), limits: prep.current, ...(out.error ? { error: out.error } : {}) });
       } catch (err) {
         assistant.expectRequest(undefined);

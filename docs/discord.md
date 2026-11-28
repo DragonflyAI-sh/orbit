@@ -8,7 +8,9 @@ An instance can take a Discord channel as a second front door to its **Assistant
 - **Replies.** The reply posts as a Discord reply to your message. A long reply is split into ordered messages of at most 2,000 characters that, joined, are exactly the reply. Mentions in replies never ping anyone, and the channel shows "typing…" while a turn runs.
 - **Order.** Turns run one at a time, in order. If the web page already has a reply running, the Discord message is refused with a note to send it again, never queued silently. The same happens in the other direction.
 - **Confirmations stay on the web page.** A turn that makes proposals (a launch, a server operation, a protected vault write) says how many are waiting and links the page. Nothing can be confirmed from Discord.
-- **Photos and files.** They aren't supported over Discord yet, and a message with only attachments gets a note saying so.
+- **Photos and files.** Attached images become photos on the turn, the same as uploads on the page. They are fetched as JPEG at most 1,600 px on the long edge through Discord's media proxy, which converts PNG, WebP and HEIC. A photo still over 1 MB is refused, and at most 10 are sent per message. Small text files (up to 64 KB: .txt, .md, .csv, .json, .log, .yaml and similar) are added to the message as quoted text. Any other file is named in the reply as not read. Only Discord's own CDN hosts are fetched, and never with the bot token.
+- **The same conversation as the web page.** A turn sent from the page's Assistant tab is shown in the channel too: your message, quoted and marked "From the web page", then the reply. So the channel and the tab show the same conversation, in order.
+- **Alerts.** With no webhook installed, notifications (a part going down, a job finishing) are posted in the channel by the bot. Quiet hours apply as they do for the webhook. ORBIT keeps its webhook if one is installed.
 
 ## Configuration
 
