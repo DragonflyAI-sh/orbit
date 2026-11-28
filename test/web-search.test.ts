@@ -69,3 +69,10 @@ test("withSources leaves text alone when there are no citations or the link is a
   const out = [{ type: "message", content: [{ type: "output_text", text: "", annotations: [{ type: "url_citation", url: "https://a.example/x", title: "A" }] }] }] as any;
   assert.equal(withSources("see https://a.example/x", out), "see https://a.example/x");
 });
+
+test("near me: the model is told it has no device location, to use what the owner said or the Home area, and to say which", () => {
+  const text = instructions([], undefined, ["memory_search"]);
+  assert.match(text, /Location: you cannot detect where Rai is right now/);
+  assert.match(text, /use the place Rai most recently said he is in during this conversation; otherwise use the Home area/);
+  assert.match(text, /Always say which place you used/);
+});
