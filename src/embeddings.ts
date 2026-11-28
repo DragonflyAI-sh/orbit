@@ -1,3 +1,4 @@
+import { PERSONA } from "./persona.ts";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { credential } from "./launcher.ts";
@@ -21,7 +22,7 @@ import { writeAtomic } from "./threads.ts";
 // - The key never appears in an error, a status line, a log or a result: error text is cut and scrubbed.
 
 export const EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings";
-export const EMBEDDINGS_CREDENTIAL = "orbit.openai-embeddings";
+export const EMBEDDINGS_CREDENTIAL = `${PERSONA.id}.openai-embeddings`;
 export const EMBEDDINGS_DEFAULT_MODEL = "text-embedding-3-small";
 // Native output sizes of the documented OpenAI embedding models. Any other model needs ORBIT_EMBEDDINGS_DIMENSIONS.
 export const NATIVE_DIMENSIONS: Record<string, number> = { "text-embedding-3-small": 1536, "text-embedding-3-large": 3072, "text-embedding-ada-002": 1536 };

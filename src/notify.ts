@@ -1,3 +1,4 @@
+import { PERSONA } from "./persona.ts";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -47,7 +48,7 @@ export function discordWebhook(url: string, fetcher: Fetch = fetch): Sink {
 
 export function selectDiscord(env: NodeJS.ProcessEnv): Sink | undefined {
   try {
-    const url = readFileSync(join(env.CREDENTIALS_DIRECTORY ?? "", "orbit.discord-webhook"), "utf8").trim();
+    const url = readFileSync(join(env.CREDENTIALS_DIRECTORY ?? "", `${PERSONA.id}.discord-webhook`), "utf8").trim();
     return env.CREDENTIALS_DIRECTORY && url.startsWith("https://") ? discordWebhook(url) : undefined;
   } catch {
     return undefined;
