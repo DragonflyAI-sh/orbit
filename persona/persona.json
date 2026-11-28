@@ -1,9 +1,17 @@
 {
+  "id": "orbit",
   "name": "ORBIT",
   "expansion": "Operational Reasoning Bot for Intelligent Tasks",
   "owner": "Rai",
   "zone": "America/Los_Angeles",
   "port": 8790,
   "ingressPort": 8791,
-  "themeColor": { "dark": "#080a1a", "light": "#f4f2fb" }
+  "themeColor": {
+    "dark": "#080a1a",
+    "light": "#f4f2fb"
+  },
+  "discord": {
+    "channelId": "1551482832587722863",
+    "ownerUserId": "809169364745846806"
+  }
 }
