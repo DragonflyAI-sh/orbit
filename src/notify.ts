@@ -56,6 +56,8 @@ export function selectDiscord(env: NodeJS.ProcessEnv): Sink | undefined {
 }
 
 const KEEP = 200;
+export const PUSH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const PUSH_SPACING_MS = 1200;
 
 export type Notifier = ReturnType<typeof notifier>;
 
@@ -78,7 +80,12 @@ export function notifier(store: Store<Notification[]>, discord?: Sink, now: () =
     async pump(): Promise<void> {
       lastPump = now().toISOString();
       if (!discord) return;
-      for (const n of list().filter((x) => due(x) && !x.discord?.ok)) {
+      // Notes older than a day are not pushed (they stay on the web page): a sink connected for the first time, or back after a long
+      // outage, must not flood the channel with a stale backlog. Sends are paced so a burst stays under Discord's rate limit.
+      const fresh = (x: Notification) => now().getTime() - new Date(x.createdAt).getTime() <= PUSH_MAX_AGE_MS;
+      let sent = 0;
+      for (const n of list().filter((x) => due(x) && !x.discord?.ok && fresh(x))) {
+        if (sent++ > 0) await new Promise((r) => setTimeout(r, PUSH_SPACING_MS));
         const at = now().toISOString();
         let receipt: Notification["discord"];
         try {
@@ -135,7 +142,7 @@ export function notifier(store: Store<Notification[]>, discord?: Sink, now: () =
       const failed = list().filter((n) => n.discord && !n.discord.ok).length;
       const sinks = [
         "web inbox live",
-        discord ? `Discord live${failed ? `, ${failed} failed sends` : ""}` : "Discord not connected (no orbit.discord-webhook credential)",
+        discord ? `Discord live${failed ? `, ${failed} failed sends (retried at each pump; see each note's discord receipt)` : ""}` : `Discord not connected (no ${PERSONA.id}.discord-webhook credential and no Discord bot channel)`,
       ];
       const persisted = store.persisted ? "" : " Not persisted: notifications are lost on restart.";
       return {

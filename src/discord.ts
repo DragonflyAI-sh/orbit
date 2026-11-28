@@ -455,7 +455,11 @@ export function discordBotSink(config: DiscordConfig, o: { fetch?: typeof fetch;
         body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
         signal: AbortSignal.timeout(15_000),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { message?: unknown; retry_after?: unknown };
+        const why = typeof body.message === "string" ? `: ${body.message.slice(0, 120)}` : "";
+        throw new Error(`HTTP ${res.status}${why}${res.status === 429 && Number(body.retry_after) ? ` (retry after ${Number(body.retry_after)} s)` : ""}`);
+      }
       const id = ((await res.json()) as { id?: string }).id;
       if (!id) throw new Error("Discord returned no message id");
       return id;

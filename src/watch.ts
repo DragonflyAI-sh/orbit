@@ -1,3 +1,4 @@
+import { PERSONA } from "./persona.ts";
 import { jobProgress } from "./job-progress.ts";
 import type { CallbackAlert, Job } from "./jobs.ts";
 import { dispatchEvidence } from "./launch-evidence.ts";
@@ -71,7 +72,7 @@ export function watcher(store: Store<WatchState>, notify: Notifier, now: () => D
         const first = !told && long(cur.since);
         const escalate = told?.state === "degraded" && cur.state === "down" && long(cur.stateSince);
         if (first || escalate) {
-          notify.send(`ORBIT part "${s.port}" is ${cur.state} since ${since}: ${s.detail}${escalate ? " (it was degraded before)" : ""}`, cur.state === "down");
+          notify.send(`${PERSONA.name} part "${s.port}" is ${cur.state} since ${since}: ${s.detail}${escalate ? " (it was degraded before)" : ""}`, cur.state === "down");
           ports[s.port] = { since, state: cur.state };
         }
       } else {
@@ -83,7 +84,7 @@ export function watcher(store: Store<WatchState>, notify: Notifier, now: () => D
           held = true;
         } else if (told && s.state === "live") {
           if (s.port === "model") held = false;
-          notify.send(`ORBIT part "${s.port}" is live again after ${duration(t.getTime() - new Date(told.since).getTime())} (${told.state} since ${told.since}).`);
+          notify.send(`${PERSONA.name} part "${s.port}" is live again after ${duration(t.getTime() - new Date(told.since).getTime())} (${told.state} since ${told.since}).`);
           delete ports[s.port];
         } else if (told) {
           // mock: no longer broken, but not proven live either; forget it without claiming recovery.
