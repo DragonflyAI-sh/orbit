@@ -72,7 +72,7 @@ import type { ImportLedger } from "./photo-import-ledger.ts";
 import { photoSearchTool, photoSemantic as semanticSearch } from "./photo-semantic.ts";
 import type { SemanticSources } from "./photo-semantic.ts";
 import type { Embedder } from "./embeddings.ts";
-import { ZONE } from "./time.ts";
+import { nowNote, ZONE } from "./time.ts";
 import { PERSONA, personaPage, personaText } from "./persona.ts";
 import type { ChannelTurn } from "./discord.ts";
 import type { AttachmentRef, Attachments } from "./attachments.ts";
@@ -705,6 +705,8 @@ export function buildServer({
       const devices = `### Devices right now (from Tailscale)\n${nodes.summary()}`;
       notes = notes ? `${devices}\n\n${notes}` : devices;
     }
+    // The current date and time on the owner's clock, first, for everyone: without it the model guesses what "today" is.
+    notes = notes ? `${nowNote(clock())}\n\n${notes}` : nowNote(clock());
     const current = limits(isOwner);
     const offered = isOwner && model.step
       ? [...refuseLegacyContext(withDuplicateWarning([...withLaneGuard(chatTools({ memory, toolbox: tools, ops, admin: adminOps, sys: sysOps, vault: vaultEdits, config: configView ? () => configView(statuses()) : undefined, jobs, notify, proposals, launchable }), () => researchLane().names, () => [...routines.keys()]), ...textReaderTools({ memory, jobs }), ...laneTools()], proposals, (brief) => (jobs ? findDuplicates(brief, jobs.all(), (j) => jobs.health(j)) : []))), ...(prInspect ?? []), ...(hostInventory ?? []), ...(workspace?.tools ?? []), ...(workspaceAdmin?.tools ?? []), ...(scope === "assistant" ? sessionTools(sessions, { caller: assistantSessionId(), isOwner }) : []), ...(conversation ? [...photoTools({ attachments, sources: photoSources, caller: conversation, isOwner, now: clock, zone: ZONE }), ...observationTools({ store: photoObservations, attachments, sources: observationSources, caller: conversation, isOwner, now: clock, zone: ZONE, onChange: semantic ? (ref) => semantic.invalidate(ref) : undefined }), ...(semantic ? [photoSearchTool({ semantic, attachments, caller: conversation, isOwner, zone: ZONE })] : [])] : [])]

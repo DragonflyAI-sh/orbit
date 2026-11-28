@@ -229,6 +229,23 @@ function roundLines(rounds: ToolRounds, offeredNow: boolean): string[] {
   ];
 }
 
+// The provider's built-in web search, when offered (src/chatgpt.ts): listed with the tools so the guidance below applies.
+export const WEB_SEARCH_TOOL = "web_search";
+
+// Look things up before answering: the current date is in the notes ("### Now"), and anything about the present or a place is
+// searched, not recalled. Always given (the date part needs no tool); the search part only when web_search is offered.
+function researchGuidance(names: string[]): string[] {
+  return [
+    "",
+    "Dates and times: resolve \"today\", \"tomorrow\", \"this weekend\" and weekdays against the Now note in the reference material, never against what you remember. Say the actual date when it matters.",
+    ...(names.includes(WEB_SEARCH_TOOL)
+      ? [
+          "Research before answering when the answer depends on the present or a place: events and their dates, times and tickets; opening hours; schedules; prices; weather; local places, restaurants and activities; news; anything that may have changed. Search first, then answer. Prefer the official or event-specific site (the venue, organizer, city calendar, ticketing page) over aggregators, check that dates match the year and the Home area or the place Rai names, and give the source link for each fact. If you could not confirm something, say so instead of guessing. Do not search for things that do not change (definitions, how-tos, history) or when Rai asks for your own ideas.",
+        ]
+      : ["There is no live web search in this step: for anything about current events, hours, schedules or prices, say you cannot check it live and that it may be out of date."]),
+  ];
+}
+
 // The persona's name, owner, pronouns and protected tag replace ORBIT's in everything below except the reference notes, which
 // are what people and tools wrote (personaModelText).
 export function instructions(limits: string[], notes?: string, tooling?: string[], rounds?: ToolRounds): string {
@@ -258,6 +275,7 @@ function platformInstructions(limits: string[], names: string[], rounds: ToolRou
         ]
       : []),
     ...roundGuidance(rounds, names.length > 0),
+    ...researchGuidance(names),
     ...photoGuidance(names),
     ...laneGuidance(names),
     "",

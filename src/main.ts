@@ -76,7 +76,7 @@ function readDeploy(): unknown {
 // systemd sets STATE_DIRECTORY from StateDirectory=orbit. Without it, state is in memory and /status says so.
 const stateDir = process.env.STATE_DIRECTORY;
 const chatgpt: { current?: ReturnType<typeof chatgptModel> } = {};
-const primaryModel = selectModel(process.env, (name) => (chatgpt.current = chatgptModel(name, tokenFile(stateDir), { capabilities: { operatorFile: process.env.ORBIT_MODEL_CAPABILITIES || undefined } })));
+const primaryModel = selectModel(process.env, (name) => (chatgpt.current = chatgptModel(name, tokenFile(stateDir), { capabilities: { operatorFile: process.env.ORBIT_MODEL_CAPABILITIES || undefined }, webSearch: process.env.ORBIT_WEB_SEARCH !== "off" })));
 // The OpenRouter fallback is off unless ORBIT_OPENROUTER_ENABLED=1 and its model, prices and orbit.openrouter credential are all set.
 // Disabled, the primary model is used as it is, untouched.
 const openrouter = openrouterConfig(process.env);

@@ -14,7 +14,7 @@ An instance is a repo that holds this platform's tree at a pinned commit plus it
 | Nova | `DragonflyAI-sh/nova` | 8792 |
 
 - `persona/` is loaded at startup by `src/persona.ts` (`PERSONA_DIR` overrides the path):
-  - `persona.json`: id (credential prefix), name, expansion, owner, time zone, default port, theme colors, Discord channel and owner, vault repository (`vault.remote`, written with the `<id>.github-vault` credential)
+  - `persona.json`: id (credential prefix), name, expansion, owner, ownerPronouns, protectedTag, homeArea, time zone, default port, theme colors, Discord channel and owner, vault repository (`vault.remote`, written with the `<id>.github-vault` credential)
   - `personality.md`: the model's identity and voice
   - `avatar.png`
   - `theme.css`: CSS custom properties over the base palette
@@ -43,6 +43,8 @@ default to ORBIT's. ORBIT's root ops helpers, job ingress node, vault and creden
 for other instances. `deploy/install.sh` remains ORBIT's full installer.
 
 **Discord.** Each instance can use its own bot in its own channel as a second front door to its Assistant conversation. The bot answers the owner only, and confirmations stay on the web page. See `docs/discord.md`.
+
+**Research before answering.** Every turn gets the current date and time on the persona's clock, plus its `homeArea` when set. Tool-using steps also offer the ChatGPT backend's built-in web search, with instructions to search first for anything current or local: events, hours, schedules, prices, weather and places. Answers cite their sources. `ORBIT_WEB_SEARCH=off` turns search off. If the backend refuses the tool, search switches itself off for the process and the model status says why.
 
 **Tests.** `pnpm test` runs the suite as the fixture persona in `test/fixtures/persona` (ORBIT's identity, which the suite
 was written against). `test/persona.test.ts` also loads the repo's real `persona/`.

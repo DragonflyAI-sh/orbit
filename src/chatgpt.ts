@@ -1,7 +1,7 @@
 import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { instructions, parseOutput, resolverOptions, responsesInput, responsesTools, supportFrom } from "./model.ts";
+import { instructions, parseOutput, resolverOptions, responsesInput, responsesTools, supportFrom, WEB_SEARCH_TOOL } from "./model.ts";
 import type { CapabilityOptions, Item, Message, ModelPort, ReplyOptions, Step, ToolDef } from "./model.ts";
 import { capabilityResolver } from "./model-capability.ts";
 import { deadline, RequestCancelled, RequestTimeout } from "./model-deadline.ts";
@@ -157,8 +157,30 @@ export function stepFromStream(raw: string): Step {
     if (event.type === "response.output_item.done" && event.item) items.push(event.item);
     if (event.type === "response.completed") completed = event.response?.output;
   }
-  const calls = parseOutput(completed?.length ? completed : items).calls;
-  return { text: textFromStream(raw) || deltas, calls };
+  const output = completed?.length ? completed : items;
+  const calls = parseOutput(output).calls;
+  return { text: withSources(textFromStream(raw) || deltas, output), calls };
+}
+
+// Web search answers carry their sources as url_citation annotations, not always as links in the text: any cited page the text
+// does not already link is listed under it, so the owner can check where a date, time or place came from.
+export function withSources(text: string, output: StreamItem[]): string {
+  if (!text) return text;
+  const seen = new Set<string>();
+  const sources: string[] = [];
+  for (const o of output as { type?: string; content?: { annotations?: { type?: string; url?: unknown; title?: unknown }[] }[] }[]) {
+    if (o.type !== "message") continue;
+    for (const c of o.content ?? []) {
+      for (const a of c.annotations ?? []) {
+        if (a.type !== "url_citation" || typeof a.url !== "string" || !/^https?:\/\//.test(a.url)) continue;
+        const url = a.url.replace(/[?&]utm_source=openai$/, "");
+        if (seen.has(url) || text.includes(url)) continue;
+        seen.add(url);
+        sources.push(`- ${typeof a.title === "string" && a.title.trim() ? `[${a.title.trim().slice(0, 100)}](${url})` : url}`);
+      }
+    }
+  }
+  return sources.length ? `${text}\n\nSources:\n${sources.slice(0, 8).join("\n")}` : text;
 }
 
 
@@ -373,7 +395,9 @@ export type ChatGPTModel = ModelPort & {
 };
 
 // `bounds` and `timers` exist for tests (short deadlines, counted timers); production uses CHATGPT_BOUNDS and the real clock.
-export type ChatGPTOptions = { fetcher?: Fetch; now?: () => number; sleep?: (ms: number) => Promise<void>; bounds?: Partial<Bounds>; timers?: Timers; capabilities?: CapabilityOptions };
+// webSearch: offer the provider's built-in web search tool on tool-using steps (ORBIT_WEB_SEARCH, default on). If the backend refuses
+// it, it is switched off for the rest of the process, the step is asked again without it, and the model status says why.
+export type ChatGPTOptions = { fetcher?: Fetch; now?: () => number; sleep?: (ms: number) => Promise<void>; bounds?: Partial<Bounds>; timers?: Timers; capabilities?: CapabilityOptions; webSearch?: boolean };
 
 // Why this backend has no provider capability metadata (docs/photos.md). ORBIT does not call an endpoint it has no contract for.
 export const CHATGPT_NO_METADATA =
@@ -393,6 +417,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const bounds: Bounds = { ...CHATGPT_BOUNDS, ...options.bounds };
+  const webSearch: { on: boolean; off?: string } = { on: options.webSearch !== false };
   const saved = file.read();
   const capability = capabilityResolver({ backend: "chatgpt-token-sharing", model, noDiscovery: CHATGPT_NO_METADATA, ...resolverOptions(options.capabilities) });
   let login: Login = saved ? { state: "signed-in", email: saved.email, since: new Date(now()).toISOString() } : { state: "signed-out" };
@@ -767,7 +792,7 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
         // too. Only the answer time is shown when nothing newer exists. A failed call is handled above and is not
         // cleared by a login check, which says nothing about whether the model answers.
         const verified = [lastOk, renewedAt, checkedAt].filter((v): v is string => !!v).sort().at(-1)!;
-        return { port: "model", state: "live", impl, detail: "Answering through your ChatGPT subscription.", verifiedAt: verified };
+        return { port: "model", state: "live", impl, detail: `Answering through your ChatGPT subscription.${webSearch.on ? " Live web search is offered." : webSearch.off ? ` Live web search is off: ${webSearch.off}.` : " Live web search is off (ORBIT_WEB_SEARCH=off)."}`, verifiedAt: verified };
       }
       return readiness();
     },
@@ -775,16 +800,26 @@ export function chatgptModel(model: string, file: TokenFile, options: ChatGPTOpt
     images: () => supportFrom(capability.resolve()),
 
     async step(input: Item[], limits: string[], notes: string | undefined, tools: ToolDef[], opts?: ReplyOptions): Promise<Step> {
-      const body = JSON.stringify({
-        model,
-        instructions: instructions(limits, notes, tools.map((t) => t.name), opts?.rounds),
-        input: responsesInput(input),
-        ...(tools.length ? { tools: responsesTools(tools) } : {}),
-        stream: true,
-        store: false,
-      });
+      const bodyFor = (search: boolean) =>
+        JSON.stringify({
+          model,
+          instructions: instructions(limits, notes, [...tools.map((t) => t.name), ...(search ? [WEB_SEARCH_TOOL] : [])], opts?.rounds),
+          input: responsesInput(input),
+          ...(tools.length || search ? { tools: [...responsesTools(tools), ...(search ? [{ type: "web_search" }] : [])] } : {}),
+          stream: true,
+          store: false,
+        });
       try {
-        const raw = await request(body, opts?.signal);
+        const search = webSearch.on && tools.length > 0;
+        let raw: string;
+        try {
+          raw = await request(bodyFor(search), opts?.signal);
+        } catch (err) {
+          if (!search || !(err instanceof ProviderError) || err.kind !== "failed" || !/web_search|tool/i.test(err.message)) throw err;
+          webSearch.on = false;
+          webSearch.off = `the provider refused its web search tool (${err.base.slice(0, 160)}), so replies go without live web search until ORBIT restarts`;
+          raw = await request(bodyFor(false), opts?.signal);
+        }
         const step = stepFromStream(raw);
         if (!step.text && !step.calls.length) throw new Error(`response had no text and no tool call (stream events: ${streamShape(raw)})`);
         lastOk = at();

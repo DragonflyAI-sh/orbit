@@ -330,7 +330,7 @@ test("ChatGPT adapter (strict Responses schema): first calls with nulls, then ex
   const model = chatgptModel("gpt-6-astra", file, { fetcher }) as ModelPort;
   const out = await runChat({ model, messages: [{ role: "user", content: "read comment 6969315410 on PR 128" }], limits: [], tools: g.tools, maxRounds: 20 });
   assert.equal(out.text, "Read it all.");
-  const wire = bodies[0].tools.filter((t: any) => t.name.startsWith("pr_"));
+  const wire = bodies[0].tools.filter((t: any) => t.type === "function" && t.name.startsWith("pr_"));
   assert.equal(wire.length, 7);
   assert.ok(wire.every((t: any) => t.strict === true));
   // Every call the model made conforms to the schema that was sent, and every one succeeded.
