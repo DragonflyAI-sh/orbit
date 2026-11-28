@@ -195,7 +195,13 @@ export function vaultClone(deps: VaultCloneDeps) {
       if (url !== remote) fail("sync_failed", "The clone in ORBIT's state directory is not a clone of the configured vault remote; refusing to use it.");
     }
     if (!branch) {
-      const r = await git.run(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: dir, allowFail: true });
+      let r = await git.run(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: dir, allowFail: true });
+      // A clone of a repository that was still empty has no origin/HEAD, and git never sets one later: ask the remote again.
+      if (r.code !== 0) {
+        await git.run(["fetch", "--quiet", "--prune", "--no-tags", "origin"], { cwd: dir, allowFail: true, timeoutMs: 120_000 });
+        await git.run(["remote", "set-head", "origin", "--auto"], { cwd: dir, allowFail: true, timeoutMs: 60_000 });
+        r = await git.run(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: dir, allowFail: true });
+      }
       const b = r.code === 0 ? r.stdout.trim().replace(/^origin\//, "") : "";
       if (!BRANCH.test(b)) fail("sync_failed", "Could not tell which branch the vault remote uses (set ORBIT_VAULT_BRANCH).");
       branch = b;
