@@ -4,6 +4,7 @@
   "expansion": "Operational Reasoning Bot for Intelligent Tasks",
   "owner": "Rai",
   "zone": "America/Los_Angeles",
+  "homeArea": "Duvall, WA",
   "port": 8790,
   "ingressPort": 8791,
   "themeColor": {
