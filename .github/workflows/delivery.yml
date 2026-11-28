@@ -20,6 +20,9 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
+      # Instance repos (orbit, nova): code outside persona/ must be exactly the pinned agent-platform commit. No-op here.
+      - name: Platform drift check
+        run: tools/check-platform.sh
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test

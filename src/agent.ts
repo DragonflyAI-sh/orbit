@@ -1,3 +1,4 @@
+import { personaModelSchema, personaModelText } from "./persona.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { ProviderError } from "./chatgpt.ts";
 import { REPEAT_FAILURES_MAX, REPEAT_RECOVERIES_MAX } from "./model.ts";
@@ -226,7 +227,8 @@ const argsOf = (rawArgs: string): Record<string, unknown> => {
   }
 };
 
-const def = (t: ChatTool): ToolDef => ({ name: t.name, description: t.description, parameters: t.parameters, ...(t.strict ? { strict: true } : {}) });
+// Tool descriptions are platform text: the persona's name and owner replace ORBIT's (personaModelText).
+const def = (t: ChatTool): ToolDef => ({ name: t.name, description: personaModelText(t.description), parameters: personaModelSchema(t.parameters), ...(t.strict ? { strict: true } : {}) });
 
 const merge = (into: string[], more: readonly string[] | undefined) => {
   for (const m of more ?? []) if (!into.includes(m)) into.push(m);

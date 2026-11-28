@@ -221,7 +221,9 @@ export function appendToSection(text: string, heading: string, add: string): { t
 
 // ---- #rai tags and sensitive categories ---------------------------------------------------------------------------------------
 
-const BODY_RAI = /(^|[^\w/#&])#rai(?![\w-])/i;
+// The persona's protected tag (#rai for ORBIT, #jackie for Nova).
+const TAG = PERSONA.protectedTag;
+const BODY_RAI = new RegExp(`(^|[^\\w/#&])#${TAG}(?![\\w-])`, "i");
 
 // A note is tagged #rai when the body has the tag or the tags/tag front matter lists it.
 export function isTaggedRai(text: string): boolean {
@@ -234,7 +236,7 @@ export function isTaggedRai(text: string): boolean {
     if (m) inTags = /^tags?$/i.test(m[1]!);
     if (!inTags) continue;
     const rest = m ? m[2]! : l;
-    if (rest.split(/[\s,[\]'"-]+/).some((t) => /^#?rai(\/.*)?$/i.test(t))) return true;
+    if (rest.split(/[\s,[\]'"-]+/).some((t) => new RegExp(`^#?${TAG}(/.*)?$`, "i").test(t))) return true;
   }
   return false;
 }
@@ -415,7 +417,7 @@ export function classify(applied: Applied): Verdict {
     const movable = src.area === "journal" || (src.area === "direct" && MOVABLE.has(edit.path.split("/")[0]!));
     if (!movable) return { kind: "refused", reason: `${src.label} cannot be archived by ORBIT (only notes under Projects/, Tasks/, Areas/, Resources/, Memory/, Inbox/, and Journal/ with confirmation).` };
     if (src.area === "journal") reasons.push("moving a Journal/ note");
-    if (isTaggedRai(applied.before)) reasons.push("note is tagged #rai");
+    if (isTaggedRai(applied.before)) reasons.push(`note is tagged #${TAG}`);
     return reasons.length ? { kind: "protected", reasons } : { kind: "direct" };
   }
 
@@ -433,7 +435,7 @@ export function classify(applied: Applied): Verdict {
     const plan = edit.op === "append_section" && PLAN_HEADING.test(applied.heading ?? "");
     if (!plan) reasons.push("Journal/ beyond appending to a plan section");
   }
-  if (isTaggedRai(applied.before) || isTaggedRai(applied.after)) reasons.push("note is tagged #rai");
+  if (isTaggedRai(applied.before) || isTaggedRai(applied.after)) reasons.push(`note is tagged #${TAG}`);
   const cats = sensitiveCategories(applied.inserted.join("\n"), applied.before);
   if (cats.length) reasons.push(`possible new category of sensitive personal detail (${cats.join(", ")})`);
   return reasons.length ? { kind: "protected", reasons } : { kind: "direct" };

@@ -32,7 +32,7 @@ test("selection: off when nothing is set, refused with the reason when partly se
 });
 
 type Sent = { method: string; path: string; body: any };
-function harness(turn: ChannelTurn, o: { gateway?: number; webUrl?: string } = {}) {
+function harness(turn: ChannelTurn, o: { gateway?: number; webUrl?: string; cdn?: (url: string) => Response } = {}) {
   const sent: Sent[] = [];
   const sockets: FakeSocket[] = [];
   class FakeSocket {
@@ -62,9 +62,11 @@ function harness(turn: ChannelTurn, o: { gateway?: number; webUrl?: string } = {
   }
   const fakeFetch = (async (url: string, init: any) => {
     const path = url.replace("https://discord.com/api/v10", "");
-    sent.push({ method: init.method, path, body: init.body ? JSON.parse(init.body) : undefined });
-    assert.equal(init.headers.authorization, "Bot tok");
+    sent.push({ method: init.method ?? "GET", path, body: init.body ? JSON.parse(init.body) : undefined });
+    if (url.startsWith("https://discord.com/")) assert.equal(init.headers.authorization, "Bot tok");
+    else assert.equal(init.headers.authorization, undefined, "the bot token is never sent to the CDN");
     if (path === "/gateway/bot") return new Response(JSON.stringify({ url: "wss://gateway.discord.gg" }), { status: o.gateway ?? 200 });
+    if (!url.startsWith("https://discord.com/")) return o.cdn ? o.cdn(url) : new Response("no", { status: 404 });
     return new Response("{}", { status: 200 });
   }) as typeof fetch;
   const ch = discordChannel({ token: "tok", channelId: CHANNEL, ownerId: OWNER_ID }, turn, { fetch: fakeFetch, WebSocket: FakeSocket as any, random: () => 0.5, log: () => undefined, webUrl: o.webUrl });
@@ -182,4 +184,89 @@ test("server: a channel turn is an owner turn in the Assistant conversation, sto
   const channel = (await x.api("/status")).data.ports.find((p: any) => p.port === "channel");
   assert.equal(channel.detail, "Web chat at /, and Discord.");
   assert.match((await turn!(" ")).error ?? "", /1-/);
+});
+
+test("notifications through the bot: posted in the channel, never pinging, rewritten for the persona, the message id is the receipt", async () => {
+  const { discordBotSink } = await import("../src/discord.ts");
+  const seen: { url: string; body: any; auth: string }[] = [];
+  const ok = (async (url: string, init: any) => (seen.push({ url, body: JSON.parse(init.body), auth: init.headers.authorization }), new Response(JSON.stringify({ id: "555" }), { status: 200 }))) as typeof fetch;
+  const sink = discordBotSink({ token: "tok", channelId: CHANNEL, ownerId: OWNER_ID }, { fetch: ok, rewrite: (t) => t.replace("ORBIT", "Nova") });
+  assert.equal(await sink.send("ORBIT: memory is down" + "x".repeat(3000)), "555");
+  assert.equal(seen[0]!.url, `https://discord.com/api/v10/channels/${CHANNEL}/messages`);
+  assert.equal(seen[0]!.auth, "Bot tok");
+  assert.ok(seen[0]!.body.content.startsWith("Nova: memory is down") && seen[0]!.body.content.length === MAX_CONTENT);
+  assert.deepEqual(seen[0]!.body.allowed_mentions, { parse: [] });
+  const refused = discordBotSink({ token: "tok", channelId: CHANNEL, ownerId: OWNER_ID }, { fetch: (async () => new Response("{}", { status: 403 })) as typeof fetch });
+  await assert.rejects(refused.send("x"), /HTTP 403/);
+});
+
+test("attachments: photos are fetched as JPEG through Discord's proxy, text files are quoted into the message, others are named", async () => {
+  const { smallJpeg } = await import("./jpeg-fixture.ts");
+  const jpeg = smallJpeg(1, 64, 48);
+  const asked: string[] = [];
+  const calls: { text: string; photos: number }[] = [];
+  const h = harness(async (text, extra) => (calls.push({ text, photos: extra?.photos?.length ?? 0 }), { reply: "seen" }), {
+    cdn: (url) => {
+      asked.push(url);
+      if (url.startsWith("https://media.discordapp.net/attachments/1/2/IMG.HEIC")) return new Response(new Uint8Array(jpeg), { status: 200 });
+      if (url.startsWith("https://cdn.discordapp.com/attachments/1/3/list.md")) return new Response("# Groceries\n- eggs\n", { status: 200 });
+      return new Response("no", { status: 404 });
+    },
+  });
+  const ws = await h.ready();
+  h.message(ws, {
+    content: "what's in these?",
+    attachments: [
+      { filename: "IMG.HEIC", content_type: "image/heic", size: 3_000_000, width: 4032, height: 3024, url: "https://cdn.discordapp.com/attachments/1/2/IMG.HEIC", proxy_url: "https://media.discordapp.net/attachments/1/2/IMG.HEIC" },
+      { filename: "list.md", content_type: "text/markdown; charset=utf-8", size: 20, url: "https://cdn.discordapp.com/attachments/1/3/list.md" },
+      { filename: "report.pdf", content_type: "application/pdf", size: 9000, url: "https://cdn.discordapp.com/attachments/1/4/report.pdf" },
+      { filename: "evil.png", content_type: "image/png", size: 10, width: 10, height: 10, url: "https://evil.example/x.png", proxy_url: "https://evil.example/x.png" },
+    ],
+  });
+  await h.until(() => h.ch.handled() === 1);
+  await h.ch.idle();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.photos, 1, "the HEIC photo arrives as one JPEG");
+  assert.match(calls[0]!.text, /^what's in these\?\n\n\[Attached file: list\.md\]\n```\n# Groceries\n- eggs\n\n```$/);
+  const photoUrl = new URL(asked.find((u) => u.includes("IMG.HEIC"))!);
+  assert.equal(photoUrl.searchParams.get("format"), "jpeg");
+  assert.equal(photoUrl.searchParams.get("width"), "1600");
+  assert.equal(photoUrl.searchParams.get("height"), "1200");
+  assert.ok(!asked.some((u) => u.includes("evil.example")), "only Discord's CDN hosts are fetched");
+  const reply = h.posts().at(-1)!.body.content as string;
+  assert.match(reply, /^seen\n\n📎 report\.pdf was not read: over Discord only photos and small text files \(64 KB\) are supported\. evil\.png could not be read as a photo/);
+  h.ch.stop();
+});
+
+test("a turn from the web page's Assistant tab is shown in the channel too, in order, never pinging", async () => {
+  const h = harness(async () => ({ reply: "from discord" }));
+  const ws = await h.ready();
+  h.ch.mirror({ text: "hi from the browser\nsecond line", photos: 2, reply: "Hello!", proposals: 1 });
+  h.message(ws, {}, 2);
+  await h.until(() => h.ch.handled() === 1);
+  await h.ch.idle();
+  const posts = h.posts().map((p) => p.body.content as string);
+  assert.deepEqual(posts.slice(0, 2), ["🌐 **From the web page:**\n> hi from the browser\n> second line\n> 📷 2 photos", "Hello!\n\n🔒 1 proposal is waiting for your confirmation on the web page. Nothing has run yet."]);
+  assert.equal(posts[2], "from discord");
+  assert.ok(h.posts().every((p) => p.body.allowed_mentions.parse.length === 0));
+  h.ch.stop();
+});
+
+test("server: photos from a channel turn are checked, stored and attached to the owner's message like a page upload", async () => {
+  const { smallJpeg } = await import("./jpeg-fixture.ts");
+  const d = mkdtempSync(join(tmpdir(), "discord-photo-"));
+  let turn: ChannelTurn | undefined;
+  const mirrored: object[] = [];
+  const x = rig({ dir: d, extra: () => ({ assistantDir: join(d, "assistant"), channels: { onTurn: (t: ChannelTurn) => (turn = t), mirror: (m: object) => mirrored.push(m) } }), model: scripted([say("Web reply.")]) });
+  const out = await turn!("what is this?", { photos: [smallJpeg(2, 40, 30)] });
+  assert.match(out.error ?? "", /1 photo.*the connected model does not take photos.*stored with the message/, "the same answer the page gets from a model without image input");
+  x.caller.who = OWNER;
+  const view = (await x.api("/assistant")).data.assistant;
+  const mine = view.chunks.flatMap((c: any) => c.messages).find((m: any) => m.role === "user");
+  assert.equal(mine.attachments.length, 1);
+  assert.equal(mine.attachments[0].type, "image/jpeg");
+  assert.deepEqual(await turn!("bad", { photos: [Buffer.from("not a jpeg")] }).then((r) => Object.keys(r)), ["error"]);
+  const web = await x.api("/assistant/messages", "POST", { text: "typed on the page" });
+  assert.equal(web.status, 200);
+  assert.deepEqual(mirrored, [{ text: "typed on the page", photos: 0, reply: "Web reply.", proposals: 0 }], "a web turn is handed to the channel");
 });

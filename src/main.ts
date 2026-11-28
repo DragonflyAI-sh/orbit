@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { tailscaleIdentify } from "./identity.ts";
-import { PERSONA } from "./persona.ts";
-import { discordChannel, discordOffStatus, selectDiscordChannel } from "./discord.ts";
+import { PERSONA, personaModelText } from "./persona.ts";
+import { discordBotSink, discordChannel, discordOffStatus, selectDiscordChannel } from "./discord.ts";
 import type { DiscordChannel } from "./discord.ts";
 import { buildIngress } from "./ingress.ts";
 import { jobLauncher } from "./job-launch.ts";
@@ -114,7 +114,10 @@ const vault = stateDir && vaultRemote
   ? vaultClone({ dir: join(stateDir, "vault-clone"), remote: vaultRemote, branch: process.env.ORBIT_VAULT_BRANCH || undefined, credential: credentialFile(process.env), onChange: () => memory.invalidate?.() })
   : undefined;
 const memory = selectMemory(process.env, vault);
-const notify = notifier(jsonStore(stateDir, "notifications", []), selectDiscord(process.env));
+// Notifications go to Discord through the webhook when one is installed (ORBIT), otherwise through the instance's own bot in its
+// channel (src/discord.ts discordBotSink), otherwise nowhere but the web page.
+const discordSelection = selectDiscordChannel(process.env, PERSONA);
+const notify = notifier(jsonStore(stateDir, "notifications", []), selectDiscord(process.env) ?? ("config" in discordSelection ? discordBotSink(discordSelection.config, { rewrite: (t) => personaModelText(t) }) : undefined));
 const tools = toolbox([githubRepoStatus()]);
 const ops = opsClient();
 // Server operations (tier 2): proposals need the owner's confirmation; the ledger is persisted so results survive a restart.
@@ -284,6 +287,7 @@ buildServer({
   ports: [...MOCK_PORT_NAMES.map((name) => mockPort(name)), ...discordPort],
   channels: {
     describe: "config" in discordSel ? `Web chat at /, and Discord channel ${discordSel.config.channelId} for the owner (turns in the Assistant conversation).` : "off" in discordSel ? undefined : `Web chat at /. ${discordSel.invalid}`,
+    mirror: (turn) => discord?.mirror(turn),
     onTurn: (turn) => {
       if ("config" in discordSel) discord = discordChannel(discordSel.config, turn, { webUrl: discordUrl, name: PERSONA.name });
     },

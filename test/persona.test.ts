@@ -88,3 +88,31 @@ test("each instance has its own vault credential, repository, log file, machine 
   assert.deepEqual(run(nova), { cred: "nova.github-vault", remote: "https://github.com/DragonflyAI-sh/nova-vault.git", novaLog: true, orbitLog: false, machine: "direct", author: { name: "Nova", email: "nova@users.noreply.github.com" } });
   assert.equal(run(none).remote, null, "no vault repository unless the persona names one: never another instance's");
 });
+
+test("model-facing platform text names the persona, its owner, her pronouns and protected tag; people's words are untouched", async () => {
+  const { personaModelText, personaModelSchema } = await import("../src/persona.ts");
+  const nova = loadPersona(dir({ "persona.json": JSON.stringify({ name: "Nova", owner: "Jackie", ownerPronouns: "she" }) }));
+  assert.equal(nova.protectedTag, "jackie", "the tag follows the owner's name");
+  assert.equal(
+    personaModelText("When Rai asks about photos he sent, ORBIT uses Rai's time zone; His notes tagged #rai need him to confirm it himself. ORBIT_MODEL stays. Therefore the theme.", nova),
+    "When Jackie asks about photos she sent, Nova uses Jackie's time zone; Her notes tagged #jackie need her to confirm it herself. ORBIT_MODEL stays. Therefore the theme.",
+  );
+  assert.deepEqual(personaModelSchema({ type: "object", properties: { q: { type: "string", description: "What Rai asked ORBIT" } } }, nova), { type: "object", properties: { q: { type: "string", description: "What Jackie asked Nova" } } });
+  const orbit = loadPersona(dir({ "persona.json": JSON.stringify({ name: "ORBIT", owner: "Rai" }) }));
+  assert.equal(orbit.protectedTag, "rai");
+  const text = "When Rai asks, ORBIT answers him. #rai";
+  assert.equal(personaModelText(text, orbit), text);
+});
+
+test("system instructions: the platform part is the persona's, the reference notes stay as written", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const nova = dir({ "persona.json": JSON.stringify({ id: "nova", name: "Nova", owner: "Jackie", ownerPronouns: "she" }), "personality.md": "You are Nova, Jackie's assistant." });
+  const probe = `const m = await import("./src/model.ts"); console.log(m.instructions(["memory is down: ORBIT has no vault"], "Note from the vault: Rai and ORBIT met him.", ["memory_search"]));`;
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e", probe], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, PERSONA_DIR: nova }, encoding: "utf8" });
+  const [platform, notes] = out.split("Note from the vault:");
+  assert.ok(out.startsWith("You are Nova, Jackie's assistant."));
+  assert.doesNotMatch(platform!, /\bORBIT\b(?!_)|\bRai\b|\bhe\b|\bhis\b|#rai/, "the platform text names Nova, Jackie and her");
+  assert.match(platform!, /These parts of Nova are not fully live/);
+  assert.match(platform!, /- memory is down: Nova has no vault/);
+  assert.equal(notes, " Rai and ORBIT met him.\n", "the notes are what was written");
+});

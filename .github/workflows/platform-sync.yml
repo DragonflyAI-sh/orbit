@@ -1,0 +1,73 @@
+name: Platform sync
+
+# Instance repos only (orbit, nova, ...: a repo with PLATFORM_COMMIT). Every hour, and on demand, brings this instance to the
+# newest agent-platform main with tools/sync-platform.sh, runs typecheck and tests, and opens (or updates) one pull request,
+# branch platform-sync. Merging stays a person's decision; the merge commit's own Delivery checks then gate the deploy.
+# Needs the repository setting "Allow GitHub Actions to create and approve pull requests" (Settings > Actions > General).
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: platform-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Bring the platform up to date
+        id: sync
+        run: |
+          if [ ! -f PLATFORM_COMMIT ]; then echo "Not an instance repo; nothing to sync."; echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          old="$(tr -d '[:space:]' < PLATFORM_COMMIT)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -B platform-sync
+          tools/sync-platform.sh main
+          new="$(tr -d '[:space:]' < PLATFORM_COMMIT)"
+          if git diff --cached --quiet; then echo "Already on agent-platform ${new:0:7}."; echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          git commit -q -m "Sync platform ${new:0:7}" -m "agent-platform ${old:0:7}..${new:0:7}: https://github.com/DragonflyAI-sh/agent-platform/compare/${old}...${new}"
+          { echo "changed=true"; echo "old=$old"; echo "new=$new"; } >> "$GITHUB_OUTPUT"
+      - if: steps.sync.outputs.changed == 'true'
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - if: steps.sync.outputs.changed == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Typecheck and test the synced tree
+        id: test
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          pnpm install --frozen-lockfile
+          if pnpm typecheck && pnpm test > test.log 2>&1; then echo "result=passed" >> "$GITHUB_OUTPUT"; else echo "result=FAILED" >> "$GITHUB_OUTPUT"; fi
+          grep -E '^# (pass|fail)' test.log || true
+          rm -f test.log
+      - name: Open or update the pull request
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OLD: ${{ steps.sync.outputs.old }}
+          NEW: ${{ steps.sync.outputs.new }}
+          RESULT: ${{ steps.test.outputs.result }}
+        run: |
+          git push -q --force origin platform-sync
+          title="Sync platform ${NEW:0:7}"
+          body="Brings this instance from agent-platform \`${OLD:0:7}\` to \`${NEW:0:7}\` ([changes](https://github.com/DragonflyAI-sh/agent-platform/compare/${OLD}...${NEW})). Only platform files change; \`persona/\` and the other paths in \`INSTANCE_FILES\` are untouched.
+
+          Typecheck and tests on the synced tree: **${RESULT}** ([run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})).
+
+          Opened by the Platform sync workflow. Merge to deploy; the merge commit's Delivery checks gate the deploy as usual."
+          if gh pr view platform-sync --json state -q .state 2>/dev/null | grep -q OPEN; then
+            gh pr edit platform-sync --title "$title" --body "$body"
+          else
+            gh pr create --head platform-sync --base main --title "$title" --body "$body"
+          fi
