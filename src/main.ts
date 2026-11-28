@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { tailscaleIdentify } from "./identity.ts";
 import { PERSONA } from "./persona.ts";
+import { discordChannel, discordOffStatus, selectDiscordChannel } from "./discord.ts";
+import type { DiscordChannel } from "./discord.ts";
 import { buildIngress } from "./ingress.ts";
 import { jobLauncher } from "./job-launch.ts";
 import { jobSecret, jobs as jobRegistry } from "./jobs.ts";
@@ -24,6 +26,7 @@ import { sysClient } from "./ops-sys-client.ts";
 import { hostInventoryEnabled, hostInventoryTool } from "./host-inventory.ts";
 import { opsClient } from "./ops-client.ts";
 import { MOCK_PORT_NAMES, mockPort } from "./ports.ts";
+import type { Port } from "./ports.ts";
 import { selectPrInspect } from "./pr-inspect.ts";
 import { parseRoutineRepos, pullRequestOpener, selectPulls } from "./pull-requests.ts";
 import { reviewer, selectComments } from "./review.ts";
@@ -266,8 +269,24 @@ const smoke = smokeRunner({
   }),
 });
 
+// Discord as a chat channel (src/discord.ts, docs/discord.md): on when the persona names a channel and owner and the
+// <persona id>.discord-bot credential is installed. Partly configured is reported as a down port with the reason, never half-run.
+const discordSel = selectDiscordChannel(process.env, PERSONA);
+let discord: DiscordChannel | undefined;
+const discordPort: Port[] =
+  "off" in discordSel
+    ? []
+    : [{ name: "discord", status: () => (discord ? discord.status() : discordOffStatus("invalid" in discordSel ? discordSel.invalid : "Discord has not started.")), call: () => ({ value: null, provenance: "live", source: "discord" }) }];
+const discordUrl = PERSONA.url ?? (process.env.HOST ? `http://${process.env.HOST}:${port}/` : undefined);
+
 buildServer({
-  ports: MOCK_PORT_NAMES.map((name) => mockPort(name)),
+  ports: [...MOCK_PORT_NAMES.map((name) => mockPort(name)), ...discordPort],
+  channels: {
+    describe: "config" in discordSel ? `Web chat at /, and Discord channel ${discordSel.config.channelId} for the owner (turns in the Assistant conversation).` : "off" in discordSel ? undefined : `Web chat at /. ${discordSel.invalid}`,
+    onTurn: (turn) => {
+      if ("config" in discordSel) discord = discordChannel(discordSel.config, turn, { webUrl: discordUrl, name: PERSONA.name });
+    },
+  },
   model,
   memory,
   notify,
@@ -335,4 +354,6 @@ buildServer({
   deploy: readDeploy,
 }).listen(port, host, () => {
   console.log(`orbit ${commit} listening on ${host}:${port}`);
+  discord?.start();
 });
+for (const sig of ["SIGTERM", "SIGINT"] as const) process.once(sig, () => discord?.stop());

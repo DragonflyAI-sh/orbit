@@ -59,3 +59,12 @@ test("another persona's name and owner replace ORBIT and Rai in the page text, n
   assert.equal(personaText(html, orbit), html);
   assert.throws(() => loadPersona(dir({ "persona.json": JSON.stringify({ owner: "O'Brien" }) })), /owner/, "an apostrophe could end a script string");
 });
+
+test("id and discord settings are validated; Discord ids must be strings of 17-20 digits", () => {
+  const p = loadPersona(dir({ "persona.json": JSON.stringify({ id: "nova", discord: { channelId: "1575982468467531787" } }) }));
+  assert.equal(p.id, "nova");
+  assert.deepEqual(p.discord, { channelId: "1575982468467531787", ownerUserId: undefined });
+  assert.equal(loadPersona(dir({})).discord, undefined);
+  assert.throws(() => loadPersona(dir({ "persona.json": JSON.stringify({ discord: { channelId: 1575982468467531787 } }) })), /discord.channelId/, "a number loses precision");
+  assert.throws(() => loadPersona(dir({ "persona.json": JSON.stringify({ id: "Nova!" }) })), /id is not valid/);
+});
