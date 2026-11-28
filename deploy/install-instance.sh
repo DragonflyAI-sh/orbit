@@ -10,7 +10,8 @@
 # Bind address and owner default to ORBIT's (/opt/orbit/orbit.env), so the instance is reachable at the same host on <port>.
 #
 # Not set up for an instance (ORBIT-only, opt-in later): the root ops helpers (/run/orbit-ops*.sock), the orbit-jobs
-# Tailscale node and job ingress, the vault copy and systemd credentials. /status reports each of those as not connected.
+# Tailscale node and job ingress, and the vault copy. /status reports each of those as not connected. Credentials are the
+# instance's own: /etc/credstore/<name>.* (for example <name>.discord-bot), never ORBIT's orbit.*.
 # Re-running is safe: it keeps settings in <name>.env it does not manage and never touches ORBIT's units or files.
 set -euo pipefail
 usage() { echo "usage: install-instance.sh <name> <owner/repo> <port> [bind-address] [owner-tailscale-login]" >&2; exit 64; }
@@ -70,6 +71,8 @@ PrivateTmp=yes
 NoNewPrivileges=yes
 # Asks tailscaled who sent each request (owner check).
 ReadWritePaths=/run/tailscale
+# The instance's own credentials: /etc/credstore/$name.* (root, 0600), e.g. $name.discord-bot for Discord (docs/discord.md).
+ImportCredential=$name.*
 StateDirectory=$name
 
 [Install]
